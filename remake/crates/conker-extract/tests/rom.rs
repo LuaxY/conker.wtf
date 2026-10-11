@@ -112,7 +112,8 @@ fn slice_in_memory() {
         assert_eq!(e["logicalIds"], serde_json::json!(c.logical));
     }
 
-    // The weapons and the grenade in the hand: 11 models (the twin guns are two), one mesh each.
+    // The weapons and the grenade in the hand: 13 models (the twin guns are two), one mesh each but
+    // the crossbow, a child object with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -120,11 +121,12 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!((slice.held.len(), names.len()), (11, 11));
+    assert_eq!(slice.held.len(), 13);
     for (i, h) in slice.held.iter().enumerate() {
         let node = held["scenes"][i]["nodes"][0].as_u64().unwrap() as usize;
         let mesh = held["nodes"][node]["mesh"].as_u64().unwrap() as usize;
-        assert_eq!(names[mesh], format!("09-{:02x}-00", h.entry));
+        let bank = if h.object { 1 } else { 9 };
+        assert_eq!(names[mesh], format!("{bank:02x}-{:02x}-00", h.entry));
     }
 
     assert_eq!(slice.collision.len(), 4_299);

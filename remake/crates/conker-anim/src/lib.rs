@@ -108,6 +108,21 @@ pub mod combat {
     pub const W16_DRAW: u16 = 0x76;
     pub const W16_IDLE: u16 = 0xBD;
     pub const W16_HOLSTER: u16 = 0x78;
+    /// The crossbow (0x18): draw 64, idle, holster 34; Z from the hip 29; R's aim, and its shot on
+    /// Z's release, 29 (V combat5_ctlw18, cb3).
+    pub const CROSSBOW_DRAW: u16 = 0xFB;
+    pub const CROSSBOW_IDLE: u16 = 0xC5;
+    pub const CROSSBOW_HOLSTER: u16 = 0xC6;
+    pub const CROSSBOW_FIRE: u16 = 0xFC;
+    pub const CROSSBOW_AIM: u16 = 0x10A;
+    pub const CROSSBOW_AIMED: u16 = 0x10C;
+    /// The shotgun (0x37): draw 13, idle, holster 13 (rate 1.4); Z plays 0x1F4 (45) or, one shot
+    /// in four, 0x235 (71) (V combat5_ctlw37, sg3).
+    pub const SHOTGUN_DRAW: u16 = 0x1F7;
+    pub const SHOTGUN_IDLE: u16 = 0x1F3;
+    pub const SHOTGUN_HOLSTER: u16 = 0x1F8;
+    pub const SHOTGUN_FIRE: u16 = 0x1F4;
+    pub const SHOTGUN_FIRE_B: u16 = 0x235;
     /// Grenade (C-down): pull 28, hold while held, throw 28.
     pub const GRENADE_PULL: u16 = 0x176;
     pub const GRENADE_HOLD: u16 = 0x177;
@@ -157,6 +172,10 @@ pub mod combat {
     pub const W16_WALK: u16 = 0xE8;
     pub const GRENADE_WALK: u16 = 0x178;
     pub const GRENADE_RUN: u16 = 0x179;
+    pub const CROSSBOW_WALK: u16 = 0xEC;
+    pub const CROSSBOW_RUN: u16 = 0xF8;
+    pub const SHOTGUN_WALK: u16 = 0x1F5;
+    pub const SHOTGUN_RUN: u16 = 0x1F6;
     /// Clip lengths (ticks) of the drawn idles and their fidgets: the rules pick the next idle on
     /// the clip's last tick (the ROM's durations, tests/rom.rs).
     pub const IDLE_CLIPS: [(u16, u16); 6] = [
@@ -201,8 +220,9 @@ pub fn effective_speed(speed: f32, target: f32) -> f32 {
 /// and target speed (obj+0x44). Ids the player never showed in the traces get rate 1, blend 4 (I).
 pub fn request(id: u16, speed: f32, target: f32) -> Request {
     use combat::{
-        BLADE_RUN, BLADE_WALK, FLAME_WALK, GRENADE_RUN, GRENADE_WALK, GUN23_RUN, GUN23_WALK,
-        MELEE_STEP, PISTOL_RUN, SNIPER_RUN, SNIPER_WALK, TWIN_RUN, W16_WALK,
+        BLADE_RUN, BLADE_WALK, CROSSBOW_RUN, CROSSBOW_WALK, FLAME_WALK, GRENADE_RUN, GRENADE_WALK,
+        GUN23_RUN, GUN23_WALK, MELEE_STEP, PISTOL_RUN, SHOTGUN_RUN, SNIPER_RUN, SNIPER_WALK,
+        TWIN_RUN, W16_WALK,
     };
     use id::*;
     let e = effective_speed(speed, target);
@@ -228,7 +248,9 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         | combat::MELEE_DRAW
         | combat::MELEE_HOLSTER
         | combat::BLADE_DRAW
-        | combat::BLADE_HOLSTER => (1.4, 4.0, 0.0),
+        | combat::BLADE_HOLSTER
+        | combat::SHOTGUN_DRAW
+        | combat::SHOTGUN_HOLSTER => (1.4, 4.0, 0.0),
         combat::MELEE_SWING_A | combat::MELEE_SWING | combat::BLADE_SWING => (1.3, 4.0, 0.0),
         combat::HIT_MELEE => (1.5, 4.0, 0.0),
         combat::BLOWN_UP => (1.2, 4.0, 0.0),
@@ -245,12 +267,10 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         // (e_w21) and 35 (bots3), 69 rows; 0x15B at 19.2 (e_w22). The clip's first frame plays e/27
         // for 0x124 (not modelled). The bots' TWIN_MOVE 0x12B plays at 1 (V, 1,708 rows).
         combat::MELEE_WALK => (armed_e(id, speed, target) / 27.0, 4.0, 0.0),
-        MELEE_STEP | BLADE_WALK | SNIPER_WALK | GUN23_WALK | W16_WALK | GRENADE_WALK => {
-            (armed_e(id, speed, target) * 0.0625 + 0.6, 4.0, 0.0)
-        }
-        BLADE_RUN | SNIPER_RUN | GUN23_RUN | TWIN_RUN | PISTOL_RUN | GRENADE_RUN | FLAME_WALK => {
-            (armed_e(id, speed, target) / 22.0 + 0.4, 4.0, 0.0)
-        }
+        MELEE_STEP | BLADE_WALK | SNIPER_WALK | GUN23_WALK | W16_WALK | GRENADE_WALK
+        | CROSSBOW_WALK => (armed_e(id, speed, target) * 0.0625 + 0.6, 4.0, 0.0),
+        BLADE_RUN | SNIPER_RUN | GUN23_RUN | TWIN_RUN | PISTOL_RUN | GRENADE_RUN | FLAME_WALK
+        | CROSSBOW_RUN | SHOTGUN_RUN => (armed_e(id, speed, target) / 22.0 + 0.4, 4.0, 0.0),
         _ => (1.0, 4.0, 0.0),
     };
     Request {
@@ -281,14 +301,17 @@ pub fn request_at(id: u16, speed: f32, target: f32, percent: u8) -> Request {
         | combat::SNIPER_WALK
         | combat::GUN23_WALK
         | combat::W16_WALK
-        | combat::GRENADE_WALK => e * 0.0625 + 0.6,
+        | combat::GRENADE_WALK
+        | combat::CROSSBOW_WALK => e * 0.0625 + 0.6,
         combat::BLADE_RUN
         | combat::SNIPER_RUN
         | combat::GUN23_RUN
         | combat::TWIN_RUN
         | combat::PISTOL_RUN
         | combat::GRENADE_RUN
-        | combat::FLAME_WALK => e / 22.0 + 0.4,
+        | combat::FLAME_WALK
+        | combat::CROSSBOW_RUN
+        | combat::SHOTGUN_RUN => e / 22.0 + 0.4,
         _ => return request(id, speed, target),
     };
     Request {
@@ -301,12 +324,12 @@ pub fn request_at(id: u16, speed: f32, target: f32, percent: u8) -> Request {
 
 /// The effective speed an armed locomotion id's rate uses: the target counts at the weapon's speed
 /// percentage, which `func_15064B94` sets with the id (C: 80 for most, 110 for melee 0x21's, 30
-/// for weapon 0x16's walk; none in multiplayer for the twin guns and the pistol).
+/// for weapon 0x16's walk; none in multiplayer for the twin guns, the pistol and the shotgun).
 fn armed_e(id: u16, speed: f32, target: f32) -> f32 {
     let percent = match id {
         combat::MELEE_STEP | combat::MELEE_WALK => 1.1,
         combat::W16_WALK => 0.3,
-        combat::TWIN_RUN | combat::PISTOL_RUN => 1.0,
+        combat::TWIN_RUN | combat::PISTOL_RUN | combat::SHOTGUN_RUN => 1.0,
         _ => 0.8,
     };
     speed * 0.4 + target * percent * 0.6
@@ -338,6 +361,10 @@ pub fn armed_move(weapon: u8, target: f32) -> Option<u16> {
         0x26 => GRENADE_WALK,
         0x15 => FLAME_WALK,
         0x16 => W16_WALK,
+        0x18 if run => CROSSBOW_RUN,
+        0x18 => CROSSBOW_WALK,
+        0x37 if run => SHOTGUN_RUN,
+        0x37 => SHOTGUN_WALK,
         _ => return None,
     })
 }

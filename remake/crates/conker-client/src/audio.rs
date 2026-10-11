@@ -389,11 +389,13 @@ fn burning(p: &Seen) -> bool {
 
 /// The weapon that hit `victim`, which the server does not send, from its first reaction (its
 /// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21, 0xD3
-/// weapon 0x14's shot, 0x69 the flame, 0x19C weapon 0x23; a blast (0xF3) is a rocket's when one went
-/// off this tick or the last (`rocket`), else a grenade's; the kill 0x17E is the sniper's or melee
-/// 0x22's, and the stagger 0x11D a bullet's (or a lethal shot or burn): the nearest other player
-/// holding one of those drawn decides (a burning victim: the flame), else the sniper rifle and the
-/// twin guns. I: wrong when another player holds such a weapon nearer than the shooter.
+/// weapon 0x14's shot or the crossbow's bolt, 0x69 the flame, 0x19C weapon 0x23; a blast (0xF3) is a
+/// rocket's when one went off this tick or the last (`rocket`), else the shotgun's or a grenade's;
+/// the kill 0x17E is the sniper's, melee 0x22's, the crossbow's or the shotgun's, and the stagger
+/// 0x11D a bullet's or the shotgun's (or a lethal shot or burn): the nearest other player holding
+/// one of those drawn decides (a burning victim: the flame), else weapon 0x14, a grenade, the sniper
+/// rifle and the twin guns. I: wrong when another player holds such a weapon nearer than the
+/// shooter.
 fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool) -> u8 {
     let nearest = |ids: &[u8]| {
         let d = |p: &Seen| dist2(p.pos, victim.pos);
@@ -404,14 +406,14 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
     };
     match victim.reaction {
         HIT_MELEE => 0x21,
-        HIT_SHOT => SHOTS,
+        HIT_SHOT => nearest(&[SHOTS, 0x18]).unwrap_or(SHOTS),
         FLAME_HIT => 0x15,
         DEATH_BLAST => 0x23,
         BLOWN_UP if rocket => ROCKETS,
-        BLOWN_UP => GRENADE,
-        DEATH_SHOT => nearest(&[0x24, 0x22]).unwrap_or(0x24),
+        BLOWN_UP => nearest(&[0x37]).unwrap_or(GRENADE),
+        DEATH_SHOT => nearest(&[0x24, 0x22, 0x18, 0x37]).unwrap_or(0x24),
         _ if burnt => 0x15,
-        _ => nearest(&[0x09, 0x39, 0x24, SHOTS]).unwrap_or(0x09),
+        _ => nearest(&[0x09, 0x39, 0x24, SHOTS, 0x37]).unwrap_or(0x09),
     }
 }
 

@@ -168,8 +168,9 @@ impl Bots {
     }
 
     /// Writes each bot's scope into the match before [`Match::step`]: while a bot holds R with weapon
-    /// 0x14 or 0x24 drawn, the game sets its scope flag (s126+0x197 = 2: V, 3,793 of 3,793 rows
-    /// with 0x14 and 3,161 of 3,161 with 0x24 in bot_long3, 6,556 of 6,560 in bot_long2) and its shot follows the aim's yaw
+    /// 0x14, 0x24 or the crossbow 0x18 drawn, the game sets its scope flag (s126+0x197 = 2: V, 3,793
+    /// of 3,793 rows with 0x14 and 3,161 of 3,161 with 0x24 in bot_long3, 6,556 of 6,560 in
+    /// bot_long2; 0x18: I, as a human's aim, V combat5_ctlw18) and its shot follows the aim's yaw
     /// and pitch (s126+0x16C, +0x170), which conker-rules reads from `body.scope_yaw` and
     /// `scope_pitch`. Other weapons fire along the facing there (twin guns: flag 0, V).
     pub fn scopes(&self, m: &mut Match) {
@@ -306,7 +307,7 @@ impl Bots {
             let aim = n.aim.take().filter(|_| held & 0x10 != 0);
             *aimed = aim;
             *scope = aim
-                .filter(|_| matches!(b.drawn, 0x14 | 0x24))
+                .filter(|_| matches!(b.drawn, 0x14 | 0x24 | 0x18))
                 .map(|a| look(b.pos, a, world));
             let toward = aim.unwrap_or(steer.toward);
             let mut input = drive(b, toward, steer.speed, aim.is_some(), world);

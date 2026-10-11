@@ -534,11 +534,19 @@ struct Report {
 
 /// The game's RNG word at the first call of each frame to a function whose draws the port
 /// reproduces (the idle pick `func_1507EFD0`, the swing pick `func_150641D8`, the respawn picker
-/// `func_15084D70`): frame → state.
+/// `func_15084D70`, and the shotgun's pick `func_15065A5C` on the frames it fires, `func_150FF840`:
+/// it runs every frame a weapon is held): frame → state.
 fn rng_states(log: &str) -> HashMap<u32, u64> {
+    let calls = calls(log);
+    let shotgun: BTreeSet<u32> = (calls.iter())
+        .filter(|c| c.func == "func_150FF840")
+        .map(|c| c.frame)
+        .collect();
     let mut out = HashMap::new();
-    for c in calls(log) {
-        if !["func_1507EFD0", "func_150641D8", "func_15084D70"].contains(&c.func.as_str()) {
+    for c in calls {
+        let pick = ["func_1507EFD0", "func_150641D8", "func_15084D70"].contains(&c.func.as_str())
+            || (c.func == "func_15065A5C" && shotgun.contains(&c.frame));
+        if !pick {
             continue;
         }
         let (Some(hi), Some(lo)) = (c.kv.get("0x800885B0"), c.kv.get("0x800885B4")) else {
@@ -605,7 +613,7 @@ const fn probe(name: &'static str, id: u8) -> Case {
 /// Positions are printed, not asserted: their gaps are conker-sim's (player-to-player pushes in
 /// e_w14b and e_w21, C-left/right strafing in buttons, ctl_cd_cr and k6/k10, a wall-push reversal
 /// in pick87) or root motion the port does not have (dead bodies in e_w22/e_w24, 0x16's Z in k7).
-const CASES: [Case; 47] = [
+const CASES: [Case; 57] = [
     case("combat_e_gren", 745, None),
     Case {
         rng: Some("combat4_e_w09_lldb"),
@@ -737,6 +745,36 @@ const CASES: [Case; 47] = [
     Case {
         grenade_tol: 4.0,
         ..case("combat4_cook", 30, None)
+    },
+    // Weapons 2 (lab/oracle/combat5_README.md): the crossbow's controls, hip and aimed cadence,
+    // bolts fired on odd and even frames, a body hit then a head kill at 146.5; the shotgun's
+    // controls and cadence, its kill at 146.5 and at point blank, its blow-up and outer hits.
+    case("combat5_ctlw18", 30, Some((40, 0x18))),
+    case("combat5_cb3", 30, Some((40, 0x18))),
+    case("combat5_cb4", 30, Some((40, 0x18))),
+    encounter("combat5_cb_e1", 0x18),
+    encounter("combat5_cb_e2", 0x18),
+    Case {
+        rng: Some("combat5_ctlw37_lldb"),
+        ..case("combat5_ctlw37", 30, Some((40, 0x37)))
+    },
+    Case {
+        rng: Some("combat5_sg3_lldb"),
+        ..case("combat5_sg3", 30, Some((40, 0x37)))
+    },
+    Case {
+        rng: Some("combat5_sg_e1_lldb"),
+        ..encounter("combat5_sg_e1", 0x37)
+    },
+    // Player 2's back-stepping states 0x2B and 0x21 before the shot are conker-sim's gap (2 events).
+    Case {
+        known: 2,
+        rng: Some("combat5_sg_e2_lldb"),
+        ..encounter("combat5_sg_e2", 0x37)
+    },
+    Case {
+        rng: Some("combat5_sg_e3_lldb"),
+        ..encounter("combat5_sg_e3", 0x37)
     },
 ];
 
@@ -923,9 +961,11 @@ fn replay(c: &Case) -> Option<Report> {
             report.health += usize::from(f.health != want.health);
             report.anim += usize::from(f.anim != want.raw.anim);
             let armed = (1..=40).any(|t| {
-                [0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x16, 0x26]
-                    .iter()
-                    .any(|&w| conker_anim::armed_move(w, t as f32) == Some(f.anim))
+                [
+                    0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x16, 0x26, 0x18, 0x37,
+                ]
+                .iter()
+                .any(|&w| conker_anim::armed_move(w, t as f32) == Some(f.anim))
             });
             if armed && f.anim == want.raw.anim {
                 let percent = if f.body.prev_strafe {
@@ -1095,7 +1135,8 @@ fn respawns_match_the_picker() {
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|n| {
             let n = n.strip_suffix("_events.csv")?;
-            (n.starts_with("combat_") || n.starts_with("combat4_")).then(|| n.to_string())
+            (n.starts_with("combat_") || n.starts_with("combat4_") || n.starts_with("combat5_"))
+                .then(|| n.to_string())
         })
         .collect();
     names.sort();

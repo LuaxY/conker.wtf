@@ -1,5 +1,5 @@
-//! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D
-//! or 0x30 (`--map`).
+//! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D,
+//! 0x30 or 0x34 (`--map`).
 //!
 //! ONE lightyear `Server` entity carries both transports on the same port number:
 //! WebTransport (UDP) and WebSocket (TCP). With `--cert`/`--cert-key` (PEM, e.g. Let's Encrypt's)
@@ -58,14 +58,14 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--map 2d|30] [--port 5888] [--digest-file PATH] [--seconds N]
+//! Usage: conker-server [--assets DIR] [--map 2d|30|34] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
 //!   [--first-read R] [--no-lagcomp] [--cert PEM --cert-key PEM] [--token-key FILE]
 //!   [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
-//! - `--map 2d|30`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
+//! - `--map 2d|30|34`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
 //!   clients learn it from `GET /info` on the token endpoint ([`token`]) before loading the level.
 //! - `--token-key FILE` (or `CONKER_TOKEN_KEY`): 64 hex digits that sign the connect tokens; a
 //!   random key per start without it. `--token-addr`: the token endpoint (default `[::]`, port + 1;
@@ -283,7 +283,7 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--map 2d|30] [--port N] [--digest-file PATH] [--seconds N] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
@@ -300,7 +300,7 @@ fn main() {
     });
     let (scene, starts) = (map_scene(&net.map))
         .and_then(|s| Some((s, starts(s)?)))
-        .unwrap_or_else(|| fail(format!("--map {}: not 2d or 30", net.map)));
+        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30 or 34", net.map)));
     let pack = Slice::load(&net.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
@@ -620,7 +620,8 @@ impl Game {
     /// Where slot `slot` on `side` starts, and the records it respawns on (`Fighter::spawn_mask`):
     /// `--spawn`'s place on the slot's Deathmatch record, respawning anywhere (oracle replays). Else
     /// its side's base, as in the original's War mode on the map (Total War on 0x2D, Colors on 0x30;
-    /// its Deathmatch has no sides): the side's k-th player starts on `starts.sides[side][k]`,
+    /// its Deathmatch has no sides; 0x34 has no War mode: the Deathmatch records by slot parity,
+    /// respawning anywhere): the side's k-th player starts on `starts.sides[side][k]`,
     /// jittered (one RNG draw, `spawn::place`), and respawns in its base (`starts.side_masks`).
     fn placement(&mut self, slot: usize, side: Side) -> (Placement, u32) {
         let Some(&(pos, facing)) = self.setup.spawns.get(slot) else {

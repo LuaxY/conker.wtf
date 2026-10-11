@@ -1,5 +1,66 @@
 # Status after wave 6 (2026-10-10)
 
+## The crossbow 0x18 and the shotgun 0x37 (2026-10-11)
+**Both weapons play: pickups (0x34's, or `--give SLOT:READ:0x18`), draw, fire, hits and kills in the rules, the bots,
+the server and the client (held model, clips, sounds, HUD icon).** Oracle tools and findings:
+`../lab/oracle/combat5_README.md`.
+
+| Step | What |
+|---|---|
+| Rules | `Attack::Bolt` (hip 0xFC: a bolt at frame 10 auto-aimed by the lock-on from the muzzle; R aims 0x10A, a Z release shoots 0x10C from the scope's eye; 125 a frame, cooldown 30) and `Attack::Spread` (0x1F4 or, on an RNG draw, 0x235; four spheres resolved after every player's update; cooldown 60; draw/holster/fire lock the movement); damage types `SHOTGUN_*`, the area stagger `AREA_STAGGER`, a lethal body hit's sequence; `lock_on` takes origin, range and cone |
+| Anim | draw/idle/holster/fire/aim ids, armed walk and run (0xEC/0xF8 at 80 %, 0x1F5/0x1F6), shotgun draw rate 1.4 |
+| Bots | they take, draw and fire both (the crossbow from the hip; its scope as weapon 0x14's, I); `bot_match` `BOT_GIVE=new:old` swaps one pickup's weapon |
+| Pack | held models 11 → 13 (the shotgun's bank-09 entry 102; the crossbow is a child object, bank-01 model 110, drawn in its bind pose); HUD icons 0x18, 0x37; sounds 1090, 1091; clip sounds of the new clips (incl. op 144, the shotgun's blast); pickup, hit and voice cues |
+| Client | the held models, `hit_weapon` knows both, bolts drawn and heard as aimed shots (placeholder) |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| `tests/combat.rs` | 57 cases pass (47 old, 10 new): ctlw18 18/18 events, cb3 55/55, cb4 23/23, cb_e1 22/22 + kill, cb_e2 39/39 + kill (6 bolt hits), ctlw37 20/20, sg3 33/33 (17 RNG draws fed), sg_e1 13/13 + kill, sg_e2 37/39 + kill (2 known), sg_e3 16/16 + kill; position errors ≤ 0.44 but the crossbow shooter's (below) |
+| Tests (target-net) | conker-rules 60 + combat + oracle, -sim, -bots, -anim, -server, -client 40, -assets, -extract (ROM) pass; clippy clean; wasm32 check |
+| `bot_match` (seed 7, 9000 frames) | `BOT_GIVE=18:09`: crossbow drawn 4,750 frames, 7 hits; `37:09`: shotgun 867 frames, 6 hits |
+| `smoke.sh` (port 5901) | 16/16, prediction max error 0; `MAP=34 BOTS=5 bots.sh` (port 5910): every bot fights, dies, respawns; the shotgun taken 9 times |
+| Native (`../lab/screens/weapons2/shots.sh`, cb_e2 and sg_e1 replayed) | crossbow: 6 hits, the last lethal, each a frame after the oracle's (the server's reads 852-1053 for the trace's frames 851-1052, below); shotgun: the kill in frame 790 as the oracle's; `crossbow-p1.png`, `crossbow-side-p1.png`, `shotgun-p1.png` |
+
+Gaps:
+- Firing the crossbow from the hip moves the shooter in the game (~5.3 a shot; cb3 drifts 69 over 15 shots, cb_e2 19.8),
+  not modelled; the victim's facing then follows the drifted angle (up to 332).
+- The crossbow in the hand doesn't play its own clips (string); bolts sound like weapon 0x14's aimed shots.
+- A bolt first moves on an odd match tick (V on the replays, where tick = read); a server started with `--first-read 745`
+  has tick 388 there, the other parity, so its bolts land a frame later than the oracle's (play is unaffected).
+- The shotgun's point-blank sphere (0x3A) never traced a hit; player 2's back-steps in sg_e2 (conker-sim).
+
+## Deathmatch on scene 0x34, the Bunker (2026-10-11)
+**`conker-server --map 34` plays Deathmatch on scene 0x34 (the original's scenario 4); the clients load it through
+`/info` as for 0x30; `--map 2d` and `30` are unchanged.** Its crossbow (0x18) and shotgun (0x37) pickups are in: until
+those weapons are ported, a player who takes one holds an id the rules don't know, which never draws (`Fighter::weapon`
+is `None`: no fire, no panic; the HUD prints `weapon 0x37`).
+
+| Step | What |
+|---|---|
+| Oracle (`../lab/oracle/map34`, a private copy of the oracle) | Scenario 4, 1 human + 15 bots (60 s, RAM dumps at DL 100-1700) and 2 + 3 (8 s). Deathmatch start by slot = `(slot + 7) % 12`, `[7,8,9,10,11,0,1,2,3,4,5,6,7,8,9,10]`, in both layouts; masks all ones (19 respawns). 16 slots on 12 records: slots 0 and 12 share record 7 and push apart. 16 pickups, respawn 240 VIs (V, RAM at 3, 10, 57 s): pickup k is the prop with id k + 1 and stands exactly on its placement (no spots, as 0x2D): placements 13-28. Ambience: **song 36** (not 19), channels 0-5 (mute 0xFFC0), no emitter in 25 s (`../lab/audio/map34`). Surface kinds new here: 6 (77 faces, the low floors, footsteps 606-616 and 683-686) and 0xE (35 faces, a 24° slope in x −3719..−277, z −4438..1227: no footsteps, sink −100). No lift (type-8) trigger. The mounted gun: one model-138 object at (2428, 645, 537) (RAM, as 0x30's), left out |
+| Sides | No War mode on 0x34, so no team records: `starts(0x34).sides` is the Deathmatch table split by slot parity (squirrels the even slots' records, Tediz the odd ones'), masks all ones (I, the remake's choice). With sides alternating by slot (the bots) that is exactly the Deathmatch table; a side only changes the model |
+| Rules | `spawn::DEATHMATCH_START_34`, `starts(0x34)`; `weapon::PICKUPS_34`, `pickups(0x34)` (no spots) |
+| Pack | `conker-extract pack --map 2d --map 30 --map 34 --background 34=../lab/audio/map34/background_loop.wav …`; `map_sounds` names each map's sequence (36 on 0x34). Added to `../assets`: `maps/34/` (7 files, 120 textures), `audio/maps/34/background.wav`, `audio/common/0606-0616.wav`; `pack.json`, `audio/events.json`, `audio/sounds.json` gained the new entries only (each written as the fresh export once the merge equalled it) and `README.md` is the new template. A fresh three-map export equals `../assets` file for file |
+| Background loop | Song 36 never repeats sample for sample (two runs differ from 0.8 s; no 64-frame window recurs in 340 s or in a 900 s untimed run), but its loudness repeats every 85.35 s (envelope correlation 0.97, also at 2-5 periods). `background.wav` is one 85.35 s period cut at 171.0 s where both ends are near silent (mean \|x\| 3-4) with a zero jump at the seam: not sample-exact like 0x2D's and 0x30's |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| `conker-rules` oracle test | 17 captures (2 on 0x34): 211 placements + 70 respawns (1,431 RNG draws), 0 mismatches; 114 start records, 70 masks; 17 traces, 138 rows (the read-30 idle check now skips humans sharing their record); unit test: 0x34's sides are its Deathmatch table by parity |
+| `conker-extract` `pack.rs` (ROM) | 0x30 and 0x34 read back exactly (collision, 12 spawns, pickups on their placements, nav, triggers, glTF); audio: kinds 6 and 0xE, no emitter, sequence 36 |
+| `MAP=34 smoke.sh wt ws ws` (ports 5956, 5960) | 16/16 twice, prediction max error 0; `MAP=2d`, `MAP=30` 16/16, max error 0 (one 0x30 run under load from a parallel bots run had max error 2,103 with 2 state misses; two reruns alone: 0) |
+| `MAP=34 bots.sh` (3 bots 120 s; 5 bots 150 s) | every bot moves (106-153 positions/s); 17 and 33 pickups (crossbow and shotgun taken in both); 16 and 39 hits, 3 and 6 kills; the script's fights-dies-respawns check fails as on 0x30 (run 1: 1 bot without a hit, 2 without a death; run 2: 2 without a hit, 2 without a death). Records 3 (21 under a floor at −761; the step-up, 50, covers it as the oracle does, not watched tick by tick) and 6 (106 above its floor) start fine |
+| Unknown weapons | `--give 0:100:0x18 --give 1:100:0x37`, 2 bots and 2 headless clients for 24 s: no panic in the server or the clients; the bots carry them holstered, and a human client that walked into the shotgun held it holstered through 23 HUD samples |
+| Browser (`/tmp/web-map34`, headless Chrome) | WebTransport and WebSocket, `/info` (`{"map":"34","protocol":11}`) then `maps/34/`: `../lab/screens/map34/browser-wt.png`, `browser-ws.png` |
+| Tests (target-net) | conker-assets, -extract (ROM), -rules 59 + oracle 4, -sim, -bots, -server 14, -client 40 pass |
+
+Gaps:
+- The crossbow and the shotgun need their port (another agent's work); the mounted gun is left out.
+- A bot can loop for a long while near its start: in the 5-bot run bot 0 stayed unarmed all match, running and
+  jumping (state 55) between nav nodes 60-62 by record 7, later 28/29 on the low floor; untraced.
+- Kind 0xE's `func_1507CD64(obj, 0xD)` call is not modelled (no oracle player stood on it in 60 s). Trigger kinds new
+  on 0x34 (12: 29 records, 17: 1) are unread; dispatch-2 placements 6 and 9 move by 10 in y in the oracle, static here.
+  Camera script zones and volumes as on 0x30 (not ported).
+
 ## Match settings, the end and the results (2026-10-11)
 **The server takes the original's SET-UP options (`--time 3-10|unlimited`, `--lives 1-5`, `--kills 0-10`, `--skill
 inbred..einstein`, `--radar on|off`; defaults 10 min, 3, unlimited, NORMAL, on) and ends the match as

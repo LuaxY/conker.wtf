@@ -3,7 +3,7 @@
 `index.html` is the landing (Home, the server browser and the lobby: "Landing" below, built from `app/`).
 `play.html` + `play.js`, the game page, load the wasm client from `dist/` (`client.js` + `client_bg.wasm`, built from
 `crates/conker-client`, WebGL2) and start it at once. Nobody picks or uploads a ROM: the client fetches the asset
-pack (`conker-extract pack`: scenes 0x2D and 0x30, character 117 and the held weapons as glTF + PNG, the game data as
+pack (`conker-extract pack`: scenes 0x2D, 0x30 and 0x34, character 117 and the held weapons as glTF + PNG, the game data as
 JSON) from `assets/` next to the page, from the site that serves the game. Besides the page and the pack, it fetches only
 the server's `/info` (which map it plays), its connect token (and, in dev, the certificate digest).
 
@@ -122,7 +122,7 @@ python3 -m http.server 8080 --bind :: --directory web   # serve web/, not web/di
 Open <http://localhost:8080/> for the landing (Join game, This machine, Join game) or
 <http://localhost:8080/play.html> for the game page, which starts by itself, with a status line while the pack loads. The client
 first asks the game server which map it plays: `GET /info` next to the token endpoint below (`http://localhost:5889/info`,
-`{"map":"2d","protocol":11}`; the server's `--map 2d|30`, default `2d`; a client of another protocol stops there and says
+`{"map":"2d","protocol":11}`; the server's `--map 2d|30|34`, default `2d`; a client of another protocol stops there and says
 to reload). Then it fetches that map's and the pack's 13 data files from `assets/` (all at once), then the sound's two (`audio/sounds.json`,
 `audio/events.json`, when `pack.json` lists `audio`), and Bevy its glTF models with their `.bin` files and PNG
 textures, and after the first key press or click the WAVs, from the same folder (no `.meta` requests: `AssetMetaCheck::Never`). Once the level

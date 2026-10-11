@@ -9,8 +9,10 @@
 //!   clock reaches its time (V: f32 clock, twin guns' draw t 15 at 15.4, holster t 14 at 15.4 after
 //!   13.999998, flamethrower t 9 at 9.0).
 //! - An action (`func_15083568`): a header at `0x80086CC4 + 8·(action − 1)` (records pointer, u8
-//!   count), then 16-byte records: byte 3 the kind (1 and 2 make an attachment, 0 changes the
-//!   parent), byte 0 the bank-09 entry, byte 1 the parent's matrix slot (`func_15030AF4` → +2).
+//!   count), then 16-byte records: byte 3 the kind (1 and 2 make a bank-09 attachment,
+//!   `func_15030AF4`; 0 a child object of class byte 0, the bank-01 model of that entry,
+//!   `func_15083AC8`: the crossbow's 0x6E), byte 0 the entry, byte 1 the parent's matrix slot
+//!   (`func_15030AF4` → +2).
 //! - The renderer (`func_150311C4`, `func_15031070`) binds segment 3 to the parent's matrix in that
 //!   slot (obj+0x1D4 + slot·0x40) and the model's lists load it as their only matrix: the model is
 //!   drawn in the joint's frame, with no offset, rotation or scale of its own (V: the RAM's display
@@ -37,8 +39,10 @@ const RENDER_STATES: usize = 0x8008_3140;
 /// that fired created it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
-    /// Bank-09 entry.
+    /// Bank-09 entry, or bank-01 entry of a child object.
     pub entry: usize,
+    /// A child object (kind 0, I: drawn in its bind pose, its own clips not played).
+    pub object: bool,
     /// The character's matrix slot (joint) it is drawn with.
     pub joint: u8,
     /// (logical animation id, clip time in ticks) of every event that creates it, and removes it.
@@ -90,9 +94,10 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
             let e = events.iter().filter(|e| e.3 == action && e.2 == creates);
             e.map(|e| (e.0, e.1)).collect()
         };
-        for r in records.as_chunks::<16>().0.iter().filter(|r| r[3] != 0) {
+        for r in records.as_chunks::<16>().0 {
             held.push(Held {
                 entry: r[0] as usize,
+                object: r[3] == 0,
                 joint: r[1],
                 create: of(true),
                 remove: of(false),

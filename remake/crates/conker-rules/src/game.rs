@@ -34,7 +34,7 @@ use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
 use crate::flame::{self, Burn};
 use crate::projectile::{
-    self, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
+    self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
 use crate::spawn::{self, Placement, Spawn};
 use crate::weapon::{self, Attack, Gives, Pickup, Weapon};
@@ -80,7 +80,8 @@ const GRENADE_PUSH: f32 = 32.74;
 const LOCK_ON: f32 = 200.0;
 const RAY_RANGE: f32 = 20_000.0;
 const C_STATE: u32 = 3;
-/// A blown-up player's bounces: the first landing's y velocity, and the least bounce.
+/// A blown-up player's bounces: the most the first landing gives back (half the fall speed, as later
+/// ones: V e_gren 28, combat5_sg_e2 7.8), and the least bounce.
 const BLAST_BOUNCE: f32 = 28.0;
 const BOUNCE_MIN: f32 = 5.0;
 const NONE: u32 = u32::MAX;
@@ -365,8 +366,9 @@ impl Fighter {
     /// holster's or throw's first frame. `tick` is the next frame to run, as in [`Self::item`].
     pub fn in_hand(&self, tick: u32) -> bool {
         let attach = |id: u8| match id {
-            0x39 | 0x23 => 7,
+            0x39 | 0x23 | 0x37 => 7,
             0x15 => 8,
+            0x18 => 20,
             0x14 => 11,
             0x21 => 12,
             0x22 => 15,
@@ -574,8 +576,13 @@ enum Strike {
     /// The flame stream's `k`-th frame.
     Flame(DamageType, u32),
     Rocket(Rocket),
-    /// Weapon 0x14's aimed shot: its kind and muzzle (forward, side, up from the feet).
-    Aimed(DamageType, [f32; 3]),
+    /// An aimed shot (weapon 0x14's, the crossbow's): its kind, where it leaves (y from the eye,
+    /// side, the eye's height above the feet) and its step.
+    Aimed(DamageType, [f32; 3], f32),
+    /// The crossbow's bolt from the hip, from this point along the facing.
+    Bolt(DamageType, [f32; 3]),
+    /// The shotgun's spheres from this muzzle ([`weapon::SPREAD`]).
+    Spread([f32; 3]),
     /// A grenade going off in the hand.
     Blast([f32; 3]),
 }
@@ -697,10 +704,11 @@ impl Match {
         if self.phase() == Phase::Over {
             return ev;
         }
-        let mut rays = Vec::new();
-        self.player(i, input, arena, world, seen, &mut rays, &mut ev);
+        let mut late = Vec::new();
+        self.player(i, input, arena, world, seen, &mut late, &mut ev);
         self.burn_player(i, &mut ev);
         self.fly_grenades(world, &mut ev);
+        let rays = self.late_strikes(late, world, seen, &mut ev);
         if self.players[i].out == 0 {
             animate(&mut self.players[i], world);
         }
@@ -731,19 +739,20 @@ impl Match {
             return ev;
         }
         self.pickups(arena, &mut ev);
-        let mut rays = Vec::new();
+        let mut late = Vec::new();
         for i in 0..self.players.len() {
             if self.free.contains(&i) {
                 continue;
             }
             let input = inputs.get(i).copied().unwrap_or_default();
-            self.player(i, &input, arena, world, seen, &mut rays, &mut ev);
+            self.player(i, &input, arena, world, seen, &mut late, &mut ev);
         }
         self.burn(&mut ev);
         self.fly_bullets(seen, &mut ev);
         self.fly_rockets(world, seen, &mut ev);
         self.fly_shots(world, seen, &mut ev);
         self.fly_grenades(world, &mut ev);
+        let rays = self.late_strikes(late, world, seen, &mut ev);
         // The renderer measures every player's root once the frame's updates are done (conker-sim's
         // `animate`; V: 0x14's shot kills in its own update after the victim's, and the victim's
         // death 0x17E drifts from the third row on, combat4_w14 835).
@@ -859,7 +868,7 @@ impl Match {
         arena: &Arena,
         world: &CollisionWorld,
         seen: Seen,
-        rays: &mut Vec<(usize, DamageType, [f32; 3])>,
+        deferred: &mut Vec<(usize, Strike)>,
         ev: &mut Vec<Event>,
     ) {
         let t = self.tick;
@@ -878,8 +887,12 @@ impl Match {
                     .is_some_and(|w| matches!(w.attack, Attack::Melee { .. }))
         };
         let lock_to = melee(&self.players[i])
-            .then(|| self.lock_on(i, world, seen))
-            .flatten();
+            .then(|| {
+                let me = &self.players[i].body;
+                self.lock_on(i, me.pos, me.facing, LOCK_ON, 0x40, world, seen)
+            })
+            .flatten()
+            .map(|l| l.1);
         let f = &mut self.players[i];
         let (late, late2) = (f.buttons, f.late);
         (f.late, f.buttons) = (f.buttons, input.buttons);
@@ -952,6 +965,15 @@ impl Match {
         let armed = w.filter(|_| f.drawn);
         let aiming = armed.is_some_and(|w| w.id == 0x23) && late_held(BUTTON_R);
         let no_fire = armed.is_some_and(|w| w.id == 0x16) && late_held(BUTTON_R);
+        // The shotgun fires again as soon as its cooldown allows, cutting the long 0x235 short (V
+        // combat5_sg3: a shot every 60 frames).
+        if matches!(f.action, Action::Fire { .. })
+            && armed.is_some_and(|w| matches!(w.attack, Attack::Spread { .. }))
+            && pressed(BUTTON_Z)
+            && t >= f.ready
+        {
+            f.action = Action::Free;
+        }
         if f.action == Action::Free && !aiming {
             if late_pressed(C_DOWN) && f.grenades > 0 && armed.is_none_or(|w| w.c_button.is_none())
             {
@@ -977,9 +999,12 @@ impl Match {
                     // choices are both 0x15F).
                     let swing =
                         matches!(w.attack, Attack::Melee { .. }) && self.rng.next_u32() & 1 == 0;
+                    let alt =
+                        matches!(w.attack, Attack::Spread { .. }) && self.rng.next_u32() & 3 == 0;
                     let anim = match w.attack {
                         _ if swing && w.id == 0x21 => anim::MELEE_SWING_A,
                         Attack::Shot { anim, .. } if late_held(BUTTON_R) => anim.0,
+                        Attack::Spread { alt: a, .. } if alt => a.0,
                         _ => w.fire.0,
                     };
                     f.set(
@@ -996,8 +1021,8 @@ impl Match {
                 } else if let Some(r) = w.reload.filter(|_| pressed(BUTTON_A)) {
                     f.rounds = w.rounds;
                     f.set(Action::Reload { frames: r.1 }, r.0, t);
-                } else if matches!(w.attack, Attack::Ray { .. }) && late_held(BUTTON_R) {
-                    f.set(Action::Aim { shot: NONE }, anim::SNIPER_AIM, t);
+                } else if let Some(aim) = w.aim().filter(|_| late_held(BUTTON_R)) {
+                    f.set(Action::Aim { shot: NONE }, aim, t);
                 } else if let Some(c) = w
                     .c_button
                     .filter(|_| input.buttons & C_BUTTONS & !late != 0)
@@ -1078,27 +1103,50 @@ impl Match {
                     } if n == 0 && f.anim == anim.0 => {
                         f.ready = t + cooldown;
                         f.shots = f.shots.saturating_add(1);
-                        strikes.push(Strike::Aimed(kind, muzzle));
+                        strikes.push(Strike::Aimed(kind, muzzle, projectile::SHOT_STEP));
                     }
                     Attack::Ray { kind, origin } if n == 0 => {
                         f.shots = f.shots.saturating_add(1);
                         strikes.push(Strike::Ray(kind, origin))
                     }
+                    // From the hip: the cooldown runs from Z, the bolt leaves `at` frames in.
+                    Attack::Bolt { cooldown, .. } if n == 0 && f.anim == w.fire.0 => {
+                        f.ready = t + cooldown;
+                    }
+                    Attack::Bolt {
+                        kind, muzzle, at, ..
+                    } if n == at && f.anim == w.fire.0 => {
+                        f.shots = f.shots.saturating_add(1);
+                        let at = local_to_world(pos, facing, muzzle);
+                        strikes.push(Strike::Bolt(kind, at));
+                    }
+                    Attack::Spread {
+                        muzzles,
+                        alt,
+                        cooldown,
+                    } if n == 0 => {
+                        f.ready = t + cooldown;
+                        f.shots = f.shots.saturating_add(1);
+                        let m = muzzles[usize::from(f.anim == alt.0)];
+                        strikes.push(Strike::Spread(local_to_world(pos, facing, m)));
+                    }
                     _ => {}
                 }
                 let ray = matches!(w.attack, Attack::Ray { .. });
                 // Swing 0x129 is a frame shorter than 0x12A (V e_w21 1051-1070).
-                let frames = u32::from(w.fire.1) - u32::from(f.anim == anim::MELEE_SWING_A);
+                let frames = match w.attack {
+                    Attack::Spread { alt, .. } if f.anim == alt.0 => u32::from(alt.1),
+                    _ => u32::from(w.fire.1) - u32::from(f.anim == anim::MELEE_SWING_A),
+                };
                 let done = if w.automatic() {
                     t >= last_z + 7
                 } else {
                     n >= frames || (ray && unaimed)
                 };
                 if done {
-                    let next = if ray && late_held(BUTTON_R) {
-                        (Action::Aim { shot: NONE }, anim::SNIPER_AIM)
-                    } else {
-                        (Action::Free, w.idle)
+                    let next = match w.aim().filter(|_| late_held(BUTTON_R)) {
+                        Some(aim) => (Action::Aim { shot: NONE }, aim),
+                        None => (Action::Free, w.idle),
                     };
                     f.set(next.0, next.1, t);
                 } else {
@@ -1117,6 +1165,30 @@ impl Match {
                     );
                     if let Attack::Ray { kind, origin } = w.attack {
                         strikes.push(Strike::Ray(kind, origin));
+                    }
+                } else if let Attack::Bolt {
+                    kind,
+                    aimed,
+                    cooldown,
+                    ..
+                } = w.attack
+                {
+                    // The crossbow shoots on Z's release, in that frame (V combat5_cb4: on odd and
+                    // even frames alike), from the scope's eye 11 lower.
+                    if late_held(BUTTON_Z) && !held(BUTTON_Z) && t >= f.ready {
+                        f.set(
+                            Action::Fire {
+                                last_z: t,
+                                cycles: [NONE; 2],
+                            },
+                            aimed.0,
+                            t,
+                        );
+                        f.ready = t + cooldown;
+                        f.shots = f.shots.saturating_add(1);
+                        strikes.push(Strike::Aimed(kind, [-11.0, 0.0, 67.5], BOLT_STEP));
+                    } else if unaimed {
+                        f.set(Action::Free, w.idle, t);
                     }
                 } else if shot == NONE && pressed(BUTTON_Z) {
                     f.action = Action::Aim {
@@ -1194,6 +1266,17 @@ impl Match {
             f.body.prev_strafe = false;
         }
         let start = f.body.pos;
+        // A draw or a holster holds the player still through the frame it ends in (obj+0x89 = 0xFF
+        // from `func_15063E84`, C; V combat5_sg_e3 765-774: the stick held through the shotgun's
+        // draw moves nothing, the idle shows on its last frame), and so does the shotgun's shot (its
+        // case of `func_15065A5C`, C).
+        let still = matches!(ended, Action::Draw | Action::Holster)
+            || matches!(f.action, Action::Draw | Action::Holster)
+            || (matches!(f.action, Action::Fire { .. })
+                && w.is_some_and(|w| matches!(w.attack, Attack::Spread { .. })));
+        if still {
+            f.body.lock = 0xFF;
+        }
         f.body.armed = match (f.action, w) {
             (Action::Draw, Some(w)) => w.id,
             (Action::Holster, _) => 0,
@@ -1236,6 +1319,7 @@ impl Match {
             // gait (V for 0x14: state 1 on e_w14).
             use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
             f.anim = match (w.filter(|_| f.drawn), f.body.state) {
+                _ if still => f.idle_anim(),
                 // A's jump shows the plain jump states (V ctlw_k1, k3, k4), melee 0x21 its own landing.
                 // 0x19D is 14 frames, a frame shorter than the landing's hold (V ctlw_k1 151-165).
                 (Some(w), LAND) if w.id == 0x21 && f.body.timer > 1 => anim::MELEE_LAND,
@@ -1271,7 +1355,7 @@ impl Match {
         }
         for s in strikes {
             match s {
-                Strike::Ray(kind, origin) => rays.push((i, kind, origin)),
+                Strike::Ray(..) | Strike::Spread(_) => deferred.push((i, s)),
                 s => self.strike(i, s, world, seen, ev),
             }
         }
@@ -1314,7 +1398,7 @@ impl Match {
                     }
                 }
             }
-            Strike::Aimed(kind, [_, side, up]) => {
+            Strike::Aimed(kind, [dy, side, up], step) => {
                 // `func_15063FA0`: from the scope's eye moved `side` along its yaw, toward the
                 // first thing the scope's line meets, a wall or a body part (s126+0xB8; C, V:
                 // probe14's birth point and aim at the wall 1,229 ahead, pitch14's at the floor
@@ -1327,9 +1411,55 @@ impl Match {
                     .first_part(i, eye, dir, wall, seen)
                     .map_or(wall, |h| h.1);
                 let target = core::array::from_fn(|j| eye[j] + dir[j] * d);
-                let from = [eye[0] + side * sx, eye[1], eye[2] + side * sz];
-                self.shots
-                    .push((t, Shot::toward(world, i, from, target, kind)));
+                let from = [eye[0] + side * sx, eye[1] + dy, eye[2] + side * sz];
+                let shot = Shot::toward(world, i, from, target, kind);
+                self.shots.push((t, Shot { step, ..shot }));
+            }
+            Strike::Bolt(kind, at) => {
+                // Aimed at the player it locks onto from the muzzle (`func_1506C460` with the
+                // auto-aim flag 0x800BE616 set: `func_1505DADC(bolt, &angle, 0, 0xFF, 0x14)`),
+                // rising by the players' height difference over their distance (C; V combat5_cb_e2:
+                // 6 bolts' directions, e.g. 23381 for the facing 24066).
+                let mut shot = Shot::fire(world, i, at, me.facing, kind);
+                if let Some((v, a)) = self.lock_on(i, at, me.facing, 3162.0, 0x14, world, seen) {
+                    let p = self.seen_pos(seen, i, v);
+                    let (dx, dz) = (p[0] - me.pos[0], p[2] - me.pos[2]);
+                    let k = (p[1] - me.pos[1]) / (dx * dx + dz * dz).sqrt().max(1.0);
+                    let (c, s) = cos_sin(a);
+                    let n = (1.0 + k * k).sqrt();
+                    shot.dir = [c / n, k / n, -s / n];
+                    shot.wall = raycast(world, at, shot.dir, projectile::FLIGHT_RANGE);
+                }
+                self.shots.push((
+                    t,
+                    Shot {
+                        step: BOLT_STEP,
+                        ..shot
+                    },
+                ));
+            }
+            Strike::Spread(muzzle) => {
+                // Each sphere in turn (a victim of one is immune or stunned for the next), the
+                // shooter left out; the knock-back along the facing, or away from the sphere's
+                // centre with flag 0x10.
+                let (c, s) = cos_sin(me.facing);
+                for (j, (kind, d, r)) in weapon::SPREAD.into_iter().enumerate() {
+                    let centre = [muzzle[0] + d * c, muzzle[1], muzzle[2] - d * s];
+                    for v in (0..self.players.len()).filter(|&v| v != i) {
+                        let p = self.seen_pos(seen, i, v);
+                        if !in_reach(centre, r, p, Hitbox::of(self.players[v].side))
+                            || (kind.flags & 0x2000 != 0 && !clear(world, muzzle, p))
+                        {
+                            continue;
+                        }
+                        let angle = if kind.flags & 0x10 != 0 {
+                            away_from(world, centre, p)
+                        } else {
+                            me.facing
+                        };
+                        self.hurt(v, &kind, true, j > 0, angle, i, ev);
+                    }
+                }
             }
             Strike::Flame(kind, k) => {
                 // The stream's hits from the nozzle along the facing, cut at the first wall; each
@@ -1368,6 +1498,26 @@ impl Match {
         }
     }
 
+    /// The strikes resolved once the frame's updates are done: the shotgun's spheres now, from its
+    /// animation's event (`func_150FF840` under `func_1506AD30`, C; V combat5_sg_e2: the victim's
+    /// knock-back starts the frame after), and the sniper's rays, returned for after the render.
+    fn late_strikes(
+        &mut self,
+        late: Vec<(usize, Strike)>,
+        world: &CollisionWorld,
+        seen: Seen,
+        ev: &mut Vec<Event>,
+    ) -> Vec<(usize, DamageType, [f32; 3])> {
+        let mut rays = Vec::new();
+        for (i, s) in late {
+            match s {
+                Strike::Ray(kind, origin) => rays.push((i, kind, origin)),
+                s => self.strike(i, s, world, seen, ev),
+            }
+        }
+        rays
+    }
+
     /// The sniper's instant ray from player `i` (`func_15081E78`).
     fn ray(
         &mut self,
@@ -1400,39 +1550,48 @@ impl Match {
         seen(s, v).unwrap_or(self.players[v].body.pos)
     }
 
-    /// `func_1505DADC(attacker, 0, 0xFE, 0x40)`: the direction to the player a swing locks onto.
-    fn lock_on(&self, i: usize, world: &CollisionWorld, seen: Seen) -> Option<u16> {
+    /// `func_1505DADC(from, &angle, 0, exclude, cone)`: the player (but `i`) a swing (from the
+    /// attacker, 200, cone 0x40) or a hip bolt (from its muzzle, 3,162, cone 0x14) locks onto, and
+    /// the direction to it.
+    #[allow(clippy::too_many_arguments)]
+    fn lock_on(
+        &self,
+        i: usize,
+        from: [f32; 3],
+        facing: u16,
+        range: f32,
+        cone: i32,
+        world: &CollisionWorld,
+        seen: Seen,
+    ) -> Option<(usize, u16)> {
         let angle = |x: f32, z: f32| match &world.acos {
             Some(a) => a.angle(x, z),
             None => atan2_u16(z, x),
         };
-        let me = &self.players[i].body;
-        let mut best: Option<(f32, u8, u16)> = None;
+        let mut best: Option<(f32, u8, usize, u16)> = None;
         for (v, p) in self.players.iter().enumerate() {
             if v == i || p.health == 0 {
                 continue;
             }
             let pos = self.seen_pos(seen, i, v);
-            let (dx, dy, dz) = (pos[0] - me.pos[0], me.pos[1] - pos[1], me.pos[2] - pos[2]);
+            let (dx, dy, dz) = (pos[0] - from[0], from[1] - pos[1], from[2] - pos[2]);
             let (xz, d) = (dx * dx + dz * dz, dx * dx + dy * dy + dz * dz);
-            let nearer = best.map_or(d < LOCK_ON * LOCK_ON, |b| {
-                d < b.0 || (p.stun == 0 && b.1 != 0)
-            });
+            let nearer = best.map_or(d < range * range, |b| d < b.0 || (p.stun == 0 && b.1 != 0));
             let to = angle(dx, dz);
-            let cone = (((i32::from(to) - i32::from(me.facing)) >> 8) + 0x40) & 0xFF < 0x80;
+            let cone = (((i32::from(to) - i32::from(facing)) >> 8) + cone) & 0xFF < 2 * cone;
             let pitch = ((i32::from(angle(xz.sqrt(), -dy)) >> 8) + 0x10) & 0xFF < 0x20;
             if !(nearer && cone && pitch) {
                 continue;
             }
-            let from = [me.pos[0], me.pos[1] + 80.0, me.pos[2]];
+            let eye = [from[0], from[1] + 80.0, from[2]];
             let line = [dx, -dy, -dz];
             let len = d.sqrt();
-            if len > 0.0 && raycast(world, from, line.map(|c| c / len), len) < len {
+            if len > 0.0 && raycast(world, eye, line.map(|c| c / len), len) < len {
                 continue;
             }
-            best = Some((d, p.stun, to));
+            best = Some((d, p.stun, v, to));
         }
-        best.map(|b| b.2)
+        best.map(|b| (b.2, b.3))
     }
 
     /// The nearest player's body on the segment, but `owner`'s. Dead bodies stop bullets until
@@ -1555,15 +1714,16 @@ impl Match {
         }
     }
 
-    /// Aimed shots move from the frame after they were fired.
+    /// Aimed shots and bolts first move on the first odd frame after the one they were fired in
+    /// (V combat5_cb2-4, cb_e1: 15 bolts fired on odd and even frames), then every frame.
     fn fly_shots(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
         let t = self.tick;
         for (born, mut s) in std::mem::take(&mut self.shots) {
-            if born == t {
+            if born == t || (born + 1 == t && t.is_multiple_of(2)) {
                 self.shots.push((born, s));
                 continue;
             }
-            let reach = s.wall.min(projectile::SHOT_STEP);
+            let reach = s.wall.min(s.step);
             if let Some((v, _, head)) = self.first_part(s.owner, s.pos, s.dir, reach, seen) {
                 let kind = if head { damage::SNIPER_RAY } else { s.kind };
                 // The knock-back angle is the shot's direction (V combat4_w14: 0x6B13 for
@@ -1572,9 +1732,13 @@ impl Match {
                 if self.hurt(v, &kind, false, true, a, s.owner, ev) {
                     let o = &mut self.players[s.owner];
                     o.headshots = o.headshots.saturating_add(u16::from(head));
-                    // Its victim's first state is a frame shorter than the sniper's (V combat4_w14:
-                    // the death spin 0x17E for 75 frames, the sniper's 76; I: the frame order).
-                    self.players[v].since = t.saturating_sub(1);
+                    // Its victim's death spin is a frame shorter than the sniper's (V combat4_w14,
+                    // combat5_cb_e1: 0x17E for 75 frames, the sniper's 76; I: the frame order); a
+                    // body hit's 0xD3 keeps its 30, a lethal one's too (V combat5_cb_e1 907-937,
+                    // combat5_cb_e2 1053-1083).
+                    if head && self.players[v].health == 0 {
+                        self.players[v].since = t.saturating_sub(1);
+                    }
                 }
             } else if s.advance() {
                 self.shots.push((born, s));
@@ -1603,6 +1767,11 @@ impl Match {
         }
         let damage = kind.amount(area);
         f.health = f.health.saturating_sub(damage);
+        let reaction = if area && kind.reaction == 0x21 {
+            damage::AREA_STAGGER
+        } else {
+            kind.reaction
+        };
         let b = &mut f.body;
         if kind.aims() {
             b.move_angle = (u16::from(kind.angle) << 8).wrapping_add(angle);
@@ -1619,10 +1788,10 @@ impl Match {
         }
         f.stun = STUN_HIT;
         let lethal = f.health == 0;
-        let first = damage::sequence(kind.reaction, lethal)[0].0;
+        let first = damage::sequence(reaction, lethal)[0].0;
         f.set(
             Action::Hurt {
-                reaction: kind.reaction,
+                reaction,
                 lethal,
                 step: 0,
             },
@@ -1674,7 +1843,14 @@ impl Match {
             // is over (`func_1504CB98` with obj+0x10B & 0x80, C; V e_w15 829 → 830, 924).
             f.immune = 90;
         }
-        if t - f.since >= u32::from(seq[usize::from(step)].1) {
+        // Blown up, the first state lasts until the frame after the first landing (a landing sets
+        // the floor, which every airborne frame takes).
+        let over = if (reaction, lethal, step) == (0x2B, false, 0) {
+            f.body.floor.is_some()
+        } else {
+            t - f.since >= u32::from(seq[usize::from(step)].1)
+        };
+        if over {
             let step = step + 1;
             if usize::from(step) == seq.len() {
                 if lethal && f.deaths >= u16::from(self.settings.lives()) {
@@ -1990,7 +2166,7 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             && b.pos[1] <= fl.y
         {
             let bounce = if step == 0 {
-                BLAST_BOUNCE
+                (0.5 * -b.y_vel).min(BLAST_BOUNCE)
             } else {
                 0.5 * -b.y_vel
             };
@@ -2277,7 +2453,9 @@ mod tests {
         let (_, mut m, w) = duel();
         let mut at = |p: [f32; 3]| {
             m.players[1].body.pos = p;
-            m.lock_on(0, &w, &here)
+            let me = &m.players[0].body;
+            m.lock_on(0, me.pos, me.facing, LOCK_ON, 0x40, &w, &here)
+                .map(|l| l.1)
         };
         assert_eq!(at([199.0, 0.0, 0.0]), Some(0));
         assert_eq!(at([201.0, 0.0, 0.0]), None);
@@ -2367,8 +2545,48 @@ mod tests {
         assert!((b.pos[0] + 1.1).abs() < 1e-4);
     }
 
-    /// A blown-up player bounces: 28 off the first landing, then half the landing speed, keeping
-    /// 0.6 of the xz speed; below 5 it stays down (V e_gren 965-989).
+    /// The shotgun at 146.5 kills with its second sphere (0x32, the death spin); the crossbow's hip
+    /// bolt (from frame 10 of the fire, 125 a frame) hits the body for 1, and Z's release in R's
+    /// aim shoots at once.
+    #[test]
+    fn shotgun_and_crossbow() {
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x37);
+        let ev = run(&mut m, &arena, &w, 20, |t| match t {
+            0 => BUTTON_B,
+            14 => BUTTON_Z,
+            _ => 0,
+        });
+        let hit = ev.iter().find_map(|(t, e)| match e {
+            Event::Hit { lethal, .. } => Some((*t, *lethal)),
+            _ => None,
+        });
+        assert_eq!(
+            (hit, m.players[1].anim),
+            (Some((14, true)), anim::DEATH_SHOT)
+        );
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x18);
+        let draw = u32::from(weapon::CROSSBOW.draw.1);
+        let ev = run(&mut m, &arena, &w, draw + 14, |t| match t {
+            0 => BUTTON_B,
+            t if t == draw + 1 => BUTTON_Z,
+            _ => 0,
+        });
+        assert!(
+            ev.iter()
+                .any(|(_, e)| matches!(e, Event::Hit { damage: 1, .. }))
+        );
+        assert_eq!(m.players[1].anim, anim::HIT_SHOT);
+        run(&mut m, &arena, &w, 42, |t| {
+            BUTTON_R | if t < draw + 40 { BUTTON_Z } else { 0 }
+        });
+        let f = &m.players[0];
+        assert_eq!((f.anim, f.shots), (anim::CROSSBOW_AIMED, 2));
+    }
+
+    /// A blown-up player bounces: half the landing speed, at most 28 off the first landing, keeping
+    /// 0.6 of the xz speed; below 5 it stays down (V e_gren 965-989, combat5_sg_e2 810).
     #[test]
     fn blast_bounces() {
         let w = flat();
@@ -2380,13 +2598,16 @@ mod tests {
             f.body.y_vel,
             f.body.gravity,
             f.body.xz_speed,
-        ) = ([0.0, 5.0, 0.0], true, -20.0, 3.4, 16.0);
+        ) = ([0.0, 5.0, 0.0], true, -66.0, 3.4, 16.0);
         knock(f, 0x2B, 0, &w, &[]);
         assert_eq!(
             (f.body.pos[1], f.body.y_vel, f.body.gravity),
             (0.0, BLAST_BOUNCE, movement::GRAVITY_FALL)
         );
         assert!((f.body.xz_speed - 15.9 * 0.6).abs() < 1e-5);
+        (f.body.pos[1], f.body.y_vel, f.body.gravity) = (2.0, -12.2, 3.4);
+        knock(f, 0x2B, 0, &w, &[]);
+        assert!((f.body.y_vel - 7.8).abs() < 1e-5); // 0.5 · |−12.2 − 3.4|
         (f.body.pos[1], f.body.y_vel) = (2.0, -8.0);
         knock(f, 0x2B, 1, &w, &[]);
         assert_eq!(f.body.y_vel, 6.5); // 0.5 · |−8 − 5|

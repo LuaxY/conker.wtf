@@ -97,15 +97,23 @@ bots camped with the sniper rifle in the last `bots.sh` runs (known bot weakness
 Evidence: `lab/research/mp-original/` (menus-and-flow.md, modes-and-maps.md). Our map 0x2D is the **Total War** map:
 scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier notes (names fixed in the code and docs).
 **Done 2026-10-11:** the SET-UP options, the end conditions and the STATS results with RESTART/QUIT; Deathmatch on
-0x30 (`--map 30`). Leftovers:
+0x30 (`--map 30`) and on 0x34, the Bunker (`--map 34`); the crossbow (0x18) and shotgun (0x37). Leftovers:
 - results: the skull's grow; the level still drawn in an eliminated player's view; the lit button's pulse; the
   radar/score hidden during the fade; the 17-frame fade before RESTART; when the original counts a hit (accuracy);
   P3/P4 row colours;
 - 0x30: 1-2 bots per match ride a pair of lifts back and forth all match (the original's wander between rides); the
   2 mounted machine guns (usable in the original's Deathmatch: mount, Z fires); `bots.sh` fails on this bigger map
   (not every bot hits in time); camera script zones and volumes (as on 0x2D);
-- the pack: the map export rewrote `pack.json`, `audio/events.json` and `audio/sounds.json` (additions only), so
-  pack edits in those three files would need re-applying.
+- 0x34: the mounted gun; in a corridor near start record 9 the camera sits steeply above the player (not compared
+  with the original); a bot can loop jumping between
+  nav nodes 60-62 for most of a match; surface kind 0xE's extra call and trigger kinds 12 and 17 are unread; its
+  background loop is not sample-exact (song 36 never repeats exactly);
+- crossbow and shotgun: the crossbow's hip shot moves the shooter about 5.3 units a shot in the game (not modelled);
+  the held crossbow doesn't animate (string) and its bolts use the sniper's flight sound; the shotgun's point-blank
+  sphere never hit in the traces; `--first-read` replays land bolts one frame late;
+- the pack: the map exports and the weapons' port rewrote `pack.json`, `audio/events.json`, `audio/sounds.json`,
+  `hud/hud.json` (additions only) and `weapons/deathmatch/held.{bin,gltf,json}` (13 models, new order), so pack edits
+  in those files would need re-applying. `assets/` equals a fresh three-map export (804 files).
 1. Around the match:
    - ~~the end of a match and a STATS screen with RESTART and QUIT~~ (done);
    - ~~SET-UP: time 3-10 min or unlimited, lives 1-5 (last one standing when untimed), kill limit, bot skill
@@ -113,7 +121,7 @@ scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier not
    - pause (CONT./RESTART/QUIT): not online (it would freeze everyone);
    - bot caps by human count;
    - real lobby wiring.
-2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), 0x34 Bunker (+crossbow, shotgun), 0x3F Temple
+2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), ~~0x34 Bunker~~ (done, with the crossbow and shotgun; its mounted machine gun is left out), 0x3F Temple
    (+caveman, item 0x40), 0x1A Vault (+Wise Guy, tommy gun, item 0x19, moving pickups). Per-map character sets and
    cheat characters. The bots' navigation on those maps is unchecked.
 3. Team modes:

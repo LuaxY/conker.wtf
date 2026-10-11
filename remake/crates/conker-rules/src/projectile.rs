@@ -310,9 +310,13 @@ pub struct Shot {
     pub wall: f32,
     pub owner: usize,
     pub kind: DamageType,
+    /// Units a frame: [`SHOT_STEP`], or the crossbow's [`BOLT_STEP`].
+    pub step: f32,
 }
 
 pub const SHOT_STEP: f32 = 75.0;
+/// The crossbow's bolt: an object at speed 250 (V combat5_cb2-4: 125 a frame).
+pub const BOLT_STEP: f32 = 125.0;
 
 impl Shot {
     pub fn fire(
@@ -330,6 +334,7 @@ impl Shot {
             wall: raycast(world, muzzle, dir, FLIGHT_RANGE),
             owner,
             kind,
+            step: SHOT_STEP,
         }
     }
 
@@ -355,16 +360,17 @@ impl Shot {
             wall: raycast(world, muzzle, dir, FLIGHT_RANGE),
             owner,
             kind,
+            step: SHOT_STEP,
         }
     }
 
     /// The step after a sweep that hit no body; false once it reached the wall.
     pub fn advance(&mut self) -> bool {
-        if self.wall <= SHOT_STEP {
+        if self.wall <= self.step {
             return false;
         }
-        self.pos = core::array::from_fn(|i| self.pos[i] + self.dir[i] * SHOT_STEP);
-        self.wall -= SHOT_STEP;
+        self.pos = core::array::from_fn(|i| self.pos[i] + self.dir[i] * self.step);
+        self.wall -= self.step;
         true
     }
 }

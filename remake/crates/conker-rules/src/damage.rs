@@ -89,6 +89,16 @@ pub const SHOT_BODY: DamageType = ty(0x20, 0x01, 20.0, 0.0, 6.0, 1, 0x80 | 10, 0
 pub const ROCKET_INNER: DamageType = ty(0x2C, 0x07, 0.0, 0.0, 0.0, 0, 0x80 | 30, 0x3010);
 pub const ROCKET_OUTER: DamageType = ty(0x2B, 0x02, 20.0, 70.0, 3.4, 1, 0x80 | 30, 0x3010);
 pub const ROCKET_INNER_R: f32 = 40.0;
+/// The shotgun's four spheres (`func_150FF840`, C; V combat5_sg_e1-e3): type 0x3A at the muzzle,
+/// then 0x32 (kills), 0x30 (3 damage, blown up) and 0x31 (1) further along the facing.
+pub const SHOTGUN_MUZZLE: DamageType = ty(0x21, 0x01, 34.0, 0.0, 4.0, 30, 0, 0x0400);
+pub const SHOTGUN_KILL: DamageType = ty(0x2F, 0x07, 0.0, 0.0, 4.0, 0, 0x80 | 30, 0x2010);
+pub const SHOTGUN_BLAST: DamageType = ty(0x2B, 0x03, 120.0, 15.0, 3.4, 1, 0x80 | 5, 0x2000);
+pub const SHOTGUN_EDGE: DamageType = ty(0x21, 0x01, 0.0, 0.0, 3.4, 1, 0x80 | 5, 0x2400);
+/// The port's reaction for an area hit of reaction 0x21 (the shotgun's): the stagger, and when it
+/// kills, lying dead 63 frames then 0x18A for 18, as melee 0x21's kill (V combat5_sg_e2 1060+;
+/// I: what the game reads to tell it from a bullet's kill).
+pub const AREA_STAGGER: u8 = 0x80 | 0x21;
 pub const ROCKET_OUTER_R: f32 = 300.0;
 
 /// Explosion radii (`0.5 · 4 · entry+0xE`): the outer and inner grenade blasts.
@@ -135,12 +145,20 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
     const SHOT_DEAD: &[(u16, u16)] = &[(anim::HIT, 18), (anim::DEATH_FALL, 52), (anim::DEAD, 81)];
     match (reaction, lethal) {
         (0x33, false) => &[(anim::HIT_MELEE, 19)],
+        (AREA_STAGGER, true) => &[
+            (anim::HIT, 18),
+            (anim::DEATH_FALL, 52),
+            (anim::DEAD, 63),
+            (anim::DEAD_MELEE_END, 18),
+        ],
         (0x33, true) => &[
             (anim::HIT_MELEE, 19),
             (anim::DEATH_FALL, 52),
             (anim::DEAD, 63),
             (anim::DEAD_MELEE_END, 18),
         ],
+        // The blow-up lasts until the frame after the first landing (`Match::hurt_frame`; 42 from a
+        // grenade's blast, 10 from the shotgun's: V e_gren, combat5_sg_e2).
         (0x2B, false) => &[
             (anim::BLOWN_UP, 42),
             (anim::GET_UP, 42),
@@ -162,6 +180,13 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         (0x10, false) => &[(anim::FLAME_HIT, 5)],
         // Weapon 0x14's body hit: class 117's reaction 0x20 entry, 0xD3 for 30 frames (C).
         (0x20, false) => &[(anim::HIT_SHOT, 30)],
+        // A lethal one falls from it (V combat5_cb_e2: 0xD3 30, 0x58 52; the dead pose's 81 as
+        // the stagger's, I).
+        (0x20, true) => &[
+            (anim::HIT_SHOT, 30),
+            (anim::DEATH_FALL, 52),
+            (anim::DEAD, 81),
+        ],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,
     }
@@ -186,7 +211,7 @@ pub enum Facing {
 
 pub fn facing(reaction: u8) -> Facing {
     match reaction {
-        0x21 | 0x2E | 0x31 => Facing::Attacker,
+        0x20 | 0x21 | 0x2E | 0x31 | AREA_STAGGER => Facing::Attacker,
         0x2B | 0x2F => Facing::Away,
         _ => Facing::Keep,
     }

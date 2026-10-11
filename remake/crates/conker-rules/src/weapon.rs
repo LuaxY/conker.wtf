@@ -41,7 +41,40 @@ pub enum Attack {
         anim: (u16, u16),
         cooldown: u32,
     },
+    /// The crossbow's bolt ([`crate::projectile::Shot`], 125 a frame): from the hip, Z plays the
+    /// weapon's `fire` and looses it `at` frames in from `muzzle`, level along the facing; R holds
+    /// the aim (`aim`), and Z's release shoots at once (`aimed`) from the scope's eye 11 lower
+    /// toward what the scope looks at. A head hit kills (type 0x20), a body hit is `kind`; Z does
+    /// nothing for `cooldown` frames after a shot's Z (s126+0x19E = 60 VIs, C). V combat5_cb2-4,
+    /// cb_e1.
+    Bolt {
+        kind: DamageType,
+        muzzle: [f32; 3],
+        at: u32,
+        aim: u16,
+        aimed: (u16, u16),
+        cooldown: u32,
+    },
+    /// The shotgun: on the Z press, four area hits along the facing from the muzzle
+    /// (`func_150FF840`, [`SPREAD`]); then nothing for `cooldown` frames (s126+0x19E = 120 VIs, C).
+    /// One shot in four (an RNG draw: `& 3 == 0`, C `func_15065A5C`) plays `alt` from `muzzles[1]`
+    /// instead of `fire` from `muzzles[0]` (the hand's pose). V combat5_sg3 (20 picks), sg_e1-e3.
+    Spread {
+        muzzles: [[f32; 3]; 2],
+        alt: (u16, u16),
+        cooldown: u32,
+    },
 }
+
+/// The shotgun's spheres in order: type, distance from the muzzle along the facing, radius
+/// (`0.5 · 4 · entry+0xE`). The muzzle's (0x3A) is the only one an immune or stunned player takes
+/// (not guarded, C); the others need a clear line from the muzzle (flag 0x2000).
+pub const SPREAD: [(DamageType, f32, f32); 4] = [
+    (damage::SHOTGUN_MUZZLE, 0.0, 40.0),
+    (damage::SHOTGUN_KILL, 88.0, 120.0),
+    (damage::SHOTGUN_BLAST, 383.0, 240.0),
+    (damage::SHOTGUN_EDGE, 810.0, 360.0),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Weapon {
@@ -75,6 +108,15 @@ impl Weapon {
     /// Automatic: Z held keeps firing (the twin guns, the flamethrower).
     pub fn automatic(&self) -> bool {
         self.fire.1 == 0
+    }
+
+    /// R's aim state, for the weapons that have one (the sniper rifle, the crossbow).
+    pub fn aim(&self) -> Option<u16> {
+        match self.attack {
+            Attack::Ray { .. } => Some(anim::SNIPER_AIM),
+            Attack::Bolt { aim, .. } => Some(aim),
+            _ => None,
+        }
     }
 }
 
@@ -255,6 +297,49 @@ pub const W16: Weapon = Weapon {
     ..W14
 };
 
+/// The crossbow (0x18): see [`Attack::Bolt`]. A does nothing; the C buttons play the run for 3
+/// frames (V combat5_ctlw18).
+pub const CROSSBOW: Weapon = Weapon {
+    id: 0x18,
+    draw: (anim::CROSSBOW_DRAW, 64),
+    idle: anim::CROSSBOW_IDLE,
+    holster: (anim::CROSSBOW_HOLSTER, 34),
+    fire: (anim::CROSSBOW_FIRE, 29),
+    walk: None,
+    attack: Attack::Bolt {
+        kind: damage::SHOT_BODY,
+        muzzle: [10.259, -7.948, 45.225],
+        at: 10,
+        aim: anim::CROSSBOW_AIM,
+        aimed: (anim::CROSSBOW_AIMED, 29),
+        cooldown: 30,
+    },
+    rounds: 0,
+    reload: None,
+    empty_reload: 0,
+    c_button: Some(anim::CROSSBOW_RUN),
+};
+
+/// The shotgun (0x37): see [`Attack::Spread`]. One shot per Z press; a new one may cut the long
+/// 0x235 short (V combat5_sg3). R and A do nothing, C-down throws a grenade (V combat5_ctlw37).
+pub const SHOTGUN: Weapon = Weapon {
+    id: 0x37,
+    draw: (anim::SHOTGUN_DRAW, 13),
+    idle: anim::SHOTGUN_IDLE,
+    holster: (anim::SHOTGUN_HOLSTER, 13),
+    fire: (anim::SHOTGUN_FIRE, 45),
+    walk: None,
+    attack: Attack::Spread {
+        muzzles: [[57.535, 7.572, 45.99], [59.756, 12.117, 46.046]],
+        alt: (anim::SHOTGUN_FIRE_B, 71),
+        cooldown: 60,
+    },
+    rounds: 0,
+    reload: None,
+    empty_reload: 0,
+    c_button: None,
+};
+
 pub fn weapon(id: u8) -> Option<&'static Weapon> {
     Some(match id {
         0x09 => &TWIN_GUNS,
@@ -266,6 +351,8 @@ pub fn weapon(id: u8) -> Option<&'static Weapon> {
         0x22 => &BLADE,
         0x14 => &W14,
         0x16 => &W16,
+        0x18 => &CROSSBOW,
+        0x37 => &SHOTGUN,
         _ => return None,
     })
 }
@@ -376,12 +463,35 @@ pub const SPOTS_30: [[i16; 3]; 17] = [
     [691, 99, 8577],
 ];
 
+/// Scene 0x34's 16 pickups (Deathmatch, scenario 4), in the manager's order: pickup k is the prop
+/// whose id is k + 1, and each stands on its placement (V from the RAM at 3, 10 and 57 s,
+/// `../lab/oracle/map34`). 0x18 and 0x37 are the crossbow and the shotgun.
+pub const PICKUPS_34: [Pickup; 16] = [
+    pick(13, 0x24),
+    pick(14, 0x23),
+    pick(15, 0x16),
+    pick(16, 0x22),
+    pick(17, 0x16),
+    pick(18, 0x15),
+    pick(25, 0x39),
+    pick(19, 0x18),
+    pick(20, 0x14),
+    pick(21, 0x09),
+    pick(22, 0x09),
+    pick(23, 0x21),
+    pick(24, 0x23),
+    pick(26, 0x37),
+    pick(27, 0),
+    pick(28, 0),
+];
+
 /// A scene's pickups, and their spots when the game moves them off their placements (empty: on
 /// the placements), if known.
 pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
     match scene {
         0x2D => Some((&PICKUPS_2D, &[])),
         0x30 => Some((&PICKUPS_30, &SPOTS_30)),
+        0x34 => Some((&PICKUPS_34, &[])),
         _ => None,
     }
 }
@@ -409,7 +519,7 @@ mod tests {
 
     #[test]
     fn table_is_consistent() {
-        for p in PICKUPS_2D.iter().chain(&PICKUPS_30) {
+        for p in PICKUPS_2D.iter().chain(&PICKUPS_30).chain(&PICKUPS_34) {
             if let Gives::Weapon(id) = p.gives {
                 assert_eq!(weapon(id).unwrap().id, id);
             }

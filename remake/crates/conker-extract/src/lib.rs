@@ -19,7 +19,8 @@ pub use conker_assets::{ClipInfo, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, RootC
 use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
-    Character, DEATHMATCH_PLAYER, FPS, SQUIRREL_SOLDIER, held_models, parse_attachment, parse_model,
+    Character, DEATHMATCH_PLAYER, FPS, SQUIRREL_SOLDIER, bind_pivots, held_models, matrix_slot,
+    parse_attachment, parse_model,
 };
 use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
 use extract_level::{
@@ -34,9 +35,10 @@ pub const SLICE_SCENE: usize = 0x2D;
 /// The vertical slice's character: the bank-01 model every Deathmatch participant uses.
 pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// The clips that put Deathmatch's held models in the hand: the draws of weapons 0x09, 0x39, 0x23,
-/// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull (conker-anim's ids).
-pub const HELD_CLIPS: [u16; 10] = [
-    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176,
+/// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull, then the crossbow's and the
+/// shotgun's draws (conker-anim's ids; new ones go last, keeping the pack's scene order).
+pub const HELD_CLIPS: [u16; 12] = [
+    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7,
 ];
 /// How far below a floor plane a spawn point may sit and still stand on it (spawns on slopes sit
 /// up to ~1.3 units under the plane; the extract-scene example uses the same value).
@@ -398,13 +400,32 @@ fn clips(character: &Character) -> (Vec<ClipInfo>, Vec<RootClip>) {
 }
 
 /// The held models ([`HELD_CLIPS`]'), their meshes as one pseudo-level (a mesh per part, at the
-/// origin), and one glTF scene per model listing its parts' nodes.
+/// origin; a child object's per display list, in its bind pose), and one glTF scene per model
+/// listing its parts' nodes.
 fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
     let held = held_models(rom, SLICE_CHARACTER, &HELD_CLIPS)?;
     let game_data = rom.game_data()?;
     let (mut models, mut scenes) = (Level::default(), Vec::new());
     for h in &held {
-        let parts = parse_attachment(&rom.asset(&[0x09, h.entry])?, &game_data)?;
+        let (bank, parts) = match h.object {
+            true => {
+                let model = parse_model(&rom.asset(&[0x01, h.entry])?)?;
+                let pivots = bind_pivots(&model.joints)?;
+                let mut lists = model.lists;
+                for v in lists.iter_mut().flat_map(|ir| &mut ir.vertices) {
+                    let p = pivots
+                        .get(matrix_slot(v.matrix))
+                        .copied()
+                        .unwrap_or_default();
+                    v.position = std::array::from_fn(|a| v.position[a] + p[a] as i16);
+                }
+                (0x01, lists)
+            }
+            false => (
+                0x09,
+                parse_attachment(&rom.asset(&[0x09, h.entry])?, &game_data)?,
+            ),
+        };
         let first = models.meshes.len();
         scenes.push(json!({ "nodes": (first..first + parts.len()).collect::<Vec<_>>() }));
         for (part, ir) in parts.into_iter().enumerate() {
@@ -414,7 +435,7 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
                 matrix: IDENTITY,
             });
             models.meshes.push(Mesh {
-                path: vec![0x09, h.entry, part],
+                path: vec![bank, h.entry, part],
                 ir,
             });
         }

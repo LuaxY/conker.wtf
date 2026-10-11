@@ -62,7 +62,7 @@ fn spawn(hex: &str) -> Spawn {
     }
 }
 
-/// One logged pick in a match (scene 0x2D or 0x30) and what the game returned.
+/// One logged pick in a match (scene 0x2D, 0x30 or 0x34) and what the game returned.
 struct Pick {
     caller: String,
     player: usize,
@@ -116,7 +116,9 @@ fn captures(dir: &Path) -> Vec<Capture> {
                     Some("setidx") => {
                         set_index.push((int(kv["obj"]) as usize, int(kv["a1"]) as usize))
                     }
-                    Some("pick") if kv["mp"] == "1" && ["0x2d", "0x30"].contains(&kv["scene"]) => {
+                    Some("pick")
+                        if kv["mp"] == "1" && ["0x2d", "0x30", "0x34"].contains(&kv["scene"]) =>
+                    {
                         scene = int(kv["scene"]) as u16;
                         let objs = kv["objs"]
                             .split(',')
@@ -291,7 +293,8 @@ fn start_records_and_masks() {
 }
 
 /// Each participant's row at read 23 (the match's first frame) equals its script placement, and the
-/// idle humans are still there at read 30 (bots walk from read 24), in x and z.
+/// idle humans alone on their record are still there at read 30 (bots walk from read 24), in x
+/// and z.
 #[test]
 fn traces_start_on_the_placements() {
     let Some(dir) = oracle_dir() else { return };
@@ -326,10 +329,18 @@ fn traces_start_on_the_placements() {
             .filter(|p| p.caller.contains("func_15097A8C"))
             .map(|p| (p.player, p))
             .collect();
+        // 16 players on 0x34's 12 records: two slots share a record and push each other apart.
+        let alone = |i: usize| {
+            placed
+                .values()
+                .filter(|q| q.s11b == placed[&i].s11b)
+                .count()
+                == 1
+        };
         for line in lines {
             let v: Vec<&str> = line.split(',').collect();
             let (r, i): (u32, usize) = (v[read].parse().unwrap(), v[player].parse().unwrap());
-            if !(r == 23 || r == 30 && i < humans) {
+            if !(r == 23 || r == 30 && i < humans && alone(i)) {
                 continue;
             }
             let p = placed[&i];

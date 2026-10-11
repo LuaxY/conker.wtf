@@ -11,7 +11,7 @@ What runs on the host:
 How a player connects: the landing (`/`) lists the servers and opens a lobby, whose "Join game" opens the game
 page, `/play.html?server=DOMAIN:5888&transport=wt&side=...` (`web/README.md`, "Landing"; the server list and lobbies
 are mock for now, "This machine" is this host's server). The game page (over https) loads the client, which asks `/info` which map the server plays
-(`conker-server --map 2d|30`), fetches that map and the rest of the asset pack from `/assets/` and
+(`conker-server --map 2d|30|34`), fetches that map and the rest of the asset pack from `/assets/` and
 draws the level; then it fetches `/token` from its own origin. Caddy passes it to the
 game server, which signs a netcode connect token with its private key (`/etc/conker/token.key`, never
 sent anywhere) for the domain's addresses. The page then connects to `DOMAIN:5888` over WebTransport, or

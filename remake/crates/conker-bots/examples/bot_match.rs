@@ -31,6 +31,12 @@ fn main() {
     let seed: Option<u64> = args.get(3).map(|a| a.parse().unwrap());
     // BOT_DEBUG=k: participant k's walk state every 5 frames.
     let debug: Option<usize> = std::env::var("BOT_DEBUG").ok().map(|v| v.parse().unwrap());
+    // BOT_GIVE=new:old (hex ids): the pickups giving weapon `old` give `new` instead.
+    let give: Option<(u8, u8)> = std::env::var("BOT_GIVE").ok().map(|v| {
+        let (a, b) = v.split_once(':').expect("BOT_GIVE=new:old");
+        let id = |s: &str| u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+        (id(a), id(b))
+    });
     let rom = std::env::var_os("CONKER_ROM").expect("CONKER_ROM");
     let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
     let scene = 0x2D;
@@ -61,9 +67,16 @@ fn main() {
             b15: s.byte_15,
         })
         .collect();
-    let arena = Arena::deathmatch(spawns, |n| {
+    let mut arena = Arena::deathmatch(spawns, |n| {
         placements[usize::from(n)].position.map(f32::from)
     });
+    for (p, _) in &mut arena.pickups {
+        if let (conker_rules::weapon::Gives::Weapon(w), Some((new, old))) = (&mut p.gives, give)
+            && *w == old
+        {
+            *w = new;
+        }
+    }
     let assets: Vec<Vec<u8>> = Assets::paths(scene)
         .iter()
         .map(|p| rom.asset(p).unwrap().into_owned())

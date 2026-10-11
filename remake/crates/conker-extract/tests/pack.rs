@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34].map(|scene| PackMap {
         scene,
         background: None,
     });
@@ -270,41 +270,47 @@ fn pack_reads_back_as_the_rom_path() {
     }
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30"]);
+    assert_eq!(manifest.maps, ["2d", "30", "34"]);
 
-    // Map 0x30 against the ROM path: the same reads, its pickups on the oracle's spots (their
-    // models moved there in the level).
-    let names = conker_assets::Slice::files("30", &PACK_CHARACTERS, PACK_WEAPONS);
-    assert!(names.iter().all(|n| files.contains_key(n.as_str())));
-    let map = conker_assets::Slice::load("30", &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
-    let placements = extract_scene::scene_placements(&rom, 0x30).unwrap();
-    let collision = extract_scene::scene_collision(&rom, 0x30, &placements).unwrap();
-    assert_eq!(map.collision.len(), collision.triangles.len());
-    for (p, s) in map.collision.iter().zip(&collision.triangles) {
-        assert_eq!(p.points.map(bits), s.points.map(bits));
-        assert_eq!(p.surface, s.surface);
+    // Maps 0x30 and 0x34 against the ROM path: the same reads, their pickups on the oracle's spots
+    // (0x30's, their models moved there in the level) or on their placements (0x34's).
+    for (name, scene, records) in [("30", 0x30, 25), ("34", 0x34, 12)] {
+        let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
+        assert!(names.iter().all(|n| files.contains_key(n.as_str())));
+        let map = conker_assets::Slice::load(name, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
+        let placements = extract_scene::scene_placements(&rom, scene).unwrap();
+        let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
+        assert_eq!(map.collision.len(), collision.triangles.len());
+        for (p, s) in map.collision.iter().zip(&collision.triangles) {
+            assert_eq!(p.points.map(bits), s.points.map(bits));
+            assert_eq!(p.surface, s.surface);
+        }
+        let spawns = extract_scene::scene_spawns(&rom, scene).unwrap();
+        assert_eq!(spawns.len(), records);
+        for (p, s) in map.spawns.iter().zip(&spawns) {
+            assert_eq!(
+                (p.position, bits(p.camera), p.yaw),
+                (s.position, bits(s.camera), s.yaw)
+            );
+        }
+        let gives: Vec<_> = (map.pickups.iter())
+            .map(|p| (p.placement, p.position.map(|v| v as i16)))
+            .collect();
+        let (pickups, spots) = weapon::pickups(scene as u16).unwrap();
+        let table: Vec<_> = (pickups.iter().enumerate())
+            .map(|(k, p)| {
+                let at = placements[usize::from(p.placement)].position;
+                (p.placement, spots.get(k).copied().unwrap_or(at))
+            })
+            .collect();
+        assert_eq!(gives, table);
+        let [nav, triggers, ..] =
+            conker_bots::Assets::paths(scene).map(|p| rom.asset(&p).unwrap().into_owned());
+        assert_eq!([&map.nav, &map.triggers], [&nav, &triggers]);
+        let level = conker_extract::map_level(&rom, scene).unwrap();
+        let glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
+        check_gltf(&dir, &conker_assets::level_gltf(name), &glb);
     }
-    let spawns = extract_scene::scene_spawns(&rom, 0x30).unwrap();
-    assert_eq!(spawns.len(), 25);
-    for (p, s) in map.spawns.iter().zip(&spawns) {
-        assert_eq!(
-            (p.position, bits(p.camera), p.yaw),
-            (s.position, bits(s.camera), s.yaw)
-        );
-    }
-    let gives: Vec<_> = (map.pickups.iter())
-        .map(|p| (p.placement, p.position.map(|v| v as i16)))
-        .collect();
-    let table: Vec<_> = (weapon::PICKUPS_30.iter().zip(weapon::SPOTS_30))
-        .map(|(p, spot)| (p.placement, spot))
-        .collect();
-    assert_eq!(gives, table);
-    let [nav, triggers, ..] =
-        conker_bots::Assets::paths(0x30).map(|p| rom.asset(&p).unwrap().into_owned());
-    assert_eq!([&map.nav, &map.triggers], [&nav, &triggers]);
-    let level = conker_extract::map_level(&rom, 0x30).unwrap();
-    let glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
-    check_gltf(&dir, &conker_assets::level_gltf("30"), &glb);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -352,7 +358,8 @@ fn pack_audio_reads_back() {
     let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
     let background = wav(&[0, 1, -1, 2], 22020);
     let other = wav(&[3, 4], 22020);
-    let maps = [(0x2D, &background), (0x30, &other)].map(|(scene, wav)| PackMap {
+    let third = wav(&[5], 22020);
+    let maps = [(0x2D, &background), (0x30, &other), (0x34, &third)].map(|(scene, wav)| PackMap {
         scene,
         background: Some(wav),
     });
@@ -370,7 +377,8 @@ fn pack_audio_reads_back() {
             "characters/128",
             "common",
             "maps/2d",
-            "maps/30"
+            "maps/30",
+            "maps/34"
         ]
     );
 
@@ -400,15 +408,28 @@ fn pack_audio_reads_back() {
         bytes += pcm.len() * 2;
         listed.push(file);
     }
-    for (name, wav) in [("2d", &background), ("30", &other)] {
+    for (name, wav) in [("2d", &background), ("30", &other), ("34", &third)] {
         let file = format!("audio/{}", audio.events.maps[name].background[0].file);
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
-    // Scene 0x30's own surface kind 0x11 has footsteps; 0x2D's bubbles are its only emitters.
-    assert!(audio.events.footsteps.surfaces.contains_key(&0x11));
+    // Scene 0x30's own surface kind 0x11 and 0x34's 6 and 0xE have footsteps; 0x2D's bubbles are
+    // the only emitters; 0x34's background is another sequence.
+    for kind in [0x11, 6, 0xE] {
+        assert!(
+            audio.events.footsteps.surfaces.contains_key(&kind),
+            "{kind}"
+        );
+    }
     assert_eq!(audio.events.maps["2d"].emitters.len(), 2);
-    assert!(audio.events.maps["30"].emitters.is_empty());
+    assert!(
+        audio.events.maps["30"].emitters.is_empty() && audio.events.maps["34"].emitters.is_empty()
+    );
+    assert!(
+        audio.events.maps["34"].background[0]
+            .note
+            .contains("sequence 36")
+    );
     listed.sort();
     let under: Vec<&str> = files
         .keys()

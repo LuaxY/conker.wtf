@@ -10,23 +10,23 @@ source tree.
 
 You may edit any file. A pack whose files don't parse is refused at load, with the file and the field
 in the message. `conker-extract pack` refuses to overwrite a pack, so your edits are safe; with
-`--force` it writes a fresh one over it. `--map 2d --map 30` exports both maps (default: 2d only).
+`--force` it writes a fresh one over it. `--map 2d --map 30 --map 34` exports the three maps (default: 2d only).
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `pack.json` | `format` (the pack format; a server reads only its own), `source_rom_sha1` (for reference), the folders under `maps/`, `characters/` and `weapons/`, `audio`: the folders under `audio/` that hold sound (absent in a pack without sound), and `hud`: whether the pack has `hud/` |
-| `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map) |
+| `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4) |
 | `maps/<map>/collision.json` | What players stand on and run into, in the game's build order |
-| `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30) |
-| `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D, 17 on 0x30) |
+| `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30, 12 on 0x34) |
+| `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D, 17 on 0x30, 16 on 0x34) |
 | `maps/<map>/triggers.json` | The scene's trigger records: camera volumes and hints, bot zones, lifts |
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
-| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (11 models: the twin guns are two): glTF scene `i` is `held.json[i]` |
+| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (13 models: the twin guns are two): glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
@@ -72,7 +72,7 @@ The point order sets which side faces up (the normal is (p1 − p0) × (p2 − p
 agree on it. On 0x2D, placements 10 and 11 are wall objects; their runs must stay contiguous.
 
 Surface words: bits 0-4 are the kind (it indexes `sink.json`; on 0x2D 0, 1, 3, 4, 5, 9 and 0xA,
-where 0xA slows players; 0x30 adds 0x11, which only has its own footsteps). Bits 28-30 are the slide class (6: an idle player slides down).
+where 0xA slows players; 0x30 adds 0x11, which only has its own footsteps; 0x34 adds 6, with its own footsteps, and 0xE, silent, where the sink table puts players 100 units down; the original's extra call on it is untraced). Bits 28-30 are the slide class (6: an idle player slides down).
 
 Collision is JSON, not glTF: a glTF split by surface word would lose the build order, and a float
 written in text reads back exactly here.
@@ -107,7 +107,7 @@ field:
 - `action`:
   - a camera volume: 0 turns the camera's wall checks off, 6 on, 2 sets a ceiling;
   - a hint: its kind;
-  - a lift: the target scene (0x2D = 45, 0x30 = 48).
+  - a lift: the target scene (0x2D = 45, 0x30 = 48; 0x34 has none).
 - `arg`: a lift's target spawn record.
 - `command`: a hint's camera command (30 cuts behind the player).
 - `word_1c`: kept as is.
@@ -149,8 +149,9 @@ the server and the clients, not in the pack.
 
 ### `weapons/deathmatch/held.json`
 One entry per glTF scene of `held.gltf`, in order:
-- `entry`: the model, whose meshes are named `09-<entry>-<part>` in hex (for reference: glTF scene
-  `i` is entry `i`).
+- `entry`: the model, whose meshes are named `09-<entry>-<part>` in hex (the crossbow, a child
+  object: `01-6e-<list>`, its bank-01 model in its bind pose; for reference: glTF scene `i` is
+  entry `i`).
 - `joint`: the character joint it hangs from (`joint_09`, the right hand; `joint_04`, the left).
 - `create` and `remove`: `[animation id, tick]` events that show and hide it.
 
@@ -257,7 +258,7 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
 - **glTF models** (`level.gltf`, `character.gltf`, `held.gltf`): in Blender, *File > Import >
   glTF 2.0*. Export with *Format: glTF Separate (.gltf + .bin + textures)*, *Include > Custom
   Properties* on, to the same file name and folder. Keep:
-  - node and mesh names: `joint_NN`, the held meshes `09-…`, and the level's `…@N` nodes (the client
+  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbow's `01-6e-…`), and the level's `…@N` nodes (the client
     hides node `…@N` while the pickup on placement N is taken);
   - the character's animations' names (`pair_NNNN_anim_IIII`): the client finds each clip by its
     name, so their order may change;
@@ -280,7 +281,7 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
 
 ## When edits take effect
 
-The game server reads the data files of its map (`conker-server --map 2d|30`) when it starts:
+The game server reads the data files of its map (`conker-server --map 2d|30|34`) when it starts:
 restart it after an edit. The clients ask the server which map it plays and load that one. Pages and native
 clients read the pack (the HUD too) when they start: reload them (bypassing the browser's cache if the static server
 sends no `Cache-Control`). The server and its clients must read the same pack: each client predicts its

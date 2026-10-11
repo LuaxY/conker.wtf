@@ -302,15 +302,17 @@ pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
 // `../lab/audio/README.md`: C read in the recompiled code, V seen on the oracle's sound calls.
 
 /// The clips a Deathmatch plays: every animation id (obj+0x84) of the oracle's Deathmatch traces
-/// (`../lab/audio/tools/mp_anims.py` over `../lab/oracle/trajectories/*.raw`, 90 ids).
-pub const MATCH_CLIPS: [u16; 90] = [
-    0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x32, 0x36, 0x37, 0x38, 0x4C,
-    0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xCF, 0xE2, 0xE4,
-    0xE7, 0xEB, 0xF0, 0xF3, 0xF4, 0xF7, 0xF9, 0x102, 0x103, 0x11A, 0x11B, 0x11D, 0x120, 0x121,
-    0x122, 0x124, 0x129, 0x12A, 0x12B, 0x144, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159,
-    0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B,
-    0x16F, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1EA, 0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x20D,
-    0x21E, 0x22C, 0x238, 0x26E, 0x28E,
+/// (`../lab/audio/tools/mp_anims.py` over `../lab/oracle/trajectories/*.raw`, 105 ids), and the
+/// crossbow's and the shotgun's walks (0xEC, 0x1F5: conker-anim's, untraced).
+pub const MATCH_CLIPS: [u16; 107] = [
+    0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x2B, 0x32, 0x36, 0x37, 0x38,
+    0x4C, 0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xC5, 0xC6,
+    0xCF, 0xD3, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8, 0xF9, 0xFB, 0xFC,
+    0x102, 0x103, 0x10A, 0x10C, 0x11A, 0x11B, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A,
+    0x12B, 0x144, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D,
+    0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E,
+    0x18A, 0x19C, 0x19D, 0x1EA, 0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7,
+    0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x26E, 0x28E,
 ];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
@@ -327,7 +329,7 @@ const OP_STOP_B: u32 = 107;
 const OP_STOP_A: u32 = 108;
 /// Ops whose argument goes through `func_1506E46C` (voice table, random count, chance, busy flag):
 /// (op, channel, near, far, volume for others, own volume). C: their handlers.
-const VOICED: [(u32, Channel, u16, u16, u16, u16); 12] = [
+const VOICED: [(u32, Channel, u16, u16, u16, u16); 13] = [
     (53, Channel::A, 300, 1800, 28000, 24000),
     (55, Channel::B, 3000, 8000, 28000, 24000),
     (56, Channel::A, 3000, 8000, 28000, 24000),
@@ -340,6 +342,8 @@ const VOICED: [(u32, Channel, u16, u16, u16, u16); 12] = [
     (109, Channel::A, 80, 800, 28000, 24000),
     (110, Channel::A, 300, 3000, 28000, 24000),
     (111, Channel::A, 300, 3000, 14000, 12000),
+    // The shotgun's blast (`func_1506E6FC`: op 53's call, farther; V sounds 755/756 as e_w24's).
+    (144, Channel::A, 700, 4000, 28000, 24000),
 ];
 
 fn play(
@@ -453,6 +457,8 @@ fn clip_sounds(rom: &Rom, game_data: &[u8], class: usize) -> Result<Vec<ClipSoun
                 }),
                 OP_STOP_A => Some(ClipAction::Stop(Channel::A)),
                 OP_STOP_B => Some(ClipAction::Stop(Channel::B)),
+                // The sniper rifle's shot (clip 0x156) is its `On::Shot` cue.
+                144 if clip == 0x156 => None,
                 _ => VOICED.iter().find(|v| v.0 == op).and_then(
                     |&(_, channel, near, far, volume, own)| {
                         let (sounds, chance, if_idle) = resolve(arg, &voices)?;
@@ -503,7 +509,7 @@ fn footsteps(rom: &Rom, kinds: &BTreeSet<u8>) -> Result<Footsteps> {
 /// byte 0, `../lab/oracle/combat_README.md` §4), whose entry in the shared reaction list
 /// (`[0x0F, entry]`, header word 2; 0x18-byte entries, byte 0 the reaction, word 1 its sound word)
 /// names the voice; `func_15060A30` plays it on slot B.
-const REACTIONS: [(u8, u8); 12] = [
+const REACTIONS: [(u8, u8); 16] = [
     (0x09, 0x21),
     (0x39, 0x21),
     (0x23, 0x31),
@@ -516,6 +522,10 @@ const REACTIONS: [(u8, u8); 12] = [
     (0x16, 0x2B),
     (0x14, 0x2E),
     (0x24, 0x2E),
+    (0x18, 0x20),
+    (0x18, 0x2E),
+    (0x37, 0x21),
+    (0x37, 0x2B),
 ];
 
 fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Result<Vec<Cue>> {
@@ -700,6 +710,30 @@ fn code_cues() -> Vec<Cue> {
         ),
         cue(
             On::Hit {
+                weapon: 0x18,
+                lethal: Some(true),
+            },
+            splat(),
+            "a head shot (C func_15081E78, as weapon 0x14's)",
+        ),
+        cue(
+            On::Hit {
+                weapon: 0x18,
+                lethal: Some(true),
+            },
+            play([170], 28000, Some(24000), 500, 2500, Channel::B),
+            "a head shot (C func_15081E78, as weapon 0x14's)",
+        ),
+        cue(
+            On::Hit {
+                weapon: 0x18,
+                lethal: Some(false),
+            },
+            play([263], 28000, Some(24000), 500, 2500, Channel::B),
+            "a body hit (C func_15081E78 → func_15060A30(0x107), as weapon 0x14's)",
+        ),
+        cue(
+            On::Hit {
                 weapon: 0x21,
                 lethal: None,
             },
@@ -838,7 +872,8 @@ fn code_cues() -> Vec<Cue> {
             "the scope coming up (C func_15126378, camera code; V e_w24, ctlw_k10)",
         ),
     ];
-    // Pickups (C func_1511DD98, by the pickup's class; V pick57 688, pick87 81, the bot's 1454).
+    // Pickups (C func_1511DD98, by the pickup's class; V pick57 688, pick87 81, the bot's 1454; the
+    // crossbow's class 0x3D and the shotgun's 0x5E, scene 0x34's placements: C).
     for (weapon, id) in [
         (0x09, 688),
         (0x39, 688),
@@ -849,6 +884,8 @@ fn code_cues() -> Vec<Cue> {
         (0x15, 385),
         (0x24, 1454),
         (0x16, 1546),
+        (0x18, 1090),
+        (0x37, 688),
     ] {
         let mut c = cue(
             On::Pickup {
@@ -869,7 +906,7 @@ fn code_cues() -> Vec<Cue> {
         play([81], 9000, Some(9000), 100, 1000, Channel::Free),
         "pickup (C func_1511DD98; V pick87)",
     ));
-    for weapon in [0x09, 0x39, 0x24, 0x16, 0x23] {
+    for weapon in [0x09, 0x39, 0x24, 0x16, 0x23, 0x37] {
         cues.push(Cue {
             character: Some("128".into()),
             ..cue(
@@ -882,11 +919,12 @@ fn code_cues() -> Vec<Cue> {
     cues
 }
 
-/// A map's own sound: its emitters and the channels of sequence 19 its background plays.
+/// A map's own sound: its emitters, and the sequence its background plays and its channels.
 /// 0x2D: two bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
-/// capture, 25000, 500/1500, one of ten), channels 0-3 (mute mask 0xFFF0). 0x30: no emitter (V: no
-/// positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask 0xFFC0, V).
-fn map_sounds(map: &str) -> (Vec<Emitter>, &'static str) {
+/// capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
+/// emitter (V: no positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask
+/// 0xFFC0, V). 0x34: no emitter, sequence 36, channels 0-5 (V, as 0x30).
+fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str) {
     let emitters = match map {
         "2d" => [[-1101, -1201, -229], [650, -1191, 486]]
             .map(|at| Emitter {
@@ -898,7 +936,8 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, &'static str) {
         _ => vec![],
     };
     let channels = if map == "2d" { "0-3" } else { "0-5" };
-    (emitters, channels)
+    let sequence = if map == "34" { 36 } else { 19 };
+    (emitters, sequence, channels)
 }
 
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
@@ -920,7 +959,7 @@ pub fn pack_audio(
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
     for (name, background) in maps {
-        let (emitters, channels) = map_sounds(name);
+        let (emitters, sequence, channels) = map_sounds(name);
         let mut map = MapSounds {
             background: vec![],
             emitters,
@@ -930,7 +969,7 @@ pub fn pack_audio(
             map.background.push(Background {
                 file: file.clone(),
                 volume: 32767,
-                note: format!("the game's own output (sequence 19, channels {channels}, at volume 32000), recorded on the oracle and looped whole"),
+                note: format!("the game's own output (sequence {sequence}, channels {channels}, at volume 32000), recorded on the oracle and looped whole"),
             });
             files.push((format!("audio/{file}"), wav.to_vec()));
         }

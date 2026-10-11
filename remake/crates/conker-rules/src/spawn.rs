@@ -97,6 +97,12 @@ pub const COLORS_START_30: [[u8; 8]; 2] =
     [[12, 10, 11, 13, 6, 7, 8, 9], [14, 15, 16, 17, 2, 3, 4, 5]];
 pub const COLORS_MASKS_30: [u32; 2] = [0x3FC0, 0x3_C03C];
 
+/// Scene 0x34 Deathmatch (scenario 4): slot s starts on record (s + 7) % 12 (V on the oracle for
+/// slots 0-15, 1 human + 15 bots and 2 + 3, `../lab/oracle/map34`); masks all ones (V). The map
+/// has no War mode, so the sides take the Deathmatch records by slot parity and respawn anywhere
+/// (I, the remake's choice): with sides alternating by slot this is the Deathmatch table.
+pub const DEATHMATCH_START_34: [u8; 16] = [7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
 /// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
 /// record, and the side's respawn mask), from the War mode played on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +112,8 @@ pub struct Starts {
     pub side_masks: [u32; 2],
 }
 
-/// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'), if known.
+/// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
+/// split by slot parity), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -118,6 +125,11 @@ pub const fn starts(scene: u16) -> Option<Starts> {
             deathmatch: DEATHMATCH_START_30,
             sides: COLORS_START_30,
             side_masks: COLORS_MASKS_30,
+        }),
+        0x34 => Some(Starts {
+            deathmatch: DEATHMATCH_START_34,
+            sides: [[7, 9, 11, 1, 3, 5, 7, 9], [8, 10, 0, 2, 4, 6, 8, 10]],
+            side_masks: DEATHMATCH_MASKS,
         }),
         _ => None,
     }
@@ -267,5 +279,14 @@ mod tests {
         assert_eq!(b6_degrees(6), 8.0); // 2160 >> 8
         assert_eq!(b6_degrees(248), -12.0); // 348 - 360
         assert_eq!(b6_degrees(128), 180.0);
+    }
+
+    /// 0x34's sides are its Deathmatch table split by slot parity.
+    #[test]
+    fn bunker_sides_are_deathmatch_by_parity() {
+        let s = starts(0x34).unwrap();
+        for (k, &record) in DEATHMATCH_START_34.iter().enumerate() {
+            assert_eq!(s.sides[k % 2][k / 2], record, "{k}");
+        }
     }
 }
