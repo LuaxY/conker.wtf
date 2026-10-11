@@ -1,0 +1,6 @@
+# ROMs and ROM-derived data (the asset pack, the lab's dumps and traces): never committed.
+*.z64
+/assets/
+/lab/
+.claude/settings.local.json
+.DS_Store

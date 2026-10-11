@@ -1,0 +1,250 @@
+//! Network protocol shared by `conker-server` and `conker-client` (lightyear 0.30).
+//!
+//! Each crate adds its own lightyear role (`client`/`server`) and transports; this module only
+//! registers what both sides must agree on: the input type ([`Input`], one per tick, its camera yaw
+//! included), the replicated player state ([`Player`], predicted by its owner), each player's
+//! combat state ([`Combat`]), the match ([`MatchView`]), the side a client asks for when it joins
+//! ([`Join`]) and what a client showed when it took an input ([`Saw`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
+//! the player): the server runs the match, each client predicts its own player with the same rules.
+
+use crate::collision::{CollisionWorld, Layer};
+use crate::movement::{Input, PlayerState, Side, angle_diff};
+use crate::root::RootTrack;
+use crate::trig::AcosTable;
+use bevy::ecs::entity::MapEntities;
+use bevy::prelude::*;
+use conker_camera::volume::CameraLevel;
+use lightyear::prelude::input::InputConfig;
+use lightyear::prelude::input::native::InputPlugin;
+use lightyear::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// Protocol version = simulation version: bump on any change to the protocol or to `movement::step`.
+/// 2: game-unit movement (`movement::step`), N64 input with the camera yaw.
+/// 3: the game's wall routine, the full 16-bit stick yaw, and `PlayerState`'s new fields (heading,
+/// turning, aiming, prev_strafe, sink, speed_percent).
+/// 4: Deathmatch combat on the server (conker-rules): `Rules`, [`Combat`], [`MatchView`].
+/// 5: wave 4's movement: `PlayerState`'s `root`, `twist` and `scope_yaw`; pushing (`step_among`), root
+/// motion, the aimed gun's twist, the scope's facing, the walls' zone gate, the armed C-strafe rules.
+/// 6: wave 4's netcode: conker-rules' `Fighting` (each player's fighter, predicted by its owner),
+/// [`Saw`], and the rockets and aimed shots in [`MatchView`]. Wave 3's `Rules` masks are gone: the
+/// fighter carries them.
+/// 7: wave 5: a player's `Fighting` goes to its own client only; [`Combat`] gains `slot`, `team` and
+/// `stun`, what the other clients' prediction reads of it.
+/// 8: wave 6: each `Fighting` carries every grenade in flight, not only its owner's (each client
+/// predicts the others' grenades too), and a player who leaves frees its slot without moving the
+/// others down (`Fighting.slot` and [`Combat::slot`] stay put).
+/// 9: sides: a client asks for one when it joins ([`Join`]), every player's goes out in
+/// [`Combat::side`] (it picks the model and the body), and the fighter carries it.
+/// 10: each side starts and respawns in its own base: the fighter carries the records it respawns
+/// on (conker-rules' `Fighter::spawn_mask`), so its owner predicts the server's pick.
+pub const PROTOCOL_ID: u64 = 10;
+/// The multiplayer scene both sides build ([`scene_world`]).
+pub const SCENE: u16 = 0x2D;
+/// Netcode connect-token key. ponytail: fixed dev key (manual tokens); a public server needs a
+/// secret key and a token endpoint.
+pub const DEV_PRIVATE_KEY: [u8; 32] = [0; 32];
+/// UDP (WebTransport) and TCP (WebSocket) share this port number.
+pub const DEFAULT_PORT: u16 = 5888;
+
+/// The client that owns a player entity.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct PlayerId(pub PeerId);
+
+/// Authoritative player state; predicted on the owning client, interpolated on the others.
+/// `floor.tri` indexes the collision world, so server and clients must build it from the same asset
+/// pack ([`scene_world`]: the browser fetches the server's own, from the site that serves the page).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Deref, DerefMut)]
+pub struct Player(pub PlayerState);
+
+/// A player's combat state, server-authoritative (not predicted): the HUD's numbers and the
+/// animation the rules chose, sent to every client. With the body ([`Player`]) it is all the other
+/// clients get of a player: its fighter (conker-rules' `Fighting`) goes to its own client only.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Combat {
+    /// The player's slot in the server's match, its team (Deathmatch: one each) and its hit stun
+    /// (obj+0x104): with `health` and `immune`, what another client's frame reads of it (a lock-on,
+    /// a hit, a respawn pick).
+    pub slot: u16,
+    pub team: u8,
+    pub stun: u8,
+    /// The player's side: its model, and the body the others' frames push against and hit.
+    pub side: Side,
+    pub health: u8,
+    /// The held weapon's id (0: none), whether it is drawn, and the rounds left in its clip.
+    pub weapon: u8,
+    pub drawn: bool,
+    pub rounds: u8,
+    pub grenades: u8,
+    /// Kills (the game's score) and own-grenade deaths.
+    pub kills: u16,
+    pub suicides: u16,
+    /// Frames left immune after a (re)spawn.
+    pub immune: u8,
+    /// The animation id the rules play (obj+0x84): weapon, hit and death states, or the movement's.
+    pub anim: u16,
+    /// Frames until the respawn while dying or dead, else 0.
+    pub respawn_in: u16,
+    /// Respawns so far: the client's camera cuts to the new spawn when it changes.
+    pub lives: u16,
+}
+
+/// The match, on one replicated entity.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct MatchView {
+    /// The clock in VIs (60 per second), counting down from 36,000.
+    pub timer: i32,
+    /// 0 playing, 1 the end fade, 2 over.
+    pub phase: u8,
+    /// The tick the match started at and the oracle read it stands for (scripted clients key their
+    /// script on it; `None` until the server's `--wait` players have joined).
+    pub start: Option<u32>,
+    pub first_read: u32,
+    pub bullets: Vec<[f32; 3]>,
+    pub grenades: Vec<[f32; 3]>,
+    /// Weapon 0x16's rockets and weapon 0x14's aimed shots in flight.
+    pub rockets: Vec<[f32; 3]>,
+    pub shots: Vec<[f32; 3]>,
+    /// Bit n: the pickup on placement n is taken (back after 120 frames).
+    pub taken: u64,
+}
+
+/// What a client showed of the other players when it sampled its input for `tick`: their states
+/// interpolated at server tick `at` plus `overstep` (lightyear's interpolation time). The server's
+/// lag compensation rewinds its hit tests to exactly that (conker-rules' `Match::step_seen`);
+/// lightyear's own `InterpolationDelay` folds in the client's fixed-step overstep, a fraction of a
+/// tick off.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Saw {
+    pub tick: u32,
+    pub at: u32,
+    pub overstep: f32,
+}
+
+/// A client's first message: the side it asks for (`None`: the server's pick, the side with fewer
+/// players). The server puts the player in the match when it arrives.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Join {
+    pub side: Option<Side>,
+}
+
+/// The channel [`Join`] travels on: reliable.
+pub struct JoinChannel;
+
+/// The channel [`Saw`] travels on, with the inputs: unreliable (a lost one falls back to
+/// `InterpolationDelay`) and unordered (a sequenced channel dropped about 5% of them, V: 150 ms each
+/// way, the reports of two ticks crossing).
+pub struct SawChannel;
+
+/// The scene's collision, shared by the systems that step players.
+#[derive(Resource, Deref)]
+pub struct Collision(pub CollisionWorld);
+
+/// Scene 0x2D's world as the server and every client build it from the asset pack (its characters
+/// in [`Side`] order, `conker_assets::PACK_CHARACTERS`): the collision in its order with its wall
+/// layers (`floor.tri` indexes it, so both sides must agree), the game's arctangent table, the
+/// level's camera data (its trigger table), the players' root-motion clips (the Tedi's: both sides
+/// play the same clips, V) and the sink table.
+pub fn scene_world(pack: &conker_assets::Slice) -> CollisionWorld {
+    let mut world = CollisionWorld::layered(pack.collision.iter().map(|t| {
+        let layer = match t.layer {
+            conker_assets::Layer::Terrain => Layer::Terrain,
+            conker_assets::Layer::Secondary => Layer::Secondary,
+            conker_assets::Layer::Placement(i) => Layer::Placement(i as u16),
+        };
+        (t.points, t.surface.unwrap_or(0), layer)
+    }));
+    world.acos = AcosTable::new(pack.acos.clone());
+    world.camera = Some(CameraLevel::new(SCENE, &pack.triggers));
+    // Weapon 0x16's Z, the shot death's drift.
+    world.roots = (pack.characters[Side::Tediz as usize].root_clips.iter())
+        .map(|c| RootTrack {
+            ids: c.logical.clone(),
+            duration: c.duration,
+            step: c.step,
+            z: c.z.clone(),
+            end: c.end,
+        })
+        .collect();
+    world.sink = Some(pack.sink);
+    world
+}
+
+/// A remote player between two server states: position and facing blend (the facing the short way
+/// round), everything else is `b`'s.
+pub fn lerp(a: &PlayerState, b: &PlayerState, t: f32) -> PlayerState {
+    let pos = core::array::from_fn(|i| a.pos[i] + (b.pos[i] - a.pos[i]) * t);
+    let turn = (angle_diff(b.facing, a.facing) as f32 * t) as i32;
+    PlayerState {
+        pos,
+        facing: a.facing.wrapping_add(turn as u16),
+        ..*b
+    }
+}
+
+impl Ease for Player {
+    fn interpolating_curve_unbounded(start: Self, end: Self) -> impl Curve<Self> {
+        FunctionCurve::new(Interval::UNIT, move |t| Player(lerp(&start, &end, t)))
+    }
+}
+
+impl MapEntities for Input {
+    fn map_entities<M: EntityMapper>(&mut self, _: &mut M) {}
+}
+
+pub struct ProtocolPlugin;
+
+impl Plugin for ProtocolPlugin {
+    fn build(&self, app: &mut App) {
+        // Inputs carry the client's interpolation delay: the server rewinds its hit tests to it.
+        app.add_plugins(InputPlugin::<Input> {
+            config: InputConfig {
+                lag_compensation: true,
+                ..default()
+            },
+        });
+        app.component::<PlayerId>().replicate();
+        app.component::<Player>()
+            .replicate()
+            .predict()
+            .add_linear_interpolation();
+        app.component::<Combat>().replicate();
+        app.component::<MatchView>().replicate();
+        app.add_channel::<JoinChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            ..default()
+        })
+        .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Join>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.add_channel::<SawChannel>(ChannelSettings {
+            mode: ChannelMode::UnorderedUnreliable,
+            ..default()
+        })
+        .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Saw>()
+            .add_direction(NetworkDirection::ClientToServer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::movement::state;
+
+    #[test]
+    fn interpolation_blends_position_and_facing_and_takes_the_end_state() {
+        let a = PlayerState::spawn([0.0, 0.0, 0.0], 65000);
+        let mut b = PlayerState::spawn([2.0, 1.0, -4.0], 500);
+        b.state = state::RUN;
+        b.xz_speed = 35.0;
+        let mid = Player::interpolating_curve_unbounded(Player(a), Player(b)).sample_unchecked(0.5);
+        assert_eq!(mid.pos, [1.0, 0.5, -2.0]);
+        // 65000 -> 500 is +1036 through 0, not -64500.
+        assert_eq!(mid.facing, 65518);
+        assert_eq!(
+            (mid.state, mid.xz_speed, mid.move_angle),
+            (state::RUN, 35.0, 500)
+        );
+    }
+}

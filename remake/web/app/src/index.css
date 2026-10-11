@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Luckiest Guy", ui-rounded, system-ui, sans-serif;
+  --font-stencil: "Black Ops One", ui-sans-serif, system-ui, sans-serif;
+
+  --color-bunker: #14110b;
+  --color-trench: #1f1a12;
+  --color-mud: #2e2719;
+  --color-khaki: #efe4c8;
+  --color-dust: #b9ad8d;
+  --color-acorn: #f5a524;
+  --color-squirrels: #8cc63f;
+  --color-tediz: #ff5b4f;
+  --color-go: #6fd36f;
+}
+
+@layer base {
+  html {
+    background: var(--color-bunker);
+    color: var(--color-khaki);
+    color-scheme: dark;
+  }
+  body {
+    min-height: 100dvh;
+    background:
+      radial-gradient(ellipse at top, rgb(245 165 36 / 0.08), transparent 60%),
+      repeating-linear-gradient(135deg, transparent 0 24px, rgb(255 255 255 / 0.015) 24px 48px);
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-acorn);
+    outline-offset: 2px;
+  }
+}
+
+/* The game's own textures, drawn as the N64 drew them: big pixels. */
+.pixelated {
+  image-rendering: pixelated;
+}
+
+/* Cartoon title lettering: a thick dark outline and a hard drop shadow. */
+.cartoon {
+  -webkit-text-stroke: 0.06em var(--color-bunker);
+  paint-order: stroke fill;
+  text-shadow: 0.06em 0.08em 0 var(--color-bunker);
+}
+
+/* Luckiest Guy's lowercase is a second, odd set of capitals: always use the real ones. */
+.font-display {
+  text-transform: uppercase;
+}

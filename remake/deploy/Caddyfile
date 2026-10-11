@@ -1,0 +1,54 @@
+# The page and the asset pack over HTTPS, and the connect tokens proxied to the game server
+# (deploy/README.md).
+# Environment:
+#   DOMAIN      the game's domain (e.g. game.example.org)
+#   SITE        the folder deploy/build.sh made (e.g. /srv/conker/site): the landing at /, the game at /play.html
+#   PACK        the asset pack deploy/pack.sh uploaded (e.g. /srv/conker/assets), served at /assets/
+#   TLS_DIR     fullchain.pem and privkey.pem (copied there by renew-hook.sh)
+#   TOKEN_ADDR  conker-server's --token-addr (default 127.0.0.1:5889)
+#   HTTP_PORT, HTTPS_PORT  default 80 and 443 (the local test uses others)
+{
+	# certbot owns the certificate, which the game server reads too; Caddy serves it and keeps
+	# redirecting http to https.
+	auto_https disable_certs
+	http_port {$HTTP_PORT:80}
+	https_port {$HTTPS_PORT:443}
+}
+
+{$DOMAIN} {
+	tls {$TLS_DIR}/fullchain.pem {$TLS_DIR}/privkey.pem
+
+	# A password for the whole site (the page, the pack, the tokens: without a token nobody joins a
+	# match). The pack is Rare's data: turn this on for a public deployment. Uncomment, and replace
+	# HASH with the output of `caddy hash-password` (one line per player name if you like).
+	# basic_auth {
+	# 	player HASH
+	# }
+
+	# The asset pack: the page's client fetches it here. Editable, so revalidated on every load.
+	handle_path /assets/* {
+		root * {$PACK}
+		header Cache-Control "no-cache"
+		file_server {
+			precompressed br gzip
+		}
+	}
+
+	# Connect tokens from the game server: same origin, over this HTTPS.
+	handle /token {
+		reverse_proxy {$TOKEN_ADDR:127.0.0.1:5889}
+	}
+
+	handle {
+		root * {$SITE}
+		# v/<hash>/ and landing/ are named by their content: keep them a year. The pages
+		# (index.html, play.html) and play.js: revalidate.
+		@versioned path /v/* /landing/*
+		header @versioned Cache-Control "public, max-age=31536000, immutable"
+		@page not path /v/* /landing/*
+		header @page Cache-Control "no-cache"
+		file_server {
+			precompressed br gzip
+		}
+	}
+}

@@ -1,0 +1,9 @@
+target/
+target-net/
+web/dist/
+# The asset pack (ROM-derived, ../../assets): a symlink for the dev static server, never in this tree.
+web/assets
+# The landing app's build (web/app: `bun run build`) and its dependencies.
+web/index.html
+web/landing/
+web/app/node_modules/

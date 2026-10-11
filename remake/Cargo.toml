@@ -1,0 +1,34 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# Pinned for every crate (versions confirmed on crates.io 2026-10-08). Engine/netcode
+# crates are exact pins: upgrade them together and deliberately.
+[workspace.dependencies]
+bevy = { version = "=0.19.1", default-features = false }
+lightyear = { version = "=0.30.1", default-features = false }
+avian3d = { version = "=0.7.0", features = ["enhanced-determinism"] }
+bevy_enhanced_input = "=0.26.0"
+wasm-bindgen = "=0.2.129"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+miniz_oxide = "0.9.1"
+sha1 = "0.11.0"
+png = "0.18.1"
+gltf-json = "1.4.1"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+extract-core = { path = "crates/extract-core" }
+
+# Size-optimised wasm build (plan §5): cargo build --profile web --target wasm32-unknown-unknown
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

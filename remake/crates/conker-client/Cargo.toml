@@ -1,0 +1,44 @@
+[package]
+name = "conker-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conker-sim = { path = "../conker-sim", features = ["net"] }
+bevy = { workspace = true, features = [
+    "std", "async_executor", "multi_threaded", "bevy_log", "bevy_state",
+    "bevy_winit", "bevy_window", "x11", "keyboard", "bevy_gilrs", "webgl2",
+    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_light", "bevy_mesh", "bevy_camera", "bevy_color",
+    "bevy_gltf", "gltf_animation", "png", "free_camera", "reflect_auto_register",
+] }
+# The asset pack's data files (the glTF models load through Bevy's asset server).
+conker-assets = { path = "../conker-assets" }
+conker-anim = { path = "../conker-anim" }
+# The scope's zoom range (the HUD's zoom bar).
+conker-camera = { path = "../conker-camera" }
+# The local player's fighter, predicted with the server's own rules (its knock-back, death and
+# respawn), and the replicated fighter component.
+conker-rules = { path = "../conker-rules", features = ["net"] }
+lightyear = { workspace = true, features = ["client", "netcode", "webtransport", "websocket"] }
+getrandom = "0.3"
+# Sound (`audio`): rodio's mixer on cpal (CoreAudio, WASAPI, ALSA; Web Audio in the browser),
+# without bevy_audio, whose sinks can't hold the pack's loop points or open the device late.
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# pack.json's `audio` list (whether the pack has sound).
+serde_json.workspace = true
+
+# The HUD: Bevy text natively; the page's own `#hud` element in the browser (1.5 MB gzip less wasm).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy = { workspace = true, features = ["bevy_ui", "bevy_ui_render", "bevy_text", "default_font"] }
+# `ca=` (dev/test): a WebTransport link checked against a CA; the exact versions lightyear 0.30.1 uses.
+aeronet_webtransport = "=0.21.0"
+lightyear_aeronet = "=0.30.1"
+
+# On wasm, lightyear enables getrandom's `wasm_js` backend (0.2, 0.3 and 0.4) for the whole tree.
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element", "Node", "Response"] }
+wasm-bindgen.workspace = true
+# Fetching the pack's data files and the connect token (both already in the tree through lightyear).
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+rodio = { version = "0.22", default-features = false, features = ["playback", "wasm-bindgen"] }

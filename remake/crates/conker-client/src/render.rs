@@ -1,0 +1,795 @@
+//! What the windowed client draws: the asset pack's level (scene 0x2D) and both sides' characters
+//! (the squirrel soldier, 128, and the Tedi, 117), which Bevy's glTF loader reads from the pack
+//! (natively its folder, in the browser `assets/` next to the page; [`Slice`] carries the data
+//! files), one skinned character per networked player, its side's ([`Combat::side`]), posed by its
+//! animation clock ([`crate::Anim`]) with its own clips, the view of the
+//! follow camera ([`crate::FollowCamera`]) and a free debug camera. Combat adds the match's bullets,
+//! aimed shots, grenades and rockets (placeholder spheres: the pack has no models for them), hides the level's pickup
+//! models while taken (they are the level glTF's placement nodes). The HUD is [`crate::hud`]'s;
+//! [`TEXT_HUD_KEY`] shows the old text readout too ([`crate::hud_text`]; in the browser, the page's
+//! `#hud` element).
+//!
+//! The glTF materials already carry the N64 render state the extractor read (wrap/mirror/clamp,
+//! point/bilinear filtering, alpha mode, unlit for draws without normals), so Bevy's loader maps
+//! them as is. Units are the game's: the map spans about 7,000 x 13,000 units.
+
+use crate::connection::NetStatus;
+use crate::{Anim, Config, FollowCamera, SideClips, hud_text};
+use bevy::app::AnimationSystems;
+use bevy::asset::AssetMetaCheck;
+use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
+use bevy::color::Srgba;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::gltf::Gltf;
+use bevy::mesh::VertexAttributeValues;
+use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::transform::TransformSystems;
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
+use conker_anim::id;
+use conker_assets::{PACK_CHARACTERS, PACK_MAP, Slice, character_gltf, level_gltf};
+use conker_sim::movement::Side;
+use conker_sim::net::{Combat, MatchView, Player};
+use core::f32::consts::{FRAC_PI_2, TAU};
+
+/// The level's scene and a side's character glTF (asset paths in the pack).
+pub fn level_scene() -> String {
+    format!("{}#Scene0", level_gltf(PACK_MAP))
+}
+
+pub fn character(side: Side) -> String {
+    character_gltf(PACK_CHARACTERS[side as usize])
+}
+
+/// The sides, in [`Side`] order.
+const SIDES: [Side; 2] = [Side::Squirrels, Side::Tediz];
+
+/// Spawn record whose camera the window shows until our player arrives (V: oracle player 1's).
+pub const FIRST_SPAWN: usize = 1;
+/// The game draws players at half their model units (V: obj+0x14C/+0x150 = 0.5, anim_README).
+pub const MODEL_SCALE: f32 = 0.5;
+/// The character's root joint; its z travel in the creep clip is root motion (see [`pin_creep_root`]).
+const ROOT_JOINT: &str = "joint_00";
+/// Toggles the free debug camera (WASD/QE fly, hold the right mouse button to look, Shift = fast).
+pub const DEBUG_CAMERA_KEY: KeyCode = KeyCode::KeyC;
+/// Sky and fog colour (I: the extractor reads no fog or sky state yet).
+const SKY: Color = Color::srgb(0.55, 0.68, 0.85);
+
+/// A game angle (u16, 65,536 per turn) in radians. The game moves along (cos a, −sin a) in
+/// (x, z) (V: oracle traces).
+fn angle(game: u16) -> f32 {
+    game as f32 * TAU / 65536.0
+}
+
+/// Yaw about +y that turns the character, whose rest pose faces +z, to a game facing angle.
+pub fn model_yaw(facing: u16) -> f32 {
+    angle(facing) + FRAC_PI_2
+}
+
+/// N64 vertex colours are display values that the RDP multiplies with raw texels; Bevy reads glTF
+/// `COLOR_0` as linear and multiplies with linearised texels. Decoding the colour once makes the
+/// sRGB output equal texel × shade, as on the console (I: CRT-era art, no gamma pipeline).
+pub fn shade_to_linear(color: &mut [f32; 4]) {
+    for c in &mut color[..3] {
+        *c = Srgba::gamma_function(*c);
+    }
+}
+
+/// Model units the game draws each side's model above the player's position, scaled with the model
+/// (the pack's `model_lift`), by [`Side`]: the s16 at +6 of the model's bank-0x11 record (43 for
+/// 117, 42 for 128), copied to obj+0xC8 at spawn (`func_150837D4`); the object matrix is at (x, y +
+/// obj+0x150 × obj+0xC8, z) (`func_1502DF38`). C, and V: the oracle's joint matrices equal the
+/// clips' roots lifted by 43 (idle, run, crouch); obj+0xC8 is 42.0 for a squirrel.
+#[derive(Resource)]
+struct ModelLift([f32; 2]);
+
+/// A side's character: its scene and its clips' graph.
+struct Look {
+    scene: Handle<WorldAsset>,
+    graph: Handle<AnimationGraph>,
+    /// Animation id → graph node, for the ids in its [`crate::Clips`].
+    nodes: Vec<(u16, AnimationNodeIndex)>,
+}
+
+impl Look {
+    fn node(&self, id: u16) -> Option<AnimationNodeIndex> {
+        self.nodes.iter().find(|n| n.0 == id).map(|n| n.1)
+    }
+}
+
+/// Both sides' characters, once loaded, by [`Side`].
+#[derive(Resource)]
+struct Characters(Vec<Look>);
+
+impl Characters {
+    fn of(&self, side: Side) -> &Look {
+        &self.0[side as usize]
+    }
+}
+
+/// A player entity that has its model.
+#[derive(Component)]
+struct Model;
+
+/// A bullet or grenade drawn this frame (respawned every frame from the [`MatchView`]).
+#[derive(Component)]
+struct Projectile;
+
+/// Placeholder meshes for projectiles: bullet (and aimed shot), grenade, rocket.
+#[derive(Resource)]
+struct ProjectileLooks([(Handle<Mesh>, Handle<StandardMaterial>); 3]);
+
+/// The HUD's text (native).
+#[cfg(not(target_family = "wasm"))]
+#[derive(Component)]
+struct Hud;
+
+/// The posed parts of a player's model: its side, its `AnimationPlayer` and root joint (with its
+/// rest z).
+#[derive(Component)]
+struct Rig {
+    side: Side,
+    animator: Entity,
+    root: Entity,
+    root_z: f32,
+}
+
+/// Windowed setup: Bevy's default plugins with the pack as the asset folder, the level, the cameras
+/// and the player models.
+pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
+    let offscreen = cfg.offscreen;
+    let first = &slice.spawns[FIRST_SPAWN];
+    let (eye, look) = match cfg.view {
+        Some(v) => (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5])),
+        None => (
+            Vec3::from_array(first.camera),
+            Vec3::from_array(first.position.map(f32::from)) + Vec3::Y * 67.5,
+        ),
+    };
+    let free = cfg.view.is_some();
+    let lift = |s: Side| f32::from(slice.characters[s as usize].model_lift);
+    app.insert_resource(ModelLift(SIDES.map(lift)));
+    crate::held::build(app, slice.held);
+    // The pack has no `.meta` files: don't ask for one before each file.
+    let mut assets = AssetPlugin {
+        meta_check: AssetMetaCheck::Never,
+        ..default()
+    };
+    // Natively the pack's folder (absolute); in the browser `assets/`, relative to the page.
+    if let Some(dir) = &cfg.assets {
+        assets.file_path = dir.clone();
+    }
+    let window = WindowPlugin {
+        primary_window: Some(Window {
+            title: "Conker multiplayer".into(),
+            canvas: Some("#game".into()),
+            fit_canvas_to_parent: true,
+            // Screenshot runs neither take the keyboard (typing elsewhere would fly the free
+            // camera) nor hide behind other windows (macOS doesn't draw occluded windows).
+            focused: cfg.screenshot.is_none(),
+            window_level: match cfg.screenshot {
+                Some(_) => bevy::window::WindowLevel::AlwaysOnTop,
+                None => default(),
+            },
+            position: cfg.position.map_or(WindowPosition::Automatic, |[x, y]| {
+                WindowPosition::At(IVec2::new(x, y))
+            }),
+            ..default()
+        }),
+        ..default()
+    };
+    if offscreen {
+        // No window: the camera draws into an image, ticked like a headless client.
+        let tick = core::time::Duration::from_secs_f64(1.0 / conker_sim::TICK_HZ);
+        app.add_plugins((
+            DefaultPlugins
+                .set(crate::log_plugin(cfg))
+                .set(assets)
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    close_when_requested: false,
+                    ..window
+                })
+                .disable::<bevy::winit::WinitPlugin>(),
+            bevy::app::ScheduleRunnerPlugin::run_loop(tick / 2),
+            FreeCameraPlugin,
+        ));
+    } else {
+        app.add_plugins((
+            DefaultPlugins
+                .set(crate::log_plugin(cfg))
+                .set(assets)
+                .set(window),
+            FreeCameraPlugin,
+        ));
+    }
+    // Keep simulating and talking to the server while unfocused.
+    app.insert_resource(bevy::winit::WinitSettings::continuous());
+    app.insert_resource(ClearColor(SKY));
+    app.init_resource::<TextHud>();
+    app.insert_resource(GlobalAmbientLight {
+        brightness: 400.0,
+        ..default()
+    });
+    app.add_systems(
+        Startup,
+        (
+            move |mut commands: Commands,
+                  assets: Res<AssetServer>,
+                  images: ResMut<Assets<Image>>| {
+                let target = offscreen.then(|| offscreen_target(&mut commands, images));
+                setup_scene(&mut commands, &assets, eye, look, free, target)
+            },
+            setup_combat,
+        ),
+    );
+    let ready = resource_exists::<Characters>;
+    app.add_systems(
+        Update,
+        (
+            load_characters.run_if(not(ready)),
+            shade_vertex_colors,
+            toggle_debug_camera,
+            add_player_models.run_if(ready),
+            place_players,
+            pose_players.run_if(ready),
+            follow_camera,
+            draw_projectiles,
+            show_pickups,
+            toggle_text_hud,
+            update_hud,
+            log_loaded,
+        )
+            .chain(),
+    );
+    app.add_systems(
+        PostUpdate,
+        pin_creep_root
+            .after(AnimationSystems)
+            .before(TransformSystems::Propagate),
+    );
+}
+
+/// The sides' characters, one after the other once the level has loaded: each glTF, then its
+/// scene and clips from the loaded asset, each clip found by its animation's name (its side's
+/// [`crate::Clips`]). A glTF load polls other pending IO tasks from inside its texture tasks on
+/// the same thread, so a second load of a GLB (the level, or the character again through hundreds
+/// of labelled clip requests) nested inside it and overflowed the IO thread's stack in debug builds
+/// (V: lldb, `load_gltf` within `execute_global_scope<ImageOrPath>`, with the GLBs' embedded
+/// images).
+#[allow(clippy::too_many_arguments)]
+fn load_characters(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    clips: Res<SideClips>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut animations: ResMut<Assets<AnimationClip>>,
+    mut loads: Local<Vec<Handle<Gltf>>>,
+    mut looks: Local<Vec<Look>>,
+) {
+    let level = assets.get_handle_untyped(level_scene());
+    if !level.is_some_and(|h| assets.is_loaded_with_dependencies(&h)) {
+        return;
+    }
+    let side = SIDES[looks.len()];
+    if loads.len() == looks.len() {
+        loads.push(assets.load(character(side)));
+    }
+    let handle = &loads[looks.len()];
+    let Some(gltf) = gltfs
+        .get(handle)
+        .filter(|_| assets.is_loaded_with_dependencies(handle))
+    else {
+        return;
+    };
+    let mut ids = Vec::new();
+    let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
+    for (id, name, ticks) in &clips.of(side).0 {
+        let Some(handle) = gltf.named_animations.get(name.as_str()) else {
+            warn!(
+                "{}: no animation {name} (animation id {id:#x})",
+                character(side)
+            );
+            continue;
+        };
+        // The clocks loop on the game's duration; the glTF clips end a tick earlier.
+        // ponytail: the last tick holds the last key instead of blending back to the first.
+        if let Some(mut clip) = animations.get_mut(handle) {
+            clip.set_duration(f32::from(*ticks) / conker_sim::TICK_HZ as f32);
+        }
+        ids.push(*id);
+        handles.push(handle.clone());
+    }
+    let (graph, nodes) = AnimationGraph::from_clips(handles);
+    looks.push(Look {
+        scene: gltf.scenes[0].clone(),
+        graph: graphs.add(graph),
+        nodes: ids.into_iter().zip(nodes).collect(),
+    });
+    if looks.len() == SIDES.len() {
+        commands.insert_resource(Characters(std::mem::take(&mut *looks)));
+    }
+}
+
+/// The image an `offscreen` client draws into (the size of the windows), and its screenshots' source.
+#[derive(Resource, Clone)]
+pub struct Offscreen(pub Handle<Image>);
+
+fn offscreen_target(commands: &mut Commands, mut images: ResMut<Assets<Image>>) -> Handle<Image> {
+    let format = bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb;
+    let mut image = Image::new_target_texture(1280, 720, format, None);
+    image.texture_descriptor.usage |= bevy::render::render_resource::TextureUsages::COPY_SRC;
+    let handle = images.add(image);
+    commands.insert_resource(Offscreen(handle.clone()));
+    handle
+}
+
+fn setup_scene(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    eye: Vec3,
+    look: Vec3,
+    free: bool,
+    target: Option<Handle<Image>>,
+) {
+    commands.spawn(WorldAssetRoot(assets.load(level_scene())));
+    crate::hud::camera(commands, target.clone());
+    // Only the character and the 27 level materials with normals are lit (I: direction and levels).
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 2500.0,
+            ..default()
+        },
+        Transform::from_xyz(1.0, 2.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    let mut camera = commands.spawn((
+        Camera3d::default(),
+        // ponytail: no tonemapping LUTs in the build (wasm size); N64 colours need none anyway.
+        Tonemapping::None,
+        // I: field of view; near/far for a ~70-unit character on a ~13,000-unit map.
+        Projection::Perspective(PerspectiveProjection {
+            fov: 50f32.to_radians(),
+            near: 4.0,
+            far: 40_000.0,
+            ..default()
+        }),
+        DistanceFog {
+            color: SKY,
+            falloff: FogFalloff::Linear {
+                start: 8_000.0,
+                end: 25_000.0,
+            },
+            ..default()
+        },
+        FreeCamera {
+            walk_speed: 1500.0,
+            run_speed: 6000.0,
+            ..default()
+        },
+        Transform::from_translation(eye).looking_at(look, Vec3::Y),
+    ));
+    if let Some(image) = target {
+        camera.insert(bevy::camera::RenderTarget::Image(image.into()));
+        // The HUD draws into it too (natively: the wasm build has no UI).
+        #[cfg(not(target_family = "wasm"))]
+        camera.insert(IsDefaultUiCamera);
+    }
+    // The free camera starts on only with `view=`.
+    camera.queue(move |mut entity: EntityWorldMut| {
+        if let Some(mut state) = entity.get_mut::<FreeCameraState>() {
+            state.enabled = free;
+        }
+    });
+}
+
+/// The projectile placeholders and the HUD.
+fn setup_combat(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let mut look = |radius: f32, color: Color| {
+        let mesh = meshes.add(Sphere::new(radius));
+        let material = materials.add(StandardMaterial {
+            base_color: color,
+            unlit: true,
+            ..default()
+        });
+        (mesh, material)
+    };
+    let bullet = look(4.0, Color::srgb(1.0, 0.85, 0.2));
+    let grenade = look(9.0, Color::srgb(0.15, 0.35, 0.1));
+    let rocket = look(12.0, Color::srgb(1.0, 0.35, 0.1));
+    commands.insert_resource(ProjectileLooks([bullet, grenade, rocket]));
+    #[cfg(not(target_family = "wasm"))]
+    commands.spawn((
+        Hud,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(22.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(8.0),
+            padding: UiRect::all(Val::Px(6.0)),
+            ..default()
+        },
+    ));
+}
+
+/// See [`shade_to_linear`]. Only meshes from the pack's glTF models exist besides the
+/// projectiles' spheres (which have no vertex colours), so every new mesh is converted.
+fn shade_vertex_colors(
+    mut events: MessageReader<AssetEvent<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for event in events.read() {
+        if let AssetEvent::Added { id } = event
+            && let Some(mut mesh) = meshes.get_mut(*id)
+            && let Some(VertexAttributeValues::Float32x4(colors)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
+        {
+            colors.iter_mut().for_each(shade_to_linear);
+        }
+    }
+}
+
+fn toggle_debug_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    camera: Single<(&Transform, &mut FreeCameraState)>,
+) {
+    if !keys.just_pressed(DEBUG_CAMERA_KEY) {
+        return;
+    }
+    let (transform, mut state) = camera.into_inner();
+    state.enabled = !state.enabled;
+    // Start flying from where the follow camera is, not where the free camera was left.
+    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    (state.yaw, state.pitch, state.velocity) = (yaw, pitch, Vec3::ZERO);
+    info!("debug camera {}", if state.enabled { "on" } else { "off" });
+}
+
+/// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each its side's
+/// model, lifted by its own model lift.
+#[allow(clippy::type_complexity)]
+fn add_player_models(
+    players: Query<(Entity, &Combat), (With<Anim>, Without<Model>)>,
+    characters: Res<Characters>,
+    lift: Res<ModelLift>,
+    mut commands: Commands,
+) {
+    for (entity, combat) in &players {
+        commands
+            .entity(entity)
+            .insert((Transform::default(), Visibility::default(), Model));
+        let lift = lift.0[combat.side as usize];
+        commands
+            .spawn((
+                WorldAssetRoot(characters.of(combat.side).scene.clone()),
+                Transform::from_xyz(0.0, MODEL_SCALE * lift, 0.0)
+                    .with_scale(Vec3::splat(MODEL_SCALE)),
+                ChildOf(entity),
+            ))
+            .observe(rig_ready);
+    }
+}
+
+/// The model's scene is in: hook its `AnimationPlayer` to its side's clips and find the root joint.
+#[allow(clippy::too_many_arguments)]
+fn rig_ready(
+    ready: On<WorldInstanceReady>,
+    parents: Query<&ChildOf>,
+    children: Query<&Children>,
+    animators: Query<(), With<AnimationPlayer>>,
+    joints: Query<(&Name, &Transform)>,
+    combats: Query<&Combat>,
+    characters: Res<Characters>,
+    mut commands: Commands,
+) {
+    let Ok(player) = parents.get(ready.entity).map(ChildOf::parent) else {
+        return;
+    };
+    let side = combats.get(player).map_or(Side::default(), |c| c.side);
+    let mut animator = None;
+    let mut root = None;
+    for entity in children.iter_descendants(ready.entity) {
+        if animators.contains(entity) {
+            animator = Some(entity);
+        }
+        if let Ok((name, transform)) = joints.get(entity)
+            && name.as_str() == ROOT_JOINT
+        {
+            root = Some((entity, transform.translation.z));
+        }
+    }
+    let (Some(animator), Some((root, root_z))) = (animator, root) else {
+        warn!("character model without an AnimationPlayer or {ROOT_JOINT}");
+        return;
+    };
+    commands
+        .entity(animator)
+        .insert(AnimationGraphHandle(characters.of(side).graph.clone()));
+    commands.entity(player).insert(Rig {
+        side,
+        animator,
+        root,
+        root_z,
+    });
+}
+
+/// Each player where its state is; the local player where and as its correction draws it
+/// ([`crate::smooth::Drawn`]).
+// ponytail: players move in 30 Hz steps; add lightyear frame interpolation for smooth rendering
+// above 30 fps.
+fn place_players(
+    mut players: Query<(&Player, Option<&FollowCamera>, &mut Transform), With<Model>>,
+) {
+    for (p, camera, mut transform) in &mut players {
+        let (pos, facing) = camera.map_or((p.pos, p.facing), |c| {
+            (c.drawn.body(p.pos), c.drawn.facing(p.facing))
+        });
+        transform.translation = Vec3::from_array(pos);
+        transform.rotation = Quat::from_rotation_y(model_yaw(facing));
+    }
+}
+
+/// Shows each player's clock: its clip at its time, cross-faded with the previous clip.
+fn pose_players(
+    players: Query<(&Anim, &Rig)>,
+    mut animators: Query<&mut AnimationPlayer>,
+    characters: Res<Characters>,
+) {
+    for (anim, rig) in &players {
+        let Ok(mut animator) = animators.get_mut(rig.animator) else {
+            continue;
+        };
+        let character = characters.of(rig.side);
+        let a = &anim.0;
+        let w = a.prev_weight();
+        let current = character.node(a.id);
+        let prev = character.node(a.prev).filter(|_| w > 0.0 && a.prev != a.id);
+        let stale: Vec<AnimationNodeIndex> = animator
+            .playing_animations()
+            .map(|(node, _)| *node)
+            .filter(|node| Some(*node) != current && Some(*node) != prev)
+            .collect();
+        for node in stale {
+            animator.stop(node);
+        }
+        for (node, time, weight) in [(current, a.time, 1.0 - w), (prev, a.prev_time, w)] {
+            if let Some(node) = node {
+                animator
+                    .play(node)
+                    .set_speed(0.0)
+                    .set_seek_time(time / conker_sim::TICK_HZ as f32)
+                    .set_weight(weight);
+            }
+        }
+    }
+}
+
+/// The creep clip carries its walk in the root's z (143 model units); the game turns that into
+/// the player's motion instead of drawing it (V: conker-anim), so the root stays at rest here.
+fn pin_creep_root(players: Query<(&Anim, &Rig)>, mut joints: Query<&mut Transform>) {
+    for (anim, rig) in &players {
+        if (anim.0.id == id::CREEP || anim.0.prev == id::CREEP)
+            && let Ok(mut root) = joints.get_mut(rig.root)
+        {
+            root.translation.z = rig.root_z;
+        }
+    }
+}
+
+/// The view is the follow camera's: from its view eye to its view look-at point (y up, game units;
+/// the aim camera's lift included); after a correction, the drawn body's camera's
+/// ([`crate::smooth::Drawn::view`]).
+#[allow(clippy::type_complexity)]
+fn follow_camera(
+    player: Query<&FollowCamera>,
+    camera: Single<(&mut Transform, &FreeCameraState), (Without<Model>, Without<Projectile>)>,
+) {
+    let (mut camera, free) = camera.into_inner();
+    if let (false, Ok(follow)) = (free.enabled, player.single()) {
+        let (eye, at) = follow.drawn.view(&follow.follow);
+        *camera = Transform::from_translation(eye).looking_at(at, Vec3::Y);
+    }
+}
+
+/// The match's bullets, aimed shots, grenades and rockets where the server last put them.
+/// ponytail: respawned every frame (a handful at most); pool them if that ever shows.
+fn draw_projectiles(
+    game: Query<&MatchView>,
+    old: Query<Entity, With<Projectile>>,
+    looks: Res<ProjectileLooks>,
+    mut commands: Commands,
+) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    let Ok(m) = game.single() else {
+        return;
+    };
+    let shots = (m.bullets.iter().chain(&m.shots).map(|p| (p, 0)))
+        .chain(m.grenades.iter().map(|p| (p, 1)))
+        .chain(m.rockets.iter().map(|p| (p, 2)));
+    for (pos, kind) in shots {
+        let (mesh, material) = looks.0[kind].clone();
+        commands.spawn((
+            Projectile,
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(Vec3::from_array(*pos)),
+        ));
+    }
+}
+
+/// The level glTF draws every placement, pickups included, as a node named `model@placement`: a
+/// taken pickup's node hides until it is back.
+fn show_pickups(
+    game: Query<&MatchView>,
+    names: Query<(Entity, &Name)>,
+    mut nodes: Local<Vec<(u32, Entity)>>,
+    mut visibility: Query<&mut Visibility>,
+) {
+    let Ok(m) = game.single() else {
+        return;
+    };
+    if nodes.is_empty() {
+        *nodes = names
+            .iter()
+            .filter_map(|(e, name)| Some((name.rsplit_once('@')?.1.parse().ok()?, e)))
+            .collect();
+    }
+    for &(placement, entity) in nodes.iter() {
+        let taken = placement < 64 && m.taken >> placement & 1 != 0;
+        if let Ok(mut v) = visibility.get_mut(entity) {
+            v.set_if_neq(if taken {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            });
+        }
+    }
+}
+
+/// Shows the old text readout ([`hud_text`]) over the HUD ([`crate::hud`]), for debugging.
+pub const TEXT_HUD_KEY: KeyCode = KeyCode::KeyH;
+
+/// Whether the text readout is on ([`TEXT_HUD_KEY`] toggles it).
+#[derive(Resource, Default)]
+struct TextHud(bool);
+
+fn toggle_text_hud(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<TextHud>) {
+    if keys.just_pressed(TEXT_HUD_KEY) {
+        on.0 = !on.0;
+    }
+}
+
+/// While connected, the local player's numbers and the clock as text if [`TextHud`] is on: a text
+/// node natively, the page's `#hud` element in the browser (the wasm build has no UI or font
+/// renderer). Otherwise, natively, where the connection stands ([`NetStatus`]: loading,
+/// connecting, failed or lost, with the reason).
+#[allow(clippy::too_many_arguments)]
+fn update_hud(
+    player: Query<&Combat, With<FollowCamera>>,
+    game: Query<&MatchView>,
+    status: Res<NetStatus>,
+    cfg: Res<Config>,
+    on: Res<TextHud>,
+    #[cfg(not(target_family = "wasm"))] mut hud: Single<(&mut Text, &mut Visibility), With<Hud>>,
+    #[cfg(target_family = "wasm")] mut shown: Local<String>,
+) {
+    let text = match (player.single(), game.single()) {
+        (Ok(c), Ok(m)) if *status == NetStatus::Connected && on.0 => hud_text(c, m),
+        _ if *status == NetStatus::Connected => String::new(),
+        // The page's `#net` line says where the connection stands (a failure too).
+        _ if cfg!(target_family = "wasm") => String::new(),
+        _ => status.text(&cfg).0,
+    };
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let (text_node, visibility) = &mut *hud;
+        visibility.set_if_neq(match text.is_empty() {
+            true => Visibility::Hidden,
+            false => Visibility::Inherited,
+        });
+        if text_node.0 != text {
+            text_node.0 = text;
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    if *shown != text {
+        let hud = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("hud"));
+        if let Some(hud) = hud {
+            hud.set_text_content(Some(&text));
+        }
+        *shown = text;
+    }
+}
+
+/// Logs when the level and the characters have finished loading (load time on native and in the
+/// browser).
+fn log_loaded(
+    assets: Res<AssetServer>,
+    time: Res<Time<Real>>,
+    mut pending: Local<Option<Vec<String>>>,
+) {
+    let pending = pending.get_or_insert_with(|| {
+        let characters = SIDES.map(|s| format!("{}#Scene0", character(s)));
+        [vec![level_scene()], characters.into()].concat()
+    });
+    pending.retain(|path| {
+        let done = assets
+            .get_handle_untyped(path)
+            .is_some_and(|h| assets.is_loaded_with_dependencies(&h));
+        if done {
+            let secs = time.startup().elapsed().as_secs_f32();
+            info!("{path} loaded {secs:.2} s after the app started");
+        }
+        !done
+    });
+}
+
+/// Saves the window (or the [`Offscreen`] image) to `path` (native: a file; browser: a download).
+pub fn screenshot(commands: &mut Commands, path: String) {
+    commands.queue(move |world: &mut World| {
+        let shot = shot(world);
+        world.spawn(shot).observe(save_to_disk(path));
+    });
+}
+
+/// [`screenshot`], then exits.
+pub fn screenshot_then_exit(commands: &mut Commands, path: String) {
+    commands.queue(move |world: &mut World| {
+        let shot = shot(world);
+        world.spawn(shot).observe(save_to_disk(path)).observe(
+            |_: On<ScreenshotCaptured>, mut exit: MessageWriter<AppExit>| {
+                exit.write(AppExit::Success);
+            },
+        );
+    });
+}
+
+fn shot(world: &World) -> Screenshot {
+    world
+        .get_resource::<Offscreen>()
+        .map_or_else(Screenshot::primary_window, |o| {
+            Screenshot::image(o.0.clone())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_yaw_turns_plus_z_to_the_game_direction() {
+        for facing in [0u16, 16384, 16896, 40000] {
+            let forward = Quat::from_rotation_y(model_yaw(facing)) * Vec3::Z;
+            let a = angle(facing);
+            assert!(
+                forward.abs_diff_eq(Vec3::new(a.cos(), 0.0, -a.sin()), 1e-5),
+                "{facing}"
+            );
+        }
+    }
+
+    #[test]
+    fn shade_decodes_rgb_only() {
+        let mut c = [1.0, 0.5, 0.0, 0.5];
+        shade_to_linear(&mut c);
+        assert_eq!([c[0], c[2], c[3]], [1.0, 0.0, 0.5]);
+        // Re-encoded by the sRGB surface, an untextured unlit draw shows the raw N64 value.
+        assert!((Srgba::gamma_function_inverse(c[1]) - 0.5).abs() < 1e-6);
+        assert!((c[1] - 0.214).abs() < 1e-3);
+    }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "conker-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+conker-sim = { path = "../conker-sim", features = ["net"] }
+# The match rules (Deathmatch), and the animation ids they play.
+conker-rules = { path = "../conker-rules", features = ["net"] }
+conker-anim = { path = "../conker-anim" }
+# Server-side bots (the original's AI) and the level's lifts.
+conker-bots = { path = "../conker-bots" }
+# The asset pack (`conker-extract pack`): the scene's world, spawns, pickups and the bots' data.
+conker-assets = { path = "../conker-assets" }
+bevy = { workspace = true, features = ["std", "async_executor", "multi_threaded", "bevy_log", "bevy_state"] }
+lightyear = { workspace = true, features = ["server", "netcode", "webtransport", "webtransport_self_signed", "websocket"] }
+# The exact versions lightyear 0.30.1 uses; needed for the two-transport relink workaround.
+lightyear_aeronet = "=0.30.1"
+aeronet_io = "=0.21.0"
+# lightyear's replication backend, for a per-component visibility filter (`Fighting` to its owner).
+bevy_replicon = { version = "=0.44.3", default-features = false, features = ["server"] }
+# `--cert`: wtransport reads PEM files with tokio::fs (already in the tree through it).
+tokio = { version = "1", default-features = false, features = ["rt"] }

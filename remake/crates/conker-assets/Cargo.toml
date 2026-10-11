@@ -1,0 +1,12 @@
+[package]
+name = "conker-assets"
+version.workspace = true
+edition.workspace = true
+
+# The asset pack's data files: what a match reads, in place of the ROM. No ROM or extractor
+# dependencies, no file system: callers hand it file bytes (read from disk, or fetched by a page).
+[dependencies]
+serde.workspace = true
+# float_roundtrip: f32 values parse back to the same bits (correctly rounded f64, then f32).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+thiserror.workspace = true

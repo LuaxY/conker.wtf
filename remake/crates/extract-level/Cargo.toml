@@ -1,0 +1,14 @@
+[package]
+name = "extract-level"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+extract-core.workspace = true
+extract-gbi = { path = "../extract-gbi" }
+extract-scene = { path = "../extract-scene" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+png.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "conker-bots"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Bots play through the same rules as humans: conker-rules' Match and conker-sim's movement Input.
+conker-rules = { path = "../conker-rules" }
+conker-sim = { path = "../conker-sim" }
+# The level's trigger volumes (the zone test) and the game's sin/cos.
+conker-camera = { path = "../conker-camera" }
+
+[dev-dependencies]
+# ROM tests (CONKER_ROM): the scene's navigation graph, AI script and world.
+extract-core.workspace = true
+extract-scene = { path = "../extract-scene" }

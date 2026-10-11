@@ -1,0 +1,9 @@
+[package]
+name = "conker-anim"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+extract-core.workspace = true
+extract-character = { path = "../extract-character" }
+serde_json.workspace = true

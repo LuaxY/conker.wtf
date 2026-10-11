@@ -1,0 +1,1161 @@
+//! The multiplayer AI: the level script ([`crate::script`]) and the game's C helpers it calls through
+//! natives, sharing the script's globals, which are the game's multiplayer struct (`*0x800D23B0`; the
+//! offsets below are that struct's). Ported from the code (C) unless tagged.
+//!
+//! Participants are indexed as the game does: humans first, then bots ([`crate::Bots`] maps them to
+//! the match's slots).
+
+use crate::nav::{Graph, NONE};
+use crate::npc::{AT_GOAL, Npc};
+use crate::script::{Globals, Host};
+use conker_rules::Rng;
+use conker_sim::collision::CollisionWorld;
+use std::collections::BTreeMap;
+
+/// Offsets in the multiplayer struct (G). `[p]` arrays hold one s32 per participant.
+pub mod g {
+    pub const HANDLE: i32 = 0x0;
+    pub const CUR: i32 = 0x4;
+    pub const COUNT: i32 = 0x10;
+    pub const ALIVE: i32 = 0x14;
+    pub const SEEN: i32 = 0x18;
+    pub const REPLAN: i32 = 0x1C;
+    pub const REEVAL: i32 = 0x5C;
+    pub const BAND: i32 = 0x9C;
+    pub const ENEMY: i32 = 0x11C;
+    pub const STATE: i32 = 0x19C;
+    pub const ATTACKING: i32 = 0x21C;
+    pub const COOL: i32 = 0x25C;
+    pub const FIRE: i32 = 0x29C;
+    pub const TARGET: i32 = 0x31C;
+    pub const DEAD: i32 = 0x35C;
+    pub const HEALTH: i32 = 0x39C;
+    pub const HIT_BY: i32 = 0x3DC;
+    pub const JUMPED: i32 = 0x41C;
+    pub const THREAT_DIST: i32 = 0x45C;
+    pub const THREAT: i32 = 0x49C;
+    pub const GRENADES: i32 = 0x4DC;
+    pub const NEAREST: i32 = 0x51C;
+    pub const HEARD: i32 = 0x55C;
+    pub const DIED_AT: i32 = 0x59C;
+    pub const RANK: i32 = 0x5DC;
+    pub const RANK_SCORE: i32 = 0x9DC;
+    pub const TEAM_COUNT: i32 = 0xDDC;
+    pub const TEAM: i32 = 0xE64;
+    pub const PICKUPS: i32 = 0xEA4;
+    pub const RESPAWN: i32 = 0xEAC;
+    pub const HELD: i32 = 0xEB0;
+    pub const PROP: i32 = 0xEF0;
+    pub const HOLDER: i32 = 0xF70;
+    pub const OVERRIDE: i32 = 0xFF0;
+    pub const PICKUP_TIMER: i32 = 0x1070;
+    pub const GIVES: i32 = 0x1174;
+    pub const PICKUP_FLAGS: i32 = 0x11F4;
+    pub const PLACE: i32 = 0x1274;
+    pub const NODE_OF: i32 = 0x14F4;
+    pub const TIMER3: i32 = 0x1574;
+    pub const PREFER: i32 = 0x15B4;
+    pub const DT: i32 = 0x16B4;
+    pub const HUMAN_SCALE: i32 = 0x16B8;
+    pub const SCRIPT_ID: i32 = 0x16BC;
+    pub const SEES: i32 = 0x16C0;
+    pub const RR_A: i32 = 0x1700;
+    pub const RR_B: i32 = 0x1701;
+    pub const RR_C: i32 = 0x1702;
+    pub const RR_D: i32 = 0x1704;
+    pub const JIT_X: i32 = 0x1705;
+    pub const JIT_Z: i32 = 0x1715;
+    pub const JIT_SX: i32 = 0x1725;
+    pub const JIT_SZ: i32 = 0x1735;
+    pub const NOISES: i32 = 0x1745;
+    pub const NOISE: i32 = 0x1748;
+    pub const AIM_X: i32 = 0x17A8;
+    pub const AIM_Y: i32 = 0x17E8;
+    pub const AIM_Z: i32 = 0x1828;
+    pub const AIM_RATE: i32 = 0x1868;
+    /// Bytes of the struct plus the script's own globals (the AI script's highest is 0x2534 + 0x30).
+    pub const SIZE: usize = 0x2600;
+}
+
+/// The bot skill tables (`0x800872B0`.., indexed by the skill byte `0x800E0BD0`; the oracle's is 2).
+mod skill {
+    /// `0x800872B0`: f32 scale of the distance to a human in the target ranking.
+    pub const HUMAN_SCALE: [f32; 5] = [1.5, 1.2, 0.8, 0.4, 0.15];
+    /// `0x800872C4` (s16): VIs of attacking one target before the shot goes for the head (−1 never).
+    pub const HEAD_AFTER: [i32; 4] = [-1, -1, 600, 240];
+    /// `0x800872D0`: VIs between fire cycles.
+    pub const CYCLE: [i32; 4] = [0x50, 0x46, 0x3C, 0x3C];
+    /// `0x800872D8`: VIs a twin-gun burst lasts.
+    pub const BURST: [i32; 4] = [0x0A, 0x14, 0x1E, 0x3C];
+    /// `0x800872E0`: the fire counter's start while not attacking (negated).
+    pub const FIRST: [i32; 4] = [0x78, 0x50, 0x28, 0x0A];
+    /// `0x800872E8`: percent under which the aim stays on target each cycle.
+    pub const STEADY: [i32; 4] = [0x0A, 0x14, 0x32, 0x50];
+    /// `0x800872F0`: G+0xC.
+    pub const G_C: [i32; 4] = [0x1E, 0x19, 0x14, 0x0F];
+    /// `0x800872F8`: f32 aim following rate per VI.
+    pub const AIM_RATE: [f32; 5] = [0.05, 0.1, 0.125, 0.25, 1.0];
+}
+
+/// A participant as the AI sees it each frame (filled from the match by [`crate::Bots`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Body {
+    pub pos: [f32; 3],
+    pub old: [f32; 3],
+    /// Height above the floor (obj+0x28).
+    pub height: f32,
+    /// The facing as the game's heading in degrees (obj+0x40).
+    pub heading: f32,
+    pub facing: u16,
+    pub health: u8,
+    /// s126+0x75 & 0x7F: the held item; s126+0x78: the drawn weapon (0 holstered).
+    pub item: u8,
+    pub drawn: u8,
+    pub grenades: u8,
+    /// 0x80 | the last attacker, set on the frame of a hit (`0x800E0BB8`).
+    pub hit_by: u8,
+    pub is_bot: bool,
+    pub team: u8,
+}
+
+/// Natives the AI called that this port does not implement, by (native, handle type, code); the
+/// harness reports them (they must stay at 0 in a match).
+pub type Unknown = BTreeMap<(i32, i32, i32), u32>;
+
+/// What the natives work on: the participants, the navigation graph, the world, the RNG.
+pub struct World<'a> {
+    pub bodies: &'a [Body],
+    pub npcs: &'a mut [Npc],
+    pub graph: &'a Graph,
+    pub world: &'a CollisionWorld,
+    pub rng: &'a mut Rng,
+    pub humans: usize,
+    pub skill: usize,
+    /// Each pickup's position (the arena's), for its nearest node.
+    pub unknown: &'a mut Unknown,
+}
+
+impl Host for World<'_> {
+    fn native(&mut self, g: &mut Globals, index: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        match index {
+            // Debug prints.
+            0..=2 | 13 => 1,
+            3 | 4 => self.object(index, a(0), args),
+            5 => self.query(g, a(0), a(1), args),
+            6 => self.command(g, a(0), a(1), args),
+            7 => match a(0) {
+                0 => 0,
+                n => (self.rng.next_u32() % n as u32) as i32,
+            },
+            8 => 1,
+            9 => {
+                let t = a(0);
+                match t {
+                    0 => 1,
+                    t if t < 0 && t + 1 >= 0 => 0,
+                    t => t + 1,
+                }
+            }
+            10 => {
+                let t = a(0);
+                if t >= 2 && t - 1 < 2 {
+                    1
+                } else if t == 1 {
+                    0
+                } else {
+                    t - 1
+                }
+            }
+            11 => ((i64::from(a(0)) * i64::from(a(1))) >> 16) as i32,
+            12 => match a(1) {
+                0 => 0,
+                b => ((i64::from(a(0)) << 16) / i64::from(b)) as i32,
+            },
+            _ => self.unknown(index, 0, 0),
+        }
+    }
+}
+
+fn kind(h: i32) -> i32 {
+    (h >> 12) & 0xF
+}
+
+fn index(h: i32) -> usize {
+    (h & !0xF000) as usize
+}
+
+impl World<'_> {
+    fn unknown(&mut self, native: i32, kind: i32, code: i32) -> i32 {
+        *self.unknown.entry((native, kind, code)).or_default() += 1;
+        0
+    }
+
+    /// Natives 3 and 4 (handle tables `0x80088420` / `0x8008845C`): only the level-start fade calls
+    /// (type 0xE) reach them in Deathmatch; they set screen fades.
+    fn object(&mut self, native: i32, h: i32, _args: &[i32]) -> i32 {
+        match kind(h) {
+            0xE => 0,
+            k => self.unknown(native, k, -1),
+        }
+    }
+
+    fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        match (kind(h), code) {
+            // Type 1 (`func_1509C7C8`) 4: no cutscene running.
+            (1, 4) => 1,
+            (2, _) => self.player_query(index(h), code, args),
+            // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
+            (3, 1) => 0,
+            // Type 5, the level (`func_1509FE0C`).
+            (5, 0x1D) => (1 << self.bodies.len()) - 1,
+            (5, 0x1E) => i32::from(self.bodies.get(a(2) as usize).map_or(0, |b| b.team)),
+            (5, 0x22) => {
+                let n = a(2).max(0) as usize;
+                let w: Vec<i32> = (0..n).map(|k| a(3 + k)).collect();
+                let total: i32 = w.iter().sum();
+                let r = (self.rng.next_f32() * total as f32) as i32;
+                let mut sum = 0;
+                for (k, &x) in w.iter().enumerate() {
+                    sum += x;
+                    if sum >= r && x != 0 {
+                        return k as i32;
+                    }
+                }
+                n as i32 - 1
+            }
+            (5, 0x23) => self.humans as i32,
+            (5, 0x24) => 0,
+            (5, 0x25) => 0,
+            (5, 0x26) => self.bodies.len() as i32,
+            // Type 15, the multiplayer helpers (`func_1509E3DC`).
+            (0xF, 3) => self.next_ai(g),
+            (0xF, 4) => self.visibility(g, a(2) as usize, a(3)),
+            (0xF, 5) => self.skill as i32,
+            (0xF, 7) => give_range(a(2)),
+            (0xF, 0x11) => 0,
+            (k, c) => self.unknown(5, k, c),
+        }
+    }
+
+    fn command(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        match (kind(h), code) {
+            (2, _) => self.player_command(index(h), code, args),
+            // Props (type 3) 4: camera/zone setup at level start; the level (5) 0xA, 0xF: HUD and
+            // music; (0xA, 0) a timer display.
+            (3, 4) | (5, 0xA) | (5, 0xF) | (0xA, 0) | (3, 0) => 1,
+            (0xF, 4) => {
+                self.init(g);
+                0
+            }
+            (0xF, 6) => self.frame(g),
+            (0xF, 0xA) => {
+                // func_1508DA1C: no pickup held or carried, all present.
+                for p in 0..self.bodies.len() {
+                    g.set(g::HELD, p, -1);
+                }
+                0
+            }
+            (0xF, 0xB) => 0, // the weapon manager: mirrored from the match ([`crate::Bots`])
+            (0xF, 0xC) => 0, // release a weapon: the match drops it
+            (0xF, 0xD) => {
+                self.threats(g);
+                0
+            }
+            (0xF, 0x17) => 0,
+            (0xF, 1) | (0xF, 7) => 0,
+            (k, c) => {
+                let _ = a(0);
+                self.unknown(6, k, c)
+            }
+        }
+    }
+
+    /// `func_1508C9CC` (query 3): the next AI participant after G+0x1702, round robin.
+    fn next_ai(&mut self, g: &mut Globals) -> i32 {
+        let n = self.bodies.len() as i32;
+        let mut at = i32::from(g.i8(g::RR_C));
+        let mut found = -1;
+        let mut k = 0;
+        while k < n {
+            at += 1;
+            if at >= n {
+                at = 0;
+            }
+            if self.bodies[at as usize].is_bot {
+                k = n;
+                found = at;
+            }
+            k += 1;
+        }
+        g.set_i8(g::RR_C, at as i8);
+        found
+    }
+
+    /// `func_15089BC0` (command 4) for the AI script: the struct's start, with `func_1508BC20`'s
+    /// random preference matrix.
+    fn init(&mut self, g: &mut Globals) {
+        let n = self.bodies.len();
+        prefer(g, n, self.rng);
+        for b in [g::RR_A, g::RR_B, g::RR_C, g::RR_C + 1, g::RR_D] {
+            g.set_i8(b, 0);
+        }
+        g.0[g::SCRIPT_ID as usize..g::SCRIPT_ID as usize + 2]
+            .copy_from_slice(&0xBAu16.to_be_bytes());
+        g.set_f32(g::HUMAN_SCALE, skill::HUMAN_SCALE[self.skill]);
+        g.set_i8(g::NOISES, 0);
+        for p in 0..16 {
+            g.set(g::SEES, p, 0);
+            g.set_f32(g::AIM_X + 4 * p as i32, 0.0);
+            g.set_f32(g::AIM_Y + 4 * p as i32, 0.0);
+            g.set_f32(g::AIM_Z + 4 * p as i32, 0.0);
+            g.set_f32(g::AIM_RATE + 4 * p as i32, skill::AIM_RATE[self.skill]);
+        }
+        g.set_i32(0xC, skill::G_C[self.skill]);
+        g.set_i32(g::COUNT, n as i32);
+    }
+
+    /// A player query (`func_15099C14`).
+    fn player_query(&mut self, p: usize, code: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        let Some(&b) = self.bodies.get(p) else {
+            return match code {
+                0x9A => 0x7D00,
+                _ => 0,
+            };
+        };
+        let n = self.npcs[p];
+        match code {
+            0x91 => i32::from(n.script),
+            0x93 => i32::from(b.health),
+            0x9A => match self.bodies.get(index(a(2))) {
+                Some(o) => {
+                    let (dx, dz) = (b.pos[0] - o.pos[0], b.pos[2] - o.pos[2]);
+                    (dx * dx + dz * dz).sqrt() as i32
+                }
+                None => 0x7D00,
+            },
+            0xBF => (b.height as i32 as f32 * 65536.0) as i32,
+            0xC3 => n.f4 as i32,
+            0xC4 => n.flags as i32,
+            0xC7 => {
+                if n.goal == NONE {
+                    1
+                } else {
+                    (n.flags & AT_GOAL) as i32
+                }
+            }
+            0xC8 => self.goal_distance(p),
+            0xCA => self.node_id(p),
+            0xCD => match self.bodies.get(index(a(2))) {
+                Some(o) => off_heading(&b, o, a(3) == 1),
+                None => 0,
+            },
+            0xCF => self.pick_node(p, args),
+            0xD3 => weapon_class(b.item),
+            0xD4 => i32::from(b.drawn),
+            0xD5 => 1,
+            0xD6 => 0,
+            0xDC => 0,
+            0xF0 => 0,
+            c => self.unknown(5, 2, c),
+        }
+    }
+
+    /// Query 0xC8: the distance left to the goal through the current node (or straight, if farther).
+    fn goal_distance(&self, p: usize) -> i32 {
+        let (n, b) = (&self.npcs[p], &self.bodies[p]);
+        if n.cur == NONE || n.goal == NONE {
+            return 0;
+        }
+        let d = |node: u8| {
+            let q = self.graph.at(node);
+            let v = [q[0] - b.pos[0], q[1] - b.pos[1], q[2] - b.pos[2]];
+            (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() as i32
+        };
+        let via = d(n.cur) + n.length;
+        if n.goal != n.cur {
+            let straight = d(n.goal);
+            if via < straight {
+                return straight;
+            }
+        }
+        via
+    }
+
+    /// Query 0xCA: the id of the participant's node (its current one, or the nearest).
+    fn node_id(&mut self, p: usize) -> i32 {
+        let n = &mut self.npcs[p];
+        if n.cur != NONE {
+            return i32::from(self.graph.nodes[usize::from(n.cur)].id);
+        }
+        // ponytail: the game seeds the search with the last answer (`D_8008729C`); without it the
+        // nearest node is searched afresh, which differs only when that hint is nearer.
+        let near = self.graph.approach(self.bodies[p].pos, &[], &[]);
+        n.near = near;
+        self.graph.node(near).map_or(0xFF, |x| i32::from(x.id))
+    }
+
+    /// Query 0xCF(n, ids…): of the nodes named, the one the shortest path from here reaches first.
+    fn pick_node(&mut self, p: usize, args: &[i32]) -> i32 {
+        let count = args.get(2).copied().unwrap_or(0).max(0) as usize;
+        let goals: Vec<u8> = (0..count)
+            .map(|k| self.graph.by_id(args.get(3 + k).copied().unwrap_or(-1)))
+            .filter(|&x| x != NONE)
+            .collect();
+        if goals.is_empty() {
+            return -1;
+        }
+        let start = self.graph.approach(self.bodies[p].pos, &goals, &[]);
+        if start == NONE {
+            return -1;
+        }
+        let (_, _, reached) = self.graph.next_toward(start, &goals, &[]);
+        match self.graph.node(reached) {
+            Some(x) => i32::from(x.id),
+            None => -1,
+        }
+    }
+
+    /// A player command (`func_15097A8C`).
+    fn player_command(&mut self, p: usize, code: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        if p >= self.npcs.len() {
+            return 0;
+        }
+        let by_id = |g: &Graph, id: i32| if id < 0 { NONE } else { g.by_id(id) };
+        let n = &mut self.npcs[p];
+        match code {
+            0x14 => {
+                n.script = a(2) as u8;
+                n.at = None;
+                n.wait = 0;
+            }
+            0x19 => n.target = (a(2) & !0xF000) as u8,
+            0x1F | 0x5A | 0x7D => {}
+            0x5B => n.goal = by_id(self.graph, a(2)),
+            0x5C => n.cur = by_id(self.graph, a(2)),
+            0x5D => n.avoid = by_id(self.graph, a(2)),
+            0x5F => n.speed = n.speed.min(a(2) as f32),
+            0x60 => {
+                n.goal = by_id(self.graph, a(2));
+                n.cur = NONE;
+                n.flags &= !AT_GOAL;
+                n.script = a(3) as u8;
+                n.at = None;
+                n.wait = 0;
+            }
+            0x61 => {
+                let b = if a(2) == -1 { 0x8000 } else { a(2) as u16 };
+                n.pressed = b;
+                n.press = 0;
+                if matches!(a(2), -1 | 4 | 0x2000) {
+                    n.held = b;
+                    n.hold = 2;
+                }
+            }
+            0x7B => n.pickup = a(2) as u8,
+            c => return self.unknown(6, 2, c),
+        }
+        0
+    }
+
+    /// `func_1508A6FC` (command 6), every participant: deaths, fire timers, the attack, the noises.
+    /// Returns the mask of those that died (or appeared) this frame.
+    fn frame(&mut self, g: &mut Globals) -> i32 {
+        let count = self.bodies.len();
+        let (alive, mut seen) = (g.i32(g::ALIVE), g.i32(g::SEEN));
+        let mut died = 0;
+        let dt = 2;
+        for p in 0..count {
+            let bit = 1 << p;
+            g.set(g::REPLAN, p, 0);
+            let mut first = false;
+            if alive & bit == 0 {
+                if seen & bit == 0 {
+                    first = true;
+                }
+                seen |= bit;
+            }
+            if alive & bit == 0 && !first {
+                g.set(g::HEALTH, p, 0);
+                g.set(g::BAND, p, -1);
+                continue;
+            }
+            let b = self.bodies[p];
+            let mut idle = true;
+            let fire_was = g.get(g::FIRE, p);
+            g.set(g::ATTACKING, p, g.get(g::ATTACKING, p) + dt);
+            g.set(g::FIRE, p, fire_was + dt);
+            for off in [g::COOL, g::JUMPED] {
+                g.set(off, p, (g.get(off, p) - dt).max(0));
+            }
+            g.set(g::TIMER3, p, (g.get(g::TIMER3, p) - dt).max(0));
+            if g.get(g::STATE, p) == 3 && (g.get(g::COOL, p) & 0x1F) >= 0x1D {
+                let n = &mut self.npcs[p];
+                (n.pressed, n.press) = (0x8000, 0);
+            }
+            let hit_by = i32::from(b.hit_by);
+            g.set(g::HIT_BY, p, hit_by);
+            g.set(g::GRENADES, p, i32::from(b.grenades));
+            g.set(g::HEALTH, p, i32::from(b.health));
+            g.set(g::BAND, p, i32::from(self.graph.band(b.pos[1])));
+            if b.health == 0 || first {
+                if g.get(g::DEAD, p) == 0 {
+                    let cur = self.npcs[p].cur;
+                    // The node's index, which the script then uses as an id (the game's own mix-up;
+                    // the two differ from node 65 on).
+                    g.set(g::DIED_AT, p, if cur != NONE { i32::from(cur) } else { -1 });
+                    g.set(g::DEAD, p, 1);
+                    g.set(g::COOL, p, 0);
+                    g.set(g::STATE, p, 0);
+                    g.set(g::REEVAL, p, 1);
+                    g.set(g::ENEMY, p, -1);
+                    g.set(g::OVERRIDE, p, 0);
+                    died |= bit;
+                }
+            } else {
+                g.set(g::DEAD, p, 0);
+            }
+            let target = g.get(g::TARGET, p);
+            if target != 0 {
+                if g.get(g::STATE, p) != 1 && g.get(g::ATTACKING, p) < 0x1E {
+                    let n = &mut self.npcs[p];
+                    n.target = (target - 2) as u8;
+                    let s = n.script;
+                    if s != 4 && s != 5 {
+                        (n.script, n.at, n.wait) = (4, None, 0);
+                    }
+                    if s == 4 {
+                        g.set(g::ATTACKING, p, 0);
+                    }
+                    if s == 5 {
+                        g.set(g::ATTACKING, p, 0x1E);
+                        g.set_f32(g::AIM_RATE + 4 * p as i32, skill::AIM_RATE[self.skill]);
+                        let o = 4 * p as i32;
+                        g.set_f32(g::AIM_X + o, self.rng.next_f32() * 50.0 + b.pos[0]);
+                        g.set_f32(g::AIM_Y + o, b.pos[1] + 40.0);
+                        g.set_f32(g::AIM_Z + o, self.rng.next_f32() * 50.0 + b.pos[2]);
+                        if target - 2 >= 2
+                            && let Some(t) = self.bodies.get((target - 2) as usize)
+                        {
+                            g.set_f32(
+                                g::AIM_X + o,
+                                g.f32(g::AIM_X + o) + (t.pos[0] - b.pos[0]) * 0.5,
+                            );
+                            g.set_f32(
+                                g::AIM_Z + o,
+                                g.f32(g::AIM_Z + o) + (t.pos[2] - b.pos[2]) * 0.5,
+                            );
+                        }
+                    }
+                }
+                idle = false;
+                let mut fire = g.get(g::FIRE, p);
+                let mut was = fire_was;
+                if skill::CYCLE[self.skill] < fire {
+                    g.set(g::FIRE, p, 0);
+                    was = -1;
+                    fire = 0;
+                }
+                let shoot = fire >= 0 && was < 0;
+                let head = skill::HEAD_AFTER[self.skill];
+                let head = head != -1 && g.get(g::ATTACKING, p) >= head;
+                for (avg, aim) in [(g::JIT_SX, g::JIT_X), (g::JIT_SZ, g::JIT_Z)] {
+                    let s = i32::from(g.i8(avg + p as i32));
+                    let t = i32::from(g.i8(aim + p as i32));
+                    g.set_i8(avg + p as i32, (s + ((t - s) >> 2)) as i8);
+                }
+                let (jx, jz) = (
+                    i32::from(g.i8(g::JIT_SX + p as i32)),
+                    i32::from(g.i8(g::JIT_SZ + p as i32)),
+                );
+                if self.attack(g, p, (target - 2) as usize, shoot, head, jx, jz)
+                    && g.get(g::STATE, p) != 1
+                {
+                    g.set(g::ATTACKING, p, 0);
+                }
+                if g.get(g::FIRE, p) == 0 {
+                    g.set_i8(g::JIT_X + p as i32, 0);
+                    g.set_i8(g::JIT_Z + p as i32, 0);
+                    if skill::STEADY[self.skill] < (self.rng.next_f32() * 100.0) as i32 {
+                        let x = if self.rng.next_f32() > 0.5 {
+                            -0x32
+                        } else {
+                            0x32
+                        };
+                        g.set_i8(g::JIT_X + p as i32, x);
+                        let z = if self.rng.next_f32() > 0.5 { 0x32 } else { 0 };
+                        g.set_i8(g::JIT_Z + p as i32, z);
+                    }
+                }
+            }
+            if idle {
+                g.set(g::FIRE, p, -skill::FIRST[self.skill]);
+            }
+            if hit_by & 0x80 != 0 {
+                g.set(g::STATE, p, 0);
+                g.set(g::REPLAN, p, 1);
+            }
+        }
+        g.set_i32(g::SEEN, seen);
+        g.set_f32(g::DT, dt as f32);
+        self.noises(g);
+        died
+    }
+
+    /// `func_1508B3F8`: a bot within a noise's radius (+100 on the square, and 200 above to 100
+    /// below it) hears it: of the walkway's nodes just outside the radius ([`walkway`]), the one
+    /// nearest the bot among those nearer it than the noise is, by id, in G+0x55C.
+    fn noises(&mut self, g: &mut Globals) {
+        let count = self.bodies.len();
+        for p in 0..count {
+            if g.get(g::HEARD, p) != -1 {
+                g.set(g::HEARD, p, -2);
+            }
+        }
+        let n = g.i8(g::NOISES).max(0) as usize;
+        for k in 0..n {
+            let at = g::NOISE + 12 * k as i32;
+            let r2 = g.f32(at);
+            let h = |o: i32| {
+                f32::from(i16::from_be_bytes([
+                    g.0[(at + o) as usize],
+                    g.0[(at + o + 1) as usize],
+                ]))
+            };
+            let noise = [h(4), h(6), h(8)];
+            let mut around: Option<Vec<(u8, f32)>> = None;
+            for p in self.humans..count {
+                let b = self.bodies[p];
+                let dy = b.pos[1] - noise[1];
+                if !(dy < 200.0 && dy > -100.0) {
+                    continue;
+                }
+                let (dx, dz) = (b.pos[0] - noise[0], b.pos[2] - noise[2]);
+                if dx * dx + dz * dz >= r2 + 100.0 {
+                    continue;
+                }
+                let list = around.get_or_insert_with(|| {
+                    let (start, _) =
+                        self.graph
+                            .nearest(noise, Some(0), Some(self.graph.band(noise[1])));
+                    let mut out = Vec::new();
+                    if start != NONE {
+                        walkway(
+                            self.graph,
+                            start,
+                            [noise[0], noise[2]],
+                            r2,
+                            &mut [0u8; 32],
+                            &mut out,
+                        );
+                    }
+                    out
+                });
+                let mut best = (100_000_000.0f32, NONE);
+                for &(node, limit) in list.iter() {
+                    let q = self.graph.at(node);
+                    let (ex, ez) = (q[0] - b.pos[0], q[2] - b.pos[2]);
+                    let d2 = ex * ex + ez * ez;
+                    if d2 < limit && d2 < best.0 {
+                        best = (d2, node);
+                    }
+                }
+                if best.1 != NONE {
+                    if g.get(g::HEARD, p) != -2 {
+                        g.set(g::REEVAL, p, 1);
+                    }
+                    g.set(
+                        g::HEARD,
+                        p,
+                        i32::from(self.graph.nodes[usize::from(best.1)].id),
+                    );
+                }
+            }
+        }
+        for p in 0..count {
+            if g.get(g::HEARD, p) < 0 {
+                g.set(g::HEARD, p, -1);
+            }
+        }
+        g.set_i8(g::NOISES, 0);
+    }
+
+    /// `func_1508B9BC` (command 0xD): visibility pairs, the threat ranking, then for the participant
+    /// G+4 its best target by the preference matrix (G+0x49C) and its distance (G+0x45C).
+    fn threats(&mut self, g: &mut Globals) {
+        let n = self.bodies.len();
+        let pairs = if n >= 9 { 4 } else { 1 };
+        self.visibility(g, 0, pairs);
+        self.rank(g);
+        let me = g.i32(g::CUR);
+        if me < 0 || me as usize >= n {
+            return;
+        }
+        let me = me as usize;
+        let (mut best, mut least) = (-1i32, 10_000_000i32);
+        for t in 0..n {
+            if g.get(g::HEALTH, t) <= 0 || t == me {
+                continue;
+            }
+            let mut score = -1;
+            for k in 0..16 {
+                let r = g.get(g::RANK, 16 * t + k);
+                if r == -1 {
+                    break;
+                }
+                if r == me as i32 {
+                    score = g.get(g::RANK_SCORE, 16 * t + k);
+                    break;
+                }
+            }
+            if score == -1 {
+                continue;
+            }
+            let mut f = f32::from(g.0[(g::PREFER as usize) + 16 * me + t]) * 0.003_921_569; // 1/255
+            if t as i32 == g.get(g::ENEMY, me) {
+                f *= 0.8;
+            }
+            let s = (score as f32 * f) as i32;
+            if s < least {
+                (least, best) = (s, t as i32);
+            }
+        }
+        g.set(g::THREAT, me, best);
+        let d = if best != -1 {
+            let (a, b) = (self.bodies[me].pos, self.bodies[best as usize].pos);
+            let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+            (dx * dx + dz * dz).sqrt() as i32
+        } else {
+            least
+        };
+        g.set(g::THREAT_DIST, me, d);
+    }
+
+    /// `func_1508A1BC`: one participant v per frame (G+0x1704, round robin) ranks the enemies that
+    /// may hunt it, nearest first (G+0x5DC, scores G+0x9DC): the xz distance, +500 across bands; if
+    /// v has no clear line to them, a bot's doubled and roles 2 and 3 left out; a human's scaled by
+    /// the skill. G+0x51C[v] = the nearest distance.
+    fn rank(&mut self, g: &mut Globals) {
+        let n = self.bodies.len();
+        if n == 0 {
+            return;
+        }
+        let mut v = i32::from(g.i8(g::RR_D)) + 1;
+        if v == n as i32 {
+            v = 0;
+        }
+        g.set_i8(g::RR_D, v as i8);
+        let v = v as usize;
+        let mut list: Vec<(i32, i32)> = Vec::new();
+        if g.i32(g::ALIVE) & (1 << v) != 0 {
+            let sees = g.get(g::SEES, v);
+            let mut nearest = 0x7D00;
+            for s in 0..n {
+                if g.get(g::HEALTH, s) <= 0 || g.get(g::TEAM, v) == g.get(g::TEAM, s) {
+                    continue;
+                }
+                let (a, b) = (self.bodies[v].pos, self.bodies[s].pos);
+                let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+                let raw = (dx * dx + dz * dz).sqrt() as i32;
+                let mut d = raw;
+                if g.get(g::BAND, v) != g.get(g::BAND, s) {
+                    d += 0x1F4;
+                }
+                if (0x10000 << s) & sees != 0 {
+                    // obj+0x65 is 0 for every player (V, the oracle's RAM): never left out here.
+                } else {
+                    if s >= self.humans {
+                        d *= 2;
+                    }
+                    if matches!(g.get(0x15C, s), 2 | 3) {
+                        d = -1;
+                    }
+                }
+                if s < self.humans && d != -1 {
+                    d = (d as f32 * g.f32(g::HUMAN_SCALE)) as i32;
+                }
+                if d >= 0 {
+                    let at = list.iter().position(|e| e.1 >= d).unwrap_or(list.len());
+                    list.insert(at, (s as i32, d));
+                }
+                nearest = nearest.min(raw);
+            }
+            g.set(g::NEAREST, v, nearest);
+        }
+        for k in 0..16 {
+            match list.get(k) {
+                Some(&(s, d)) => {
+                    g.set(g::RANK, 16 * v + k, s);
+                    g.set(g::RANK_SCORE, 16 * v + k, d);
+                }
+                None => g.set(g::RANK, 16 * v + k, -1),
+            }
+        }
+    }
+
+    /// `func_1508C5B8(0, pairs)` (query 4): each human tests its lines of sight to three enemy bots
+    /// it does not see yet (the game measures their distance as the human's own x − z, so the first
+    /// three in slot order), then `pairs` more pairs are tested round robin (G+0x1700/1701).
+    /// G+0x16C0[p] bit q: p sees q along a clear line; bit 16+q: no wall between their eyes.
+    fn visibility(&mut self, g: &mut Globals, who: usize, pairs: i32) -> i32 {
+        let n = self.bodies.len();
+        if pairs != 0 {
+            for h in 0..self.humans.min(n) {
+                let mut near: Vec<usize> = Vec::new();
+                let quirk = {
+                    let b = self.bodies[h].pos;
+                    let d = b[0] - b[2];
+                    d * d
+                };
+                for q in self.humans..n {
+                    if g.get(g::TEAM, h) == g.get(g::TEAM, q)
+                        || g.get(g::SEES, h) & (0x10001 << q) != 0
+                    {
+                        continue;
+                    }
+                    if near.len() < 3 && quirk < 900_000_000.0 {
+                        near.push(q);
+                    }
+                }
+                for q in near {
+                    self.clear_pair(g, h, q);
+                    self.line_of_sight(g, h, q);
+                }
+            }
+            let (mut a, mut b) = (
+                usize::from(g.0[g::RR_A as usize]),
+                usize::from(g.0[g::RR_B as usize]),
+            );
+            if n >= 2 {
+                for _ in 0..pairs {
+                    let mut tries = 0;
+                    loop {
+                        b += 1;
+                        if b >= n {
+                            a += 1;
+                            if a >= n - 1 {
+                                a = 0;
+                            }
+                            b = a + 1;
+                        }
+                        self.clear_pair(g, a, b);
+                        tries += 1;
+                        if !(tries < 0x40 && g.get(g::TEAM, a) == g.get(g::TEAM, b)) {
+                            break;
+                        }
+                    }
+                    self.line_of_sight(g, a, b);
+                }
+            }
+            g.0[g::RR_A as usize] = a as u8;
+            g.0[g::RR_B as usize] = b as u8;
+        }
+        g.get(g::SEES, who)
+    }
+
+    fn clear_pair(&self, g: &mut Globals, a: usize, b: usize) {
+        g.set(g::SEES, a, g.get(g::SEES, a) & !(0x10001 << b));
+        g.set(g::SEES, b, g.get(g::SEES, b) & !(0x10001 << a));
+    }
+
+    /// `func_1508C1A4`: eye to eye (a bot's at 0.75 of its height 90, 50 lower with the twin guns; a
+    /// human's 40 up, or its head when a bot looks at it); clear of walls, and of the navigation's
+    /// barrier lines for bit q.
+    fn line_of_sight(&self, g: &mut Globals, a: usize, b: usize) {
+        let eye = |me: usize, other: usize| {
+            let x = self.bodies[me];
+            let mut p = x.pos;
+            if x.is_bot {
+                p[1] += 67.5;
+                if x.item == 9 {
+                    p[1] -= 50.0;
+                }
+            } else if self.bodies[other].is_bot && skill::HEAD_AFTER[self.skill] != -1 {
+                p[1] += HEAD;
+            } else {
+                p[1] += 40.0;
+            }
+            p
+        };
+        let Some(open) = sight(self.world, self.graph, eye(a, b), eye(b, a)) else {
+            return;
+        };
+        for (x, y) in [(a, b), (b, a)] {
+            let mut v = g.get(g::SEES, x) | (0x10000 << y);
+            if open {
+                v |= 1 << y;
+            }
+            g.set(g::SEES, x, v);
+        }
+    }
+
+    /// `func_1508CAD8`: the attacker `p` aims at `t`: an aim point follows the target (40 above its
+    /// feet, or its head) at the skill's rate, the jitter shifts it sideways and down; the aim yaw
+    /// snaps onto it. The virtual pad: R always; Z held in bursts (twin guns), held (flamethrower),
+    /// released on the cycle's shot frame and held otherwise (single shots), or pressed on it (the
+    /// rest). Returns whether the aim had to swing more than 45°.
+    #[allow(clippy::too_many_arguments)]
+    fn attack(
+        &mut self,
+        g: &mut Globals,
+        p: usize,
+        t: usize,
+        shoot: bool,
+        head: bool,
+        jx: i32,
+        jz: i32,
+    ) -> bool {
+        let Some(&tb) = self.bodies.get(t) else {
+            return true;
+        };
+        let b = self.bodies[p];
+        let weapon = b.drawn;
+        let single = matches!(weapon, 0x24 | 0x18 | 0x23 | 0x41);
+        let automatic = match weapon {
+            9 => 1,
+            0x15 => 3,
+            0x38 => 2,
+            _ => 0,
+        };
+        let o = 4 * p as i32;
+        let (tx, ty, tz) = if head && !tb.is_bot {
+            (tb.pos[0], tb.pos[1] + HEAD, tb.pos[2])
+        } else {
+            (tb.pos[0], tb.pos[1] + 40.0, tb.pos[2])
+        };
+        let rate = (g.f32(g::AIM_RATE + o) * 2.0).min(1.0);
+        let (mut ax, mut az) = (g.f32(g::AIM_X + o), g.f32(g::AIM_Z + o));
+        ax += (tx - ax) * rate;
+        az += (tz - az) * rate;
+        g.set_f32(g::AIM_X + o, ax);
+        g.set_f32(g::AIM_Z + o, az);
+        let (mut dx, mut dz) = (ax - b.pos[0], az - b.pos[2]);
+        let d = (dx * dx + dz * dz).sqrt();
+        let (mut jx, mut jz) = (jx, jz);
+        if d >= 1.0 {
+            if d < 100.0 && jz != 0 {
+                jz = 0;
+                if jx == 0 {
+                    jx = 0x32;
+                }
+            }
+            let mut k = jx as f32;
+            if weapon == 9 {
+                k *= 1.25;
+            }
+            k /= d;
+            (dx, dz) = (dx - dz * k, dz + dx * k);
+        }
+        let to = conker_sim::movement::atan2_u16(-dz, dx);
+        let to_deg = wrap360(f32::from(to) * 0.005_493_164);
+        let n = &mut self.npcs[p];
+        let yaw = n
+            .aim_yaw
+            .unwrap_or(wrap360(f32::from(b.facing) * 0.005_493_164));
+        let mut off = wrap360(wrap360(yaw) - to_deg);
+        if off > 180.0 {
+            off -= 360.0;
+        }
+        let far = !(-45.0..=45.0).contains(&off);
+        n.aim_yaw = Some(to_deg);
+        let ay = g.f32(g::AIM_Y + o);
+        g.set_f32(g::AIM_Y + o, ay + ((ty - jz as f32) - ay) * rate);
+        n.aim = Some([b.pos[0] + dx, g.f32(g::AIM_Y + o), b.pos[2] + dz]);
+        if automatic != 0 {
+            if g.get(g::FIRE, p) >= 0 {
+                n.held = 0x2000;
+                match automatic {
+                    1 if skill::BURST[self.skill] < g.get(g::FIRE, p) => n.held &= !0x2000,
+                    2 if !shoot => n.held &= !0x2000,
+                    _ => {}
+                }
+            }
+        } else if shoot {
+            if single {
+                (n.pressed, n.held) = (0, 0);
+            } else {
+                (n.pressed, n.press) = (0x2000, 1);
+            }
+        } else if single {
+            n.held = 0x2000;
+        }
+        n.held |= 0x10;
+        n.hold = 1;
+        far
+    }
+}
+
+/// The ray of `func_1508C1A4` from eye `from` to eye `to`: `None` when a wall is in the way, else
+/// whether the line also stays clear of the navigation's barrier lines.
+pub fn sight(world: &CollisionWorld, graph: &Graph, from: [f32; 3], to: [f32; 3]) -> Option<bool> {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let walls = len <= 0.0 || {
+        let dir = d.map(|v| v / len);
+        conker_rules::projectile::raycast(world, from, dir, len) >= len
+    };
+    walls.then(|| graph.crossing(from, d[0], d[2]) <= 0.0)
+}
+
+/// `func_1508B2A8` from `node`: the walkway out of a noise of radius² `r2` at `at` (x, z): nodes
+/// inside are walked through, the first ones outside (at most 8) listed with their distance². The
+/// visited set takes bit `node & 3` of byte `node >> 3`, so pairs of nodes share a bit (the game's).
+fn walkway(
+    g: &Graph,
+    node: u8,
+    at: [f32; 2],
+    r2: f32,
+    seen: &mut [u8; 32],
+    out: &mut Vec<(u8, f32)>,
+) {
+    seen[usize::from(node >> 3)] |= 1 << (node & 3);
+    let n = g.nodes[usize::from(node)];
+    let (dx, dz) = (f32::from(n.pos[0]) - at[0], f32::from(n.pos[2]) - at[1]);
+    let d2 = dx * dx + dz * dz;
+    if r2 < d2 {
+        if out.len() < 8 {
+            out.push((node, d2));
+        }
+        return;
+    }
+    for nb in n.next {
+        if nb != NONE && seen[usize::from(nb >> 3)] & (1 << (nb & 3)) == 0 {
+            walkway(g, nb, at, r2, seen, out);
+        }
+    }
+}
+
+/// Query 0xCD: how far `o` lies off `b`'s heading, in degrees (−180..180, or its size when `abs`):
+/// `func_1505A630(dx, −dz) + 0x4000` (the direction's angle, a quarter turn on, as the heading
+/// obj+0x40 is the facing + 90°, V on bot_long3) against the heading.
+fn off_heading(b: &Body, o: &Body, abs: bool) -> i32 {
+    let to = conker_sim::movement::atan2_u16(b.pos[2] - o.pos[2], o.pos[0] - b.pos[0]);
+    let deg = wrap360((to.wrapping_add(0x4000)) as f32 * 0.005_493_164);
+    let mut d = wrap360(wrap360(b.heading) - deg);
+    if d > 180.0 {
+        d -= 360.0;
+    }
+    if abs && d < 0.0 {
+        d = -d;
+    }
+    d as i32
+}
+
+/// A human's head above its feet, where a bot aims once it has fought it long enough (I: obj+0x1A6,
+/// the head joint, read 47-57 above the feet in the oracle's RAM).
+const HEAD: f32 = 52.0;
+
+fn wrap360(d: f32) -> f32 {
+    let r = d % 360.0;
+    if r < 0.0 { r + 360.0 } else { r }
+}
+
+/// Query 0xD3: the held item's class: 2 automatic guns, 3 melee, 1 other weapons, 0 none.
+pub fn weapon_class(item: u8) -> i32 {
+    match item {
+        0x03 | 0x09 | 0x15 => 2,
+        0x21 | 0x22 => 3,
+        0x14 | 0x16 | 0x18 | 0x23 | 0x24 | 0x37 | 0x38 | 0x39 | 0x3F | 0x41 => 1,
+        _ => 0,
+    }
+}
+
+/// `func_1508E6D0` (query 7): the range a weapon is worth using at.
+pub fn give_range(id: i32) -> i32 {
+    match id {
+        0x3F => 0x708,
+        0x14 => 0xC80,
+        0x22 | 0x15 | 0x21 | 0x19 | 0x40 => 0x1F4,
+        0x23 => 0x2710,
+        0x09 | 0x38 => 0x1388,
+        0x03 => 0x2EE,
+        0x37 => 0x5DC,
+        _ => 0x186A0,
+    }
+}
+
+/// `func_1508BC20`: each participant's preference bytes for the others (G+0x15B4 + 16p), a zigzag
+/// of steps 0xAA / (n/2) from 0x55 laid from a random start in a random direction.
+fn prefer(g: &mut Globals, n: usize, rng: &mut Rng) {
+    if n == 0 {
+        return;
+    }
+    let step0 = 0xAA / (n as i32 / 2).max(2);
+    for p in 0..n {
+        // The game marks the start used in a table it clears for every participant, so it never
+        // moves; both draws are taken.
+        let mut s = (rng.next_f32() * n as f32) as i32;
+        let _dir = rng.next_f32() > 0.5;
+        let (mut v, mut step) = (0x55i32, step0);
+        for _ in 0..n {
+            let at = g::PREFER as usize + 16 * p + s as usize;
+            g.0[at] = if v < 0x100 { v as u8 } else { 0xFF };
+            s += 1;
+            if s >= n as i32 {
+                s = 0;
+            }
+            v += step;
+            if v >= 0x100 {
+                step = -step;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weapon_tables() {
+        assert_eq!(
+            (
+                weapon_class(0x09),
+                weapon_class(0x22),
+                weapon_class(0x39),
+                weapon_class(0)
+            ),
+            (2, 3, 1, 0)
+        );
+        assert_eq!(
+            (give_range(0x09), give_range(0x24), give_range(0x22)),
+            (5000, 100_000, 500)
+        );
+    }
+
+    #[test]
+    fn angle_off_the_heading() {
+        // Facing +x (facing 0, heading 90°, as the game's obj+0x40 reads).
+        let me = Body {
+            heading: 90.0,
+            ..Body::default()
+        };
+        let at = |x, z| Body {
+            pos: [x, 0.0, z],
+            ..Body::default()
+        };
+        assert_eq!(off_heading(&me, &at(100.0, 0.0), false), 0);
+        // The facing turns toward −z as it grows (a move by (cos a, −sin a)): −z is 90° to one side.
+        assert_eq!(off_heading(&me, &at(0.0, -100.0), false).abs(), 90);
+        assert_eq!(off_heading(&me, &at(0.0, 100.0), true), 90);
+        assert_eq!(off_heading(&me, &at(-100.0, 0.0), true), 180);
+    }
+
+    #[test]
+    fn preference_bytes_zigzag() {
+        let mut g = Globals::new(g::SIZE);
+        let mut rng = Rng::default();
+        prefer(&mut g, 4, &mut rng);
+        for p in 0..4 {
+            let row: Vec<u8> = g.0[g::PREFER as usize + 16 * p..][..4].to_vec();
+            let mut sorted = row.clone();
+            sorted.sort();
+            // 4 players: steps of 0xAA / 2 = 0x55 from 0x55: 0x55, 0xAA, 0xFF, then 0x154 ≥ 0x100 → 0xFF.
+            assert_eq!(sorted, [0x55, 0xAA, 0xFF, 0xFF], "row {p}: {row:?}");
+        }
+    }
+}

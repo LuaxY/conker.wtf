@@ -1,0 +1,13 @@
+[package]
+name = "extract-character"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+extract-core.workspace = true
+extract-gbi = { path = "../extract-gbi" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+png.workspace = true

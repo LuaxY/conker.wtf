@@ -1,0 +1,8 @@
+[package]
+name = "conker-camera"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+extract-core.workspace = true
+extract-scene = { path = "../extract-scene" }

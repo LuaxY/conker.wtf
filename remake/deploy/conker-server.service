@@ -1,0 +1,30 @@
+# systemd unit for the game server (deploy/README.md): /etc/systemd/system/conker-server.service
+[Unit]
+Description=Conker multiplayer game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=conker
+Group=conker
+# --assets: the asset pack deploy/pack.sh uploads (Caddy serves the same folder at /assets/).
+# --public: the domain's A and AAAA addresses (the connect tokens name them; the server checks it).
+ExecStart=/opt/conker/conker-server --assets /srv/conker/assets --port 5888 \
+    --cert /etc/conker/tls/fullchain.pem --cert-key /etc/conker/tls/privkey.pem \
+    --token-key /etc/conker/token.key --token-addr 127.0.0.1:5889 \
+    --public 203.0.113.7 --public 2001:db8::7
+Environment=RUST_LOG=info
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

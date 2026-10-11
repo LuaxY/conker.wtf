@@ -1,0 +1,25 @@
+[package]
+name = "conker-sim"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Network protocol (lightyear registration) shared by conker-server and conker-client.
+# Off by default so the pure simulation has no dependencies.
+net = ["dep:bevy", "dep:lightyear", "dep:serde", "dep:conker-assets"]
+
+[dependencies]
+# The follow camera (no dependencies, wasm-compatible): its yaw steers the camera-relative stick.
+conker-camera = { path = "../conker-camera" }
+bevy = { workspace = true, optional = true }
+lightyear = { workspace = true, optional = true, features = ["std", "replication", "prediction", "interpolation", "input_native"] }
+serde = { workspace = true, optional = true }
+# The asset pack's data, which the server and every client build the scene's world from (`net::scene_world`).
+conker-assets = { path = "../conker-assets", optional = true }
+
+[dev-dependencies]
+# Oracle replay tests load scene 0x2D's collision from the ROM (CONKER_ROM); the library itself stays free of them.
+extract-core.workspace = true
+extract-scene = { path = "../extract-scene" }
+extract-character = { path = "../extract-character" }
+conker-anim = { path = "../conker-anim" }

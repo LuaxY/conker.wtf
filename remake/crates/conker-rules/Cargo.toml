@@ -1,0 +1,27 @@
+[package]
+name = "conker-rules"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# The replicated fighter (`net::Fighting`) shared by conker-server and conker-client: serde on the
+# fighter's state and its lightyear registration. Off by default: the rules stay engine-free.
+net = ["conker-sim/net", "dep:serde", "dep:bevy", "dep:lightyear"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+bevy = { workspace = true, optional = true }
+lightyear = { workspace = true, optional = true, features = ["std", "replication", "prediction"] }
+# The game's sinf/cosf, ported op for op (the spawn jitter calls the same two functions).
+conker-camera = { path = "../conker-camera" }
+# Combat: players move with conker-sim's movement and collide with its CollisionWorld; the
+# animation ids of the weapon, hit and death states come from conker-anim.
+conker-sim = { path = "../conker-sim" }
+conker-anim = { path = "../conker-anim" }
+
+[dev-dependencies]
+# ROM tests (CONKER_ROM) check the constants against .game data and scan every scene's surface words.
+extract-core.workspace = true
+extract-scene = { path = "../extract-scene" }
+# The player's root-motion clips (the replay's CollisionWorld::roots).
+extract-character = { path = "../extract-character" }
