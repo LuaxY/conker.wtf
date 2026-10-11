@@ -2,7 +2,7 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] crates/conker-server/bots.sh [seconds=150]. All processes exit by themselves (--seconds).
+# Usage: [PORT=5888] [MAP=2d|30] crates/conker-server/bots.sh [seconds=150]. All processes exit by themselves (--seconds).
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -12,7 +12,7 @@ logs=$(mktemp -d)
 export NO_COLOR=1 RUST_LOG=info
 secs=${1:-150} bots=${BOTS:-2} humans=${HUMANS:-1} port=${PORT:-5888}
 
-$bin/conker-server --port $port --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
+$bin/conker-server --port $port --map ${MAP:-2d} --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!
 for _ in {1..300}; do [[ -s $logs/digest.txt ]] && break; sleep 0.1; done

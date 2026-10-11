@@ -882,25 +882,32 @@ fn code_cues() -> Vec<Cue> {
     cues
 }
 
-/// The map's bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
-/// capture, 25000, 500/1500, one of ten).
-fn emitters() -> Vec<Emitter> {
-    [[-1101, -1201, -229], [650, -1191, 486]]
-        .map(|at| Emitter {
-            at,
-            play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
-            start_chance: 0.005,
-        })
-        .into()
+/// A map's own sound: its emitters and the channels of sequence 19 its background plays.
+/// 0x2D: two bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
+/// capture, 25000, 500/1500, one of ten), channels 0-3 (mute mask 0xFFF0). 0x30: no emitter (V: no
+/// positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask 0xFFC0, V).
+fn map_sounds(map: &str) -> (Vec<Emitter>, &'static str) {
+    let emitters = match map {
+        "2d" => [[-1101, -1201, -229], [650, -1191, 486]]
+            .map(|at| Emitter {
+                at,
+                play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
+                start_chance: 0.005,
+            })
+            .into(),
+        _ => vec![],
+    };
+    let channels = if map == "2d" { "0-3" } else { "0-5" };
+    (emitters, channels)
 }
 
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
-/// under `audio/` that hold them. `surfaces`: the map's terrain surface kinds (footsteps);
-/// `background`: a recording of the map's background (`../lab/audio`'s), or None.
+/// under `audio/` that hold them. `surfaces`: the maps' terrain surface kinds (footsteps); `maps`:
+/// each map's folder name and a recording of its background (`../lab/audio`'s), or None.
 pub fn pack_audio(
     rom: &Rom,
     surfaces: &BTreeSet<u8>,
-    background: Option<&[u8]>,
+    maps: &[(String, Option<&[u8]>)],
 ) -> Result<(Files, Vec<String>)> {
     use conker_assets::audio::{self as pack, Audio, Events, MapSounds};
     let game_data = rom.game_data()?;
@@ -911,21 +918,26 @@ pub fn pack_audio(
         cues.extend(hit_voices(rom, &game_data, class, folder)?);
     }
     let mut files = Vec::new();
-    let mut map = MapSounds {
-        background: vec![],
-        emitters: emitters(),
-    };
-    if let Some(wav) = background {
-        let file = format!("maps/{}/background.wav", crate::PACK_MAP);
-        map.background.push(Background {
-            file: file.clone(),
-            volume: 32767,
-            note: "the game's own output (sequence 19, channels 0-3, at volume 32000), recorded on the oracle and looped whole".into(),
-        });
-        files.push((format!("audio/{file}"), wav.to_vec()));
+    let mut map_events = BTreeMap::new();
+    for (name, background) in maps {
+        let (emitters, channels) = map_sounds(name);
+        let mut map = MapSounds {
+            background: vec![],
+            emitters,
+        };
+        if let Some(wav) = background {
+            let file = format!("maps/{name}/background.wav");
+            map.background.push(Background {
+                file: file.clone(),
+                volume: 32767,
+                note: format!("the game's own output (sequence 19, channels {channels}, at volume 32000), recorded on the oracle and looped whole"),
+            });
+            files.push((format!("audio/{file}"), wav.to_vec()));
+        }
+        map_events.insert(name.clone(), map);
     }
     let events = Events {
-        maps: BTreeMap::from([(crate::PACK_MAP.to_string(), map)]),
+        maps: map_events,
         characters,
         footsteps: footsteps(rom, surfaces)?,
         cues,
@@ -949,11 +961,10 @@ pub fn pack_audio(
             }
         }
     }
-    for e in &events.maps[crate::PACK_MAP].emitters {
-        add(
-            &mut e.play.sounds.iter().copied(),
-            format!("maps/{}", crate::PACK_MAP),
-        );
+    for (name, map) in &events.maps {
+        for e in &map.emitters {
+            add(&mut e.play.sounds.iter().copied(), format!("maps/{name}"));
+        }
     }
     for c in &events.cues {
         let scope = c

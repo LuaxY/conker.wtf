@@ -1,5 +1,72 @@
 # Status after wave 6 (2026-10-10)
 
+## Match settings, the end and the results (2026-10-11)
+**The server takes the original's SET-UP options (`--time 3-10|unlimited`, `--lives 1-5`, `--kills 0-10`, `--skill
+inbred..einstein`, `--radar on|off`; defaults 10 min, 3, unlimited, NORMAL, on) and ends the match as
+`func_151E565C` does: the clock at 0, a player at the kill limit, fewer than 2 in play or no human in play once someone
+is out of lives. After the fade every client draws the original's STATS over the frozen level; the next match (same
+settings) starts once every human chose RESTART, or 40 s after the end; QUIT leaves (browser: `index.html`).** Untimed,
+the HUD has no clock and shows the lives left (the original's digit); a player out of lives stays down under a skull.
+
+| Part | What |
+|---|---|
+| Rules | `Settings`, `Match::with`, `ends`, `places` (kills − deaths, the kill limit's holders +1000 once reached, then fewer shots s126+0x1AA; tied humans share a place); `Fighter` `deaths`, `shots` (+1 per round, swing, grenade pull), `hits`, `headshots`, `out`; 5 bot skill levels (tables at 0x800872B0) |
+| Net | `PROTOCOL_ID` 11: `MatchView` time, lives, kill limit, radar, `restart_in`; `Combat` deaths, shots, hits, headshots, out, `lives_left` (drops at the respawn, as `func_15085710`); `Restart` message (client → server) |
+| Pack | `conker-extract pack` adds `hud/end.json` (lives digits, skull, STATS layout) and 11 PNGs (RGBA32 tiles 0xD14, 0xD0F, 0x816, 0x80E/0x810, 0x7FC/0x7FE, 0x7E8, 0x888, 0x887, 0x843); `hud.json` unchanged. Copied into `../assets/hud/` (new files only), `README.md` gained the section |
+| Client | `hud.rs`: lives digit, skull, results (a row per human: place, accuracy, kills, headshots, deaths; RESTART/QUIT lit by the menu); `results.rs`: the menu (stick left/right toggles, A chooses) |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| Oracle end timing (`../lab/research/mp-original`, `CONKER_MP_OPTS`) | kill limit 1: lethal hit 118, phase 7 at row 159 = the remake's `ended_at` + 41 (the first `Fading` row); time-out the same; lives 1 (1 human + bot): the human out at 384, phase 7 at 424; results auto-quit after 0x961 VIs = 40 s |
+| Pack | the 11 PNGs equal the research's own decode (`../lab/hud/out/end`) pixel for pixel; a fresh `hud.json` equals `../assets`'; `pack.rs` (ROM) reads `end.json` back |
+| e2e, native | `--bots 1 --time unlimited --lives 1 --skill einstein`: the human out at t 2097, next match at 3506 by the 40 s deadline; with the script's A taps: "slot 1 votes to restart", next match at 2427; `--bots 2 --kills 1 --lives 2`, 2 offscreen clients: the kill at t 1996 ends it, `../lab/screens/end/results.png` (P1 2nd 0% 0 0 1), `untimed-lives.png` |
+| `smoke.sh` (port 5911) | 16/16, prediction max error 0 |
+| Tests (target-net) | conker-rules 58 + combat replays 3/3 (ROM), -bots, -sim, -server 14, -client 40, -assets, -extract (ROM) pass; clippy clean; wasm `cargo check` passes; no browser run |
+| Chrome (after both agents, `web/build.sh web`, 4,423,488 B brotli) | `--kills 1 --bots 3` on 0x2D: the STATS screen over the level (`../lab/screens/end/chrome-results.png`), a held Space = "slot 3 votes to restart" and the next match at once; on 0x30 the match plays (`chrome-map30-1.png`). A DevTools key tap (down and up in the same tick) is no press: the menu reads the pad per tick, like the game |
+| Next match's RNG | with `--kills 1` no respawn ran the rules' RNG, so every next match replayed the last (the same grenade at read 213); the next match now goes on from the bots' RNG (`Bots::rng`) |
+
+Gaps:
+- The skull is drawn at its full 32 x 32 (the original grows it from 8 x 8 over 16 frames) and the level still draws
+  in an eliminated player's view (the original draws only the sky). The lit button does not pulse.
+- During the fade the original hides the radar, score and rank (HUD flags `&= 0xE35F`); the remake keeps them.
+- `hits` counts every hit taken from another player (burns and multi-victim blasts too; when the original's
+  `gGameState+0x66` counts is untraced); the flame counts no shots; headshots only from rays and aimed shots (bullets
+  have no head test in the rules). P3/P4 row colours are inferred (their labels' green and yellow).
+- RESTART starts the next match at once (the original fades 17 frames); a finished match with no human left waits for
+  one to join. Tied bots share a place (the original orders them by slot; bots are not listed).
+
+## Deathmatch on scene 0x30 (2026-10-11)
+**`conker-server --map 30` plays Deathmatch on scene 0x30 (the original's scenario 5); `--map 2d` (default) is
+unchanged.** The server's token endpoint answers `GET /info` with `{"map":"30","protocol":11}`; native clients and the
+page fetch it first (`connection::info_url`/`info_map`; `map=` skips it), then load `maps/<map>/`. Caddy proxies `/info`
+with `/token`. The client's level, sound (background, emitters) and collision follow the server's map; `PACK_MAP`
+remains only as `--map`'s default name (and in a held-weapons test).
+
+| Step | What |
+|---|---|
+| Oracle (`../lab/oracle/map30`, private copy of the oracle) | Scenario 5 (1 human + 15 bots) and 10 (War: Colors, 2 + 14, 70 s): `spawn_lldb` + traces, RAM dumps. DM start by slot `[12,14,10,15,8,4,9,5,1,21,18,22,19,23,20,24]`, masks all ones (V). Colors: team 0 = squirrels (class 4, model 128), green flag (131, 1342, 6144), starts `[12,10,11,13,6,7,8,9]`, mask 0x3FC0; team 1 = Tediz, red flag (−330, 410, −3803), `[14,15,16,17,2,3,4,5]`, mask 0x3C03C (V; per-rank order I). 17 pickups, respawn 240 (V, RAM); the game moves them off their placed models by 2-344 units (`SPOTS_30`, RAM; ROM source untraced). New surface kind 0x11 on 59 faces: sink 0, no slide class, only its footsteps. Ambience: song 19, channels 0-5 (mute 0xFFC0); no emitters heard in 25 s |
+| Rules | `spawn::starts(scene)` (`Starts`: DM table, the sides' records and masks: 0x2D Total War's, 0x30 Colors'); `weapon::pickups(scene)` (`PICKUPS_30`, `SPOTS_30`) |
+| Pack | `conker-extract pack --map 2d --map 30 --background 2d=… --background 30=…` (repeatable; default 2d only). Added to `../assets`: `maps/30/` (113 textures), `audio/maps/30/background.wav` (one loop period, seam sample-exact, `../lab/audio/map30`), `audio/common/0650-0660.wav`; `pack.json`, `audio/events.json`, `audio/sounds.json` and `README.md` gained the new entries only. A fresh two-map export equals `../assets` file for file |
+| Bots | Lifts of shape 2 (oriented boxes, 10 on 0x30) via `Lifts::new(triggers, scene)`; the pickup-gives check no longer reads 0x2D's table |
+| Mounted guns | Two model-138 objects (hp 15) at (−322, −387, −3621) and (170, 544, 5938), present in DM: touching one mounts it (player state 161, the camera moves to the gun), Z fires (state 164), B does not dismount; damage untested. Not implemented |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| `conker-rules` oracle test | 15 captures (2 on 0x30): 187 placements + 51 respawns (1,187 RNG draws), 0 mismatches; 93 start records, 51 masks; 15 traces, 115 rows |
+| `conker-extract` `pack.rs` (ROM) | both maps read back exactly (collision, 25 spawns, pickups = `PICKUPS_30` + `SPOTS_30`, nav, triggers, glTF); audio: kind 0x11 footsteps, 0x30 without emitters |
+| `MAP=30 smoke.sh wt ws ws` (port 5940) | 16/16, prediction max error 0 (685/686/268 ticks); `MAP=2d` (5946): 16/16, max error 0 |
+| `MAP=30 bots.sh` (3 bots 120 s; 5 bots 150 s) | every bot moves (61-156 positions/s), 4 and 16 pickups, 7 and 8 hits, 2 and 5 kills, 103 and 190 lift rides; the script's every-bot-fights check fails on this larger map (2 and 3 bots without a hit) |
+| Browser (`/tmp/web-map30`, headless Chrome) | WebTransport and WebSocket, `/info` then `maps/30/`: `../lab/screens/map30/browser-wt.png`, `browser-ws-overview.png` |
+| Tests (target-net) | conker-assets, -extract, -rules, -sim, -bots, -server, -client pass; clippy clean in this work |
+
+Gaps:
+- **Bots loop on lift pairs:** 1-2 bots per match ride a pair back and forth all match (e.g. lifts 4 ↔ 7, every 36
+  ticks): their goal, node 29, lies inside lift 4's box, so the lift fires before they arrive and the AI keeps the goal.
+  The original's bots ride the same pair too (s10 player 9: 4 rides in 380 reads) but wander 100-150 reads between
+  rides; why the original's AI changes its goal is untraced.
+- 0x30's camera script zones are not ported (`CameraLevel` has 0x2D's only); its 8 action-1 camera volumes are
+  ignored, as on 0x2D. The mounted guns are left out. No team modes (Colors' tables are only used for the sides).
+
 ## HUD (2026-10-11)
 **The match shows the original's Deathmatch HUD, natively and in the browser, from the pack's `hud/`: chocolate health
 (top left), kills and place `0 (1st)` (top centre), the held weapon's icon or the grenades in the hand and the radar
@@ -140,10 +207,10 @@ Gaps:
 **A player picks a side, `side=squirrels|tediz` (URL query, or `--side` natively); without it the server puts the
 player on the side with fewer players (the squirrels on a tie), and bots alternate (even slots squirrels).** The side
 picks the model and its body; the match stays a Deathmatch (every player its own team, scoring per player). **Each side
-starts and respawns in its own base, as War: Colors does (after the bases fix below): the squirrels in the south, green
+starts and respawns in its own base, as War: Total War does (after the bases fix below): the squirrels in the south, green
 base (records 0, 6, 7, ...), the Tediz in the north, red one (1, 13, 14, ...).**
 
-What the original does (oracle runs in `../lab/oracle`: `sides_s9` = War: Colors, scenario 9, 2 humans + 2 bots,
+What the original does (oracle runs in `../lab/oracle`: `sides_s9` = War: Total War, scenario 9, 2 humans + 2 bots,
 both humans on `jump.txt`, raw trace and RAM dumps; `sides_dm_custom` = Deathmatch with the menu's characters poked
 by lldb through `tools/combat_lldb.sh`, which re-signs a temporary copy, the oracle binary untouched; the ROM probe
 `../lab/tools/sides_probe`, modes `models`, `routes`, `scripts`). V oracle, C code/ROM, I inferred:
@@ -192,10 +259,10 @@ Changes:
   x −4300, behind 1, 13, 14); the textures only the south uses average green or olive (`0729` 41,66,16; `2728`
   32,60,18; `0730`/`0731` 66,83,36; `0289`; `0189`), the north's only ones red (`3755` 80,22,21 on 42 triangles;
   `1858` 107,37,36; `0606`/`0607` ~90,20,18; `0831` 61,1,0; `1582`). So south = green = team 0 = model 128, matching
-  the oracle's War: Colors (`sides_s9`: team 0 starts on `COLORS_START[0]`). Now:
+  the oracle's War: Total War (`sides_s9`: team 0 starts on `TOTAL_WAR_START[0]`). Now:
   - **Server:** `Game::placement(slot, side)`: a side's k-th player (k = its players now, `Game::members`) starts on
-    `COLORS_START[side][k % 8]` (jittered) and respawns in its half, `COLORS_MASKS[side]` (V for k = 0, 1 in the
-    original; Colors indexes by team, here by side, since the remake's Deathmatch has no teams), for bots and humans,
+    `TOTAL_WAR_START[side][k % 8]` (jittered) and respawns in its half, `TOTAL_WAR_MASKS[side]` (V for k = 0, 1 in the
+    original; Total War indexes by team, here by side, since the remake's Deathmatch has no teams), for bots and humans,
     at the start and mid-match. The respawn's scoring is unchanged: every other player is an enemy. A `--spawn` slot
     (oracle replays) keeps the original's Deathmatch: the slot's `DEATHMATCH_START` record (facing, camera) and every
     record for respawns.
@@ -1603,7 +1670,7 @@ The white quad near record 1 is still there (`duel4-p1.png`, top left).
 8. **Fidelity details:** 3-VI frames, the render-only camera offsets, segment-8 render state, fog and sky from the
    game, the level duplicates and the white quad; consolidate the duplicated tables and world queries into conker-sim;
    update the stale lab notes and `../RUST_REMAKE_PLAN.md`.
-9. **Modes:** War: Colors (scenario 9, same scene; its start records and masks are known), then the others.
+9. **Modes:** War: Total War (scenario 9, same scene; its start records and masks are known), then the others.
 
 ## Wave 3 (2026-10-08 to 2026-10-09)
 Wave 3's summary, as this file's top read after it:
@@ -1938,13 +2005,13 @@ clone. Replay test `tests/combat.rs`, re-run here: 29 traces, 17,267 frames × 2
   draw per human from the scene load (record 0), then one per participant in slot order from the level script.
 - **Start records:**
   - Deathmatch by slot: [1, 0, 13, 6, 14, 7, 15, 8, 16, 9, 17, 10, 18, 11, 19, 12] (V for slots 0-15).
-  - Colors (scenario 9) by team: team 0 on 0, 6, 7, … (south), team 1 on 1, 13, 14, … (north). V for the first two
+  - Total War (scenario 9) by team: team 0 on 0, 6, 7, … (south), team 1 on 1, 13, 14, … (north). V for the first two
     of each team.
 - **Respawn:**
   - Candidates are the records in the team's mask, minus the player's previous respawn record (which takes no draw).
   - Score = the squared XZ distance to the nearest enemy (capped at 1e8) + (500·f)². The first highest wins, with no
     jitter.
-  - Deathmatch's masks stay all ones. Colors' level script sets 0xFFF01FFD / 0xFFFFE03E before the first respawn
+  - Deathmatch's masks stay all ones. Total War's level script sets 0xFFF01FFD / 0xFFFFE03E before the first respawn
     (when exactly is I).
 - **Record bytes** (C): +6 → obj+0xB8 in degrees (consumer untraced); +0x14 is never read; +0x15 → struct126+0x23
   (meaning untraced); +0x16 is a redirect the respawn path never follows.
@@ -2157,7 +2224,7 @@ re-exports `Arena`, `Event`, `Fighter`, `Match`, `Phase`, `Rng`, the spawn items
   - `Spawn` (field for field `extract_scene::SpawnPoint`), `Placement { index, pos, facing, camera }`.
   - `place(&[Spawn], index, &mut Rng)`.
   - `respawn(&[Spawn], eligible: u32, last: Option<usize>, enemies: &[[f32; 2]], &mut Rng)`.
-  - `DEATHMATCH_START`, `COLORS_START`, `DEATHMATCH_MASKS`, `COLORS_MASKS`, `JITTER`, `b6_degrees`.
+  - `DEATHMATCH_START`, `TOTAL_WAR_START`, `DEATHMATCH_MASKS`, `TOTAL_WAR_MASKS`, `JITTER`, `b6_degrees`.
 - `surface`: `Surface(u32)` with `kind()`, `slide()`, `sink()`; `SINK: [[i8; 3]; 32]`;
   `sink_target(Surface, speed, height) -> i16`; `step_sink(sink, target) -> i16`.
 - `game`:
@@ -2301,7 +2368,7 @@ wave 4's "Honest gaps".
 10. **Fidelity details:** 3-VI frames, the render-only camera offsets, segment-8 render state, fog and sky from the
     game, the level duplicates and the white quad. Consolidate the duplicated tables and world queries into
     conker-sim.
-11. **Modes:** War: Colors (scenario 9, same scene; its start records and masks are known), then the others.
+11. **Modes:** War: Total War (scenario 9, same scene; its start records and masks are known), then the others.
 
 ## Wave 2 (2026-10-08)
 Seven agents worked in this wave:
@@ -3185,7 +3252,7 @@ reads when no script is loaded.
     - `avian3d` and `bevy_enhanced_input` are still unused. Collision queries are conker-sim's own `CollisionWorld`,
       the movement is a kinematic port, and input is read directly.
     - In wave 2, `Cargo.lock` gained conker-camera and conker-anim, and Bevy features for the client (glTF, PNG, free camera).
-- **War: Colors** (scenario 9) player models are not observed yet; only Deathmatch's 117 is.
+- **War: Total War** (scenario 9) player models are not observed yet; only Deathmatch's 117 is.
 - **Wave 2 contracts between crates:**
   - `Input.camera_yaw` is the eye → look-at heading of the previous tick, truncated to a u16 (conker-camera's
     `yaw_u16()`; only `>> 8` is used). **Wave 3:** it is `Follow::yaw()` = `CameraState::stick_yaw()`, all 16 bits
@@ -3217,7 +3284,7 @@ Of the unranked items:
 - Chrome: done. Firefox and Safari: not run.
 - Texture decoding: consolidated.
 - The 3 decode failures: explained (the ROM's own lists).
-- The lightyear report and the Colors models: not done.
+- The lightyear report and the Total War models: not done.
 
 The plan as written in wave 1:
 
@@ -3248,4 +3315,4 @@ Also needed, not ranked:
 - Report the transport-link bug to lightyear.
 - Consolidate texture decoding.
 - Fix the 3 texture decode failures.
-- Observe the Colors player models.
+- Observe the Total War player models.

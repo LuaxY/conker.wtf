@@ -331,6 +331,61 @@ pub const PICKUPS_2D: [Pickup; 19] = [
     pick(20, 0x23),
 ];
 
+/// Scene 0x30's 17 pickups (Deathmatch and Colors alike), in the manager's order (V from the RAM,
+/// `../lab/oracle/map30`: pickup k is the prop whose id is k + 1).
+pub const PICKUPS_30: [Pickup; 17] = [
+    pick(1, 0x16),
+    pick(2, 0x22),
+    pick(3, 0x24),
+    pick(4, 0x24),
+    pick(5, 0x23),
+    pick(6, 0x23),
+    pick(7, 0x21),
+    pick(8, 0x21),
+    pick(9, 0x09),
+    pick(10, 0x09),
+    pick(11, 0x14),
+    pick(17, 0),
+    pick(12, 0x15),
+    pick(13, 0),
+    pick(14, 0),
+    pick(15, 0x14),
+    pick(16, 0),
+];
+
+/// Where scene 0x30's pickups stand (the props' positions in the RAM, the same from 3 to 57 s and
+/// in both scenarios: V): 2-344 units off their placements, unlike 0x2D's (how the game moves
+/// them is unread).
+pub const SPOTS_30: [[i16; 3]; 17] = [
+    [-1368, 370, 2198],
+    [-241, 352, -290],
+    [-2611, 1474, -3289],
+    [2286, 2411, 5595],
+    [455, -853, -7379],
+    [-667, 80, 9697],
+    [-836, 1466, 6261],
+    [787, 596, -3845],
+    [-188, -1343, -7175],
+    [-20, -396, 9524],
+    [572, -434, 4557],
+    [-2628, -371, 2792],
+    [1948, -346, 1560],
+    [2415, -661, -892],
+    [-891, -843, -6249],
+    [-1602, -862, -1691],
+    [691, 99, 8577],
+];
+
+/// A scene's pickups, and their spots when the game moves them off their placements (empty: on
+/// the placements), if known.
+pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
+    match scene {
+        0x2D => Some((&PICKUPS_2D, &[])),
+        0x30 => Some((&PICKUPS_30, &SPOTS_30)),
+        _ => None,
+    }
+}
+
 /// Touch radius (`100 · s126+0x1AF / 64`, with +0x1AF = 64; C `func_1511DF6C`).
 pub const PICKUP_RADIUS: f32 = 100.0;
 /// A taken pickup is back after 240 VIs (MP+0xEAC) = 120 frames (V `combat_pick57`).
@@ -354,7 +409,7 @@ mod tests {
 
     #[test]
     fn table_is_consistent() {
-        for p in PICKUPS_2D {
+        for p in PICKUPS_2D.iter().chain(&PICKUPS_30) {
             if let Gives::Weapon(id) = p.gives {
                 assert_eq!(weapon(id).unwrap().id, id);
             }

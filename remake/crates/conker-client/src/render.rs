@@ -28,14 +28,14 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_dis
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use conker_anim::id;
-use conker_assets::{PACK_CHARACTERS, PACK_MAP, Slice, character_gltf, level_gltf};
+use conker_assets::{PACK_CHARACTERS, Slice, character_gltf, level_gltf};
 use conker_sim::movement::Side;
 use conker_sim::net::{Combat, MatchView, Player};
 use core::f32::consts::{FRAC_PI_2, TAU};
 
 /// The level's scene and a side's character glTF (asset paths in the pack).
-pub fn level_scene() -> String {
-    format!("{}#Scene0", level_gltf(PACK_MAP))
+pub fn level_scene(map: &str) -> String {
+    format!("{}#Scene0", level_gltf(map))
 }
 
 pub fn character(side: Side) -> String {
@@ -148,6 +148,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
         ),
     };
     let free = cfg.view.is_some();
+    let level = level_scene(&cfg.map);
     let lift = |s: Side| f32::from(slice.characters[s as usize].model_lift);
     app.insert_resource(ModelLift(SIDES.map(lift)));
     crate::held::build(app, slice.held);
@@ -220,7 +221,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
                   assets: Res<AssetServer>,
                   images: ResMut<Assets<Image>>| {
                 let target = offscreen.then(|| offscreen_target(&mut commands, images));
-                setup_scene(&mut commands, &assets, eye, look, free, target)
+                setup_scene(&mut commands, &assets, &level, eye, look, free, target)
             },
             setup_combat,
         ),
@@ -269,8 +270,9 @@ fn load_characters(
     mut animations: ResMut<Assets<AnimationClip>>,
     mut loads: Local<Vec<Handle<Gltf>>>,
     mut looks: Local<Vec<Look>>,
+    cfg: Res<Config>,
 ) {
-    let level = assets.get_handle_untyped(level_scene());
+    let level = assets.get_handle_untyped(level_scene(&cfg.map));
     if !level.is_some_and(|h| assets.is_loaded_with_dependencies(&h)) {
         return;
     }
@@ -330,12 +332,13 @@ fn offscreen_target(commands: &mut Commands, mut images: ResMut<Assets<Image>>) 
 fn setup_scene(
     commands: &mut Commands,
     assets: &AssetServer,
+    level: &str,
     eye: Vec3,
     look: Vec3,
     free: bool,
     target: Option<Handle<Image>>,
 ) {
-    commands.spawn(WorldAssetRoot(assets.load(level_scene())));
+    commands.spawn(WorldAssetRoot(assets.load(level.to_string())));
     crate::hud::camera(commands, target.clone());
     // Only the character and the 27 level materials with normals are lit (I: direction and levels).
     commands.spawn((
@@ -722,10 +725,11 @@ fn log_loaded(
     assets: Res<AssetServer>,
     time: Res<Time<Real>>,
     mut pending: Local<Option<Vec<String>>>,
+    cfg: Res<Config>,
 ) {
     let pending = pending.get_or_insert_with(|| {
         let characters = SIDES.map(|s| format!("{}#Scene0", character(s)));
-        [vec![level_scene()], characters.into()].concat()
+        [vec![level_scene(&cfg.map)], characters.into()].concat()
     });
     pending.retain(|path| {
         let done = assets

@@ -170,12 +170,13 @@ fn ready(
     assets: Option<Res<AssetServer>>,
     time: Res<Time<Real>>,
     mut calm: Local<u32>,
+    cfg: Res<Config>,
 ) -> bool {
     // The level and the characters (`render`'s assets): windowed clients connect once they loaded.
     let loaded = assets.is_none_or(|a| {
         let character = crate::render::character;
         [
-            crate::render::level_scene(),
+            crate::render::level_scene(&cfg.map),
             character(Side::Squirrels),
             character(Side::Tediz),
         ]
@@ -201,7 +202,7 @@ fn connect(
 ) {
     if cfg.token.is_empty() {
         #[cfg(not(target_family = "wasm"))]
-        let fetched = fetch(&token_source(&cfg));
+        let fetched = fetch(&token_source(&cfg), "a connect token");
         #[cfg(target_family = "wasm")]
         let Some(fetched) = fetching.poll(&cfg) else {
             return;
@@ -331,6 +332,46 @@ pub fn token_source(cfg: &Config) -> String {
     format!("{url}{sep}id={}", cfg.id)
 }
 
+/// The server's `/info` (its map and protocol): [`token_source`]'s endpoint, `info` for `token`.
+pub fn info_url(cfg: &Config) -> String {
+    let url = token_source(cfg);
+    let url = url.split_once('?').map_or(&url[..], |(u, _)| u);
+    format!("{}/info", url.rsplit_once('/').map_or("", |(base, _)| base))
+}
+
+/// The map named by the server's `/info` body (`{"map":"30","protocol":11}`), if this client
+/// speaks its protocol and knows the map.
+pub fn info_map(body: &[u8]) -> Result<String, String> {
+    let info: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the server's /info: {e}"))?;
+    let protocol = info["protocol"].as_u64().unwrap_or(0);
+    if protocol != conker_sim::net::PROTOCOL_ID {
+        return Err(format!(
+            "the server speaks protocol {protocol}, this client {}: reload the page",
+            conker_sim::net::PROTOCOL_ID
+        ));
+    }
+    let map = info["map"].as_str().unwrap_or_default();
+    conker_sim::net::map_scene(map)
+        .ok_or_else(|| format!("the server's map {map:?} is unknown"))?;
+    Ok(map.into())
+}
+
+/// Natively: the server's map, from its `/info` (for 5 s while the server starts).
+#[cfg(not(target_family = "wasm"))]
+pub fn server_map(cfg: &Config) -> Result<String, String> {
+    let get = || fetch(&info_url(cfg), "the server's map");
+    let mut body = get();
+    for _ in 0..20 {
+        if body.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        body = get();
+    }
+    info_map(body?.as_bytes())
+}
+
 /// The browser's token fetch, in flight: [`connect`] polls it.
 #[cfg(target_family = "wasm")]
 #[derive(Default)]
@@ -367,11 +408,11 @@ fn connect_token(hex: &str) -> Result<ConnectToken, String> {
     ConnectToken::try_from_bytes(&bytes).map_err(|e| format!("bad connect token: {e}"))
 }
 
-/// A plain-HTTP GET's body (native: the token endpoint on the game server's host).
+/// A plain-HTTP GET's body (native: the token and `/info` endpoints on the game server's host).
 #[cfg(not(target_family = "wasm"))]
-fn fetch(url: &str) -> Result<String, String> {
+fn fetch(url: &str, what: &str) -> Result<String, String> {
     use std::io::{Read, Write};
-    let fail = |e: &dyn std::fmt::Display| format!("could not get a connect token from {url}: {e}");
+    let fail = |e: &dyn std::fmt::Display| format!("could not get {what} from {url}: {e}");
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| fail(&"natively only http:// (or pass token=HEX)"))?;
@@ -714,11 +755,21 @@ mod tests {
         // Natively, without `token=`, it asks `token-url` (nothing listens on port 1).
         cfg.id = 9;
         assert_eq!(token_source(&cfg), "http://127.0.0.1:1/t?id=9");
-        let why = fetch(&token_source(&cfg)).err().unwrap();
+        let why = fetch(&token_source(&cfg), "a connect token").err().unwrap();
         assert!(
             why.starts_with("could not get a connect token from http://127.0.0.1:1/t?id="),
             "{why}"
         );
+        // The map comes from `/info` next to the token endpoint.
+        assert_eq!(info_url(&cfg), "http://127.0.0.1:1/info");
+        let info = |s: &str| info_map(s.replace("P", &PROTOCOL.to_string()).as_bytes());
+        assert_eq!(info(r#"{"map":"30","protocol":P}"#), Ok("30".into()));
+        assert!(
+            info(r#"{"map":"30","protocol":1}"#)
+                .unwrap_err()
+                .contains("protocol")
+        );
+        assert!(info(r#"{"map":"zz","protocol":P}"#).is_err());
     }
     const PROTOCOL: u64 = conker_sim::net::PROTOCOL_ID;
 

@@ -10,13 +10,13 @@
 pub mod audio;
 pub mod hud;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
 use conker_assets::{self as assets, ACOS_LEN, FORMAT, MANIFEST, Manifest};
 pub use conker_assets::{ClipInfo, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, RootClip};
-use conker_rules::weapon::{Gives, PICKUPS_2D};
+use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
     Character, DEATHMATCH_PLAYER, FPS, SQUIRREL_SOLDIER, held_models, parse_attachment, parse_model,
@@ -441,30 +441,58 @@ pub fn squirrel(rom: &Rom, tedi: &Character) -> Result<Character> {
     })
 }
 
-/// The asset pack (`conker-extract pack`): the slice's data files ([`conker_assets::Slice`]), its
-/// level, characters ([`PACK_CHARACTERS`]: the squirrel soldier and the Tedi) and held models as
-/// `.gltf` + `.bin` + PNG files, its sound ([`audio::pack_audio`]; `background`: a recording of
-/// the map's background, `../lab/audio`'s, or None), `pack.json` and `README.md`.
-pub fn pack(rom: &Rom, background: Option<&[u8]>) -> Result<Export> {
+/// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any.
+pub struct PackMap<'a> {
+    pub scene: usize,
+    pub background: Option<&'a [u8]>,
+}
+
+/// A map's folder under `maps/`: its scene in lowercase hex (`2d`, `30`).
+pub fn map_name(scene: usize) -> String {
+    format!("{scene:x}")
+}
+
+/// The asset pack (`conker-extract pack`): the data files ([`conker_assets::Slice`]) of each map
+/// (the first one also writes the shared files), their levels, the characters
+/// ([`PACK_CHARACTERS`]: the squirrel soldier and the Tedi) and held models as `.gltf` + `.bin` +
+/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`.
+pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
     let characters = [squirrel(rom, &tedi)?, tedi];
     let (held, models, scenes) = held_level(rom)?;
-    let data = pack_data(rom, &characters, &held)?;
-    let mut out = Export::default();
-    for (path, bytes) in data.write(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS)? {
-        out.add(path, bytes);
-    }
-
-    let level = to_gltf(&scene_level(rom, SLICE_SCENE)?, &textures, "level.bin")?;
-    let held_models = held_gltf(&models, scenes, &textures, "held.bin")?;
     let parse = |text: &str| serde_json::from_str::<Value>(text);
-    let mut gltfs = vec![(
-        assets::level_gltf(PACK_MAP),
-        parse(&level.json)?,
-        level.bin,
-        level.images,
-    )];
+    let mut out = Export::default();
+    let (mut gltfs, mut surfaces, mut summary) = (Vec::new(), BTreeSet::new(), Vec::new());
+    let mut data = None;
+    for (i, map) in maps.iter().enumerate() {
+        let name = map_name(map.scene);
+        let d = pack_data(rom, map.scene, &characters, &held)?;
+        for (path, bytes) in d.write(&name, &PACK_CHARACTERS, PACK_WEAPONS)? {
+            if i == 0 || path.starts_with("maps/") {
+                out.add(path, bytes);
+            }
+        }
+        let level = to_gltf(&map_level(rom, map.scene)?, &textures, "level.bin")?;
+        gltfs.push((
+            assets::level_gltf(&name),
+            parse(&level.json)?,
+            level.bin,
+            level.images,
+        ));
+        // Footsteps for the surface kinds of the maps' terrain (bits 0-4 of the surface words).
+        surfaces.extend((d.collision.iter().filter_map(|t| t.surface)).map(|w| (w & 0x1F) as u8));
+        summary.push(format!(
+            "{name} ({} collision faces, {} spawns, {} pickups, {} triggers)",
+            d.collision.len(),
+            d.spawns.len(),
+            d.pickups.len(),
+            d.triggers.len() / 0x34,
+        ));
+        data.get_or_insert(d);
+    }
+    let data = data.context("pack: no map")?;
+    let held_models = held_gltf(&models, scenes, &textures, "held.bin")?;
     for (name, c) in PACK_CHARACTERS.iter().zip(&characters) {
         let g = c.gltf(&textures, true)?;
         let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
@@ -491,19 +519,19 @@ pub fn pack(rom: &Rom, background: Option<&[u8]>) -> Result<Export> {
             out.add(format!("{dir}/{image}"), png);
         }
     }
-    // Footsteps for the surface kinds of the map's terrain (bits 0-4 of the surface words).
-    let surfaces = (data.collision.iter().filter_map(|t| t.surface))
-        .map(|w| (w & 0x1F) as u8)
+    let backgrounds: Vec<_> = (maps.iter())
+        .map(|m| (map_name(m.scene), m.background))
         .collect();
-    let (sound_files, audio) = audio::pack_audio(rom, &surfaces, background)?;
+    let (sound_files, audio) = audio::pack_audio(rom, &surfaces, &backgrounds)?;
     let wavs = sound_files.iter().filter(|f| f.0.ends_with(".wav")).count();
     out.files.extend(sound_files);
     let (hud_files, hud) = hud::pack_hud(rom)?;
     out.files.extend(hud_files);
+    out.files.extend(hud::pack_end(rom)?.0);
     let manifest = Manifest {
         format: FORMAT,
         source_rom_sha1: US_SHA1.into(),
-        maps: vec![PACK_MAP.into()],
+        maps: maps.iter().map(|m| map_name(m.scene)).collect(),
         characters: PACK_CHARACTERS.map(String::from).into(),
         weapons: vec![PACK_WEAPONS.into()],
         audio,
@@ -522,12 +550,9 @@ pub fn pack(rom: &Rom, background: Option<&[u8]>) -> Result<Export> {
         })
         .collect();
     out.summary.push(format!(
-        "pack: map {PACK_MAP} ({} collision faces, {} spawns, {} pickups, {} triggers), characters \
-         {}, weapons {PACK_WEAPONS} ({} held models), {pngs} PNGs, {wavs} WAVs, a HUD of {} textures and {} glyphs",
-        data.collision.len(),
-        data.spawns.len(),
-        data.pickups.len(),
-        data.triggers.len() / 0x34,
+        "pack: maps {}, characters {}, weapons {PACK_WEAPONS} ({} held models), {pngs} PNGs, \
+         {wavs} WAVs, a HUD of {} textures and {} glyphs",
+        summary.join(" and "),
         characters.join(" and "),
         data.held.len(),
         hud.textures.len(),
@@ -536,30 +561,53 @@ pub fn pack(rom: &Rom, background: Option<&[u8]>) -> Result<Export> {
     Ok(out)
 }
 
-/// The slice's data from the ROM, as the pack keeps it: what the server and the client read from
-/// the ROM (the collision, spawn records, pickups on their placements, trigger table, navigation
-/// graph, clips, held models, acos table and the bots' scripts), and the sink table and model lifts
-/// they compile in.
-fn pack_data(rom: &Rom, characters: &[Character], held: &[Held]) -> Result<assets::Slice> {
-    let placements = scene_placements(rom, SLICE_SCENE)?;
+/// A map's level: the scene's ([`scene_level`]), its pickups' models moved to their spots where the
+/// game moves them off their placements ([`weapon::pickups`]).
+pub fn map_level(rom: &Rom, scene: usize) -> Result<Level> {
+    let mut level = scene_level(rom, scene)?;
+    let (pickups, spots) = pickup_table(scene)?;
+    for (p, spot) in pickups.iter().zip(spots) {
+        for inst in &mut level.instances {
+            if inst.placement == Some(usize::from(p.placement)) {
+                inst.matrix[12..15].copy_from_slice(&spot.map(f32::from));
+            }
+        }
+    }
+    Ok(level)
+}
+
+fn pickup_table(scene: usize) -> Result<(&'static [weapon::Pickup], &'static [[i16; 3]])> {
+    weapon::pickups(scene as u16).with_context(|| format!("no pickup table for scene {scene:#x}"))
+}
+
+/// A map's data from the ROM, as the pack keeps it: what the server and the client read from the
+/// ROM (the collision, spawn records, pickups on their placements or spots, trigger table,
+/// navigation graph, clips, held models, acos table and the bots' scripts), and the sink table and
+/// model lifts they compile in.
+fn pack_data(
+    rom: &Rom,
+    scene: usize,
+    characters: &[Character],
+    held: &[Held],
+) -> Result<assets::Slice> {
+    let placements = scene_placements(rom, scene)?;
+    let (pickups, spots) = pickup_table(scene)?;
     let game_data = rom.game_data()?;
     let table = |at: usize, n: usize| game_data.get(at..at + n).context(".game data too short");
     let sink = table(SINK_AT, 96)?;
     Ok(assets::Slice {
-        collision: (scene_collision(rom, SLICE_SCENE, &placements)?
-            .triangles
-            .iter())
-        .map(|t| assets::Triangle {
-            points: t.points,
-            layer: match t.layer {
-                Layer::Terrain => assets::Layer::Terrain,
-                Layer::Secondary => assets::Layer::Secondary,
-                Layer::Placement(i) => assets::Layer::Placement(i),
-            },
-            surface: t.surface,
-        })
-        .collect(),
-        spawns: (scene_spawns(rom, SLICE_SCENE)?.iter())
+        collision: (scene_collision(rom, scene, &placements)?.triangles.iter())
+            .map(|t| assets::Triangle {
+                points: t.points,
+                layer: match t.layer {
+                    Layer::Terrain => assets::Layer::Terrain,
+                    Layer::Secondary => assets::Layer::Secondary,
+                    Layer::Placement(i) => assets::Layer::Placement(i),
+                },
+                surface: t.surface,
+            })
+            .collect(),
+        spawns: (scene_spawns(rom, scene)?.iter())
             .map(|s| assets::SpawnPoint {
                 position: s.position,
                 byte_06: s.byte_06,
@@ -569,20 +617,22 @@ fn pack_data(rom: &Rom, characters: &[Character], held: &[Held]) -> Result<asset
                 byte_15: s.byte_15,
             })
             .collect(),
-        // As the server's `Arena::deathmatch` places them.
-        pickups: (PICKUPS_2D.iter())
-            .map(|p| assets::Pickup {
+        // On 0x2D as the server's `Arena::deathmatch` places them.
+        pickups: (pickups.iter().enumerate())
+            .map(|(k, p)| assets::Pickup {
                 placement: p.placement,
                 gives: match p.gives {
                     Gives::Weapon(id) => assets::Gives::Weapon(id),
                     Gives::Grenades => assets::Gives::Grenades,
                 },
-                position: placements[usize::from(p.placement)].position.map(f32::from),
+                position: (spots.get(k).copied())
+                    .unwrap_or(placements[usize::from(p.placement)].position)
+                    .map(f32::from),
             })
             .collect(),
         // conker-bots' `Assets::paths`.
-        triggers: rom.asset(&[0x0C, SLICE_SCENE, 5])?.into_owned(),
-        nav: rom.asset(&[0x19, SLICE_SCENE])?.into_owned(),
+        triggers: rom.asset(&[0x0C, scene, 5])?.into_owned(),
+        nav: rom.asset(&[0x19, scene])?.into_owned(),
         ai: rom.asset(&[0x14, 0xBA])?.into_owned(),
         class: rom.asset(&[0x0F, 0])?.into_owned(),
         characters: (characters.iter())

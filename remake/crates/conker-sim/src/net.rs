@@ -38,9 +38,14 @@ use serde::{Deserialize, Serialize};
 /// [`Combat::side`] (it picks the model and the body), and the fighter carries it.
 /// 10: each side starts and respawns in its own base: the fighter carries the records it respawns
 /// on (conker-rules' `Fighter::spawn_mask`), so its owner predicts the server's pick.
-pub const PROTOCOL_ID: u64 = 10;
-/// The multiplayer scene both sides build ([`scene_world`]).
-pub const SCENE: u16 = 0x2D;
+/// 11: the match's SET-UP options and its end: [`MatchView`] carries the settings and the restart
+/// countdown, [`Combat`] what ranks a player (deaths, shots, the place it went out on, lives left),
+/// and a client votes to play again with [`Restart`].
+pub const PROTOCOL_ID: u64 = 11;
+/// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
+pub fn map_scene(map: &str) -> Option<u16> {
+    u16::from_str_radix(map, 16).ok()
+}
 /// Netcode connect-token key. ponytail: fixed dev key (manual tokens); a public server needs a
 /// secret key and a token endpoint.
 pub const DEV_PRIVATE_KEY: [u8; 32] = [0; 32];
@@ -87,14 +92,32 @@ pub struct Combat {
     pub respawn_in: u16,
     /// Respawns so far: the client's camera cuts to the new spawn when it changes.
     pub lives: u16,
+    /// Deaths and shots fired (with `kills`, the player's place: conker-rules' `places`), the
+    /// place it went out on with its last life (0 in play), and the lives it has left.
+    pub deaths: u16,
+    pub shots: u16,
+    pub out: u8,
+    pub lives_left: u8,
+    /// Hits landed and those on the head (the results' accuracy and headshots).
+    pub hits: u16,
+    pub headshots: u16,
 }
 
 /// The match, on one replicated entity.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct MatchView {
-    /// The clock in VIs (60 per second), counting down from 36,000.
+    /// The clock in VIs (60 per second), counting down from `time` minutes.
     pub timer: i32,
-    /// 0 playing, 1 the end fade, 2 over.
+    /// The settings (conker-rules' `Settings`): minutes on the clock (0 unlimited: no clock, lives
+    /// count), lives, the kill limit (0 none), the radar.
+    pub time: u8,
+    pub lives: u8,
+    pub kill_limit: u8,
+    pub radar: bool,
+    /// Over: ticks before the next match starts anyway (every human voting [`Restart`] starts it
+    /// sooner).
+    pub restart_in: u16,
+    /// 0 playing, 1 the end fade, 2 over (the results).
     pub phase: u8,
     /// The tick the match started at and the oracle read it stands for (scripted clients key their
     /// script on it; `None` until the server's `--wait` players have joined).
@@ -128,7 +151,11 @@ pub struct Join {
     pub side: Option<Side>,
 }
 
-/// The channel [`Join`] travels on: reliable.
+/// Over, the results' RESTART: this client's player wants the next match now.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Restart;
+
+/// The channel [`Join`] and [`Restart`] travel on: reliable.
 pub struct JoinChannel;
 
 /// The channel [`Saw`] travels on, with the inputs: unreliable (a lost one falls back to
@@ -140,12 +167,12 @@ pub struct SawChannel;
 #[derive(Resource, Deref)]
 pub struct Collision(pub CollisionWorld);
 
-/// Scene 0x2D's world as the server and every client build it from the asset pack (its characters
+/// A map's world (`scene`: [`map_scene`]) as the server and every client build it from the asset pack (its characters
 /// in [`Side`] order, `conker_assets::PACK_CHARACTERS`): the collision in its order with its wall
 /// layers (`floor.tri` indexes it, so both sides must agree), the game's arctangent table, the
 /// level's camera data (its trigger table), the players' root-motion clips (the Tedi's: both sides
 /// play the same clips, V) and the sink table.
-pub fn scene_world(pack: &conker_assets::Slice) -> CollisionWorld {
+pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
     let mut world = CollisionWorld::layered(pack.collision.iter().map(|t| {
         let layer = match t.layer {
             conker_assets::Layer::Terrain => Layer::Terrain,
@@ -155,7 +182,7 @@ pub fn scene_world(pack: &conker_assets::Slice) -> CollisionWorld {
         (t.points, t.surface.unwrap_or(0), layer)
     }));
     world.acos = AcosTable::new(pack.acos.clone());
-    world.camera = Some(CameraLevel::new(SCENE, &pack.triggers));
+    world.camera = Some(CameraLevel::new(scene, &pack.triggers));
     // Weapon 0x16's Z, the shot death's drift.
     world.roots = (pack.characters[Side::Tediz as usize].root_clips.iter())
         .map(|c| RootTrack {
@@ -216,6 +243,8 @@ impl Plugin for ProtocolPlugin {
         })
         .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<Join>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Restart>()
             .add_direction(NetworkDirection::ClientToServer);
         app.add_channel::<SawChannel>(ChannelSettings {
             mode: ChannelMode::UnorderedUnreliable,

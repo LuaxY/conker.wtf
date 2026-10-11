@@ -2,11 +2,11 @@
 //! `CONKER_ASSETS`, else `../assets`), headless or windowed (prediction needs the pack's collision
 //! either way) and its HUD (`hud/hud.json`). Browser: options from the page URL query; [`start`]
 //! fetches the pack's data files from `assets/` next to the page, where Bevy loads its glTF models
-//! and PNGs from too.
+//! and PNGs from too. Both first ask the server's `/info` which map it plays (`maps/<map>/`).
 
 use conker_assets::audio::Audio;
-use conker_assets::hud::Hud;
-use conker_assets::{MANIFEST, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, Slice};
+use conker_assets::hud::{End, Hud};
+use conker_assets::{MANIFEST, PACK_CHARACTERS, PACK_WEAPONS, Slice};
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
@@ -25,12 +25,19 @@ fn main() {
              or pass --assets DIR)"
         ))
     });
-    let slice = Slice::load(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
+    // The server's map, unless `map=` names one.
+    if cfg.map.is_empty() {
+        cfg.map = conker_client::connection::server_map(&cfg).unwrap_or_else(|e| fail(e));
+    }
+    let slice = Slice::load(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    let hud = Hud::load(|p| std::fs::read(dir.join(p)))
+    let mut hud = Hud::load(|p| std::fs::read(dir.join(p)))
         .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    let end = End::load(|p| std::fs::read(dir.join(p)))
+        .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    hud.end = Some(end);
     let manifest = std::fs::read(dir.join(MANIFEST)).unwrap_or_default();
     let sound = (conker_client::audio::has_sound(&manifest))
         .then(|| Audio::load(|p| std::fs::read(dir.join(p))))
@@ -66,11 +73,18 @@ pub async fn start() -> Result<(), String> {
     {
         pairs.insert(0, ("server".into(), conker_client::page_server(&host)));
     }
-    let cfg = conker_client::Config::from_pairs(pairs)?;
+    let mut cfg = conker_client::Config::from_pairs(pairs)?;
+    // The server's map first (its `/info`), unless `?map=` names one.
+    if cfg.map.is_empty() {
+        let info = conker_client::connection::info_url(&cfg);
+        let body = (conker_client::web::fetch(&info).await)
+            .map_err(|e| format!("could not get the server's map from {e}"))?;
+        cfg.map = conker_client::connection::info_map(&body)?;
+    }
     // Every file at once, from the folder Bevy's asset server reads the glTF models from.
     let root = bevy::asset::AssetPlugin::default().file_path;
-    let mut files = Slice::files(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS);
-    files.push(conker_assets::hud::HUD.into());
+    let mut files = Slice::files(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS);
+    files.extend([conker_assets::hud::HUD, conker_assets::hud::END].map(String::from));
     let requests: Vec<_> = (files.iter())
         .map(|f| conker_client::web::fetch(&format!("{root}/{f}")))
         .collect();
@@ -79,12 +93,14 @@ pub async fn start() -> Result<(), String> {
         bytes.insert(file, request.await?);
     }
     let sound = conker_client::audio::has_sound(bytes.get(MANIFEST).map_or(&[][..], |m| &m[..]));
-    let slice = Slice::load(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
+    let slice = Slice::load(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         bytes.remove(p).ok_or("not fetched")
     })
     .map_err(|e| format!("{root}/{e}"))?;
-    let hud =
+    let mut hud =
         Hud::load(|p| bytes.remove(p).ok_or("not fetched")).map_err(|e| format!("{root}/{e}"))?;
+    let end = End::load(|p| bytes.remove(p).ok_or("not fetched"));
+    hud.end = Some(end.map_err(|e| format!("{root}/{e}"))?);
     // The sound's two data files, if the pack has sound (its WAVs load later, through Bevy).
     let sound = match sound {
         true => {

@@ -17,10 +17,10 @@ pub mod spawn;
 pub mod surface;
 pub mod weapon;
 
-pub use game::{Arena, Event, Fighter, Match, Phase};
+pub use game::{Arena, Event, Fighter, Match, Phase, Settings};
 pub use rng::Rng;
 pub use spawn::{
-    COLORS_MASKS, COLORS_START, DEATHMATCH_MASKS, DEATHMATCH_START, Placement, Spawn, place,
+    DEATHMATCH_MASKS, DEATHMATCH_START, Placement, Spawn, TOTAL_WAR_MASKS, TOTAL_WAR_START, place,
     respawn,
 };
 pub use surface::{Surface, sink_target, step_sink};

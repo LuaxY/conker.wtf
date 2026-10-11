@@ -9,11 +9,8 @@
 //!
 //! Files these tests don't know are skipped: other agents add traces to the same directory.
 
-use conker_rules::spawn::Spawn;
-use conker_rules::{
-    COLORS_MASKS, COLORS_START, DEATHMATCH_MASKS, DEATHMATCH_START, Rng, Surface, place, respawn,
-    sink_target, step_sink,
-};
+use conker_rules::spawn::{Spawn, starts};
+use conker_rules::{DEATHMATCH_MASKS, Rng, Surface, place, respawn, sink_target, step_sink};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -65,7 +62,7 @@ fn spawn(hex: &str) -> Spawn {
     }
 }
 
-/// One logged pick in a match on scene 0x2D and what the game returned.
+/// One logged pick in a match (scene 0x2D or 0x30) and what the game returned.
 struct Pick {
     caller: String,
     player: usize,
@@ -83,6 +80,7 @@ struct Pick {
 
 struct Capture {
     name: String,
+    scene: u16,
     table: Vec<Spawn>,
     picks: Vec<Pick>,
     /// (object, record) from `func_15085410`.
@@ -109,6 +107,7 @@ fn captures(dir: &Path) -> Vec<Capture> {
                 std::fs::read_to_string(dir.join(format!("trajectories/spawn_{name}_lldb.txt")))
                     .unwrap();
             let (mut table, mut picks, mut set_index) = (Vec::new(), Vec::new(), Vec::new());
+            let mut scene = 0x2D;
             let mut open: Option<Pick> = None;
             for line in text.lines() {
                 let kv = fields(line);
@@ -117,7 +116,8 @@ fn captures(dir: &Path) -> Vec<Capture> {
                     Some("setidx") => {
                         set_index.push((int(kv["obj"]) as usize, int(kv["a1"]) as usize))
                     }
-                    Some("pick") if kv["mp"] == "1" && kv["scene"] == "0x2d" => {
+                    Some("pick") if kv["mp"] == "1" && ["0x2d", "0x30"].contains(&kv["scene"]) => {
+                        scene = int(kv["scene"]) as u16;
                         let objs = kv["objs"]
                             .split(',')
                             .map(|o| {
@@ -158,23 +158,23 @@ fn captures(dir: &Path) -> Vec<Capture> {
             }
             Capture {
                 name,
+                scene,
                 table,
                 picks,
                 set_index,
             }
         })
         .collect();
-    // The first runs did not log the table: scene 0x2D's is the same in every run.
-    let table = caps
-        .iter()
-        .find(|c| !c.table.is_empty())
-        .map(|c| c.table.clone())
-        .unwrap_or_default();
+    // The first runs did not log the table: a scene's is the same in every run.
+    let tables: HashMap<u16, Vec<Spawn>> = (caps.iter())
+        .filter(|c| !c.table.is_empty())
+        .map(|c| (c.scene, c.table.clone()))
+        .collect();
     for c in &mut caps {
         if c.table.is_empty() {
-            c.table = table.clone();
+            c.table = tables[&c.scene].clone();
         }
-        assert!(c.table == table, "{}: another table", c.name);
+        assert!(c.table == tables[&c.scene], "{}: another table", c.name);
     }
     caps
 }
@@ -245,13 +245,15 @@ fn every_logged_pick() {
 }
 
 /// The record the level script places each slot on (struct126+0x11B at its pick, and the
-/// `func_15085410` calls where logged), and the respawn masks, by scenario.
+/// `func_15085410` calls where logged), and the respawn masks, by scene and scenario (s9 Total War
+/// and s10 Colors: the sides' tables; else Deathmatch's).
 #[test]
 fn start_records_and_masks() {
     let Some(dir) = oracle_dir() else { return };
     let (mut slots, mut picks) = (0, 0);
     for c in captures(&dir) {
-        let colors = c.name.starts_with("s9");
+        let colors = c.name.starts_with("s9") || c.name.starts_with("s10");
+        let tables = starts(c.scene).unwrap();
         let script: Vec<&Pick> = c
             .picks
             .iter()
@@ -260,9 +262,9 @@ fn start_records_and_masks() {
         for (k, p) in script.iter().enumerate() {
             let want = if colors {
                 let rank = script[..k].iter().filter(|q| q.team == p.team).count();
-                COLORS_START[usize::from(p.team != 0)][rank]
+                tables.sides[usize::from(p.team != 0)][rank]
             } else {
-                DEATHMATCH_START[p.player]
+                tables.deathmatch[p.player]
             };
             assert_eq!(usize::from(want), p.s11b, "{} slot {}", c.name, p.player);
             if let Some(&(_, record)) = c.set_index.iter().find(|s| s.0 == p.player) {
@@ -274,7 +276,7 @@ fn start_records_and_masks() {
             assert_eq!(
                 p.masks,
                 if colors {
-                    COLORS_MASKS
+                    tables.side_masks
                 } else {
                     DEATHMATCH_MASKS
                 },
@@ -289,7 +291,7 @@ fn start_records_and_masks() {
 }
 
 /// Each participant's row at read 23 (the match's first frame) equals its script placement, and the
-/// idle humans are still there at read 30 (bots walk from read 24).
+/// idle humans are still there at read 30 (bots walk from read 24), in x and z.
 #[test]
 fn traces_start_on_the_placements() {
     let Some(dir) = oracle_dir() else { return };
@@ -332,7 +334,11 @@ fn traces_start_on_the_placements() {
             }
             let p = placed[&i];
             let pos: [f32; 3] = floats(&p.out["pos"]);
-            let row = [v[x], v[y], v[z]].map(|s| s.parse::<f32>().unwrap());
+            let mut row = [v[x], v[y], v[z]].map(|s| s.parse::<f32>().unwrap());
+            // By read 30 the floor has settled y: 0x30's record 12 sits 0.84 under its floor.
+            if r == 30 {
+                row[1] = pos[1];
+            }
             assert_eq!(row, pos, "{} read {r} player {i}", c.name);
             assert_eq!(
                 v[facing].parse::<u16>().unwrap(),

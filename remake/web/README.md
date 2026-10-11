@@ -3,9 +3,9 @@
 `index.html` is the landing (Home, the server browser and the lobby: "Landing" below, built from `app/`).
 `play.html` + `play.js`, the game page, load the wasm client from `dist/` (`client.js` + `client_bg.wasm`, built from
 `crates/conker-client`, WebGL2) and start it at once. Nobody picks or uploads a ROM: the client fetches the asset
-pack (`conker-extract pack`: scene 0x2D, character 117 and the held weapons as glTF + PNG, the game data as JSON)
-from `assets/` next to the page, from the site that serves the game. Besides the page and the pack, it fetches only
-its connect token (and, in dev, the certificate digest).
+pack (`conker-extract pack`: scenes 0x2D and 0x30, character 117 and the held weapons as glTF + PNG, the game data as
+JSON) from `assets/` next to the page, from the site that serves the game. Besides the page and the pack, it fetches only
+the server's `/info` (which map it plays), its connect token (and, in dev, the certificate digest).
 
 ## Landing
 
@@ -121,7 +121,9 @@ python3 -m http.server 8080 --bind :: --directory web   # serve web/, not web/di
 
 Open <http://localhost:8080/> for the landing (Join game, This machine, Join game) or
 <http://localhost:8080/play.html> for the game page, which starts by itself, with a status line while the pack loads. The client
-fetches the pack's 13 data files from `assets/` (all at once), then the sound's two (`audio/sounds.json`,
+first asks the game server which map it plays: `GET /info` next to the token endpoint below (`http://localhost:5889/info`,
+`{"map":"2d","protocol":11}`; the server's `--map 2d|30`, default `2d`; a client of another protocol stops there and says
+to reload). Then it fetches that map's and the pack's 13 data files from `assets/` (all at once), then the sound's two (`audio/sounds.json`,
 `audio/events.json`, when `pack.json` lists `audio`), and Bevy its glTF models with their `.bin` files and PNG
 textures, and after the first key press or click the WAVs, from the same folder (no `.meta` requests: `AssetMetaCheck::Never`). Once the level
 and the character have loaded, the client fetches its connect token from the game server (`http://localhost:5889/token`,
@@ -157,6 +159,7 @@ The game page's URL options (`play.html?a=1&b=2`):
 | `digest=HEX` | SHA-256 of the server certificate, for WebTransport (default: the contents of `dist/digest.txt`; none on an https page, whose server has a trusted certificate) |
 | `token-url=URL` | where the client gets its connect token, once the level has loaded (default: `/token` on this page's origin over https, where the static server proxies it; over http the game server's host, its port + 1, `/token`) |
 | `id=N` | netcode client id (default random) |
+| `map=2d` / `30` | the map to load instead of asking the server's `/info` (it must be the server's) |
 | `side=squirrels` / `tediz` | the side to play on: the squirrels (the SHC soldier) or the Tediz (the Tedi), each with its own model; default: the server puts you on the side with fewer players (the squirrels on a tie). Deathmatch scoring stays per player |
 | `script` | drive the player with a test pattern instead of the keyboard |
 | `lag=MS` | add MS to every packet in both directions (a round trip takes 2·MS more), to test the netcode |
@@ -237,7 +240,7 @@ The same pages (the landing's `index.html` and `landing/`, `play.html`, `play.js
 | Asset pack (`/assets/`) | `web/assets`, a symlink to `../assets` (gitignored) | `deploy/pack.sh` uploads a copy with `.br` and `.gz` files to a host folder outside the site; Caddy serves it at `/assets/` (`handle_path`), `no-cache` with an ETag (the pack is editable); the server reads the same folder |
 | Static server | `python3 -m http.server`: no compression (21.8 MB per load), no cache headers | Caddy (`deploy/Caddyfile`): brotli or gzip as the browser asks (4.3 MB), `v/*` and `landing/*` cached a year as `immutable`, the pages and `play.js` `no-cache` (revalidated) |
 | Page | `http://localhost` | `https://DOMAIN` |
-| Connect token (fetched once the assets loaded) | `http://<server host>:<port + 1>/token`, the game server's own endpoint (on `[::]`) | `/token` on the page's own origin, which Caddy proxies to the game server's endpoint on loopback |
+| Connect token (fetched once the assets loaded), and `/info` (first) | `http://<server host>:<port + 1>/token` and `/info`, the game server's own endpoint (on `[::]`) | `/token` and `/info` on the page's own origin, which Caddy proxies to the game server's endpoint on loopback |
 | Token key | a new random key at each server start | `--token-key FILE`, and `--public` names the addresses the tokens carry (the server checks them) |
 | Password | none | optional: the Caddyfile's `basic_auth` block (commented out) asks for one for the whole site |
 | WebTransport certificate | self-signed for 14 days, pinned by its digest (`dist/digest.txt`, or `?digest=`) | the domain's Let's Encrypt certificate, checked as any site's: no digest |
@@ -269,6 +272,27 @@ slots, from the server's start. Humans take the slots after them, so with `--bot
 second slot 3: `--spawn` and `--give` count slots, so pass four `--spawn`s (the bots' first) to place two humans. A
 bot shows on every page as any other player, interpolated, named `Local(N)` in the console lines (`Local(0)` is
 slot 0). The bots pick up weapons, ride the lifts, hunt the humans and each other, die and respawn.
+
+## Match settings and the end
+
+The server's operator picks the original's SET-UP options (defaults: the original's):
+
+| Flag | Values (default) | What |
+|---|---|---|
+| `--time` | `3`-`10` minutes, `unlimited` (`10`) | the clock; untimed, no clock is drawn and the lives count |
+| `--lives` | `1`-`5` (`3`) | untimed only (timed gives 99): a player out of lives stays down; the last one standing wins |
+| `--kills` | `0`-`10`, `0` = `unlimited` (`0`) | the first player to reach it ends the match |
+| `--skill` | `inbred`, `crap`, `normal`, `bastard`, `einstein` or `0`-`4` (`normal`) | the bots' skill |
+| `--radar` | `on`, `off` (`on`) | the HUD's radar |
+
+E.g. `conker-server --bots 3 --time unlimited --lives 2 --kills 5 --skill bastard --radar off`. The match ends as the
+original's does: the clock reaching 0, a player at the kill limit, one player left in play (or no human) once someone
+is out of lives. Untimed, the HUD shows the lives left left of the health instead of the clock, and a player out of
+lives a skull. After the end fade every page shows the results (STATS: a row per human with place, accuracy, kills,
+headshots and deaths) over the frozen level, with RESTART and QUIT (a push of the stick or A/D left or right toggles,
+the game's A = Space or the pad's South button chooses). The next match, with the same settings, starts
+once every human in it chose RESTART, or 40 s after the end. QUIT leaves: the browser goes back to the landing page
+(`index.html`), the native client exits. With the last human gone, a finished match waits for the next one to join.
 
 ## Tested in Chrome 153 (macOS, Apple M2 Max, 2026-10-08)
 

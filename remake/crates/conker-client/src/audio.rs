@@ -33,9 +33,9 @@ use conker_anim::combat::{
     GRENADE_THROW, HIT_MELEE, HIT_SHOT,
 };
 use conker_assets::audio::{
-    Audio, Background, Channel, ClipAction, ClipSound, Cue, On, Play, Sound,
+    Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
 };
-use conker_assets::{Held, Manifest, PACK_CHARACTERS, PACK_MAP, Pickup};
+use conker_assets::{Held, Manifest, PACK_CHARACTERS, Pickup};
 use conker_rules::Rng;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
@@ -88,31 +88,36 @@ struct Pack {
     pickups: Vec<Pickup>,
     clips: [Vec<ClipSound>; 2],
     background: Option<Background>,
+    emitters: Vec<Emitter>,
 }
 
 /// Registers sound: the tick's events and voices ([`hear`], headless too) and, windowed, the device,
-/// the WAV loader and the mute key. `seed`: the client's own random sounds.
+/// the WAV loader and the mute key. `map`: whose ambience plays. `seed`: the client's own random
+/// sounds.
 pub fn build(
     app: &mut App,
     mut audio: Audio,
     held: Vec<Held>,
     pickups: Vec<Pickup>,
     windowed: bool,
+    map: &str,
     seed: u64,
 ) {
     let mut clips = PACK_CHARACTERS.map(|c| audio.events.characters.remove(c).unwrap_or_default());
     for c in &mut clips {
         c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
     }
-    let map = audio.events.maps.get(PACK_MAP);
+    let map = audio.events.maps.get(map);
     let background = map.and_then(|m| m.background.first().cloned());
-    let bursts = vec![Burst::default(); map.map_or(0, |m| m.emitters.len())];
+    let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
+    let bursts = vec![Burst::default(); emitters.len()];
     app.insert_resource(Pack {
         audio,
         held,
         pickups,
         clips,
         background,
+        emitters,
     });
     app.insert_resource(Sounds {
         rng: Rng::new(seed | 1),
@@ -862,9 +867,7 @@ impl Sounds {
             _ => {}
         }
         if m.phase < 2 {
-            let emitters =
-                (cx.pack.audio.events.maps.get(PACK_MAP)).map_or(&[][..], |m| &m.emitters[..]);
-            for (i, e) in emitters.iter().enumerate() {
+            for (i, e) in cx.pack.emitters.iter().enumerate() {
                 let Some(mut b) = self.bursts.get(i).copied() else {
                     break;
                 };

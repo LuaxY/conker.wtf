@@ -8,7 +8,7 @@
 //!   - the scene load (`func_150054C4`), once per human, always on record 0, before the match;
 //!   - the level script at match start (`func_15097A8C` → `func_15172D28`), once per participant in
 //!     slot order, on the record `func_15085410` stored in struct126+0x11B ([`DEATHMATCH_START`],
-//!     [`COLORS_START`]);
+//!     [`TOTAL_WAR_START`]);
 //!   - `func_15172E7C` during the match, which moves a player onto records 2-5, the raised and
 //!     lowered pairs near (-1100, 3700) and (800, -3900) (I: lifts or teleports; trigger untraced).
 //! - **Respawn after a death** (`func_1507D1D8` sets the flag): every eligible record but the
@@ -72,17 +72,56 @@ impl Spawn {
 /// north records (1, 13-19) and the south ones (0, 6-12).
 pub const DEATHMATCH_START: [u8; 16] = [1, 0, 13, 6, 14, 7, 15, 8, 16, 9, 17, 10, 18, 11, 19, 12];
 
-/// Scene 0x2D War: Colors (scenario 9): the k-th member of team 0 starts on `COLORS_START[0][k]`
-/// (the south records), of team 1 on `COLORS_START[1][k]` (north). V for k = 0, 1 (2 humans + 2
+/// Scene 0x2D War: Total War (scenario 9): the k-th member of team 0 starts on `TOTAL_WAR_START[0][k]`
+/// (the south records), of team 1 on `TOTAL_WAR_START[1][k]` (north). V for k = 0, 1 (2 humans + 2
 /// bots); the rest I, by analogy with Deathmatch's lists.
-pub const COLORS_START: [[u8; 8]; 2] =
+pub const TOTAL_WAR_START: [[u8; 8]; 2] =
     [[0, 6, 7, 8, 9, 10, 11, 12], [1, 13, 14, 15, 16, 17, 18, 19]];
 
-/// The `eligible` masks of [`respawn`]: Deathmatch keeps all records (V), Colors' level script
+/// The `eligible` masks of [`respawn`]: Deathmatch keeps all records (V), Total War's level script
 /// clears each team's opposite side, leaving both teams records 2-5 (V on the oracle, set before
 /// the first respawn; when exactly is I). Index by team (0, or 1 for any other team).
 pub const DEATHMATCH_MASKS: [u32; 2] = [!0, !0];
-pub const COLORS_MASKS: [u32; 2] = [0xFFF0_1FFD, 0xFFFF_E03E];
+pub const TOTAL_WAR_MASKS: [u32; 2] = [0xFFF0_1FFD, 0xFFFF_E03E];
+
+/// Scene 0x30 Deathmatch (scenario 5): the record of each participant slot at match start (V on
+/// the oracle for slots 0-15, 1 human + 15 bots, `../lab/oracle/map30`); masks all ones (V).
+pub const DEATHMATCH_START_30: [u8; 16] =
+    [12, 14, 10, 15, 8, 4, 9, 5, 1, 21, 18, 22, 19, 23, 20, 24];
+
+/// Scene 0x30 War: Colors (scenario 10): team 0 (the squirrels, class 4, the green flag's base at
+/// z ≈ 6,100-10,000) starts on `COLORS_START_30[0][k]`, team 1 (the Tediz, the red flag's, z < 0)
+/// on `[1][k]` (V for k = 0-7, 2 humans + 14 bots; by team rank as on 0x2D, I: teams alternated by
+/// slot). Each team respawns on its own start records (masks V, set before the first respawn).
+pub const COLORS_START_30: [[u8; 8]; 2] =
+    [[12, 10, 11, 13, 6, 7, 8, 9], [14, 15, 16, 17, 2, 3, 4, 5]];
+pub const COLORS_MASKS_30: [u32; 2] = [0x3FC0, 0x3_C03C];
+
+/// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
+/// record, and the side's respawn mask), from the War mode played on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Starts {
+    pub deathmatch: [u8; 16],
+    pub sides: [[u8; 8]; 2],
+    pub side_masks: [u32; 2],
+}
+
+/// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'), if known.
+pub const fn starts(scene: u16) -> Option<Starts> {
+    match scene {
+        0x2D => Some(Starts {
+            deathmatch: DEATHMATCH_START,
+            sides: TOTAL_WAR_START,
+            side_masks: TOTAL_WAR_MASKS,
+        }),
+        0x30 => Some(Starts {
+            deathmatch: DEATHMATCH_START_30,
+            sides: COLORS_START_30,
+            side_masks: COLORS_MASKS_30,
+        }),
+        _ => None,
+    }
+}
 
 /// The jitter radius: the point moves by `r = f * 80 - 40` along the record's facing.
 pub const JITTER: f32 = 40.0;

@@ -93,6 +93,38 @@ bots camped with the sniper rifle in the last `bots.sh` runs (known bot weakness
   hint overlap the clock and weapon icon in narrow windows. Deploy `deploy/pack.sh` before a new `web/dist`
   (the client needs `hud/hud.json`). `lab/hud/` holds 1.3 GB of RAM dumps that can be deleted.
 
+## Missing compared with the original's multiplayer (checked 2026-10-11)
+Evidence: `lab/research/mp-original/` (menus-and-flow.md, modes-and-maps.md). Our map 0x2D is the **Total War** map:
+scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier notes (names fixed in the code and docs).
+**Done 2026-10-11:** the SET-UP options, the end conditions and the STATS results with RESTART/QUIT; Deathmatch on
+0x30 (`--map 30`). Leftovers:
+- results: the skull's grow; the level still drawn in an eliminated player's view; the lit button's pulse; the
+  radar/score hidden during the fade; the 17-frame fade before RESTART; when the original counts a hit (accuracy);
+  P3/P4 row colours;
+- 0x30: 1-2 bots per match ride a pair of lifts back and forth all match (the original's wander between rides); the
+  2 mounted machine guns (usable in the original's Deathmatch: mount, Z fires); `bots.sh` fails on this bigger map
+  (not every bot hits in time); camera script zones and volumes (as on 0x2D);
+- the pack: the map export rewrote `pack.json`, `audio/events.json` and `audio/sounds.json` (additions only), so
+  pack edits in those three files would need re-applying.
+1. Around the match:
+   - ~~the end of a match and a STATS screen with RESTART and QUIT~~ (done);
+   - ~~SET-UP: time 3-10 min or unlimited, lives 1-5 (last one standing when untimed), kill limit, bot skill
+     (5 levels), radar on/off~~ (done, as server flags);
+   - pause (CONT./RESTART/QUIT): not online (it would freeze everyone);
+   - bot caps by human count;
+   - real lobby wiring.
+2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), 0x34 Bunker (+crossbow, shotgun), 0x3F Temple
+   (+caveman, item 0x40), 0x1A Vault (+Wise Guy, tommy gun, item 0x19, moving pickups). Per-map character sets and
+   cheat characters. The bots' navigation on those maps is unchecked.
+3. Team modes:
+   - common: team screen with BALANCE, intro and outro cutscenes, team results;
+   - in order: Total War (gas masks, canister, gas; same map), Colors (flags, score 1-40), Beach (Frenchys vs Tediz,
+     turret, escape), Heist (4 teams, money bag, vault), Raptor (raptor rig, eggs, baby);
+   - the win rules aren't in the code found yet: trace them in the oracle first.
+4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
+   to the bar after about 1 s, so its start needs fixing first.
+5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.
+
 ## Wave 7: visuals, browsers, the real deployment
 1. **Visuals:**
    - flame particles;
@@ -147,10 +179,10 @@ bots camped with the sniper rifle in the last `bots.sh` runs (known bot weakness
 
 ## After wave 5
 1. Whichever of A or B wave 5 did not take.
-2. HUD and lobby: the game's own HUD, a scoreboard, the join flow, spectators, the match-end screen (scene 0x1D).
+2. HUD and lobby: ~~the game's own HUD~~ (done), a scoreboard, the join flow, spectators, the match-end screen (scene 0x1D).
 3. Audio: MP3 voices, then the sound banks, triggered by combat events.
-4. Other modes: War: Colors first (scenario 9, same map; start records and masks known), then Beach, Heist, Raptor,
-   Tank, Total War, Race, each with its own maps and rules, traced from the original the same way.
+4. Other modes: War: Total War first (scenario 9, same map; start records and masks known; the code still calls
+   it `COLORS_*`), then Colors (scenario 10, scene 0x30), Beach, Heist, Raptor, Tank, Race, each with its own maps and rules, traced from the original the same way.
 5. More characters and maps (each mode's teams, classes and scenes).
 6. Beyond the original: more than 4 players, matchmaking or room codes, rollback-safe drop-in for spectators.
 7. Fidelity details: 3-VI frames, the render-only camera offsets, segment-8 render state, fog and sky from the game,

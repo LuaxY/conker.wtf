@@ -1,7 +1,8 @@
 //! The asset pack against the ROM path (path in env `CONKER_ROM`; the ROM test skips when it is
-//! unset): `pack` exported to a temporary folder and read back with conker-assets gives, bit for
-//! bit, what the client (`Slice::from_rom`) and the server (`conker-server`'s `scene`) build from the
-//! ROM, and its glTF files are valid, self-consistent and draw the same as the in-memory GLBs.
+//! unset): `pack` of both maps (0x2D, 0x30) exported to a temporary folder and read back with
+//! conker-assets gives, bit for bit, what the client (`Slice::from_rom`) and the server
+//! (`conker-server`'s `scene`) build from the ROM, and its glTF files are valid, self-consistent
+//! and draw the same as the in-memory GLBs.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use conker_assets::{Gives, Layer as PackLayer};
-use conker_extract::{Layer, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, SLICE_SCENE, Slice};
+use conker_extract::{Layer, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, PackMap, SLICE_SCENE, Slice};
 use conker_rules::game::Arena;
 use conker_rules::spawn::Spawn;
 use conker_rules::weapon::{self, Pickup};
@@ -111,7 +112,11 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let export = conker_extract::pack(&rom, None).unwrap();
+    let maps = [0x2D, 0x30].map(|scene| PackMap {
+        scene,
+        background: None,
+    });
+    let export = conker_extract::pack(&rom, &maps).unwrap();
     let dir = temp_dir("pack-test");
     for (path, data) in &export.files {
         let path = dir.join(path);
@@ -265,6 +270,41 @@ fn pack_reads_back_as_the_rom_path() {
     }
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
+    assert_eq!(manifest.maps, ["2d", "30"]);
+
+    // Map 0x30 against the ROM path: the same reads, its pickups on the oracle's spots (their
+    // models moved there in the level).
+    let names = conker_assets::Slice::files("30", &PACK_CHARACTERS, PACK_WEAPONS);
+    assert!(names.iter().all(|n| files.contains_key(n.as_str())));
+    let map = conker_assets::Slice::load("30", &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
+    let placements = extract_scene::scene_placements(&rom, 0x30).unwrap();
+    let collision = extract_scene::scene_collision(&rom, 0x30, &placements).unwrap();
+    assert_eq!(map.collision.len(), collision.triangles.len());
+    for (p, s) in map.collision.iter().zip(&collision.triangles) {
+        assert_eq!(p.points.map(bits), s.points.map(bits));
+        assert_eq!(p.surface, s.surface);
+    }
+    let spawns = extract_scene::scene_spawns(&rom, 0x30).unwrap();
+    assert_eq!(spawns.len(), 25);
+    for (p, s) in map.spawns.iter().zip(&spawns) {
+        assert_eq!(
+            (p.position, bits(p.camera), p.yaw),
+            (s.position, bits(s.camera), s.yaw)
+        );
+    }
+    let gives: Vec<_> = (map.pickups.iter())
+        .map(|p| (p.placement, p.position.map(|v| v as i16)))
+        .collect();
+    let table: Vec<_> = (weapon::PICKUPS_30.iter().zip(weapon::SPOTS_30))
+        .map(|(p, spot)| (p.placement, spot))
+        .collect();
+    assert_eq!(gives, table);
+    let [nav, triggers, ..] =
+        conker_bots::Assets::paths(0x30).map(|p| rom.asset(&p).unwrap().into_owned());
+    assert_eq!([&map.nav, &map.triggers], [&nav, &triggers]);
+    let level = conker_extract::map_level(&rom, 0x30).unwrap();
+    let glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
+    check_gltf(&dir, &conker_assets::level_gltf("30"), &glb);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -311,7 +351,12 @@ fn pack_audio_reads_back() {
     };
     let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
     let background = wav(&[0, 1, -1, 2], 22020);
-    let export = conker_extract::pack(&rom, Some(&background)).unwrap();
+    let other = wav(&[3, 4], 22020);
+    let maps = [(0x2D, &background), (0x30, &other)].map(|(scene, wav)| PackMap {
+        scene,
+        background: Some(wav),
+    });
+    let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())
         .map(|(p, d)| (p.as_str(), d.as_slice()))
         .collect();
@@ -320,7 +365,13 @@ fn pack_audio_reads_back() {
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(
         manifest.audio,
-        ["characters/117", "characters/128", "common", "maps/2d"]
+        [
+            "characters/117",
+            "characters/128",
+            "common",
+            "maps/2d",
+            "maps/30"
+        ]
     );
 
     let (bank, wavetable) = sound_bank(&rom).unwrap();
@@ -349,12 +400,15 @@ fn pack_audio_reads_back() {
         bytes += pcm.len() * 2;
         listed.push(file);
     }
-    let map = &audio.events.maps["2d"];
-    assert_eq!(
-        files[format!("audio/{}", map.background[0].file).as_str()],
-        &background[..]
-    );
-    listed.push(format!("audio/{}", map.background[0].file));
+    for (name, wav) in [("2d", &background), ("30", &other)] {
+        let file = format!("audio/{}", audio.events.maps[name].background[0].file);
+        assert_eq!(files[file.as_str()], &wav[..]);
+        listed.push(file);
+    }
+    // Scene 0x30's own surface kind 0x11 has footsteps; 0x2D's bubbles are its only emitters.
+    assert!(audio.events.footsteps.surfaces.contains_key(&0x11));
+    assert_eq!(audio.events.maps["2d"].emitters.len(), 2);
+    assert!(audio.events.maps["30"].emitters.is_empty());
     listed.sort();
     let under: Vec<&str> = files
         .keys()
@@ -423,24 +477,31 @@ fn pack_audio_reads_back() {
     assert_eq!(cue(&firing, None), Some(vec![719]));
 }
 
-/// The pack's HUD (`hud/`): `Hud::load` reads `hud.json` back and writes it out the same; every
-/// texture and glyph it names is a PNG of its size under `hud/`, and nothing else is there; the
+/// The pack's HUD (`hud/`): `Hud::load` reads `hud.json` back and writes it out the same, as
+/// `End::load` does `end.json`; every texture and glyph they name is a PNG of its size under
+/// `hud/`, and nothing else is there; the
 /// font is the game's (95 glyphs from "0123456789ABC…", their metrics as the game decodes them,
 /// V: `lab/hud/tools/verify_pack.py` compares every glyph with the RAM's).
 #[test]
 fn pack_hud_reads_back() {
-    use conker_assets::hud::{HUD, Hud};
+    use conker_assets::hud::{END, End, HUD, Hud};
     let Some(path) = std::env::var_os("CONKER_ROM") else {
         eprintln!("CONKER_ROM unset: skipping");
         return;
     };
     let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
-    let export = conker_extract::pack(&rom, None).unwrap();
+    let maps = [PackMap {
+        scene: SLICE_SCENE,
+        background: None,
+    }];
+    let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())
         .map(|(p, d)| (p.as_str(), d.as_slice()))
         .collect();
     let hud = Hud::load(|p| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
     assert_eq!(hud.to_json(), files[HUD]);
+    let end = End::load(|p| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
+    assert_eq!(end.to_json(), files[END]);
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert!(manifest.hud);
     let png_size = |file: &str| {
@@ -448,8 +509,8 @@ fn pack_hud_reads_back() {
         let word = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
         [word(16), word(20)]
     };
-    let mut listed = vec![HUD.to_string()];
-    for t in hud.textures.values() {
+    let mut listed = vec![HUD.to_string(), END.to_string()];
+    for t in hud.textures.values().chain(end.textures.values()) {
         assert_eq!(png_size(&t.file), t.size.map(u32::from), "{}", t.file);
         listed.push(format!("hud/{}", t.file));
     }
@@ -470,4 +531,6 @@ fn pack_hud_reads_back() {
     assert_eq!((colon.size, colon.offset), ([4, 7], [0, 2]));
     assert_eq!(hud.weapon.icons[&0x09].rect, [0, 4, 22, 12]);
     assert_eq!(hud.weapon.icons[&0x39].texture, "atlas2");
+    // The results' place, accuracy and labels are drawn with these.
+    assert!(['%', 'P'].iter().all(|&c| hud.glyph(c).is_some()));
 }

@@ -1,6 +1,6 @@
-// Starts the wasm client as soon as the page loads. The client fetches the asset pack (its data
-// files, then Bevy its glTF models) from assets/ next to this page, and, once the level is drawn,
-// its connect token from the game server (a token lasts 60 s).
+// Starts the wasm client as soon as the page loads. The client asks the game server's /info which
+// map it plays, fetches the asset pack (its data files, then Bevy its glTF models) from assets/ next
+// to this page, and, once the level is drawn, its connect token from the game server (a token lasts 60 s).
 // Options are read from the page URL by the client itself:
 //   ?transport=wt|ws  &server=host:port (default: this page's host, port 5888)  &digest=HEX  &id=N  &script
 //   &lag=MS  &log=DIRECTIVES  &token-url=URL (see README.md)

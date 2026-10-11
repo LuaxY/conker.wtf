@@ -18,6 +18,7 @@ pub mod connection;
 pub mod held;
 pub mod hud;
 pub mod render;
+pub mod results;
 pub mod smooth;
 
 /// Browser fetches: the asset pack's data files and the connect token.
@@ -62,14 +63,14 @@ use conker_assets::hud::Hud;
 use conker_assets::{ClipInfo, Slice, SpawnPoint};
 use conker_rules::net::Fighting;
 use conker_rules::projectile::Grenade;
-use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Spawn};
+use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Settings, Spawn};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{BUTTON_A, BUTTON_Z, Input, PlayerState, STRAFE_PERCENT, Side, state};
 use conker_sim::net::{
     Collision, Combat, DEFAULT_PORT, MatchView, Player, PlayerId, ProtocolPlugin, Saw, SawChannel,
-    scene_world,
+    map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::core::prelude::ConfirmedHistory;
@@ -152,6 +153,9 @@ pub struct Config {
     /// `side=squirrels|tediz`: the side to play on (its model), sent when joining; default the
     /// server's pick, the side with fewer players.
     pub side: Option<Side>,
+    /// `map=2d|30`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
+    /// ([`connection::info_url`]).
+    pub map: String,
 }
 
 impl Config {
@@ -176,6 +180,7 @@ impl Config {
             offscreen: false,
             log: None,
             side: None,
+            map: String::new(),
         };
         for (key, value) in pairs {
             let bad = || format!("bad value for {key}: {value:?}");
@@ -214,6 +219,7 @@ impl Config {
                 "at" => cfg.at = Some(value.parse().map_err(|_| bad())?),
                 "offscreen" => cfg.offscreen = true,
                 "log" => cfg.log = Some(value),
+                "map" => cfg.map = value,
                 "side" => {
                     cfg.side = Some(match value.as_str() {
                         "squirrels" => Side::Squirrels,
@@ -589,6 +595,9 @@ pub fn weapon_name(id: u8) -> String {
 pub fn hud_text(c: &Combat, m: &MatchView) -> String {
     let secs = m.timer.max(0) / 60;
     let mut out = format!("HP {}/6", c.health);
+    if m.time == 0 {
+        out += &format!("   lives {}", c.lives_left);
+    }
     if c.weapon != 0 {
         let state = if c.drawn { "drawn" } else { "away" };
         out += &format!("   {} ({state})", weapon_name(c.weapon));
@@ -596,14 +605,13 @@ pub fn hud_text(c: &Combat, m: &MatchView) -> String {
             out += &format!(" {} rounds", c.rounds);
         }
     }
-    out += &format!(
-        "   grenades {}   kills {}   {}:{:02}",
-        c.grenades,
-        c.kills,
-        secs / 60,
-        secs % 60
-    );
-    if c.health == 0 {
+    out += &format!("   grenades {}   kills {}", c.grenades, c.kills);
+    if m.time > 0 {
+        out += &format!("   {}:{:02}", secs / 60, secs % 60);
+    }
+    if c.out > 0 {
+        out += "\nOUT OF LIVES";
+    } else if c.health == 0 {
         out += &format!(
             "\nDEAD - respawn in {:.1} s",
             f32::from(c.respawn_in) / TICK_HZ as f32
@@ -704,7 +712,8 @@ fn spawn_eye(spawns: &[SpawnPoint], pos: [f32; 3]) -> [f32; 3] {
 pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Vec<ScriptLine>) {
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
-    app.insert_resource(Collision(scene_world(&slice)));
+    let scene = map_scene(&cfg.map).expect("a known map");
+    app.insert_resource(Collision(scene_world(&slice, scene)));
     let clips = slice.characters.iter().map(|c| Clips::new(&c.clips));
     let clips: Vec<Clips> = clips.collect();
     app.insert_resource(SideClips(clips.try_into().expect("a character per side")));
@@ -725,7 +734,15 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
         hud::build(&mut app, hud);
     }
     if let Some(sound) = sound {
-        audio::build(&mut app, sound, held, pickups, !cfg.headless, cfg.id);
+        audio::build(
+            &mut app,
+            sound,
+            held,
+            pickups,
+            !cfg.headless,
+            &cfg.map,
+            cfg.id,
+        );
     }
     if let Some(seconds) = cfg.seconds {
         app.add_systems(
@@ -763,6 +780,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     }
     app.insert_resource(cfg);
     connection::build(&mut app);
+    results::build(&mut app);
     app.add_systems(
         FixedPreUpdate,
         buffer_input
@@ -1030,7 +1048,20 @@ pub fn rival(c: &Combat, body: PlayerState) -> Fighter {
         weapon: (c.weapon != 0).then_some(c.weapon),
         drawn: c.drawn,
         side: c.side,
+        deaths: c.deaths,
+        out: c.out,
         ..Fighter::new(&place, c.team, 0)
+    }
+}
+
+/// The match's settings as the server sends them ([`MatchView`]); the bots' skill is the server's.
+pub fn match_settings(m: &MatchView) -> Settings {
+    Settings {
+        time: (m.time > 0).then_some(m.time),
+        lives: m.lives,
+        kills: m.kill_limit,
+        radar: m.radar,
+        ..Settings::default()
     }
 }
 
@@ -1042,6 +1073,7 @@ pub fn rival(c: &Combat, body: PlayerState) -> Fighter {
 fn own_tick(
     tick: u32,
     over: bool,
+    settings: Settings,
     body: &PlayerState,
     fighting: &Fighting,
     input: &Input,
@@ -1053,7 +1085,7 @@ fn own_tick(
     let slot = usize::from(fighting.slot);
     let bodies = others.iter().map(|o| (o.0, o.1));
     let own = fighting.fighter(*body);
-    let mut m = known_match(tick, slot, own, bodies, &fighting.grenades, arena);
+    let mut m = known_match(tick, slot, own, bodies, &fighting.grenades, arena).with(settings);
     let mut events = Vec::new();
     if !over && fighting.state.since <= tick {
         let seen = |s: usize, v: usize| {
@@ -1092,13 +1124,17 @@ fn predict(
 ) {
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase == 2) || !sync.is_none_or(|s| s.is_synced());
+    let settings = game
+        .iter()
+        .next()
+        .map_or_else(Settings::default, match_settings);
     let slot = own.iter().next().map(|o| usize::from(o.1.slot));
     let others = known(&others, slot, tick);
     // Where this screen shows the others this tick: what the server rewinds this tick's strikes to.
     let shown: Positions = others.iter().map(|o| (o.0, o.2)).collect();
     for (mut player, mut fighting, input, camera) in &mut own {
         let (mut m, i, events) = own_tick(
-            tick, over, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
+            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
         );
         let f = &mut m.players[i];
         if let Some(mut camera) = camera {
@@ -1162,6 +1198,10 @@ fn predict_again(
 ) {
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase == 2) || !sync.is_none_or(|s| s.is_synced());
+    let settings = game
+        .iter()
+        .next()
+        .map_or_else(Settings::default, match_settings);
     let slot = own.iter().next().map(|o| usize::from(o.1.slot));
     let others = known(&others, slot, tick);
     let shown = shows.0.iter().find(|s| s.0 == tick).map_or_else(
@@ -1170,7 +1210,7 @@ fn predict_again(
     );
     for (mut player, mut fighting, input, camera) in &mut own {
         let (mut m, i, _) = own_tick(
-            tick, over, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
+            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
         );
         let f = &mut m.players[i];
         if let Some(camera) = camera {
@@ -1555,6 +1595,7 @@ mod tests {
         };
         let m = MatchView {
             timer: 34_554,
+            time: 10,
             ..MatchView::default()
         };
         assert_eq!(
@@ -1563,6 +1604,10 @@ mod tests {
         );
         (c.health, c.weapon, c.respawn_in) = (0, 0, 45);
         assert!(hud_text(&c, &m).ends_with("kills 2   9:35\nDEAD - respawn in 1.5 s"));
+        // Untimed: no clock, the lives left.
+        c.lives_left = 2;
+        let untimed = MatchView { time: 0, ..m };
+        assert!(hud_text(&c, &untimed).starts_with("HP 0/6   lives 2   grenades 3   kills 2\n"));
     }
 
     #[test]

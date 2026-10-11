@@ -34,7 +34,7 @@ use nav::Graph;
 use npc::{Npc, Scripts, View};
 use script::{Globals, Machine, Script};
 
-/// The game's skill byte (`0x800E0BD0`) in the oracle's matches.
+/// The game's skill byte (`0x800E0BD0`) in the oracle's matches, the menu's default (NORMAL).
 pub const DEFAULT_SKILL: u8 = 2;
 /// The smallest stick past the deadzone: it turns a standing player without a step, and the facing
 /// settles on the multiple of 256 below the stick's angle (V: conker-sim's movement).
@@ -121,7 +121,7 @@ impl Bots {
             scopes: vec![None; n],
             noises: Vec::new(),
             rng,
-            skill: usize::from(skill.min(3)),
+            skill: usize::from(skill.min(4)),
             started: false,
             unknown: Unknown::new(),
             faults: 0,
@@ -131,6 +131,11 @@ impl Bots {
     /// The slots played by bots.
     pub fn bot_slots(&self) -> &[usize] {
         &self.slots[self.humans..]
+    }
+
+    /// The bots' RNG as far as it ran (the next match goes on from it).
+    pub fn rng(&self) -> Rng {
+        self.rng
     }
 
     pub fn graph(&self) -> &Graph {
@@ -203,9 +208,8 @@ impl Bots {
         for e in events {
             match *e {
                 Event::Pickup { player, pickup } => {
-                    if let (Some(p), Some(Gives::Weapon(_))) =
-                        (k(player), Some(pickup_gives(m, player, pickup)))
-                    {
+                    // The gift as `mirror` keeps it (2222: grenades), for any map's pickups.
+                    if let Some(p) = k(player).filter(|_| self.g.get(g::GIVES, pickup) != 2222) {
                         self.held[p] = pickup as i32;
                     }
                 }
@@ -403,13 +407,6 @@ impl Bots {
             }
         }
     }
-}
-
-fn pickup_gives(m: &Match, _player: usize, pickup: usize) -> Gives {
-    let _ = m;
-    conker_rules::weapon::PICKUPS_2D
-        .get(pickup)
-        .map_or(Gives::Grenades, |p| p.gives)
 }
 
 /// The yaw and pitch in degrees (the scope's: yaw 0 along +x, 90 along −z; pitch positive down)

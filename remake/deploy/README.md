@@ -4,14 +4,15 @@ What runs on the host:
 
 | Process | Listens on | Does |
 |---|---|---|
-| Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/token` to the game server |
+| Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/token` and `/info` to the game server |
 | `conker-server` (systemd) | TCP + UDP 5888, and `127.0.0.1:5889` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
 | certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to both |
 
 How a player connects: the landing (`/`) lists the servers and opens a lobby, whose "Join game" opens the game
 page, `/play.html?server=DOMAIN:5888&transport=wt&side=...` (`web/README.md`, "Landing"; the server list and lobbies
-are mock for now, "This machine" is this host's server). The game page (over https) loads the client, which fetches the asset pack from
-`/assets/` and draws the level; then it fetches `/token` from its own origin. Caddy passes it to the
+are mock for now, "This machine" is this host's server). The game page (over https) loads the client, which asks `/info` which map the server plays
+(`conker-server --map 2d|30`), fetches that map and the rest of the asset pack from `/assets/` and
+draws the level; then it fetches `/token` from its own origin. Caddy passes it to the
 game server, which signs a netcode connect token with its private key (`/etc/conker/token.key`, never
 sent anywhere) for the domain's addresses. The page then connects to `DOMAIN:5888` over WebTransport, or
 `wss://` with `?transport=ws`; the browser checks the certificate as for any site. The token is valid for

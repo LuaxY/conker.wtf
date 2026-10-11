@@ -54,6 +54,12 @@ in the browser after the first key press, M mutes. HUD from the original's own t
 radar, held-weapon and grenade icons, aim reticle, sniper scope, death iris), checked against its RAM dumps; H shows
 the old text readout.
 
+**Deathmatch completed against the original** (2026-10-11, two sub-agents; protocol 11). The original's SET-UP options
+as server flags (`--time`, `--lives`, `--kills`, `--skill` with all 5 levels, `--radar`), its end conditions, and its
+STATS results screen with RESTART/QUIT (the next match once every human chose RESTART, or after 40 s). A second map:
+`--map 30` (the original's Colors map, scenario 5), with its starts, pickups and sides taken from the oracle; the client
+asks the server's `/info` which map to load. Scene 0x2D is the **Total War** map (scenario 9), not Colors: names fixed.
+
 **Asset pack** (2026-10-10, two sub-agents, no workflow). `conker-extract pack` exports once what multiplayer needs
 into `assets/` (205 files, 14.2 MB, 3.4 MB brotli; glTF + PNG + JSON, two raw script tables), read back bit-exact by
 the new crate `conker-assets`. The server (`--assets`), the native client and the browser load the pack: the page no

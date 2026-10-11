@@ -1,7 +1,8 @@
 //! The HUD the original draws over a Deathmatch player's view, from the pack's `hud/` ([`Hud`]:
 //! pictures, layout and rules found in the oracle, `lab/hud`): health as chocolate, the held
 //! weapon's icon, grenades while one is in the hand, kills and rank, the clock, the radar, the aim
-//! reticle, the scope and the death iris.
+//! reticle, the scope and the death iris; untimed, the lives left; out of lives, a skull; and once
+//! the match is over, the results (`hud/end.json`, [`End`]).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -20,9 +21,12 @@ use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
-use conker_assets::hud::{Align, Anchor, Horizontal, Hud, Image as Picture, Rgba, Text, Vertical};
-use conker_sim::net::{Combat, MatchView, Player};
-use lightyear::prelude::{Interpolated, Predicted};
+use conker_assets::hud::{
+    Align, Anchor, End, Horizontal, Hud, Image as Picture, Rgba, Text, Vertical,
+};
+use conker_rules::game::{Standing, places};
+use conker_sim::net::{Combat, MatchView, Player, PlayerId};
+use lightyear::prelude::{Interpolated, PeerId, Predicted};
 
 use crate::connection::NetStatus;
 use crate::{Anim, FollowCamera};
@@ -63,8 +67,10 @@ pub struct Shown {
     pub grenades: Option<u8>,
     pub kills: u16,
     pub rank: usize,
-    /// Seconds left on the clock.
-    pub secs: u32,
+    /// Seconds left on the clock; `None` untimed (the original draws no clock, `func_151DDC20`).
+    pub secs: Option<u32>,
+    /// The radar is on (SET-UP's radar: HUD flag 0x20).
+    pub radar: bool,
     /// Other players for the radar: (right, ahead) of the player in game units, along the view,
     /// and their level against the player's (-1 lower, 0, 1 higher).
     pub blips: Vec<([f32; 2], i8)>,
@@ -74,6 +80,12 @@ pub struct Shown {
     pub scope: Option<f32>,
     /// Dead: frames to the respawn.
     pub respawn_in: Option<u16>,
+    /// Untimed: the lives left.
+    pub lives: Option<u8>,
+    /// Out of lives: a skull over the view, no radar.
+    pub out: bool,
+    /// The match is over: the results' rows ([`rows`]) and the menu's choice (0 RESTART, 1 QUIT).
+    pub results: Option<(Vec<[u32; 5]>, usize)>,
 }
 
 fn image(p: &Picture) -> (Tex, [f32; 4]) {
@@ -91,8 +103,8 @@ fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<S
     let glyph = |c: char| hud.font.iter().position(|g| g.ch == c);
     let mut items: Vec<Item> = line.chars().filter_map(glyph).map(Item::Glyph).collect();
     if let Some(s) = suffix {
-        // The rank: "(1" suffix ")".
-        let close = items.pop();
+        // The rank: "(1" suffix ")", or "1" suffix.
+        let close = line.ends_with(')').then(|| items.pop()).flatten();
         items.push(Item::Suffix(s));
         items.extend(close);
     }
@@ -200,33 +212,140 @@ fn solid(rect: [f32; 4], anchor: Anchor, colour: Rgba, z: f32) -> Sprite {
     }
 }
 
+fn quad(p: &Picture, rect: [f32; 4], anchor: Anchor, colour: Rgba, z: f32) -> Sprite {
+    let (tex, uv) = image(p);
+    Sprite {
+        tex,
+        uv,
+        rect,
+        anchor,
+        colour,
+        z,
+    }
+}
+
+/// The rank suffix of `n` (st, nd, rd, th): 1st, 2nd, 3rd, 4th…, 11th-13th.
+fn suffix(n: usize) -> usize {
+    match (n % 10, n % 100 / 10) {
+        (d @ 1..=3, tens) if tens != 1 => d - 1,
+        _ => 3,
+    }
+}
+
+/// The results' rows: one per human player (bots are not listed), in slot order, from everyone's
+/// (human, [`Combat`]): place, accuracy (hits × 100 / shots, truncated, at most 9999, 0 without a
+/// shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS).
+pub fn rows(all: &[(bool, &Combat)], kill_limit: u8) -> Vec<[u32; 5]> {
+    let mut standings = vec![
+        None;
+        all.iter()
+            .map(|p| usize::from(p.1.slot) + 1)
+            .max()
+            .unwrap_or(0)
+    ];
+    for (_, c) in all {
+        standings[usize::from(c.slot)] = Some(standing(c));
+    }
+    let place = places(&standings, kill_limit);
+    let mut humans: Vec<_> = all.iter().filter(|p| p.0).map(|p| p.1).collect();
+    humans.sort_by_key(|c| c.slot);
+    (humans.into_iter())
+        .map(|c| {
+            let accuracy = (u32::from(c.hits) * 100)
+                .checked_div(u32::from(c.shots))
+                .unwrap_or(0);
+            [
+                u32::from(place[usize::from(c.slot)]),
+                accuracy.min(9999),
+                u32::from(c.kills),
+                u32::from(c.headshots),
+                u32::from(c.deaths),
+            ]
+        })
+        .collect()
+}
+
+/// The results over the frozen level: the header, the columns' icons, a row per human, the menu
+/// with `choice` lit.
+fn results(hud: &Hud, end: &End, rows: &[[u32; 5]], choice: usize) -> Vec<Sprite> {
+    let r = &end.results;
+    let white = [255; 4];
+    let rect = |r: [i16; 4]| r.map(f32::from);
+    let mut out: Vec<Sprite> = (std::iter::once(&r.header).chain(&r.icons))
+        .chain([&r.stick])
+        .map(|p| quad(&p.image, rect(p.rect), p.anchor, white, 5.0))
+        .collect();
+    for (k, b) in [&r.restart, &r.quit].into_iter().enumerate() {
+        let image = if k == choice { &b.lit } else { &b.image };
+        out.push(quad(image, rect(b.rect), b.anchor, white, 5.0));
+    }
+    for (n, row) in rows.iter().enumerate() {
+        let dy = r.rows[1] * n as i16;
+        if let Some(label) = r.labels.get(n) {
+            let [_, _, w, h] = label.rect;
+            let [x, y] = r.label;
+            out.push(quad(
+                label,
+                rect([x, y + dy, w as i16, h as i16]),
+                r.anchor,
+                white,
+                5.0,
+            ));
+        }
+        let colour = r.colours.get(n).copied().unwrap_or(white);
+        for (column, (&x, &v)) in r.columns.iter().zip(row).enumerate() {
+            let t = Text {
+                anchor: r.anchor,
+                at: [x, r.rows[0] + dy],
+                align: Align::Centre,
+                colour,
+                shadow: Some(r.shadow),
+            };
+            let (line, suffix) = match column {
+                0 => (v.to_string(), Some(suffix(v as usize))),
+                1 => (format!("{v}%"), None),
+                _ => (v.to_string(), None),
+            };
+            out.extend(text(hud, &line, suffix, &t, 5.0));
+        }
+    }
+    out
+}
+
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
 pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
+    if let (Some((rows, choice)), Some(end)) = (&s.results, &hud.end) {
+        return results(hud, end, rows, *choice);
+    }
     let mut out = Vec::new();
-    let quad = |p: &Picture, rect: [f32; 4], anchor, colour, z| {
-        let (tex, uv) = image(p);
-        Sprite {
-            tex,
-            uv,
-            rect,
-            anchor,
-            colour,
-            z,
-        }
-    };
     let white = [255; 4];
+    // Untimed: the lives left; out of them, the skull.
+    if let (Some(n), Some(end)) = (s.lives, &hud.end) {
+        let l = &end.lives;
+        let digit = &l.digits[usize::from(n).min(9)];
+        let [_, _, w, h] = digit.rect.map(f32::from);
+        let [x, y] = l.at.map(f32::from);
+        out.push(quad(digit, [x, y, w, h], l.anchor, white, 3.0));
+    }
+    if let (true, Some(end)) = (s.out, &hud.end) {
+        let k = &end.skull;
+        out.push(quad(&k.image, k.rect.map(f32::from), k.anchor, white, 3.0));
+    }
     // Radar: the disc, then a blip per player in range, with a bar on another level's.
     let r = &hud.radar;
     let [cx, cy] = r.centre;
     let half = r.size / 2.0;
-    out.push(quad(
-        &r.disc,
-        [cx - half, cy - half, r.size, r.size],
-        r.anchor,
-        r.colour,
-        1.0,
-    ));
-    for &([right, ahead], level) in &s.blips {
+    let radar = s.radar && !s.out;
+    if radar {
+        out.push(quad(
+            &r.disc,
+            [cx - half, cy - half, r.size, r.size],
+            r.anchor,
+            r.colour,
+            1.0,
+        ));
+    }
+    for &([right, ahead], level) in s.blips.iter().filter(|_| radar) {
         // The game adds the offset in quarter pixels, truncated (C `func_15093B58`).
         let q = |v: f32| (v * r.scale * 4.0).trunc() / 4.0;
         let (x, y) = (q(right), -q(ahead));
@@ -278,20 +397,17 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     }
     // Kills, rank and clock.
     out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
-    // st, nd, rd, th: 1st, 2nd, 3rd, 4th…, 11th-13th.
-    let suffix = match (s.rank % 10, s.rank % 100 / 10) {
-        (d @ 1..=3, tens) if tens != 1 => d - 1,
-        _ => 3,
-    };
     out.extend(text(
         hud,
         &format!("({})", s.rank),
-        Some(suffix),
+        Some(suffix(s.rank)),
         &hud.rank.text,
         5.0,
     ));
-    let clock = format!("{}:{:02}", s.secs / 60, s.secs % 60);
-    out.extend(text(hud, &clock, None, &hud.clock, 5.0));
+    if let Some(secs) = s.secs {
+        let clock = format!("{}:{:02}", secs / 60, secs % 60);
+        out.extend(text(hud, &clock, None, &hud.clock, 5.0));
+    }
     // Aiming: the reticle; through a scope: the ring, its dots and the zoom bar.
     let t = &hud.reticle;
     if s.reticle {
@@ -404,7 +520,8 @@ pub fn build(app: &mut App, hud: Hud) {
                     .with_settings(settings)
                     .load(format!("hud/{file}"))
             };
-            let textures = (hud.textures.iter())
+            let end = hud.end.iter().flat_map(|e| &e.textures);
+            let textures = (hud.textures.iter().chain(end))
                 .map(|(name, t)| (name.clone(), (load(&t.file, t.smooth), t.size)))
                 .collect();
             let glyphs = hud.font.iter().map(|g| load(&g.file, false)).collect();
@@ -446,6 +563,16 @@ pub fn camera(commands: &mut Commands, target: Option<Handle<Image>>) {
     }
 }
 
+/// What ranks a player (conker-rules' [`places`]).
+pub fn standing(c: &Combat) -> Standing {
+    Standing {
+        kills: c.kills,
+        deaths: c.deaths,
+        shots: c.shots,
+        out: c.out,
+    }
+}
+
 /// What the HUD shows of the local player (`own`), the others and the match.
 #[allow(clippy::type_complexity)]
 fn shown(
@@ -472,22 +599,28 @@ fn shown(
         })
         .collect();
     let scope = camera.follow.cam.scope;
+    // The place among everyone, this player first.
+    let others = (everyone.iter()).filter(|o| !o.2).map(|o| o.1);
+    let all: Vec<_> = (std::iter::once(c).chain(others))
+        .map(|o| Some(standing(o)))
+        .collect();
     Shown {
         health: c.health,
         weapon: c.weapon,
         grenades: in_hand.then_some(c.grenades),
         kills: c.kills,
-        rank: 1 + everyone
-            .iter()
-            .filter(|(_, o, _)| o.kills > c.kills)
-            .count(),
-        secs: m.timer.max(0) as u32 / 60,
+        rank: usize::from(places(&all, m.kill_limit)[0]),
+        secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
+        radar: m.radar,
         blips,
         reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon),
         scope: scope
             .on
             .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
+        lives: (m.time == 0).then_some(c.lives_left),
+        out: c.out > 0,
+        results: None,
     }
 }
 
@@ -501,6 +634,8 @@ fn draw(
     own: Query<(&Player, &Combat, &FollowCamera, &Anim)>,
     everyone: Query<(&Player, &Combat, Has<Predicted>), Or<(With<Predicted>, With<Interpolated>)>>,
     game: Query<&MatchView>,
+    roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
+    menu: Res<crate::results::Menu>,
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: Local<HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>>,
@@ -518,7 +653,13 @@ fn draw(
     if *status != NetStatus::Connected {
         return;
     }
-    let shown = shown(&a.hud, own, &everyone, m);
+    let mut shown = shown(&a.hud, own, &everyone, m);
+    if m.phase == 2 {
+        let all: Vec<_> = (roster.iter())
+            .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
+            .collect();
+        shown.results = Some((rows(&all, m.kill_limit), menu.choice));
+    }
     for s in sprites(&a.hud, &shown) {
         let key = (s.tex.clone(), s.uv.map(f32::to_bits), s.colour);
         let material = cache.entry(key).or_insert_with(|| {
@@ -574,7 +715,10 @@ mod tests {
         let dir = std::env::var("CONKER_ASSETS")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
         let dir = std::path::PathBuf::from(dir);
-        let hud = Hud::load(|p| std::fs::read(dir.join(p))).ok();
+        let mut hud = Hud::load(|p| std::fs::read(dir.join(p))).ok();
+        if let Some(h) = &mut hud {
+            h.end = End::load(|p| std::fs::read(dir.join(p))).ok();
+        }
         if hud.is_none() {
             eprintln!("no pack HUD at {}: skipping", dir.display());
         }
@@ -617,7 +761,8 @@ mod tests {
         Shown {
             health: 6,
             rank: 1,
-            secs: 9 * 60 + 48,
+            secs: Some(9 * 60 + 48),
+            radar: true,
             ..Shown::default()
         }
     }
@@ -716,7 +861,7 @@ mod tests {
         let s = Shown {
             kills: 1,
             rank: 2,
-            secs: 9 * 60 + 52,
+            secs: Some(9 * 60 + 52),
             ..state()
         };
         let text = glyphs(&hud, &s);
@@ -807,5 +952,80 @@ mod tests {
             at(Horizontal::Left, Vertical::Bottom, narrow),
             [260.0, 389.0, 22.0, 12.0]
         );
+    }
+
+    /// The results' rows: humans only, in slot order; the place among everyone (bots too);
+    /// accuracy as the oracle's STATS showed it (2 hits of 22 shots: 9%).
+    #[test]
+    fn rows_list_the_humans() {
+        let c = |slot, kills, deaths, shots, hits| Combat {
+            slot,
+            kills,
+            deaths,
+            shots,
+            hits,
+            ..Combat::default()
+        };
+        let (bot, p1, p2) = (c(0, 3, 0, 10, 5), c(1, 2, 1, 22, 2), c(2, 0, 1, 0, 0));
+        assert_eq!(
+            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0),
+            [[2, 9, 2, 0, 1], [3, 0, 0, 0, 1]]
+        );
+    }
+
+    /// The lives digit, the skull and the results where the oracle drew them (`lab/research/
+    /// mp-original/menus-and-flow.md`, "Match end and STATS"); the results replace the HUD.
+    #[test]
+    fn the_end_matches_the_originals_draws() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            eprintln!("no pack hud/end.json: skipping");
+            return;
+        };
+        let lives = Shown {
+            lives: Some(1),
+            ..state()
+        };
+        let tex = texture("lives");
+        let one = ([7.0, 6.0, 5.0, 7.0], [8.0, 0.0, 13.0, 7.0]);
+        assert_eq!(rects(&hud, &lives, &tex), [one]);
+        let out = Shown {
+            out: true,
+            ..state()
+        };
+        assert!(rects(&hud, &out, &texture("radar")).is_empty());
+        assert_eq!(
+            rects(&hud, &out, &texture("skull"))[0].0,
+            [130.0, 92.0, 32.0, 32.0]
+        );
+        let over = Shown {
+            results: Some((vec![[1, 9, 2, 0, 1], [3, 0, 0, 0, 1]], 1)),
+            ..state()
+        };
+        let at = |name: &str| -> Vec<[f32; 4]> {
+            (rects(&hud, &over, &texture(name)).into_iter())
+                .map(|r| r.0)
+                .collect()
+        };
+        assert_eq!(at("stats"), [[116.0, 4.0, 64.0, 32.0]]);
+        assert_eq!(at("restart"), [[51.0, 164.0, 64.0, 32.0]]);
+        assert_eq!(at("quit_lit"), [[181.0, 164.0, 64.0, 32.0]]);
+        assert_eq!(at("stick"), [[132.0, 164.0, 32.0, 32.0]]);
+        let icons = [
+            [129.0, 49.0, 16.0, 16.0],
+            [158.0, 49.0, 16.0, 16.0],
+            [177.0, 49.0, 32.0, 16.0],
+        ];
+        assert_eq!(
+            (at("stat_icons"), at("stat_deaths")),
+            (icons.into(), vec![[218.0, 49.0, 16.0, 15.0]])
+        );
+        assert_eq!(
+            at("players"),
+            [[60.0, 64.0, 16.0, 16.0], [60.0, 79.0, 16.0, 16.0]]
+        );
+        assert!(at("atlas").is_empty() && at("restart_lit").is_empty());
+        // P1's "1st 9% 2 0 1" in red: 7 quads (the suffix one), each over a black shadow.
+        let red = (sprites(&hud, &over).into_iter()).filter(|q| q.colour == [255, 0, 0, 255]);
+        assert_eq!(red.count(), 7);
     }
 }

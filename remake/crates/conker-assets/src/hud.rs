@@ -18,6 +18,7 @@ use crate::audio::safe;
 use crate::{Error, Result, invalid, parse_json, to_json};
 
 pub const HUD: &str = "hud/hud.json";
+pub const END: &str = "hud/end.json";
 
 pub type Rgba = [u8; 4];
 
@@ -218,6 +219,9 @@ pub struct Hud {
     pub reticle: Reticle,
     pub scope: Scope,
     pub iris: Iris,
+    /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
+    #[serde(skip)]
+    pub end: Option<End>,
 }
 
 impl Hud {
@@ -244,27 +248,18 @@ impl Hud {
             message: format!("{e} (a pack exported before the HUD: export a new one)"),
         })?;
         let hud: Hud = parse_json(HUD, &bytes)?;
-        let files = (hud.textures.iter()).map(|(n, t)| (format!("textures.{n}"), &t.file));
         let glyphs = (hud.font.iter().enumerate()).map(|(i, g)| (format!("font[{i}]"), &g.file));
-        if let Some((field, _)) = files.chain(glyphs).find(|(_, f)| !safe(f)) {
+        if let Some((field, _)) = glyphs.into_iter().find(|(_, f)| !safe(f)) {
             return Err(invalid(HUD, field, "a path inside hud/"));
         }
         let suffixes = (hud.rank.suffixes.iter()).map(|s| ("rank.suffixes".to_string(), s));
-        let names = (hud.images().into_iter()).map(|(f, i)| (f, &i.texture));
-        if let Some((field, name)) = names
-            .chain(suffixes)
+        if let Some((field, name)) = suffixes
+            .into_iter()
             .find(|(_, n)| !hud.textures.contains_key(*n))
         {
             return Err(invalid(HUD, field, format!("no texture {name:?}")));
         }
-        for (field, image) in hud.images() {
-            let size = hud.textures[&image.texture].size;
-            let [x, y, w, h] = image.rect.map(u32::from);
-            if x + w > u32::from(size[0]) || y + h > u32::from(size[1]) {
-                let why = format!("{:?} outside {}'s {size:?}", image.rect, image.texture);
-                return Err(invalid(HUD, format!("{field}.rect"), why));
-            }
-        }
+        check(HUD, &hud.textures, hud.images())?;
         Ok(hud)
     }
 
@@ -275,5 +270,135 @@ impl Hud {
     /// The glyph of `c`, if the font has one.
     pub fn glyph(&self, c: char) -> Option<&Glyph> {
         self.font.iter().find(|g| g.ch == c)
+    }
+}
+
+/// Checks that every texture's file stays inside `hud/` and every image names one of `textures`
+/// and fits in it.
+fn check(
+    json: &str,
+    textures: &BTreeMap<String, Texture>,
+    images: Vec<(String, &Image)>,
+) -> Result<()> {
+    if let Some(name) = textures.iter().find(|(_, t)| !safe(&t.file)).map(|t| t.0) {
+        return Err(invalid(
+            json,
+            format!("textures.{name}"),
+            "a path inside hud/",
+        ));
+    }
+    for (field, image) in images {
+        let Some(t) = textures.get(&image.texture) else {
+            return Err(invalid(
+                json,
+                field,
+                format!("no texture {:?}", image.texture),
+            ));
+        };
+        let [x, y, w, h] = image.rect.map(u32::from);
+        if x + w > u32::from(t.size[0]) || y + h > u32::from(t.size[1]) {
+            let why = format!("{:?} outside {}'s {:?}", image.rect, image.texture, t.size);
+            return Err(invalid(json, format!("{field}.rect"), why));
+        }
+    }
+    Ok(())
+}
+
+/// `image` over `rect`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Placed {
+    pub anchor: Anchor,
+    pub rect: [i16; 4],
+    pub image: Image,
+}
+
+/// A choice of the results' menu: `image`, or `lit` while it is the one chosen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Button {
+    pub anchor: Anchor,
+    pub rect: [i16; 4],
+    pub image: Image,
+    pub lit: Image,
+}
+
+/// Untimed (lives count): the lives left, the digit `digits[n]` at `at`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lives {
+    pub anchor: Anchor,
+    pub at: [i16; 2],
+    pub digits: Vec<Image>,
+}
+
+/// The results (STATS): the `header` and the columns' `icons`; then a row per human player, the
+/// first's text top at `rows[0]`, each next `rows[1]` lower: its `labels[n]` (P1, P2...) with its
+/// top left at `label` (the first row's), then its place (the rank's suffixes as in `(1st)`),
+/// accuracy (hits × 100 / shots, %), kills, headshots and deaths centred on `columns`, in its
+/// `colours[n]` over a `shadow` one pixel right and down; and the menu: `restart` and `quit`, the
+/// chosen one lit, and the `stick` between them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Results {
+    pub anchor: Anchor,
+    pub header: Placed,
+    pub icons: Vec<Placed>,
+    pub labels: Vec<Image>,
+    pub label: [i16; 2],
+    pub rows: [i16; 2],
+    pub columns: [i16; 5],
+    pub colours: Vec<Rgba>,
+    pub shadow: Rgba,
+    pub restart: Button,
+    pub quit: Button,
+    pub stick: Placed,
+}
+
+/// `hud/end.json`: what the end of a match draws, in [`Hud::frame`] like the HUD: the lives left
+/// (untimed), the skull over the view of a player out of lives, and the results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct End {
+    pub textures: BTreeMap<String, Texture>,
+    pub lives: Lives,
+    pub skull: Placed,
+    pub results: Results,
+}
+
+impl End {
+    /// Every image, with where it is named (for checks).
+    fn images(&self) -> Vec<(String, &Image)> {
+        let r = &self.results;
+        let mut all = vec![
+            ("skull.image".into(), &self.skull.image),
+            ("results.header.image".into(), &r.header.image),
+            ("results.stick.image".into(), &r.stick.image),
+        ];
+        for (name, b) in [("restart", &r.restart), ("quit", &r.quit)] {
+            all.push((format!("results.{name}.image"), &b.image));
+            all.push((format!("results.{name}.lit"), &b.lit));
+        }
+        let digits = self.lives.digits.iter().enumerate();
+        all.extend(digits.map(|(n, i)| (format!("lives.digits[{n}]"), i)));
+        all.extend(
+            (r.icons.iter().enumerate())
+                .map(|(n, i)| (format!("results.icons[{n}].image"), &i.image)),
+        );
+        all.extend((r.labels.iter().enumerate()).map(|(n, i)| (format!("results.labels[{n}]"), i)));
+        all
+    }
+
+    /// Reads `hud/end.json` and checks it as [`Hud::load`] does `hud.json`.
+    pub fn load<E: Display>(read: impl FnOnce(&str) -> Result<Vec<u8>, E>) -> Result<Self> {
+        let bytes = read(END).map_err(|e| Error::Read {
+            file: END.into(),
+            message: format!("{e} (a pack exported before the results: export a new one)"),
+        })?;
+        let end: End = parse_json(END, &bytes)?;
+        if end.lives.digits.len() < 10 {
+            return Err(invalid(END, "lives.digits", "10 digits, 0 to 9"));
+        }
+        check(END, &end.textures, end.images())?;
+        Ok(end)
+    }
+
+    pub fn to_json(&self) -> Vec<u8> {
+        to_json(self, 2)
     }
 }

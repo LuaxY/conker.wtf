@@ -6,8 +6,8 @@
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
-    Align, Anchor, Glyph, Grenades, Health, Horizontal as H, Hud, Image, Iris, Radar, Rank,
-    Reticle, Scope, Text, Texture, Tv, Vertical as V, Weapon,
+    Align, Anchor, Button, End, Glyph, Grenades, Health, Horizontal as H, Hud, Image, Iris, Lives,
+    Placed, Radar, Rank, Results, Reticle, Scope, Text, Texture, Tv, Vertical as V, Weapon,
 };
 use extract_core::Rom;
 use extract_gbi::{Format, Tlut, decode, png};
@@ -239,6 +239,7 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             colour: [0, 0, 0, 255],
             radius: IRIS.into(),
         },
+        end: None,
     }
 }
 
@@ -278,6 +279,105 @@ pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
     let hud = layout(textures, glyphs);
     files.push((conker_assets::hud::HUD.into(), hud.to_json()));
     Ok((files, hud))
+}
+
+/// (name, first texture id, tiles across, smooth): what the end of a match draws, RGBA32 32 x 32
+/// tiles stored for a LOADBLOCK without dxt (odd rows' texels at x ^ 2); a sprite of several tiles
+/// (`.game` data's sprite records at 0x800859E0: tiles across, the first id) is one PNG. The stick
+/// is 0x7E8, the tile drawn (its record names 0x7E7). V: `lab/research/mp-original` (STATS screen).
+const END_TEXTURES: [(&str, usize, usize, bool); 11] = [
+    ("lives", 0xD14, 1, false),
+    ("skull", 0xD0F, 1, true),
+    ("stats", 0x816, 2, false),
+    ("restart", 0x80E, 2, false),
+    ("restart_lit", 0x810, 2, false),
+    ("quit", 0x7FC, 2, false),
+    ("quit_lit", 0x7FE, 2, false),
+    ("stick", 0x7E8, 1, false),
+    ("stat_icons", 0x888, 1, false),
+    ("stat_deaths", 0x887, 1, false),
+    ("players", 0x843, 1, false),
+];
+
+/// `end.json`'s layout, the original's draws (V, the oracle's display lists: `lab/research/
+/// mp-original/menus-and-flow.md`, "Match end and STATS").
+fn end_layout(textures: std::collections::BTreeMap<String, Texture>) -> End {
+    let centre = Anchor(H::Centre, V::Middle);
+    let placed = |rect, texture, texels| Placed {
+        anchor: centre,
+        rect,
+        image: image(texture, texels),
+    };
+    let button = |x, name: &str| Button {
+        anchor: centre,
+        rect: [x, 164, 64, 32],
+        image: image(name, [0, 0, 64, 32]),
+        lit: image(&format!("{name}_lit"), [0, 0, 64, 32]),
+    };
+    End {
+        textures,
+        // The digit n at s {1, 8, 15, 21}[n & 3], t {0, 8, 16}[n >> 2] (0x800873C4, 0x800873C8).
+        lives: Lives {
+            anchor: Anchor(H::Left, V::Top),
+            at: [7, 6],
+            digits: (0..10)
+                .map(|n| image("lives", [[1, 8, 15, 21][n & 3], [0, 8, 16][n >> 2], 5, 7]))
+                .collect(),
+        },
+        skull: placed([130, 92, 32, 32], "skull", [0, 0, 32, 32]),
+        results: Results {
+            anchor: centre,
+            header: placed([116, 4, 64, 32], "stats", [0, 0, 64, 32]),
+            // Accuracy, kills, headshots, deaths.
+            icons: vec![
+                placed([129, 49, 16, 16], "stat_icons", [16, 0, 16, 16]),
+                placed([158, 49, 16, 16], "stat_icons", [0, 0, 16, 16]),
+                placed([177, 49, 32, 16], "stat_icons", [0, 16, 32, 16]),
+                placed([218, 49, 16, 15], "stat_deaths", [0, 16, 16, 15]),
+            ],
+            labels: [[0, 0], [16, 0], [0, 16], [16, 16]]
+                .map(|[x, y]| image("players", [x, y, 16, 16]))
+                .into(),
+            label: [60, 64],
+            rows: [66, 15],
+            columns: [112, 140, 166, 196, 226],
+            // P1 red, P2 blue (V); P3 green, P4 yellow (I: their labels' colours).
+            colours: vec![
+                [255, 0, 0, 255],
+                [0, 0, 255, 255],
+                [0, 255, 0, 255],
+                [255, 255, 0, 255],
+            ],
+            shadow: [0, 0, 0, 255],
+            restart: button(51, "restart"),
+            quit: button(181, "quit"),
+            stick: placed([132, 164, 32, 32], "stick", [0, 0, 32, 32]),
+        },
+    }
+}
+
+/// `hud/end.json` and its PNGs (files `hud.json` does not name).
+pub fn pack_end(rom: &Rom) -> Result<(crate::Files, End)> {
+    let blob = rom.textures()?;
+    let mut files = Vec::new();
+    let mut textures = std::collections::BTreeMap::new();
+    for (name, id, across, smooth) in END_TEXTURES {
+        let mut tiles = Vec::new();
+        for t in id..id + across {
+            tiles.push(decode(Format::Rgba32, 32, 32, &blob.get(t)?, &[], true)?);
+        }
+        let rgba: Vec<u8> = (0..32)
+            .flat_map(|y| tiles.iter().flat_map(move |t| &t[y * 128..(y + 1) * 128]))
+            .copied()
+            .collect();
+        let file = format!("{name}.png");
+        files.push((format!("hud/{file}"), png(32 * across as u32, 32, &rgba)?));
+        let size = [32 * across as u16, 32];
+        textures.insert(name.to_string(), Texture { file, size, smooth });
+    }
+    let end = end_layout(textures);
+    files.push((conker_assets::hud::END.into(), end.to_json()));
+    Ok((files, end))
 }
 
 #[cfg(test)]

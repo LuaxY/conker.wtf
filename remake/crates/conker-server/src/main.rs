@@ -1,4 +1,5 @@
-//! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D.
+//! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D
+//! or 0x30 (`--map`).
 //!
 //! ONE lightyear `Server` entity carries both transports on the same port number:
 //! WebTransport (UDP) and WebSocket (TCP). With `--cert`/`--cert-key` (PEM, e.g. Let's Encrypt's)
@@ -8,7 +9,7 @@
 //! Two `Server` entities silently stop server-side input processing (lightyear #1693); one
 //! entity with two aeronet transports needs [`relink_evicted_session`] (tested 2026-10-08).
 //!
-//! The match is conker-rules' [`Match`] on scene 0x2D's world, read from the asset pack (`--assets`):
+//! The match is conker-rules' [`Match`] on the map's world, read from the asset pack (`--assets`):
 //! every tick it moves the players (conker-sim, with the rules' masks), fires, flies the
 //! projectiles, hits, kills, respawns and counts down. Each player also has its follow camera here
 //! (conker-sim's [`Follow`]): R's aim camera holds the player's stick. Joining players take the
@@ -38,6 +39,14 @@
 //! Each tick: the lifts, `Bots::lifted` for the slots they moved, `Bots::tick` (the bots' inputs),
 //! `Bots::scopes` (a bot aiming 0x14 or 0x24 looks through its scope), the step, `Bots::observe`.
 //!
+//! Settings (`--time`, `--lives`, `--kills`, `--skill`, `--radar`; the original's SET-UP options and
+//! defaults, conker-rules' `Settings`) go to the clients in [`MatchView`]. The match ends as the
+//! original's (`Match::ends`: the clock, the kill limit, the last one standing or no human left in
+//! play, untimed with lives); over, every client shows the results, and the next match (the same
+//! settings) starts once every human in it sent [`Restart`], or [`RESULTS`] ticks after the end
+//! (`--wait` replays end as the game does). With the last human gone, a finished match waits and
+//! the next human to join starts a fresh one.
+//!
 //! The level's lifts (conker-bots' `lift`, which conker-rules lacks) move every player, bots and
 //! humans, before each step; a ride counts in `Combat.lives` so a client cuts its camera as after a
 //! respawn.
@@ -49,12 +58,15 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--port 5888] [--digest-file PATH] [--seconds N] [--bots N]
-//!   [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
+//! Usage: conker-server [--assets DIR] [--map 2d|30] [--port 5888] [--digest-file PATH] [--seconds N]
+//!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
+//!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
 //!   [--first-read R] [--no-lagcomp] [--cert PEM --cert-key PEM] [--token-key FILE]
 //!   [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
+//! - `--map 2d|30`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
+//!   clients learn it from `GET /info` on the token endpoint ([`token`]) before loading the level.
 //! - `--token-key FILE` (or `CONKER_TOKEN_KEY`): 64 hex digits that sign the connect tokens; a
 //!   random key per start without it. `--token-addr`: the token endpoint (default `[::]`, port + 1;
 //!   production: loopback behind the static server).
@@ -62,6 +74,10 @@
 //!   the server at (a domain's A and AAAA records). The tokens name them and the server checks
 //!   that a token was issued for them; without `--public` (dev) the tokens name loopback and the
 //!   check is off.
+//! - `--time` minutes on the clock (default 10) or `unlimited` (no clock: then each player has
+//!   `--lives` lives, default 3, and the last one standing wins); `--kills N` ends the match at N
+//!   kills (default 0, unlimited); `--skill` the bots' (default normal, or 0-4); `--radar off` hides
+//!   the HUD's radar.
 //! - `--spawn` (repeatable: slot 0, 1, ...) places a slot exactly, for oracle replays of the
 //!   original's Deathmatch (the game's start jitter comes from an RNG state that can't be
 //!   reproduced): on the slot's Deathmatch start record's facing (the default) and camera, and it
@@ -85,21 +101,20 @@ use conker_assets::{PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, Slice};
 use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
-use conker_rules::game::{Action, Event, Fighter, Match, Phase};
-use conker_rules::game::{MATCH_TIME, SPAWN_IMMUNE};
+use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
+use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE};
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
+use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{Attack, Gives, Pickup};
-use conker_rules::{
-    Arena, COLORS_MASKS, COLORS_START, DEATHMATCH_START, Placement, Rng, Spawn, place,
-};
+use conker_rules::{Arena, Placement, Rng, Spawn, place};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side};
 use conker_sim::net::{
     Collision, Combat, DEFAULT_PORT, Join, MatchView, PROTOCOL_ID, Player, PlayerId,
-    ProtocolPlugin, SCENE, Saw, scene_world,
+    ProtocolPlugin, Restart, Saw, map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -108,8 +123,7 @@ use lightyear::prelude::input::native::{ActionState, NativeBuffer};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use lightyear_aeronet::{AeronetLink, AeronetLinkOf};
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 mod tls;
@@ -122,6 +136,11 @@ const START_MARGIN: u32 = 150;
 const LIVE_READ: u32 = 23;
 /// Ticks of position history: 2 s, more than any view lag a playable connection has.
 const HISTORY: usize = 60;
+/// Ticks the results show before the next match starts anyway (the original's STATS screen quits
+/// on its own after about 40 s).
+const RESULTS: u32 = 40 * 30;
+/// The bot skills' names (`--skill`), as the SET-UP screen shows them.
+const SKILLS: [&str; 5] = ["inbred", "crap", "normal", "bastard", "einstein"];
 
 /// Replay and test setup from the command line.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -133,6 +152,7 @@ struct Setup {
     first_read: u32,
     lagcomp: bool,
     bots: usize,
+    settings: Settings,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), String> {
@@ -148,6 +168,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
         digest_file: None,
         seconds: None,
         assets: std::env::var("CONKER_ASSETS").unwrap_or_else(|_| "../assets".into()),
+        map: PACK_MAP.into(),
         cert: None,
         cert_key: None,
         token_key: None,
@@ -162,6 +183,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--digest-file" => net.digest_file = Some(value()?),
             "--seconds" => net.seconds = Some(value()?.parse().map_err(|_| bad("seconds"))?),
             "--assets" => net.assets = value()?,
+            "--map" => net.map = value()?,
             "--cert" => net.cert = Some(value()?),
             "--cert-key" => net.cert_key = Some(value()?),
             "--token-key" => net.token_key = Some(value()?),
@@ -205,6 +227,27 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--first-read" => setup.first_read = value()?.parse().map_err(|_| bad("first-read"))?,
             "--no-lagcomp" => setup.lagcomp = false,
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
+            "--time" | "--lives" | "--kills" | "--skill" | "--radar" => {
+                let v = value()?;
+                let n = |lo: u8, hi: u8| v.parse().ok().filter(|n| (lo..=hi).contains(n));
+                let s = setup.settings;
+                let set = match (flag.as_str(), v.as_str()) {
+                    ("--time", "unlimited") => Some(Settings { time: None, ..s }),
+                    ("--time", _) => n(3, 10).map(|m| Settings { time: Some(m), ..s }),
+                    ("--lives", _) => n(1, 5).map(|lives| Settings { lives, ..s }),
+                    ("--kills", "unlimited") => Some(Settings { kills: 0, ..s }),
+                    ("--kills", _) => n(0, 10).map(|kills| Settings { kills, ..s }),
+                    ("--skill", _) => (SKILLS.iter().position(|k| *k == v).map(|k| k as u8))
+                        .or_else(|| n(0, 4))
+                        .map(|skill| Settings { skill, ..s }),
+                    ("--radar", "on" | "off") => Some(Settings {
+                        radar: v == "on",
+                        ..s
+                    }),
+                    _ => None,
+                };
+                setup.settings = set.ok_or_else(|| bad(&v))?;
+            }
             _ => return Err(format!("unknown flag {flag}")),
         }
     }
@@ -222,8 +265,9 @@ struct Net {
     port: u16,
     digest_file: Option<String>,
     seconds: Option<f64>,
-    /// The asset pack's folder.
+    /// The asset pack's folder, and the map played (a folder under its `maps/`).
     assets: String,
+    map: String,
     /// TLS: the certificate chain and its key (PEM).
     cert: Option<String>,
     cert_key: Option<String>,
@@ -239,8 +283,10 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--port N] [--digest-file PATH] [--seconds N] \
-             [--bots N] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30] [--port N] [--digest-file PATH] [--seconds N] \
+             [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
+             [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
+             [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
              [--first-read R] [--no-lagcomp] [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -252,11 +298,14 @@ fn main() {
             net.assets
         ))
     });
-    let pack = Slice::load(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
+    let (scene, starts) = (map_scene(&net.map))
+        .and_then(|s| Some((s, starts(s)?)))
+        .unwrap_or_else(|| fail(format!("--map {}: not 2d or 30", net.map)));
+    let pack = Slice::load(&net.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    let (world, arena) = (scene_world(&pack), arena(&pack));
+    let (world, arena) = (scene_world(&pack, scene), arena(&pack));
 
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
@@ -274,7 +323,8 @@ fn main() {
     app.insert_resource(ReplicationMetadata::new(tick));
     app.insert_resource(Collision(world));
     let mut game = Game::new(arena, setup);
-    game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class])
+    game.starts = starts;
+    game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
     app.add_observer(on_link)
         .add_observer(on_connected)
@@ -302,7 +352,7 @@ fn main() {
     // Every frame (lightyear drops messages a frame leaves unread), before its fixed ticks.
     app.add_systems(
         RunFixedMainLoop,
-        (join, collect_saws).in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+        (join, collect_saws, restart_votes).in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
     );
     app.add_systems(
         FixedPreUpdate,
@@ -365,7 +415,16 @@ fn main() {
             "token endpoint {token_addr}: {e} (another server's port? pick one with --token-addr)"
         ))
     });
-    token::serve(listener, token::Issuer { key, addrs: named });
+    info!("map {} (scene {scene:#X})", net.map);
+    let map = net.map.clone();
+    token::serve(
+        listener,
+        token::Issuer {
+            key,
+            addrs: named,
+            map,
+        },
+    );
     let ws = ServerConfig::builder().with_bind_address(addr);
     let (ws, scheme) = match wss {
         Some(identity) => (ws.with_identity(identity), "wss"),
@@ -434,15 +493,18 @@ struct Ai {
     data: [Vec<u8>; 4],
     bots: Option<Bots>,
     lifts: Lifts,
+    /// The map's scene (the lifts lead within it).
+    scene: u8,
 }
 
 impl Ai {
-    fn new(data: [Vec<u8>; 4]) -> Option<Self> {
-        let lifts = Lifts::new(&data[1], SCENE as u8);
+    fn new(data: [Vec<u8>; 4], scene: u8) -> Option<Self> {
+        let lifts = Lifts::new(&data[1], scene);
         let ai = Self {
             data,
             bots: None,
             lifts,
+            scene,
         };
         // Parse once up front, so a bad pack fails at start and not at the first join.
         ai.assets()
@@ -460,11 +522,11 @@ impl Ai {
         })
     }
 
-    /// A fresh AI for `players` participants, the first `bots` of them bots.
-    fn restart(&mut self, players: usize, bots: usize, rng: Rng) {
+    /// A fresh AI for `players` participants, the first `bots` of them bots, at `skill`.
+    fn restart(&mut self, players: usize, bots: usize, skill: u8, rng: Rng) {
         let slots: Vec<usize> = (0..bots).collect();
         self.bots = (bots > 0)
-            .then(|| Bots::new(self.assets()?, players, &slots, DEFAULT_SKILL, rng))
+            .then(|| Bots::new(self.assets()?, players, &slots, skill, rng))
             .flatten();
     }
 }
@@ -473,6 +535,8 @@ impl Ai {
 #[derive(Resource)]
 struct Game {
     arena: Arena,
+    /// The map's start records and the sides' respawn masks.
+    starts: Starts,
     m: Match,
     /// Players that ever joined (the next team).
     joins: usize,
@@ -483,13 +547,16 @@ struct Game {
     started: bool,
     history: History,
     ai: Ai,
+    /// Over, the slots whose human sent [`Restart`].
+    votes: BTreeSet<usize>,
 }
 
 impl Game {
     fn new(arena: Arena, setup: Setup) -> Self {
-        let m = Match::new(&arena, Vec::new(), Rng::default(), 0);
+        let m = Match::new(&arena, Vec::new(), Rng::default(), 0).with(setup.settings);
         Self {
             arena,
+            starts: starts(0x2D).expect("0x2D's tables"),
             m,
             joins: 0,
             setup,
@@ -500,7 +567,9 @@ impl Game {
                 data: Default::default(),
                 bots: None,
                 lifts: Lifts::default(),
+                scene: 0x2D,
             },
+            votes: BTreeSet::new(),
         }
     }
 
@@ -513,7 +582,8 @@ impl Game {
     /// The bots' AI over the roster as it now stands.
     fn restart_bots(&mut self) {
         let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
-        self.ai.restart(players, bots, rng);
+        self.ai
+            .restart(players, bots, self.setup.settings.skill, rng);
     }
 
     /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz:
@@ -524,6 +594,7 @@ impl Game {
         let fighter = Fighter {
             side,
             spawn_mask,
+            bot: true,
             ..Fighter::new(&place, self.joins as u8, 0)
         };
         self.joins += 1;
@@ -539,7 +610,7 @@ impl Game {
             Player(fighter.body),
             Fighting::new(slot, &fighter),
             FightingOwner(Entity::PLACEHOLDER),
-            combat(&fighter, slot, 0, 0),
+            combat(&fighter, slot, 0, 0, self.m.settings.lives()),
             Slot { index: slot, place },
             Replicate::to_clients(NetworkTarget::All),
             InterpolationTarget::to_clients(NetworkTarget::All),
@@ -548,18 +619,18 @@ impl Game {
 
     /// Where slot `slot` on `side` starts, and the records it respawns on (`Fighter::spawn_mask`):
     /// `--spawn`'s place on the slot's Deathmatch record, respawning anywhere (oracle replays). Else
-    /// its side's base, as in the original's War: Colors (its Deathmatch has no sides): the side's
-    /// k-th player starts on `COLORS_START[side][k]`, jittered (one RNG draw, `spawn::place`), and
-    /// respawns in its half (`COLORS_MASKS`).
+    /// its side's base, as in the original's War mode on the map (Total War on 0x2D, Colors on 0x30;
+    /// its Deathmatch has no sides): the side's k-th player starts on `starts.sides[side][k]`,
+    /// jittered (one RNG draw, `spawn::place`), and respawns in its base (`starts.side_masks`).
     fn placement(&mut self, slot: usize, side: Side) -> (Placement, u32) {
         let Some(&(pos, facing)) = self.setup.spawns.get(slot) else {
             // ponytail: k counts the side's players now, so after a leave two can share a record
             // (jittered, pushed apart); keep each player's record if that ever matters.
-            let record = COLORS_START[side as usize][self.members(side) % 8];
+            let record = self.starts.sides[side as usize][self.members(side) % 8];
             let place = place(&self.arena.spawns, usize::from(record), &mut self.m.rng);
-            return (place, COLORS_MASKS[side as usize]);
+            return (place, self.starts.side_masks[side as usize]);
         };
-        let record = usize::from(DEATHMATCH_START[slot % 16]);
+        let record = usize::from(self.starts.deathmatch[slot % 16]);
         let r = &self.arena.spawns[record];
         let place = Placement {
             index: record,
@@ -574,6 +645,16 @@ impl Game {
     fn read(&self, t: u32) -> Option<u32> {
         let start = self.start.filter(|_| self.started)?;
         (t >= start).then(|| self.setup.first_read + (t - start))
+    }
+
+    /// Over: ticks before the next match starts anyway ([`RESULTS`] until then).
+    fn restart_in(&self, t: u32) -> u32 {
+        let over = |e: u32| e + END_DELAY + FADE + 1;
+        let left = self
+            .m
+            .ended_at
+            .map_or(RESULTS, |e| (over(e) + RESULTS).saturating_sub(t));
+        left.min(RESULTS)
     }
 
     /// The players on `side` in the match.
@@ -595,6 +676,7 @@ impl Game {
     /// projectiles go (`Match::remove_player`).
     fn remove(&mut self, i: usize) {
         self.m.remove_player(i);
+        self.votes.remove(&i);
         self.restart_bots();
     }
 }
@@ -788,7 +870,7 @@ fn join_player(
         // ponytail: the lifts keep each slot's last position, here the leaver's stand-in far away,
         // and the joiner's first ride test runs from it; new lifts skip every ride test for one
         // tick instead (as the match start does). A per-slot reset belongs in conker-bots' `Lifts`.
-        game.ai.lifts = Lifts::new(&game.ai.data[1], SCENE as u8);
+        game.ai.lifts = Lifts::new(&game.ai.data[1], game.ai.scene);
     }
     game.m.join(fighter);
     game.restart_bots();
@@ -812,7 +894,7 @@ fn join_player(
         Player(fighter.body),
         Fighting::new(index, &fighter),
         FightingOwner(client),
-        combat(&fighter, index, tick, 0),
+        combat(&fighter, index, tick, 0, game.m.settings.lives()),
         Slot { index, place },
         Cam(Follow::spawn(place.camera, &fighter.body)),
         Waiting,
@@ -897,10 +979,33 @@ fn on_left(trigger: On<Remove, Slot>, slots: Query<&Slot>, mut game: ResMut<Game
     game.remove(index);
     let players = game.m.players.len() - game.m.free.len();
     info!("slot {index} left; {players} players");
+    // The last human gone: the next to join starts a fresh match (`--wait` replays end as they go).
+    if game.humans() == 0 && game.setup.wait == 0 {
+        (game.start, game.started) = (None, false);
+    }
 }
 
-/// What a client needs of a fighter.
-fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16) -> Combat {
+/// Over, a client's RESTART: its player's vote for the next match.
+fn restart_votes(
+    mut clients: Query<(Entity, &mut MessageReceiver<Restart>), With<ClientOf>>,
+    players: Query<(&Slot, &ControlledBy)>,
+    mut game: ResMut<Game>,
+) {
+    for (client, mut votes) in &mut clients {
+        let voted = votes.receive().count() > 0;
+        let slot = players
+            .iter()
+            .find(|p| p.1.owner == client)
+            .map(|p| p.0.index);
+        if let Some(slot) = slot.filter(|_| voted && game.m.phase() == Phase::Over) {
+            game.votes.insert(slot);
+            info!("slot {slot} votes to restart");
+        }
+    }
+}
+
+/// What a client needs of a fighter; `start_lives`: the lives each player starts with.
+fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> Combat {
     let respawn_in = match f.action {
         Action::Hurt {
             reaction,
@@ -931,6 +1036,18 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16) -> Combat {
         anim: f.anim,
         respawn_in,
         lives,
+        deaths: f.deaths,
+        shots: f.shots,
+        out: f.out,
+        // A life goes at the respawn (V `func_15085710(i,4,1)`), not at the lethal hit.
+        lives_left: if f.out > 0 {
+            0
+        } else {
+            let dying = matches!(f.action, Action::Hurt { lethal: true, .. });
+            (u16::from(start_lives) + u16::from(dying)).saturating_sub(f.deaths) as u8
+        },
+        hits: f.hits,
+        headshots: f.headshots,
     }
 }
 
@@ -960,9 +1077,25 @@ fn simulate(
     let t = timeline.tick().0;
     let game = &mut *game;
     game.m.tick = t;
-    // A finished match starts over (not in `--wait` replays, which end as the game does).
-    if game.m.phase() == Phase::Over && game.setup.wait == 0 {
+    // Over, the results: the next match (the same settings) once every human in it voted, or
+    // `RESULTS` ticks on. Not in `--wait` replays (they end as the game does), nor with no human in
+    // (the next to join starts it).
+    let mut humans = players.iter().map(|p| p.0.index).peekable();
+    let some_human = humans.peek().is_some();
+    let voted = humans.all(|s| game.votes.contains(&s));
+    if game.m.phase() == Phase::Over
+        && game.setup.wait == 0
+        && some_human
+        && (voted || game.restart_in(t) == 0)
+    {
         (game.start, game.started) = (Some(t), false);
+        game.votes.clear();
+        // The RNG goes on from the bots' (they draw the most): a match no draw of the rules' RNG
+        // ran in (a kill limit of 1, no respawn) would otherwise replay the last one.
+        if let Some(bots) = &game.ai.bots {
+            game.m.rng = bots.rng();
+        }
+        info!("next match at tick {t}");
     }
     if !game.started && game.start.is_some_and(|s| s <= t) {
         (game.start, game.started) = (Some(t), true);
@@ -975,6 +1108,7 @@ fn simulate(
             *f = Fighter {
                 side: f.side,
                 spawn_mask: f.spawn_mask,
+                bot: f.bot,
                 ..Fighter::new(&slot.place, f.team, t)
             };
             if since_live > 0 {
@@ -988,16 +1122,20 @@ fn simulate(
             *f = Fighter {
                 side: f.side,
                 spawn_mask: f.spawn_mask,
+                bot: true,
                 ..Fighter::new(&slot.place, f.team, t)
             };
         }
         game.m = Match {
             free: std::mem::take(&mut game.m.free),
             ..Match::new(&game.arena, fighters, game.m.rng, t)
-        };
-        game.ai.lifts = Lifts::new(&game.ai.data[1], SCENE as u8);
+        }
+        .with(game.setup.settings);
+        game.ai.lifts = Lifts::new(&game.ai.data[1], game.ai.scene);
         game.restart_bots();
-        game.m.timer = MATCH_TIME - 2 * (game.setup.first_read as i32 - (LIVE_READ as i32 - 1));
+        if game.m.settings.time.is_some() {
+            game.m.timer -= 2 * (game.setup.first_read as i32 - (LIVE_READ as i32 - 1));
+        }
         info!("match started at tick {t} = read {}", game.setup.first_read);
     }
     if let Some(read) = game.read(t) {
@@ -1222,7 +1360,7 @@ fn publish(
         let lives = combat_state.lives + u16::from(respawned) + u16::from(rode);
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
-        combat_state.set_if_neq(combat(f, slot.index, m.tick, lives));
+        combat_state.set_if_neq(combat(f, slot.index, m.tick, lives, m.settings.lives()));
     }
     let taken = game
         .arena
@@ -1231,8 +1369,14 @@ fn publish(
         .zip(&m.pickups)
         .filter(|(_, s)| s.timer > 0)
         .fold(0u64, |acc, (p, _)| acc | 1 << p.0.placement);
+    let s = m.settings;
     view.set_if_neq(MatchView {
         timer: m.timer,
+        time: s.time.unwrap_or(0),
+        lives: s.lives(),
+        kill_limit: s.kills,
+        radar: s.radar,
+        restart_in: game.restart_in(m.tick) as u16,
         phase: match m.phase() {
             Phase::Playing => 0,
             Phase::Fading => 1,
@@ -1352,6 +1496,61 @@ mod tests {
         assert!(!parse_args(args(&["--no-lagcomp"])).unwrap().0.lagcomp);
     }
 
+    /// The SET-UP flags, the original's defaults without them, and their ranges.
+    #[test]
+    fn match_settings_parse() {
+        let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
+        assert_eq!(settings(&[]), Ok(Settings::default()));
+        let s = settings(&[
+            "--time",
+            "unlimited",
+            "--lives",
+            "5",
+            "--kills",
+            "10",
+            "--skill",
+            "einstein",
+            "--radar",
+            "off",
+        ]);
+        let want = Settings {
+            time: None,
+            lives: 5,
+            kills: 10,
+            skill: 4,
+            radar: false,
+        };
+        assert_eq!(s, Ok(want));
+        assert_eq!(
+            settings(&["--time", "3", "--skill", "0"]).unwrap().time,
+            Some(3)
+        );
+        for bad in [
+            ["--time", "2"],
+            ["--time", "11"],
+            ["--lives", "0"],
+            ["--lives", "6"],
+            ["--kills", "11"],
+            ["--skill", "5"],
+            ["--skill", "genius"],
+            ["--radar", "yes"],
+        ] {
+            assert!(settings(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Over, the results last `RESULTS` ticks from the end fade's last frame.
+    #[test]
+    fn the_results_count_down() {
+        let mut g = game(Setup::default());
+        assert_eq!(g.restart_in(500), RESULTS);
+        g.m.ended_at = Some(100);
+        let over = 100 + END_DELAY + FADE + 1;
+        assert_eq!(g.restart_in(over), RESULTS);
+        assert_eq!(g.restart_in(over + 30), RESULTS - 30);
+        assert_eq!(g.restart_in(over + RESULTS + 5), 0);
+    }
+
     /// `--public` takes the game port unless it names one; the token endpoint defaults to port + 1.
     #[test]
     fn deploy_flags_parse() {
@@ -1414,7 +1613,7 @@ mod tests {
         let (a, squirrels) = g.placement(0, Side::Squirrels);
         let (b, tediz) = g.placement(0, Side::Tediz);
         assert_eq!((a.index, b.index), (0, 1));
-        assert_eq!((squirrels, tediz), (COLORS_MASKS[0], COLORS_MASKS[1]));
+        assert_eq!((squirrels, tediz), (0xFFF0_1FFD, 0xFFFF_E03E));
         // The jitter moves along the record's yaw (64: sin 1, cos 0, so along x) by at most 40.
         assert!(
             b.pos[2] == 0.0 && (b.pos[0] - 100.0).abs() <= 40.0,
@@ -1594,6 +1793,6 @@ mod tests {
             .iter()
             .map(|s| u32::from(s.1))
             .sum();
-        assert_eq!(u32::from(combat(&f, 0, 15, 0).respawn_in), total - 5);
+        assert_eq!(u32::from(combat(&f, 0, 15, 0, 99).respawn_in), total - 5);
     }
 }

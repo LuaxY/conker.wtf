@@ -48,8 +48,10 @@ pub const C_BUTTONS: u16 = 0x000F;
 pub const HEALTH: u8 = 6;
 /// Immune frames after a (re)spawn (obj+0x125).
 pub const SPAWN_IMMUNE: u8 = 150;
-/// The match clock in VIs (10 minutes; `0x8008FD78`), −2 a frame.
+/// The match clock in VIs (10 minutes, the default; `0x8008FD78`), −2 a frame.
 pub const MATCH_TIME: i32 = 36_000;
+/// A timed match's lives (`D_80087260`): only an untimed one counts them.
+pub const TIMED_LIVES: u8 = 99;
 /// obj+0x104 during a hit state, and while dead from the death's second state.
 pub const STUN_HIT: u8 = 0xFE;
 pub const STUN_DEAD: u8 = 0xFF;
@@ -98,6 +100,51 @@ impl Arena {
             .map(|p| (*p, placement(p.placement)))
             .collect();
         Self { spawns, pickups }
+    }
+}
+
+/// The original's SET-UP options for Deathmatch (the option block `0x800E0BE0`, read at the match
+/// start; `Default` is the game's defaults, `0x8008FE54`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
+pub struct Settings {
+    /// Minutes on the clock, 3-10 (opt[3]); `None`: unlimited, no clock, and the lives count.
+    pub time: Option<u8>,
+    /// Lives, 1-5 (opt[2]); a timed match gives [`TIMED_LIVES`].
+    pub lives: u8,
+    /// The kills that end the match, 1-10 (opt[6]); 0: unlimited.
+    pub kills: u8,
+    /// The bots' skill (opt[16], `0x800E0BD0`): 0-4, INBRED, CRAP, NORMAL, BASTARD, EINSTEIN.
+    pub skill: u8,
+    /// The HUD's radar (opt[17]: HUD flag 0x20).
+    pub radar: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            time: Some(10),
+            lives: 3,
+            kills: 0,
+            skill: 2,
+            radar: true,
+        }
+    }
+}
+
+impl Settings {
+    /// The clock at the start in VIs (minutes × 3600), 0 untimed.
+    pub fn timer(&self) -> i32 {
+        self.time.map_or(0, |m| i32::from(m) * 3600)
+    }
+
+    /// The lives each player starts with.
+    pub fn lives(&self) -> u8 {
+        if self.time.is_some() {
+            TIMED_LIVES
+        } else {
+            self.lives
+        }
     }
 }
 
@@ -151,7 +198,7 @@ pub struct Fighter {
     /// the Tediz unless a match puts the player with the squirrels.
     pub side: Side,
     /// The records this player respawns on ([`spawn::respawn`]'s `eligible`): every one, as in the
-    /// original's Deathmatch, unless the match keeps it in its side's half ([`spawn::COLORS_MASKS`]).
+    /// original's Deathmatch, unless the match keeps it in its side's half ([`spawn::TOTAL_WAR_MASKS`]).
     pub spawn_mask: u32,
     /// obj+0x1CA.
     pub health: u8,
@@ -177,6 +224,20 @@ pub struct Fighter {
     /// gGameState+0x46+2i, capped at 9999; and own-grenade deaths.
     pub kills: u16,
     pub suicides: u16,
+    /// `0x800E0AD0[i]`: deaths, each a life lost ([`Settings::lives`]).
+    pub deaths: u16,
+    /// s126+0x1AA: the shots fired (a tie in kills − deaths ranks fewer first): +1 per round, swing
+    /// and grenade pulled (C `func_151D5148`, `func_15074840`, `func_15065A5C`; V: twin guns,
+    /// chainsaw, grenade; I: the rocket, aimed shot and ray, and the flame counts none).
+    pub shots: u16,
+    /// gGameState+0x66+0xC*i and +0x6A: the hits this player landed on others, and those on the
+    /// head (the results' accuracy and headshots).
+    pub hits: u16,
+    pub headshots: u16,
+    /// A bot plays this slot (the end when no human is left in play).
+    pub bot: bool,
+    /// The place this player went out on, its last life lost (`0x800E0AB0[i]`); 0 in play.
+    pub out: u8,
     /// struct126+0x1B0: the record this player last respawned on (not the match-start one).
     pub last_spawn: Option<usize>,
     /// This frame's and last frame's buttons (C-down and R act one frame late).
@@ -231,6 +292,12 @@ impl Fighter {
             knock_k: 0,
             kills: 0,
             suicides: 0,
+            deaths: 0,
+            shots: 0,
+            hits: 0,
+            headshots: 0,
+            bot: false,
+            out: 0,
             last_spawn: None,
             buttons: 0,
             late: 0,
@@ -422,6 +489,51 @@ pub enum Phase {
     Over,
 }
 
+/// What a player's place depends on ([`places`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Standing {
+    pub kills: u16,
+    pub deaths: u16,
+    pub shots: u16,
+    /// [`Fighter::out`].
+    pub out: u8,
+}
+
+impl Standing {
+    pub fn of(f: &Fighter) -> Self {
+        Self {
+            kills: f.kills,
+            deaths: f.deaths,
+            shots: f.shots,
+            out: f.out,
+        }
+    }
+}
+
+/// Each player's place, 1 the best, as the original ranks them (`func_151E565C`; 0 for `None`, a
+/// free slot): a player out of lives keeps the place it went out on; the others rank among
+/// themselves by kills − deaths, those at the kill limit `kill_limit` (once reached) above the
+/// rest, then fewer shots (s126+0x1AA) first. Still tied, they share the place (the game's slot
+/// rule only orders bots, which have no rank there).
+pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
+    let in_play = || all.iter().flatten().filter(|s| s.out == 0);
+    let reached = kill_limit > 0 && in_play().any(|s| s.kills >= u16::from(kill_limit));
+    let score = |s: &Standing| {
+        let bonus = reached && s.kills >= u16::from(kill_limit);
+        i32::from(s.kills) + 1000 * i32::from(bonus) - i32::from(s.deaths)
+    };
+    let ahead = |a: &Standing, b: &Standing| {
+        score(a) > score(b) || (score(a) == score(b) && a.shots < b.shots)
+    };
+    (all.iter())
+        .map(|s| match s {
+            None => 0,
+            Some(s) if s.out > 0 => s.out,
+            Some(s) => 1 + in_play().filter(|o| ahead(o, s)).count() as u8,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match {
     /// The next frame to run (= the trace row its result shows on).
@@ -433,10 +545,11 @@ pub struct Match {
     pub rockets: Vec<(u32, Rocket)>,
     pub shots: Vec<(u32, Shot)>,
     pub pickups: Vec<PickupState>,
-    /// VIs left.
+    /// VIs left (0 untimed).
     pub timer: i32,
-    /// The frame the clock reached 0.
-    pub zero_at: Option<u32>,
+    /// The frame an end condition held ([`Self::ends`]): the clock reached 0, say.
+    pub ended_at: Option<u32>,
+    pub settings: Settings,
     pub rng: Rng,
     /// Slots whose player left, kept for the next to join ([`Self::join`]): a [`Fighter::vacant`]
     /// that the frame skips. The other players keep their slots.
@@ -504,14 +617,15 @@ impl Match {
             shots: Vec::new(),
             pickups: vec![PickupState::default(); arena.pickups.len()],
             timer: MATCH_TIME,
-            zero_at: None,
+            ended_at: None,
+            settings: Settings::default(),
             rng,
             free: BTreeSet::new(),
         }
     }
 
     pub fn phase(&self) -> Phase {
-        match self.zero_at {
+        match self.ended_at {
             Some(z) if self.tick > z + END_DELAY + FADE => Phase::Over,
             Some(z) if self.tick > z + END_DELAY => Phase::Fading,
             _ => Phase::Playing,
@@ -587,7 +701,9 @@ impl Match {
         self.player(i, input, arena, world, seen, &mut rays, &mut ev);
         self.burn_player(i, &mut ev);
         self.fly_grenades(world, &mut ev);
-        animate(&mut self.players[i], world);
+        if self.players[i].out == 0 {
+            animate(&mut self.players[i], world);
+        }
         for (s, kind, origin) in rays {
             self.ray(s, kind, origin, world, seen, &mut ev);
         }
@@ -632,7 +748,7 @@ impl Match {
         // `animate`; V: 0x14's shot kills in its own update after the victim's, and the victim's
         // death 0x17E drifts from the third row on, combat4_w14 835).
         for (i, f) in self.players.iter_mut().enumerate() {
-            if !self.free.contains(&i) {
+            if !self.free.contains(&i) && f.out == 0 {
                 animate(f, world);
             }
         }
@@ -643,11 +759,56 @@ impl Match {
             self.ray(i, kind, origin, world, seen, &mut ev);
         }
         self.timer = (self.timer - 2).max(0);
-        if self.timer == 0 && self.zero_at.is_none() {
-            self.zero_at = Some(self.tick);
+        if self.ended_at.is_none() && self.ends() {
+            self.ended_at = Some(self.tick);
         }
         self.tick += 1;
         ev
+    }
+
+    /// The match with `settings`: its clock, and the lives its players start with.
+    pub fn with(self, settings: Settings) -> Self {
+        Self {
+            timer: settings.timer(),
+            settings,
+            ..self
+        }
+    }
+
+    /// Slot `i` holds a player still in play (not free, not out of lives).
+    pub fn in_play(&self, i: usize) -> bool {
+        !self.free.contains(&i) && self.players[i].out == 0
+    }
+
+    /// The original's end conditions (`func_151E565C`, Deathmatch): the clock reached 0 (timed);
+    /// a player has the kill limit; once a player is out of lives, fewer than 2 players are left
+    /// in play, or no human (the game counts down its players and humans alive as they go out).
+    pub fn ends(&self) -> bool {
+        let s = &self.settings;
+        let taken = || (0..self.players.len()).filter(|i| !self.free.contains(i));
+        let in_play = || {
+            taken()
+                .filter(|&i| self.in_play(i))
+                .map(|i| &self.players[i])
+        };
+        let out = || {
+            taken()
+                .filter(|&i| !self.in_play(i))
+                .map(|i| &self.players[i])
+        };
+        let time_up = s.time.is_some() && self.timer == 0;
+        let kills = s.kills > 0 && taken().any(|i| self.players[i].kills >= u16::from(s.kills));
+        let alone = out().next().is_some() && in_play().count() < 2;
+        let no_human = out().any(|f| !f.bot) && in_play().all(|f| f.bot);
+        time_up || kills || alone || no_human
+    }
+
+    /// Every slot's place, 1 the best ([`places`]; free slots 0).
+    pub fn places(&self) -> Vec<u8> {
+        let all: Vec<Option<Standing>> = (self.players.iter().enumerate())
+            .map(|(i, f)| (!self.free.contains(&i)).then(|| Standing::of(f)))
+            .collect();
+        places(&all, self.settings.kills)
     }
 
     fn pickups(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
@@ -702,6 +863,9 @@ impl Match {
         ev: &mut Vec<Event>,
     ) {
         let t = self.tick;
+        if self.players[i].out > 0 {
+            return;
+        }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
         // earlier in the slot order where they moved to this frame.
         let others: Vec<Other> = (self.players.iter().enumerate())
@@ -793,6 +957,7 @@ impl Match {
             {
                 f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
                 f.cook = projectile::COOK;
+                f.shots = f.shots.saturating_add(1);
             } else if let Some(w) = w.filter(|_| pressed(BUTTON_B)) {
                 if f.drawn {
                     f.set(Action::Holster, w.holster.0, t);
@@ -825,6 +990,9 @@ impl Match {
                         anim,
                         t,
                     );
+                    f.shots = f
+                        .shots
+                        .saturating_add(u16::from(matches!(w.attack, Attack::Melee { .. })));
                 } else if let Some(r) = w.reload.filter(|_| pressed(BUTTON_A)) {
                     f.rounds = w.rounds;
                     f.set(Action::Reload { frames: r.1 }, r.0, t);
@@ -884,6 +1052,7 @@ impl Match {
                         for (m, o) in muzzles.iter().zip(at) {
                             if cycles.iter().any(|&c| c != NONE && t == c + o) && f.rounds > 0 {
                                 f.rounds -= u8::from(w.rounds > 0);
+                                f.shots = f.shots.saturating_add(1);
                                 let muzzle = local_to_world(pos, facing, *m);
                                 strikes.push(Strike::Bullet(Bullet::fire(
                                     world, i, muzzle, facing, kind,
@@ -897,6 +1066,7 @@ impl Match {
                     }
                     Attack::Rocket { muzzle, cooldown } if n == 0 => {
                         f.ready = t + cooldown;
+                        f.shots = f.shots.saturating_add(1);
                         let at = local_to_world(pos, facing, muzzle);
                         strikes.push(Strike::Rocket(Rocket::fire(world, i, at, facing)));
                     }
@@ -907,9 +1077,11 @@ impl Match {
                         cooldown,
                     } if n == 0 && f.anim == anim.0 => {
                         f.ready = t + cooldown;
+                        f.shots = f.shots.saturating_add(1);
                         strikes.push(Strike::Aimed(kind, muzzle));
                     }
                     Attack::Ray { kind, origin } if n == 0 => {
+                        f.shots = f.shots.saturating_add(1);
                         strikes.push(Strike::Ray(kind, origin))
                     }
                     _ => {}
@@ -1217,7 +1389,9 @@ impl Match {
             // `func_15081E78` skips an immune or stunned living victim (C). The angle: V 0x6300 for
             // the facing 25345 on e_w24; the game's varies by up to 21 for the same aim
             // (combat4_w24 0x6302, combat4_pitch24 0x6313 and 0x6315; I: the rifle's pose).
-            self.hurt(v, &kind, false, true, me.facing & !1, i, ev);
+            if self.hurt(v, &kind, false, true, me.facing & !1, i, ev) && head {
+                self.players[i].headshots = self.players[i].headshots.saturating_add(1);
+            }
         }
     }
 
@@ -1396,6 +1570,8 @@ impl Match {
                 // (−0.871, 0, −0.491)).
                 let a = dir_angle(world, s.dir);
                 if self.hurt(v, &kind, false, true, a, s.owner, ev) {
+                    let o = &mut self.players[s.owner];
+                    o.headshots = o.headshots.saturating_add(u16::from(head));
                     // Its victim's first state is a frame shorter than the sniper's (V combat4_w14:
                     // the death spin 0x17E for 75 frames, the sniper's 76; I: the frame order).
                     self.players[v].since = t.saturating_sub(1);
@@ -1453,8 +1629,14 @@ impl Match {
             first,
             t,
         );
+        if attacker != v {
+            let a = &mut self.players[attacker];
+            a.hits = a.hits.saturating_add(1);
+        }
+        let f = &mut self.players[v];
         if lethal {
             (f.weapon, f.drawn) = (None, false);
+            f.deaths = f.deaths.saturating_add(1);
             let team = f.team;
             let a = &mut self.players[attacker];
             if attacker == v {
@@ -1495,7 +1677,12 @@ impl Match {
         if t - f.since >= u32::from(seq[usize::from(step)].1) {
             let step = step + 1;
             if usize::from(step) == seq.len() {
-                if lethal {
+                if lethal && f.deaths >= u16::from(self.settings.lives()) {
+                    // Out of lives: it stays down, out of play, on the last place of those still in
+                    // play (the game counts places down from its participants, `0x800E0AA9`).
+                    let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
+                    self.players[i].out = place as u8;
+                } else if lethal {
                     self.respawn(i, arena, ev);
                 } else {
                     f.recover(t, reaction);
@@ -1542,13 +1729,19 @@ impl Match {
         // between two picks in one frame, 20 of them the first pick's; what draws them is unread).
         self.rng.next_u32();
         self.rng.next_u32();
-        let (kills, suicides, buttons, late, side, spawn_mask) =
-            (f.kills, f.suicides, f.buttons, f.late, f.side, f.spawn_mask);
+        let (kills, suicides, deaths, shots, bot) = (f.kills, f.suicides, f.deaths, f.shots, f.bot);
+        let (hits, headshots) = (f.hits, f.headshots);
+        let (buttons, late, side, spawn_mask) = (f.buttons, f.late, f.side, f.spawn_mask);
         // The pad carries over: a button held through the respawn is no new press (V combat4_dead2:
         // C-down held on, no new grenade).
         self.players[i] = Fighter {
             kills,
             suicides,
+            deaths,
+            shots,
+            hits,
+            headshots,
+            bot,
             buttons,
             late,
             side,
@@ -1947,6 +2140,8 @@ mod tests {
         assert_eq!(hits[0].0, 24);
         assert_eq!(m.players[1].health, 5);
         assert_eq!(m.players[0].rounds, 58);
+        // Two rounds fired, one hit (the results' accuracy).
+        assert_eq!((m.players[0].shots, m.players[0].hits), (2, 1));
         let x = m.players[1].body.pos[0];
         assert!((x - (146.5 + 15.5 + 7.8 + 3.18)).abs() < 1e-3, "{x}");
     }
@@ -2073,6 +2268,7 @@ mod tests {
             .find(|e| matches!(e.1, Event::Hit { .. }))
             .unwrap();
         assert_eq!((hit.0, m.players[1].health), (30, 5));
+        assert_eq!((m.players[0].shots, m.players[0].hits), (1, 1));
     }
 
     /// `func_1505DADC`: 200 in 3D, ±90° of the facing, ±22.5° of pitch.
@@ -2111,6 +2307,8 @@ mod tests {
         assert_eq!((hits.len(), hits[0].0), (2, 11 + 120));
         let p = &m.players[0];
         assert_eq!((p.grenades, p.suicides, p.kills), (2, 1, 1));
+        // The pull counts the shot; the own blast is no hit.
+        assert_eq!((p.shots, p.hits), (1, 1));
         assert_eq!((p.item(132), p.item(133)), (0xA6, 0));
     }
 
@@ -2510,7 +2708,7 @@ mod tests {
         let (arena, mut m, w) = duel();
         m.timer = 4;
         run(&mut m, &arena, &w, 2, |_| 0);
-        assert_eq!((m.timer, m.zero_at), (0, Some(1)));
+        assert_eq!((m.timer, m.ended_at), (0, Some(1)));
         run(&mut m, &arena, &w, END_DELAY, |_| 0);
         assert_eq!(m.phase(), Phase::Fading);
         run(&mut m, &arena, &w, FADE, |_| 0);
@@ -2518,5 +2716,132 @@ mod tests {
         let t = m.tick;
         run(&mut m, &arena, &w, 5, |_| 0);
         assert_eq!(m.tick, t);
+    }
+
+    /// A duel where player 0's pistol kills player 1 (health 2) with its bullet in frame 20; its
+    /// death sequence ends in frame 171 (as `kill_and_respawn`).
+    fn pistol_kill(settings: Settings) -> (Arena, Match, CollisionWorld, Vec<(u32, Event)>) {
+        let (arena, m, w) = duel();
+        let mut m = m.with(settings);
+        m.give(0, 0x39);
+        m.players[1].health = 2;
+        let ev = run(&mut m, &arena, &w, 200, |t| match t {
+            0 => BUTTON_B,
+            20 => BUTTON_Z,
+            _ => 0,
+        });
+        (arena, m, w, ev)
+    }
+
+    #[test]
+    fn an_untimed_match_has_no_clock() {
+        let untimed = Settings {
+            time: None,
+            ..Settings::default()
+        };
+        let (_, m, _, ev) = pistol_kill(untimed);
+        assert_eq!((m.timer, m.ended_at), (0, None));
+        assert!(ev.iter().any(|e| matches!(e.1, Event::Respawn { .. })));
+        let timed = Settings {
+            time: Some(3),
+            ..Settings::default()
+        };
+        assert_eq!(pistol_kill(timed).1.timer, 3 * 3600 - 2 * 200);
+    }
+
+    /// The kill limit ends the match on the killing frame; the fade follows as after a time-out.
+    #[test]
+    fn the_kill_limit_ends_the_match() {
+        let limit = |kills| Settings {
+            kills,
+            ..Settings::default()
+        };
+        assert_eq!(pistol_kill(limit(1)).1.ended_at, Some(20));
+        assert_eq!(pistol_kill(limit(2)).1.ended_at, None);
+        let (arena, mut m, w, _) = pistol_kill(limit(1));
+        m.tick = 20 + END_DELAY + FADE;
+        assert_eq!(m.phase(), Phase::Fading);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.phase(), Phase::Over);
+    }
+
+    /// Untimed, the last life lost puts the player out (no respawn) on the last place; the last
+    /// one standing ends the match. Timed, lives are 99.
+    #[test]
+    fn the_last_life_puts_a_player_out() {
+        let lives = |lives| Settings {
+            time: None,
+            lives,
+            ..Settings::default()
+        };
+        let (_, m, _, ev) = pistol_kill(lives(1));
+        assert!(!ev.iter().any(|e| matches!(e.1, Event::Respawn { .. })));
+        assert_eq!((m.players[1].out, m.players[1].deaths), (2, 1));
+        assert_eq!((m.ended_at, m.places()), (Some(171), vec![1, 2]));
+        let (_, m, _, ev) = pistol_kill(lives(2));
+        assert!(ev.iter().any(|e| matches!(e.1, Event::Respawn { .. })));
+        assert_eq!(
+            (m.players[1].out, m.players[1].deaths, m.ended_at),
+            (0, 1, None)
+        );
+        assert_eq!(Settings::default().lives(), TIMED_LIVES);
+    }
+
+    /// The last human out of lives ends the match, bots still in play.
+    #[test]
+    fn no_human_left_ends_the_match() {
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            time: None,
+            lives: 1,
+            ..Settings::default()
+        });
+        let far = Placement {
+            index: 1,
+            pos: [-5000.0, 0.0, 0.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        m.players.push(Fighter::new(&far, 2, 0));
+        for i in [0, 2] {
+            m.players[i].bot = true;
+        }
+        m.give(0, 0x39);
+        m.players[1].health = 2;
+        run(&mut m, &arena, &w, 200, |t| match t {
+            0 => BUTTON_B,
+            20 => BUTTON_Z,
+            _ => 0,
+        });
+        assert_eq!((m.players[1].out, m.ended_at), (3, Some(171)));
+    }
+
+    /// The original's ranking: kills − deaths, the kill limit's holders first once reached, fewer
+    /// shots on a tie, ties shared; players out keep their place; free slots none.
+    #[test]
+    fn places_rank_kills_minus_deaths_then_shots() {
+        let s = |kills, deaths, shots, out| {
+            Some(Standing {
+                kills,
+                deaths,
+                shots,
+                out,
+            })
+        };
+        let all = [
+            s(2, 1, 9, 0),
+            s(1, 0, 4, 0),
+            s(1, 0, 2, 0),
+            None,
+            s(3, 0, 0, 0),
+            s(0, 3, 0, 6),
+            s(1, 0, 4, 0),
+        ];
+        assert_eq!(places(&all, 0), [5, 3, 2, 0, 1, 6, 3]);
+        // Kill limit 2 reached: player 0 (2 − 1) ranks with the 3-kill player, above the rest.
+        assert_eq!(places(&all, 2), [2, 4, 3, 0, 1, 6, 4]);
+        // A 0-0 start: everyone shares 1st until someone fires (V: lab/hud kill, 2 shots → 2nd).
+        assert_eq!(places(&[s(0, 0, 0, 0), s(0, 0, 0, 0)], 0), [1, 1]);
+        assert_eq!(places(&[s(0, 0, 2, 0), s(0, 0, 0, 0)], 0), [2, 1]);
     }
 }

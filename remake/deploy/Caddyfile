@@ -34,8 +34,9 @@
 		}
 	}
 
-	# Connect tokens from the game server: same origin, over this HTTPS.
-	handle /token {
+	# Connect tokens and the match's map (/info) from the game server: same origin, over this HTTPS.
+	@server path /token /info
+	handle @server {
 		reverse_proxy {$TOKEN_ADDR:127.0.0.1:5889}
 	}
 

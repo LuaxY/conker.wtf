@@ -77,22 +77,23 @@ pub mod g {
     pub const SIZE: usize = 0x2600;
 }
 
-/// The bot skill tables (`0x800872B0`.., indexed by the skill byte `0x800E0BD0`; the oracle's is 2).
+/// The bot skill tables (`0x800872B0`.., indexed by the skill byte `0x800E0BD0`: 0-4, INBRED,
+/// CRAP, NORMAL, BASTARD, EINSTEIN; the oracle's is 2). Five entries each (V: RAM, 2026-10-11).
 mod skill {
     /// `0x800872B0`: f32 scale of the distance to a human in the target ranking.
     pub const HUMAN_SCALE: [f32; 5] = [1.5, 1.2, 0.8, 0.4, 0.15];
     /// `0x800872C4` (s16): VIs of attacking one target before the shot goes for the head (−1 never).
-    pub const HEAD_AFTER: [i32; 4] = [-1, -1, 600, 240];
+    pub const HEAD_AFTER: [i32; 5] = [-1, -1, 600, 240, 0];
     /// `0x800872D0`: VIs between fire cycles.
-    pub const CYCLE: [i32; 4] = [0x50, 0x46, 0x3C, 0x3C];
+    pub const CYCLE: [i32; 5] = [0x50, 0x46, 0x3C, 0x3C, 0x2D];
     /// `0x800872D8`: VIs a twin-gun burst lasts.
-    pub const BURST: [i32; 4] = [0x0A, 0x14, 0x1E, 0x3C];
+    pub const BURST: [i32; 5] = [0x0A, 0x14, 0x1E, 0x3C, 0x2D];
     /// `0x800872E0`: the fire counter's start while not attacking (negated).
-    pub const FIRST: [i32; 4] = [0x78, 0x50, 0x28, 0x0A];
+    pub const FIRST: [i32; 5] = [0x78, 0x50, 0x28, 0x0A, 0x00];
     /// `0x800872E8`: percent under which the aim stays on target each cycle.
-    pub const STEADY: [i32; 4] = [0x0A, 0x14, 0x32, 0x50];
+    pub const STEADY: [i32; 5] = [0x0A, 0x14, 0x32, 0x50, 0x64];
     /// `0x800872F0`: G+0xC.
-    pub const G_C: [i32; 4] = [0x1E, 0x19, 0x14, 0x0F];
+    pub const G_C: [i32; 5] = [0x1E, 0x19, 0x14, 0x0F, 0x0F];
     /// `0x800872F8`: f32 aim following rate per VI.
     pub const AIM_RATE: [f32; 5] = [0.05, 0.1, 0.125, 0.25, 1.0];
 }

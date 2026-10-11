@@ -35,7 +35,7 @@ use extract_core::{Rom, Table};
 
 /// Bank-01 model of every Deathmatch participant in the oracle.
 pub const DEATHMATCH_PLAYER: usize = 117;
-/// Bank-01 model of the squirrels' soldier (the SHC): War: Colors' team 0, and the first character
+/// Bank-01 model of the squirrels' soldier (the SHC): War: Total War' team 0, and the first character
 /// of the multiplayer menu (V: the oracle's obj+4). It plays [`DEATHMATCH_PLAYER`]'s clips: its
 /// byte +6 is 0 too, though 128 is in no route group (V; what sets it is unread).
 pub const SQUIRREL_SOLDIER: usize = 128;

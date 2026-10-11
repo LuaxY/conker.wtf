@@ -2,7 +2,7 @@
 # Network smoke test: server + two headless scripted clients, a third joining mid-match, then
 # checks the logs. Needs the asset pack (CONKER_ASSETS, default ../assets): server and clients both build scene 0x2D's
 # collision from it.
-# Usage: [PORT=5888] crates/conker-server/smoke.sh [transport1 transport2 transport3]   (wt|ws, default: wt ws ws)
+# Usage: [PORT=5888] [MAP=2d|30] crates/conker-server/smoke.sh [transport1 transport2 transport3]   (wt|ws, default: wt ws ws)
 # Passes when every client connects, the server applies every player's inputs, each client sees
 # the others move (interpolated, animated), no player is ever below its floor or without one, and
 # the predicted state of each client equals the server's at the same tick.
@@ -16,7 +16,7 @@ logs=$(mktemp -d)
 export NO_COLOR=1 RUST_LOG=info,conker_server=debug,conker_client=debug
 port=${PORT:-5888}
 
-$bin/conker-server --port $port --seconds 40 --digest-file $logs/digest.txt > $logs/server.log 2>&1 &
+$bin/conker-server --port $port --map ${MAP:-2d} --seconds 40 --digest-file $logs/digest.txt > $logs/server.log 2>&1 &
 server=$!
 for _ in {1..300}; do [[ -s $logs/digest.txt ]] && break; sleep 0.1; done
 digest=$(<$logs/digest.txt)

@@ -475,7 +475,7 @@ fn accelerate(speed: f32, target: f32) -> f32 {
 
 /// A multiplayer side, and the model its players are: the squirrels (the SHC soldier, bank-01 model
 /// 128) or the Tediz (117, the oracle's Deathmatch character). The game picks the model by class:
-/// War: Colors puts team 0 on class 4 (model 128) and team 1 on class 3 (117); Deathmatch gives every
+/// War: Total War puts team 0 on class 4 (model 128) and team 1 on class 3 (117); Deathmatch gives every
 /// slot class 3, unless a human picks a character in the menu, whose first is the squirrel (V: the
 /// oracle's obj+4). Both play the same clips under the same movement and combat rules (V); only their
 /// bodies differ ([`Other::player`], conker-rules' `damage::Body`).
