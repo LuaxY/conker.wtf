@@ -62,7 +62,7 @@ fn spawn(hex: &str) -> Spawn {
     }
 }
 
-/// One logged pick in a match (scene 0x2D, 0x30 or 0x34) and what the game returned.
+/// One logged pick in a match (scene 0x2D, 0x30, 0x34 or 0x3F) and what the game returned.
 struct Pick {
     caller: String,
     player: usize,
@@ -117,7 +117,8 @@ fn captures(dir: &Path) -> Vec<Capture> {
                         set_index.push((int(kv["obj"]) as usize, int(kv["a1"]) as usize))
                     }
                     Some("pick")
-                        if kv["mp"] == "1" && ["0x2d", "0x30", "0x34"].contains(&kv["scene"]) =>
+                        if kv["mp"] == "1"
+                            && ["0x2d", "0x30", "0x34", "0x3f"].contains(&kv["scene"]) =>
                     {
                         scene = int(kv["scene"]) as u16;
                         let objs = kv["objs"]
@@ -247,14 +248,14 @@ fn every_logged_pick() {
 }
 
 /// The record the level script places each slot on (struct126+0x11B at its pick, and the
-/// `func_15085410` calls where logged), and the respawn masks, by scene and scenario (s9 Total War
-/// and s10 Colors: the sides' tables; else Deathmatch's).
+/// `func_15085410` calls where logged), and the respawn masks, by scene and scenario (s9 Total War,
+/// s10 Colors and s2 Raptor: the sides' tables; else Deathmatch's).
 #[test]
 fn start_records_and_masks() {
     let Some(dir) = oracle_dir() else { return };
     let (mut slots, mut picks) = (0, 0);
     for c in captures(&dir) {
-        let colors = c.name.starts_with("s9") || c.name.starts_with("s10");
+        let colors = ["s9", "s10", "s2"].iter().any(|s| c.name.starts_with(s));
         let tables = starts(c.scene).unwrap();
         let script: Vec<&Pick> = c
             .picks

@@ -303,16 +303,18 @@ pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
 
 /// The clips a Deathmatch plays: every animation id (obj+0x84) of the oracle's Deathmatch traces
 /// (`../lab/audio/tools/mp_anims.py` over `../lab/oracle/trajectories/*.raw`, 105 ids), and the
-/// crossbow's and the shotgun's walks (0xEC, 0x1F5: conker-anim's, untraced).
-pub const MATCH_CLIPS: [u16; 107] = [
+/// crossbow's and the shotgun's walks (0xEC, 0x1F5: conker-anim's, untraced), and item 0x40's
+/// (the club's: `combat6_*` traces, `../lab/oracle/caveman_README.md`).
+pub const MATCH_CLIPS: [u16; 115] = [
     0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x2B, 0x32, 0x36, 0x37, 0x38,
     0x4C, 0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xC5, 0xC6,
     0xCF, 0xD3, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8, 0xF9, 0xFB, 0xFC,
-    0x102, 0x103, 0x10A, 0x10C, 0x11A, 0x11B, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A,
-    0x12B, 0x144, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D,
-    0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E,
-    0x18A, 0x19C, 0x19D, 0x1EA, 0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7,
-    0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x26E, 0x28E,
+    0x102, 0x103, 0x10A, 0x10C, 0x10F, 0x111, 0x112, 0x113, 0x119, 0x11A, 0x11B, 0x11C, 0x11D,
+    0x120, 0x121, 0x122, 0x124, 0x129, 0x12A, 0x12B, 0x144, 0x152, 0x153, 0x155, 0x156, 0x157,
+    0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166,
+    0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1EA, 0x1EB, 0x1ED, 0x1EE,
+    0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x26E,
+    0x28E, 0x2C2, 0x2C3,
 ];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
@@ -509,7 +511,7 @@ fn footsteps(rom: &Rom, kinds: &BTreeSet<u8>) -> Result<Footsteps> {
 /// byte 0, `../lab/oracle/combat_README.md` §4), whose entry in the shared reaction list
 /// (`[0x0F, entry]`, header word 2; 0x18-byte entries, byte 0 the reaction, word 1 its sound word)
 /// names the voice; `func_15060A30` plays it on slot B.
-const REACTIONS: [(u8, u8); 16] = [
+const REACTIONS: [(u8, u8); 18] = [
     (0x09, 0x21),
     (0x39, 0x21),
     (0x23, 0x31),
@@ -526,6 +528,8 @@ const REACTIONS: [(u8, u8); 16] = [
     (0x18, 0x2E),
     (0x37, 0x21),
     (0x37, 0x2B),
+    (0x40, 0x25),
+    (0x40, 0x26),
 ];
 
 fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Result<Vec<Cue>> {
@@ -919,12 +923,13 @@ fn code_cues() -> Vec<Cue> {
     cues
 }
 
-/// A map's own sound: its emitters, and the sequence its background plays and its channels.
+/// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.
 /// 0x2D: two bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
 /// capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
 /// emitter (V: no positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask
-/// 0xFFC0, V). 0x34: no emitter, sequence 36, channels 0-5 (V, as 0x30).
-fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str) {
+/// 0xFFC0, V). 0x34: no emitter, sequence 36, channels 0-5 (V, as 0x30). 0x3F: no emitter, sequence
+/// 84, no channel muted, volume 24000 (`func_1000E40C`, set again every frame; V).
+fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     let emitters = match map {
         "2d" => [[-1101, -1201, -229], [650, -1191, 486]]
             .map(|at| Emitter {
@@ -935,9 +940,13 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str) {
             .into(),
         _ => vec![],
     };
-    let channels = if map == "2d" { "0-3" } else { "0-5" };
-    let sequence = if map == "34" { 36 } else { 19 };
-    (emitters, sequence, channels)
+    let (sequence, channels, volume) = match map {
+        "2d" => (19, "0-3", 32000),
+        "34" => (36, "0-5", 32000),
+        "3f" => (84, "0-15", 24000),
+        _ => (19, "0-5", 32000),
+    };
+    (emitters, sequence, channels, volume)
 }
 
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
@@ -952,14 +961,14 @@ pub fn pack_audio(
     let game_data = rom.game_data()?;
     let mut characters = BTreeMap::new();
     let mut cues = code_cues();
-    for (folder, class) in [("128", 128), ("117", 117)] {
+    for (folder, class) in [("128", 128), ("117", 117), ("136", 136)] {
         characters.insert(folder.to_string(), clip_sounds(rom, &game_data, class)?);
         cues.extend(hit_voices(rom, &game_data, class, folder)?);
     }
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
     for (name, background) in maps {
-        let (emitters, sequence, channels) = map_sounds(name);
+        let (emitters, sequence, channels, volume) = map_sounds(name);
         let mut map = MapSounds {
             background: vec![],
             emitters,
@@ -969,7 +978,7 @@ pub fn pack_audio(
             map.background.push(Background {
                 file: file.clone(),
                 volume: 32767,
-                note: format!("the game's own output (sequence {sequence}, channels {channels}, at volume 32000), recorded on the oracle and looped whole"),
+                note: format!("the game's own output (sequence {sequence}, channels {channels}, at volume {volume}), recorded on the oracle and looped whole"),
             });
             files.push((format!("audio/{file}"), wav.to_vec()));
         }

@@ -1,5 +1,5 @@
 //! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D,
-//! 0x30 or 0x34 (`--map`).
+//! 0x30, 0x34 or 0x3F (`--map`).
 //!
 //! ONE lightyear `Server` entity carries both transports on the same port number:
 //! WebTransport (UDP) and WebSocket (TCP). With `--cert`/`--cert-key` (PEM, e.g. Let's Encrypt's)
@@ -58,14 +58,14 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--map 2d|30|34] [--port 5888] [--digest-file PATH] [--seconds N]
+//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cert PEM --cert-key PEM] [--token-key FILE]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--cert PEM --cert-key PEM] [--token-key FILE]
 //!   [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
-//! - `--map 2d|30|34`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
+//! - `--map 2d|30|34|3f`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
 //!   clients learn it from `GET /info` on the token endpoint ([`token`]) before loading the level.
 //! - `--token-key FILE` (or `CONKER_TOKEN_KEY`): 64 hex digits that sign the connect tokens; a
 //!   random key per start without it. `--token-addr`: the token endpoint (default `[::]`, port + 1;
@@ -86,6 +86,7 @@
 //!   human joined, every slot back on its spawn; `--first-read R`: that tick is oracle read R
 //!   (default 23, the match going live).
 //! - `--give SLOT:READ:ID` hands a weapon as its pickup does at that read (the oracle's MP+0xEB0 poke).
+//! - `--cavemen`: scene 0x3F's Deathmatch on any map: caveman bots, every player holding item 0x40.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -106,7 +107,7 @@ use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE};
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
-use conker_rules::weapon::{Attack, Gives, Pickup};
+use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, place};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
@@ -153,6 +154,8 @@ struct Setup {
     lagcomp: bool,
     bots: usize,
     settings: Settings,
+    /// `--cavemen`: scene 0x3F's Deathmatch on any map ([`Game::cavemen`]).
+    cavemen: bool,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), String> {
@@ -226,6 +229,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--margin" => setup.margin = value()?.parse().map_err(|_| bad("margin"))?,
             "--first-read" => setup.first_read = value()?.parse().map_err(|_| bad("first-read"))?,
             "--no-lagcomp" => setup.lagcomp = false,
+            "--cavemen" => setup.cavemen = true,
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
             "--time" | "--lives" | "--kills" | "--skill" | "--radar" => {
                 let v = value()?;
@@ -283,11 +287,11 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34] [--port N] [--digest-file PATH] [--seconds N] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cert PEM --cert-key PEM] [--token-key FILE] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
     });
@@ -300,7 +304,7 @@ fn main() {
     });
     let (scene, starts) = (map_scene(&net.map))
         .and_then(|s| Some((s, starts(s)?)))
-        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30 or 34", net.map)));
+        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30, 34 or 3f", net.map)));
     let pack = Slice::load(&net.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
@@ -324,6 +328,7 @@ fn main() {
     app.insert_resource(Collision(world));
     let mut game = Game::new(arena, setup);
     game.starts = starts;
+    game.cavemen = game.setup.cavemen || scene == 0x3F;
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
     app.add_observer(on_link)
@@ -549,6 +554,9 @@ struct Game {
     ai: Ai,
     /// Over, the slots whose human sent [`Restart`].
     votes: BTreeSet<usize>,
+    /// Scene 0x3F's Deathmatch (scenario 7, V oracle): the bots are cavemen, the humans Tediz, and
+    /// every player starts holding item 0x40 ([`Fighter::start`]).
+    cavemen: bool,
 }
 
 impl Game {
@@ -570,7 +578,13 @@ impl Game {
                 scene: 0x2D,
             },
             votes: BTreeSet::new(),
+            cavemen: false,
         }
+    }
+
+    /// The item every player starts holding.
+    fn start_item(&self) -> Option<u8> {
+        self.cavemen.then_some(weapon::CLUB.id)
     }
 
     /// Humans in the match (every taken slot after the bots).
@@ -586,15 +600,19 @@ impl Game {
             .restart(players, bots, self.setup.settings.skill, rng);
     }
 
-    /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz:
-    /// its fighter, and the entity clients see.
+    /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz
+    /// (all cavemen in [`Game::cavemen`]): its fighter, and the entity clients see.
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
-        let side = [Side::Squirrels, Side::Tediz][slot % 2];
+        let side = match self.cavemen {
+            true => Side::Cavemen,
+            false => [Side::Squirrels, Side::Tediz][slot % 2],
+        };
         let (place, spawn_mask) = self.placement(slot, side);
         let fighter = Fighter {
             side,
             spawn_mask,
             bot: true,
+            start: self.start_item(),
             ..Fighter::new(&place, self.joins as u8, 0)
         };
         self.joins += 1;
@@ -619,17 +637,19 @@ impl Game {
 
     /// Where slot `slot` on `side` starts, and the records it respawns on (`Fighter::spawn_mask`):
     /// `--spawn`'s place on the slot's Deathmatch record, respawning anywhere (oracle replays). Else
-    /// its side's base, as in the original's War mode on the map (Total War on 0x2D, Colors on 0x30;
-    /// its Deathmatch has no sides; 0x34 has no War mode: the Deathmatch records by slot parity,
-    /// respawning anywhere): the side's k-th player starts on `starts.sides[side][k]`,
+    /// its side's base, as in the original's War mode on the map (Total War on 0x2D, Colors on 0x30,
+    /// Raptor on 0x3F; its Deathmatch has no sides; 0x34 has no War mode: the Deathmatch records by
+    /// slot parity, respawning anywhere): the side's k-th player starts on `starts.sides[side][k]`,
     /// jittered (one RNG draw, `spawn::place`), and respawns in its base (`starts.side_masks`).
     fn placement(&mut self, slot: usize, side: Side) -> (Placement, u32) {
         let Some(&(pos, facing)) = self.setup.spawns.get(slot) else {
             // ponytail: k counts the side's players now, so after a leave two can share a record
             // (jittered, pushed apart); keep each player's record if that ever matters.
-            let record = self.starts.sides[side as usize][self.members(side) % 8];
+            // The cavemen take the squirrels' base (the Ugas' on 0x3F, `spawn::starts`).
+            let base = usize::from(side == Side::Tediz);
+            let record = self.starts.sides[base][self.members(side) % 8];
             let place = place(&self.arena.spawns, usize::from(record), &mut self.m.rng);
-            return (place, self.starts.side_masks[side as usize]);
+            return (place, self.starts.side_masks[base]);
         };
         let record = usize::from(self.starts.deathmatch[slot % 16]);
         let r = &self.arena.spawns[record];
@@ -665,9 +685,10 @@ impl Game {
             .count()
     }
 
-    /// The side with fewer players in the match, the squirrels on a tie.
+    /// The side with fewer players in the match, the squirrels on a tie; the Tediz against the
+    /// cavemen.
     fn smaller_side(&self) -> Side {
-        match self.members(Side::Tediz) < self.members(Side::Squirrels) {
+        match self.cavemen || self.members(Side::Tediz) < self.members(Side::Squirrels) {
             true => Side::Tediz,
             false => Side::Squirrels,
         }
@@ -865,6 +886,7 @@ fn join_player(
     let fighter = Fighter {
         side,
         spawn_mask,
+        start: game.start_item(),
         ..Fighter::new(&place, team, tick)
     };
     if index < game.m.players.len() {
@@ -1110,6 +1132,7 @@ fn simulate(
                 side: f.side,
                 spawn_mask: f.spawn_mask,
                 bot: f.bot,
+                start: f.start,
                 ..Fighter::new(&slot.place, f.team, t)
             };
             if since_live > 0 {
@@ -1124,6 +1147,7 @@ fn simulate(
                 side: f.side,
                 spawn_mask: f.spawn_mask,
                 bot: true,
+                start: f.start,
                 ..Fighter::new(&slot.place, f.team, t)
             };
         }
@@ -1631,6 +1655,25 @@ mod tests {
             (a.index, a.pos, a.facing, a.camera, mask),
             (1, [5.0, 6.0, 7.0], 9, [0.0, 100.0, 0.0], !0)
         );
+    }
+
+    /// Scene 0x3F's Deathmatch (`--cavemen`): the bots are cavemen in the squirrels' base, holding
+    /// item 0x40; the humans join as Tediz.
+    #[test]
+    fn cavemen_bots_hold_the_club() {
+        let mut g = game(Setup::default());
+        g.cavemen = true;
+        let _ = (g.join_bot(0), g.join_bot(1));
+        let f = &g.m.players;
+        assert_eq!([f[0].side, f[1].side], [Side::Cavemen; 2]);
+        assert_eq!([f[0].start, f[1].start], [Some(0x40); 2]);
+        let (place, mask) = g.placement(2, Side::Cavemen);
+        assert_eq!(
+            (place.index, mask),
+            (7, 0xFFF0_1FFD),
+            "the squirrels' third record"
+        );
+        assert_eq!(g.smaller_side(), Side::Tediz);
     }
 
     /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,

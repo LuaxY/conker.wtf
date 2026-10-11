@@ -264,6 +264,13 @@ pub struct Fighter {
     /// The first frame the drawn weapon may fire again (weapon 0x14's s126+0x72, the rocket's
     /// s126+0x19E).
     pub ready: u32,
+    /// The match's start item (MP+0x1170, written by the scene's script at the match start; V:
+    /// 0x40 on 0x3F, `../lab/oracle/caveman_README.md`): the weapon manager hands it to this
+    /// player whenever it holds no weapon (the match start, the frame after a respawn).
+    pub start: Option<u8>,
+    /// The last frame the club's second swing may start: [`weapon::COMBO_WINDOW`] after this
+    /// player's last landed swing (obj+0x107).
+    pub combo: u32,
     /// s126+0x170: the scope's pitch in degrees (`conker_camera::Scope::pitch`, positive looks
     /// down). Set with `body.scope_yaw` after each camera step; the sniper's ray and weapon 0x14's
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
@@ -311,6 +318,8 @@ impl Fighter {
             heat: 0,
             bump: 0,
             ready: 0,
+            start: None,
+            combo: 0,
             scope_pitch: 0.0,
         }
     }
@@ -875,6 +884,12 @@ impl Match {
         if self.players[i].out > 0 {
             return;
         }
+        // The match's start item: the manager hands it over whenever the player holds no weapon
+        // (`func_1508DC24` with no pickup held: MP+0x1170; V combat6_e40 1214, the frame after
+        // the respawn).
+        if let (None, Some(id)) = (self.players[i].weapon, self.players[i].start) {
+            self.give(i, id);
+        }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
         // earlier in the slot order where they moved to this frame.
         let others: Vec<Other> = (self.players.iter().enumerate())
@@ -964,7 +979,25 @@ impl Match {
         // 190).
         let armed = w.filter(|_| f.drawn);
         let aiming = armed.is_some_and(|w| w.id == 0x23) && late_held(BUTTON_R);
-        let no_fire = armed.is_some_and(|w| w.id == 0x16) && late_held(BUTTON_R);
+        let no_fire = armed.is_some_and(|w| matches!(w.id, 0x16 | 0x40)) && late_held(BUTTON_R);
+        // The club: a Z press in a swing draws the RNG (`func_150641D8`, C) and, within
+        // `COMBO_WINDOW` frames of the first swing's hit, chains the second (V combat6_e40 870,
+        // 990; 1110: no hit, nothing).
+        if let Action::Fire { .. } = f.action
+            && armed.is_some_and(|w| w.id == 0x40)
+            && pressed(BUTTON_Z)
+            && !no_fire
+        {
+            self.rng.next_u32();
+            if f.anim == anim::CLUB_SWING && t <= f.combo {
+                let fire = Action::Fire {
+                    last_z: t,
+                    cycles: [NONE; 2],
+                };
+                f.set(fire, weapon::CLUB_COMBO.0.0, t);
+                f.shots = f.shots.saturating_add(1);
+            }
+        }
         // The shotgun fires again as soon as its cooldown allows, cutting the long 0x235 short (V
         // combat5_sg3: a shot every 60 frames).
         if matches!(f.action, Action::Fire { .. })
@@ -1023,10 +1056,12 @@ impl Match {
                     f.set(Action::Reload { frames: r.1 }, r.0, t);
                 } else if let Some(aim) = w.aim().filter(|_| late_held(BUTTON_R)) {
                     f.set(Action::Aim { shot: NONE }, aim, t);
-                } else if let Some(c) = w
-                    .c_button
-                    .filter(|_| input.buttons & C_BUTTONS & !late != 0)
-                {
+                } else if let Some(c) = w.c_button.filter(|_| {
+                    // Not in a jump or its landing (V combat6_ctlw40 730: the club's C-up ignored).
+                    use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
+                    input.buttons & C_BUTTONS & !late != 0
+                        && !matches!(f.body.state, JUMP | RUN_JUMP | FALL | LAND)
+                }) {
                     f.set(Action::CButton, c, t);
                 }
             }
@@ -1085,7 +1120,15 @@ impl Match {
                             }
                         }
                     }
-                    Attack::Melee { kind, at } if n == at => strikes.push(Strike::Melee(kind)),
+                    Attack::Melee { kind, at } => {
+                        let (kind, at) = match f.anim == anim::CLUB_COMBO {
+                            true => (weapon::CLUB_COMBO.1, weapon::CLUB_COMBO.2),
+                            false => (kind, at),
+                        };
+                        if n == at {
+                            strikes.push(Strike::Melee(kind));
+                        }
+                    }
                     Attack::Flame { kind, delay } if n >= delay => {
                         strikes.push(Strike::Flame(kind, n - delay))
                     }
@@ -1136,6 +1179,7 @@ impl Match {
                 // Swing 0x129 is a frame shorter than 0x12A (V e_w21 1051-1070).
                 let frames = match w.attack {
                     Attack::Spread { alt, .. } if f.anim == alt.0 => u32::from(alt.1),
+                    _ if f.anim == anim::CLUB_COMBO => u32::from(weapon::CLUB_COMBO.0.1),
                     _ => u32::from(w.fire.1) - u32::from(f.anim == anim::MELEE_SWING_A),
                 };
                 let done = if w.automatic() {
@@ -1262,7 +1306,8 @@ impl Match {
         if melee && matches!(ended, Action::Fire { .. }) {
             let strafe = mv.buttons & (BUTTON_C_LEFT | BUTTON_C_RIGHT) != 0;
             keep = Some((strafe.then_some(f.body.facing), f.body.move_angle));
-            (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, mv.buttons & !C_BUTTONS);
+            // An A pressed in the hold is spent (V combat6_ctlw40 130: no jump after the club's swing).
+            (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, mv.buttons & !(C_BUTTONS | BUTTON_A));
             f.body.prev_strafe = false;
         }
         let start = f.body.pos;
@@ -1290,6 +1335,7 @@ impl Match {
             movement::step_among(&mut f.body, &mv, world, f.side, &others);
         }
         if let Some((facing, angle)) = keep {
+            f.body.prev_buttons |= input.buttons & BUTTON_A;
             if let Some(facing) = facing {
                 f.body.facing = facing;
             }
@@ -1325,11 +1371,13 @@ impl Match {
                 (Some(w), LAND) if w.id == 0x21 && f.body.timer > 1 => anim::MELEE_LAND,
                 (Some(w), LAND) if w.id == 0x21 => w.idle,
                 (Some(_), state @ (JUMP | RUN_JUMP | FALL | LAND)) => u16::from(state),
-                (Some(w), state) => match conker_anim::armed_move(w.id, f.body.target_speed) {
-                    Some(a) => a,
-                    None if state != movement::state::IDLE => u16::from(state),
-                    None => f.idle_anim(),
-                },
+                (Some(w), state) => {
+                    match conker_anim::armed_move(w.id, f.body.xz_speed, f.body.target_speed) {
+                        Some(a) => a,
+                        None if state != movement::state::IDLE => u16::from(state),
+                        None => f.idle_anim(),
+                    }
+                }
                 _ => f.idle_anim(),
             };
             if f.bump > 0 {
@@ -1489,8 +1537,11 @@ impl Match {
                 let centre = local_to_world(me.pos, me.facing, [fwd, 0.0, up]);
                 for v in (0..self.players.len()).filter(|&v| v != i) {
                     let (p, h) = (self.seen_pos(seen, i, v), Hitbox::of(self.players[v].side));
-                    if self.players[v].immune == 0 && in_reach(centre, r, p, h) {
-                        self.hurt(v, &kind, true, false, me.move_angle, i, ev);
+                    if self.players[v].immune == 0
+                        && in_reach(centre, r, p, h)
+                        && self.hurt(v, &kind, true, false, me.move_angle, i, ev)
+                    {
+                        self.players[i].combo = t + weapon::COMBO_WINDOW;
                     }
                 }
             }
@@ -1907,7 +1958,8 @@ impl Match {
         self.rng.next_u32();
         let (kills, suicides, deaths, shots, bot) = (f.kills, f.suicides, f.deaths, f.shots, f.bot);
         let (hits, headshots) = (f.hits, f.headshots);
-        let (buttons, late, side, spawn_mask) = (f.buttons, f.late, f.side, f.spawn_mask);
+        let (buttons, late, side, spawn_mask, start) =
+            (f.buttons, f.late, f.side, f.spawn_mask, f.start);
         // The pad carries over: a button held through the respawn is no new press (V combat4_dead2:
         // C-down held on, no new grenade).
         self.players[i] = Fighter {
@@ -1922,6 +1974,7 @@ impl Match {
             late,
             side,
             spawn_mask,
+            start,
             last_spawn: Some(at.index),
             ..Fighter::new(&at, team, self.tick)
         };

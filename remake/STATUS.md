@@ -1,5 +1,92 @@
 # Status after wave 6 (2026-10-10)
 
+## The caveman (class 0xB, model 136) and item 0x40, the club (2026-10-11)
+**Scene 0x3F's Deathmatch (scenario 7) as the original sets it up: caveman bots, Tedi humans, and every player
+holding the club from the start and after each respawn; `conker-server --cavemen` does the same on any map.**
+Oracle findings and tools: `../lab/oracle/caveman_README.md` (`CONKER_MP_CHARS`, the `combat6_*` traces).
+
+| Part | What |
+|---|---|
+| Rules | `weapon::CLUB` (draw 0x2C2, swing 0x113 with its hit at 10, the second swing `CLUB_COMBO` within `COMBO_WINDOW` of a hit, walk/run 0x112/0x111, C 0x112); `damage::CLUB_SWING`/`CLUB_COMBO` (0x25/0x26) and their reactions; `Fighter::start` (MP+0x1170: given back whenever the player holds no weapon), `Fighter::combo`; an A pressed in a melee swing's hold is spent, a C press in a jump or landing ignored |
+| Sim | `Side::Cavemen` (the squirrel's body for hits and pushes); `PROTOCOL_ID` 12 |
+| Server | On 0x3F (or `--cavemen`): bots `Side::Cavemen` in the squirrels' base (the Ugas' on 0x3F), humans Tediz unless they ask, `start` 0x40 for all |
+| Pack | `characters/136/` (lift 49, the Tedi's clips), `audio/characters/136/` (16 WAVs); `held.{gltf,bin,json}` rewritten with the club's model (entry 122); `weapons/deathmatch/textures/3715-…png`; entries added to `pack.json`, `audio/events.json` (the club's clip sounds, 136's events, hit voices for 0x40), `audio/sounds.json`, `hud/hud.json` (icon 0x40); `README.md` |
+| Client | the third character (render, sounds, `side=cavemen`), the club in the hand, its HUD icon, hit voices |
+| Bots | `weapon_class(0x40)` = 3 (melee) |
+
+| Check | Result |
+|---|---|
+| Combat replays (`combat6_*`) | ctlw40 35/35 events, pos 0.009; e40 46/46, pos 0.04, kill 1/1; e40c (cavemen) 46/46, pos 0.04 (5.1/9.0 as Tediz); ctlw40c 31/35 (the caveman's grenade clips, known); 0 armed-rate error over 44/20 rows |
+| Caveman movement vs the Tedi (oracle) | 10 scripts, 4,728 reads: 0 differing game values (`tools/compare.py`) |
+| Tests (target-net) | conker-rules (61 + combat + oracle), -sim, -anim, -bots, -server (15, new: `cavemen_bots_hold_the_club`), -client (40), -assets, -extract (pack.rs with the ROM); wasm check; clippy |
+| `smoke.sh` | 2d (port 5934) and 3f (5936): 16/16, prediction error 0; on 3f every human holds 0x40 |
+| Native runs | `../lab/screens/caveman/shots.sh`: 2d `--cavemen` and 3f with 3 bots: `2d-tedi.png`, `3f-tedi.png` (the swing, the HUD icon), `2d-view26.png`, `3f-view26.png` (a caveman) |
+
+Gaps: the bots hold the club but never draw it (their AI script; 0x3F's own script is not run); the caveman's grenade
+clips 0x175/0x16C (the Tedi's play); the club icon's 1-pixel offset; a lethal first swing is untraced; the club's
+and the caveman's sounds are in the pack but were not listened to (native runs only, offscreen).
+
+## Deathmatch on scene 0x3F, the Temple (2026-10-11)
+**`conker-server --map 3f` plays Deathmatch on scene 0x3F (the original's scenario 7); the clients load it through
+`/info` as for 0x30 and 0x34, which are unchanged.** It plays with today's characters; scenario 7's cavemen and club
+(item 0x40) are another agent's work.
+
+| Step | What |
+|---|---|
+| Oracle (`../lab/oracle/map3f`, a private copy of the oracle; runners in `tools/`) | Scenario 7: 1 human + 15 bots (60 s, RAM dumps at DL 100-1700) and 2 + 3 (8 s). Scenario 2 (Raptor): 2 + 14 (70 s, RAM at DL 100-500). Deathmatch start by slot = `(slot + 7) % 12` on 16 records, 0x34's table, in both layouts (V); masks all ones (V, 17 respawns). 10 pickups, respawn 240 VIs (V): the weapons are the props with ids 14-21 (placements 7-14: 0x22, 0x23, 0x24, 0x09, 0x21, 0x37, 0x39, 0x15), the grenades ids 4 and 5 (placements 23, 24); all stand on their placements at 3-57 s. Placements 0-6 and 15-22 stay hidden (+0x6E) all match: Raptor's 8 bone weapons on the 8 weapon spots, 3 props at the west nest, 4 scene objects at (6026, 156, 2188). Raptor: team 0 (Ugas, class 0xB) starts on record 8 + k, team 1 (raptors, class 9, model 83) on record k; masks 0xFFFFFF00 and 0xFFFF00FF (V, 13 respawns). Ambience: **song 84**, no channel muted, volume 24000 (`func_1000E40C`, called every frame from `func_1000D758`), no emitter in 25 s. Surface kinds 4, 5, 7, 9, 0xA; **7 is new** (70 faces, the stream bed at x −6517..−5475, z −2555..−1564, floor −10): bot 8 crossed it at 17.5, half of 35 (reads 1339-1458), as `SINK[7]` = (45, −5, 50) says, which the sim already applies. Trigger kinds 5 (2, by the stream and the nest) and 18 (1, east) are new; no lift |
+| Per slot (for the club's port) | Humans: class 3, model 117. Bots: class 0xB, model 136. Everyone's s126+0x75 = 0xC0 from DL 100 (0x34's unarmed Tedi: 0) |
+| Oracle crash | Scenario 7 crashes the oracle 31 frames after the human dies (read 245 after the death at 214, native and under lldb): `func_15042ECC` (HUD layout) → `func_151EFF94` (sprintf) → strlen of an address outside RDRAM (I: the caveman killer's name). The 60 s capture keeps player 0's health at 6 (`combat_lldb.py` pokes every 2 reads); the bots die and respawn normally |
+| Sides | Raptor's bases, as Colors' on 0x30: the squirrels on team 0's records 8-15 (east), the Tediz on team 1's 0-7 (west, by the nest), each respawning in its own half (I, the remake's choice) |
+| Rules | `spawn::DEATHMATCH_START_3F` (= 0x34's), `RAPTOR_START_3F`, `RAPTOR_MASKS_3F`, `starts(0x3F)`; `weapon::PICKUPS_3F`, `pickups(0x3F)` (no spots) |
+| Pack | `conker-extract pack --map 2d --map 30 --map 34 --map 3f --background 3f=../lab/audio/map3f/background_loop.wav …`; `hidden_placements(0x3F)` leaves the 15 hidden placements out of the level and the collision (4,251 → 2,683 faces; the collision part I, from 0x2D's RAM); `map_sounds`: sequence 84, channels 0-15, volume 24000. Added to `../assets`: `maps/3f/` (7 files, 73 textures), `audio/maps/3f/background.wav`, `audio/common/0672-0682.wav` (kind 7's footsteps); `pack.json`, `audio/events.json`, `audio/sounds.json` gained the new entries only (each written as the fresh export once the merge equalled it), `README.md` is the new template. A fresh four-map export equalled `../assets` file for file (896 files) at the merge, before the caveman agent's exporter changes (character 136, the club's held model), which need their own merge |
+| Background loop | Song 84 never repeats sample for sample in 900 s (an untimed run); its loudness repeats every 191.82 s (envelope correlation 0.51, also at 2 and 3 periods). `background.wav` is one period cut at 386.15 s, digital silence at both ends (zero runs of 151 and 2,810 frames), 16.9 MB |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| `conker-rules` oracle test | 20 captures (3 on 0x3F): 253 placements + 100 respawns (1,842 RNG draws), 0 mismatches; 151 start records, 100 masks (s2's against the sides' tables); 20 traces, 179 rows; unit test: 0x3F's sides are two disjoint bases |
+| `conker-extract` `pack.rs` (ROM) | 0x3F reads back (collision less the hidden placements, 16 spawns, pickups on their placements, nav, triggers, glTF); audio: kind 7's footsteps, no emitter, sequence 84 at 24000 |
+| `MAP=3f smoke.sh` (ports 5901, 5902) | 16/16 on a fresh export and again on the merged `../assets`, prediction max error 0 (685/685/271 and 684/682/269 ticks) |
+| `MAP=3f bots.sh` (5 bots 150 s; 3 bots 120 s) | every bot moves (65-157 positions/s); 5 and 4 pickups; 10 and 9 hits; 1 and 2 kills; the script's fights-dies-respawns check fails as on 0x30 and 0x34 (4 of 5 and 3 of 3 bots without a death): the bots run 0x2D's AI script, 0x3F's is 0xBE (the bots section above) |
+| Browser (`/tmp/web-map3f`, headless Chrome) | WebTransport and WebSocket, `/info` (`{"map":"3f","protocol":12}`) then `maps/3f/`: `../lab/screens/map3f/browser-wt.png`, `browser-ws.png` (walking) |
+| Tests (target-net) | conker-assets 6, -bots 14 + oracle 3 + rom 3, -client 40, -extract (ROM) 5 + `pack` 4, -rules 62 + combat 3 + oracle 4 + rom 2, -sim 45 + oracle 11, -server 15 pass; -extract `rom.rs` `slice_in_memory` fails on its 13 held models, the club's in-flight 14th (the caveman agent's) |
+
+Gaps:
+- The cavemen and the club (above, per slot) are the caveman agent's; the oracle cannot show a human's respawn on 0x3F
+  (the crash).
+- Trigger kinds 5 and 18 and the per-frame music volume call are unread; the camera hints (5) and volumes (6) are
+  ignored as on 0x30.
+- `conker-sim`'s `WALL_PLACEMENTS` (10, 11) are 0x2D's on every map: on 0x3F they are the twin guns' and the katana's
+  models (on 0x30 the same placements are pickups too). 0x30's Colors flags (placements 18, 19) and its placement 0
+  are hidden in its Deathmatch but still drawn there (left as they are: 0x30 unchanged).
+
+## Bots on 0x30 and 0x34: the placement replan, and each scene's own AI script (2026-10-11)
+**A placement (match start, respawn, lift) now makes the AI replan on the next frame, as in the game: 0x30's
+every-36-ticks lift ping-pong is gone. The deeper cause of both loops is found, not fixed: the remake runs 0x2D's AI
+script on every map.**
+
+| Finding | What |
+|---|---|
+| Placement replan (V, fixed) | `func_15085430` (every placement) sets obj+0x22C bit 0x200; the next frame `func_1508A6FC` clears it and sets state 0 and a replan (G+0x1C), as a hit does. Oracle scenario 5 (`../lab/oracle/trajectories/bot_s5*_lldb.txt`): the flag set by the lift's placement and cleared the next frame on all six rides watched (p6 at reads 323, 416, 539, p8 at 48, 499, 540), state 6 → 0 with it (watched at p6's 324); then the script resets G+0xDC to −1 and picks again (p6, p8, p15 after their rides; p6 goal 90 → 101 → 90). Ported as `Npc::placed`: set by command 0x5A (the start), `lifted`, `Event::Respawn`; taken in `frame` |
+| Scene scripts (V, not fixed) | The game runs `[0x14, id]` per scene: 0x2D 0xBA, 0x30 0xBB, 0x34 0xBD, 0x3F 0xBE (G+0x16BC in the RAM of s5, s10, s4 and map3f s2); the pack has one `game/ai.bin` (0xBA). 0xBA's G+0x24D0 lists 16 pickup nodes of 0x2D for an unarmed bot to head for (C: an unarmed bot never searches the wanted weapon's pickups, GIVES[−1] = G+0x1170 = 0). On 0x30 its id 29 lies inside lift 4's box (the reported loop); on 0x34 ids 31 and 61 are bare corridor nodes: the bot walks there, finds nothing, cools down 300 VIs, wanders, repeats (the nodes 60-62 loop). Not the original's: its 0x34 bots stayed unarmed up to ~900 frames of 60 s, moving about (RAM at DL 300-1700, trace) |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| 0x2D start | all three bots in state 6 at read 24, as the oracle's `bot_states_lldb.txt` (was 24/25/26) |
+| `MAP=30 bots.sh` (3 bots 120 s; 5 bots 150 s) | 27 and 39 hits, 4 and 7 kills, 12 and 7 pickups, 19 and 37 lift rides (before: 7/8 hits, 2/5 kills, 4/16 pickups, 103/190 rides; a 5-bot rerun before the fix today: 10, 1, 5, 114). Rides come in bursts of 2-5, 40-300 ticks apart (the oracle's 41-150). 15 bots 60 s: 47 rides (oracle scenario 5: 25), but slot 1, unarmed with goal node 29, still rides lifts 4/2 every ~290 ticks |
+| `MAP=34 bots.sh` (3 bots 120 s; 5 bots 150 s) | 26 and 54 hits, 4 and 13 kills, 20 and 32 pickups; 9/10 and 16/16 checks (before: 16/39 hits, 3/6 kills, 17/33 pickups). In the 5-bot run bots 0 and 3 were still unarmed for 2,070 and 2,790 ticks, cycling states 3/6 on goals 61 and 31 (0xBA's ids) |
+| `MAP=2d bots.sh 150` | 9 hits, 2 kills, 12 pickups, 6/7 (bot 1 no hit, the old flake). `bot_match` 3 bots, seeds 1-5: kills 1/10/6/12/10, rides 1/6/2/15/12; with the flag off 5/11/10/9/7, 6/1/8/13/10: the same spread |
+| Tests (target-net) | conker-bots (new `a_placement_replans_once`; oracle 391/391 node changes, sight 137/142; ROM), conker-extract `pack` (ROM) pass; clippy clean |
+
+Also: `conker_bots::script(scene)` and `Assets::paths` name each scene's script; `bot_match` takes `BOT_SCENE=30|34`
+(it then runs that script with its level natives answering 0, so neither the game's numbers nor the server's);
+`../lab/oracle/tools/bot_lldb.sh` takes `SCENARIO`; the three scripts are in `../lab/extract/bot/lscript_14_{bb,bd,be}.bin`.
+
+Gaps:
+- Per-map AI needs a pack change (`maps/<map>/ai.bin` = `[0x14, script(scene)]`, loaded per map) and the natives those
+  scripts call: player queries 0xAC (`func_150A2AEC`, a trigger the player stands in, as a type-4 handle), 0xBC
+  (obj+0x13C), 0xA5; type-4 handle queries 6 and 16, commands 0x7C, prop 7, type-4 0. Until then 0x30's and 0x34's
+  unarmed bots still loop on 0x2D's node ids (above).
+
 ## The crossbow 0x18 and the shotgun 0x37 (2026-10-11)
 **Both weapons play: pickups (0x34's, or `--give SLOT:READ:0x18`), draw, fire, hits and kills in the rules, the bots,
 the server and the client (held model, clips, sounds, HUD icon).** Oracle tools and findings:

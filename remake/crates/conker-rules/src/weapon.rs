@@ -102,7 +102,7 @@ impl Weapon {
     /// A jumps with the melee weapons and 0x14; it reloads the guns and does nothing with the
     /// sniper rifle, the flamethrower and 0x16 (V `combat_ctlw_k*` read 131).
     pub fn jumps(&self) -> bool {
-        matches!(self.id, 0x14 | 0x21 | 0x22)
+        matches!(self.id, 0x14 | 0x21 | 0x22 | 0x40)
     }
 
     /// Automatic: Z held keeps firing (the twin guns, the flamethrower).
@@ -340,6 +340,39 @@ pub const SHOTGUN: Weapon = Weapon {
     c_button: None,
 };
 
+/// Item 0x40, the club: scene 0x3F's start item (`Fighter::start`). Z swings 0x113 (30 frames; the
+/// class sphere 0x0C 10 frames in, after locking onto the nearest player); a Z press within
+/// [`COMBO_WINDOW`] frames of its hit chains [`CLUB_COMBO`]; every Z press draws the RNG once
+/// (`func_150641D8`, C). Draw, holster and swings hold the movement (obj+0x89 = 0xFF: the melee
+/// brake). R held: Z does nothing. A jumps; the C buttons strafe with the walk (no grenade). V
+/// combat6_ctlw40, e40 (`../lab/oracle/caveman_README.md`).
+pub const CLUB: Weapon = Weapon {
+    id: 0x40,
+    draw: (anim::CLUB_DRAW, 15),
+    idle: anim::CLUB_IDLE,
+    holster: (anim::CLUB_HOLSTER, 15),
+    fire: (anim::CLUB_SWING, 30),
+    walk: None,
+    attack: Attack::Melee {
+        kind: damage::CLUB_SWING,
+        at: 10,
+    },
+    rounds: 0,
+    reload: None,
+    empty_reload: 0,
+    c_button: Some(anim::CLUB_WALK),
+};
+
+/// The club's second swing: (animation, frames), its sphere and the frame it lands (V combat6_e40
+/// 871-897: the hit 11 frames in).
+pub const CLUB_COMBO: ((u16, u16), DamageType, u32) =
+    ((anim::CLUB_COMBO, 27), damage::CLUB_COMBO, 11);
+
+/// Frames after a club hit in which Z chains [`CLUB_COMBO`]: obj+0x107 is 60 at the hit, −1 a
+/// frame, and the combo needs 40 (C `func_150641D8`; V e40: a press 20 frames on chains, I: one
+/// frame more might too).
+pub const COMBO_WINDOW: u32 = 20;
+
 pub fn weapon(id: u8) -> Option<&'static Weapon> {
     Some(match id {
         0x09 => &TWIN_GUNS,
@@ -353,6 +386,7 @@ pub fn weapon(id: u8) -> Option<&'static Weapon> {
         0x16 => &W16,
         0x18 => &CROSSBOW,
         0x37 => &SHOTGUN,
+        0x40 => &CLUB,
         _ => return None,
     })
 }
@@ -485,6 +519,22 @@ pub const PICKUPS_34: [Pickup; 16] = [
     pick(28, 0),
 ];
 
+/// Scene 0x3F's 10 pickups (Deathmatch, scenario 7), in the manager's order: the weapons are the
+/// props with ids 14-21 (placements 7-14), the grenades ids 4 and 5 (placements 23, 24); each
+/// stands on its placement (V from the RAM, `../lab/oracle/map3f`).
+pub const PICKUPS_3F: [Pickup; 10] = [
+    pick(7, 0x22),
+    pick(8, 0x23),
+    pick(9, 0x24),
+    pick(10, 0x09),
+    pick(11, 0x21),
+    pick(12, 0x37),
+    pick(13, 0x39),
+    pick(14, 0x15),
+    pick(23, 0),
+    pick(24, 0),
+];
+
 /// A scene's pickups, and their spots when the game moves them off their placements (empty: on
 /// the placements), if known.
 pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
@@ -492,6 +542,7 @@ pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
         0x2D => Some((&PICKUPS_2D, &[])),
         0x30 => Some((&PICKUPS_30, &SPOTS_30)),
         0x34 => Some((&PICKUPS_34, &[])),
+        0x3F => Some((&PICKUPS_3F, &[])),
         _ => None,
     }
 }

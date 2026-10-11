@@ -3,7 +3,7 @@
 `index.html` is the landing (Home, the server browser and the lobby: "Landing" below, built from `app/`).
 `play.html` + `play.js`, the game page, load the wasm client from `dist/` (`client.js` + `client_bg.wasm`, built from
 `crates/conker-client`, WebGL2) and start it at once. Nobody picks or uploads a ROM: the client fetches the asset
-pack (`conker-extract pack`: scenes 0x2D, 0x30 and 0x34, character 117 and the held weapons as glTF + PNG, the game data as
+pack (`conker-extract pack`: scenes 0x2D, 0x30, 0x34 and 0x3F, character 117 and the held weapons as glTF + PNG, the game data as
 JSON) from `assets/` next to the page, from the site that serves the game. Besides the page and the pack, it fetches only
 the server's `/info` (which map it plays), its connect token (and, in dev, the certificate digest).
 
@@ -122,7 +122,7 @@ python3 -m http.server 8080 --bind :: --directory web   # serve web/, not web/di
 Open <http://localhost:8080/> for the landing (Join game, This machine, Join game) or
 <http://localhost:8080/play.html> for the game page, which starts by itself, with a status line while the pack loads. The client
 first asks the game server which map it plays: `GET /info` next to the token endpoint below (`http://localhost:5889/info`,
-`{"map":"2d","protocol":11}`; the server's `--map 2d|30|34`, default `2d`; a client of another protocol stops there and says
+`{"map":"2d","protocol":11}`; the server's `--map 2d|30|34|3f`, default `2d`; a client of another protocol stops there and says
 to reload). Then it fetches that map's and the pack's 13 data files from `assets/` (all at once), then the sound's two (`audio/sounds.json`,
 `audio/events.json`, when `pack.json` lists `audio`), and Bevy its glTF models with their `.bin` files and PNG
 textures, and after the first key press or click the WAVs, from the same folder (no `.meta` requests: `AssetMetaCheck::Never`). Once the level
@@ -160,7 +160,7 @@ The game page's URL options (`play.html?a=1&b=2`):
 | `token-url=URL` | where the client gets its connect token, once the level has loaded (default: `/token` on this page's origin over https, where the static server proxies it; over http the game server's host, its port + 1, `/token`) |
 | `id=N` | netcode client id (default random) |
 | `map=2d` / `30` | the map to load instead of asking the server's `/info` (it must be the server's) |
-| `side=squirrels` / `tediz` | the side to play on: the squirrels (the SHC soldier) or the Tediz (the Tedi), each with its own model; default: the server puts you on the side with fewer players (the squirrels on a tie). Deathmatch scoring stays per player |
+| `side=squirrels` / `tediz` / `cavemen` | the side to play on: the squirrels (the SHC soldier), the Tediz (the Tedi) or the cavemen (the caveman), each with its own model; default: the server puts you on the side with fewer players (the squirrels on a tie; the Tediz against caveman bots, on 0x3F or with `--cavemen`). Deathmatch scoring stays per player |
 | `script` | drive the player with a test pattern instead of the keyboard |
 | `lag=MS` | add MS to every packet in both directions (a round trip takes 2·MS more), to test the netcode |
 | `log=DIRECTIVES` | more log filters (`EnvFilter` syntax), e.g. `log=conker_client=debug` for the `STATE` (the predicted player, every tick) and `SEEN` lines (where the screen showed each other player when it took that tick's input). The browser has no `RUST_LOG`; natively `RUST_LOG` wins |

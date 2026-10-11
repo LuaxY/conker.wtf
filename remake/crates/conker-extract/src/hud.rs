@@ -116,7 +116,8 @@ fn image(texture: &str, rect: [u16; 4]) -> Image {
 /// The weapon icons (`func_150918EC`): cell `n` of the atlas is column `n % 3` (25 texels apart)
 /// of row `n / 3` (its top and height from the tables at 0x800873B4 and 0x800873BC), 22 wide;
 /// weapon 0x39's is cell 10 of the second atlas, 3 texels lower, and the shotgun's (0x37) its cell
-/// 7; cell 1 (0x16) is a texel shorter.
+/// 7; cell 1 (0x16) is a texel shorter; the club's (0x40) cell 4, 3 texels higher and 20 wide
+/// (drawn a pixel right of the others: not kept).
 fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
     const TOPS: [u16; 5] = [4, 16, 25, 39, 53];
     const HEIGHTS: [u16; 5] = [12, 9, 14, 12, 10];
@@ -137,6 +138,7 @@ fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
         (0x39, cell("atlas2", 10, 3)),
         (0x18, cell("atlas", 6, 0)),
         (0x37, cell("atlas2", 7, 3)),
+        (0x40, image("atlas", [25, 13, 20, 9])),
     ]
     .into()
 }

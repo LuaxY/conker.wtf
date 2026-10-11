@@ -104,6 +104,10 @@ pub struct Npc {
     /// struct126 +0x16C: the aim yaw in degrees while R is held, and the point aimed at this frame.
     pub aim_yaw: Option<f32>,
     pub aim: Option<[f32; 3]>,
+    /// +0x22C bit 0x200: placed since the AI's last frame (the match start, a respawn, a lift). The
+    /// placement (`func_15085430`) sets it; the AI's frame takes it: state 0 and a replan (V, the
+    /// oracle on 0x30: p6 lifted at 323, cleared with the state at 324).
+    pub placed: bool,
 }
 
 impl Default for Npc {
@@ -132,6 +136,7 @@ impl Default for Npc {
             pickup: 64,
             aim_yaw: None,
             aim: None,
+            placed: false,
         }
     }
 }
@@ -300,9 +305,10 @@ impl Npc {
     }
 
     /// A lift moved the body: the path restarts from where it stands (V: bot_long3 p1 605 → 606,
-    /// p3 1592 → 1593: the current and previous nodes cleared, the script's wait ended).
+    /// p3 1592 → 1593: the current and previous nodes cleared, the script's wait ended); the AI
+    /// replans ([`Npc::placed`]).
     pub fn lifted(&mut self) {
-        (self.cur, self.prev, self.wait) = (NONE, NONE, 0);
+        (self.cur, self.prev, self.wait, self.placed) = (NONE, NONE, 0, true);
     }
 
     /// `func_15077508` (command 0xD2): the next node toward the goal (or, `wander`, a random

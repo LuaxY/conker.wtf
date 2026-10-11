@@ -59,9 +59,21 @@ impl Assets<'_> {
         [
             vec![0x19, scene],
             vec![0x0C, scene, 5],
-            vec![0x14, 0xBA],
+            vec![0x14, script(scene)],
             vec![0x0F, 0],
         ]
+    }
+}
+
+/// The scene's multiplayer AI script, `[0x14, id]` (V: G+0x16BC in the oracle's RAM). Each holds its
+/// scene's tables (the pickups' gifts and nodes, the pickup nodes an unarmed bot heads for), so
+/// another scene's script sends bots to nodes that mean nothing there.
+pub fn script(scene: usize) -> usize {
+    match scene {
+        0x30 => 0xBB,
+        0x34 => 0xBD,
+        0x3F => 0xBE,
+        _ => 0xBA,
     }
 }
 
@@ -194,7 +206,8 @@ impl Bots {
 
     /// A lift ([`lift::Lifts::ride`]) moved `slot`: its path restarts from where it now stands
     /// ([`Npc::lifted`]). Without it a bot lifted off its route keeps walking toward a node on the
-    /// other floor, into the tower's wall.
+    /// other floor, into the tower's wall. The AI replans too ([`Npc::placed`]): without that, a bot
+    /// whose goal lies inside a lift keeps it and rides back every ~36 frames.
     pub fn lifted(&mut self, slot: usize) {
         if let Some(n) = self.by_slot(slot).and_then(|k| self.npcs.get_mut(k)) {
             n.lifted();
@@ -227,7 +240,11 @@ impl Bots {
                     }
                 }
                 Event::Explosion { pos, .. } => self.noises.push((pos, 900.0)),
-                Event::Respawn { .. } => {}
+                Event::Respawn { player, .. } => {
+                    if let Some(p) = k(player) {
+                        self.npcs[p].placed = true;
+                    }
+                }
             }
         }
     }

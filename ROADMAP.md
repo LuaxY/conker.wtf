@@ -97,7 +97,8 @@ bots camped with the sniper rifle in the last `bots.sh` runs (known bot weakness
 Evidence: `lab/research/mp-original/` (menus-and-flow.md, modes-and-maps.md). Our map 0x2D is the **Total War** map:
 scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier notes (names fixed in the code and docs).
 **Done 2026-10-11:** the SET-UP options, the end conditions and the STATS results with RESTART/QUIT; Deathmatch on
-0x30 (`--map 30`) and on 0x34, the Bunker (`--map 34`); the crossbow (0x18) and shotgun (0x37). Leftovers:
+0x30 (`--map 30`), on 0x34, the Bunker (`--map 34`), and on 0x3F, the Temple (`--map 3f`); the crossbow (0x18) and
+shotgun (0x37). Leftovers:
 - results: the skull's grow; the level still drawn in an eliminated player's view; the lit button's pulse; the
   radar/score hidden during the fade; the 17-frame fade before RESTART; when the original counts a hit (accuracy);
   P3/P4 row colours;
@@ -108,12 +109,24 @@ scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier not
   with the original); a bot can loop jumping between
   nav nodes 60-62 for most of a match; surface kind 0xE's extra call and trigger kinds 12 and 17 are unread; its
   background loop is not sample-exact (song 36 never repeats exactly);
+- 0x3F: trigger kinds 5 and 18 and the per-frame music volume
+  call are unread; the background loop is one 191.8 s loudness period of song 84 (not sample-exact); the oracle crashes
+  31 frames after its human dies in scenario 7 (HUD sprintf); `WALL_PLACEMENTS` (10, 11) are 0x2D's on every map
+  (pickup models on 0x30 and 0x3F); 0x30 still draws its hidden Colors flags;
 - crossbow and shotgun: the crossbow's hip shot moves the shooter about 5.3 units a shot in the game (not modelled);
   the held crossbow doesn't animate (string) and its bolts use the sniper's flight sound; the shotgun's point-blank
   sphere never hit in the traces; `--first-read` replays land bolts one frame late;
 - the pack: the map exports and the weapons' port rewrote `pack.json`, `audio/events.json`, `audio/sounds.json`,
   `hud/hud.json` (additions only) and `weapons/deathmatch/held.{bin,gltf,json}` (13 models, new order), so pack edits
-  in those files would need re-applying. `assets/` equals a fresh three-map export (804 files).
+  in those files would need re-applying. `assets/` equals a fresh four-map export with the caveman (919 files).
+- caveman and club (done, `--cavemen` or 0x3F): bots never draw the club (they run 0x2D's AI script, below); the
+  caveman's own grenade clips (the Tedi's play); the club's HUD icon one pixel left; a lethal first swing untraced;
+  nobody listened to the club and caveman sounds;
+- bots: a placement now replans the AI as in the game (the 0x30 lift loop mostly gone). Each map has its own AI
+  script (0x2D 0xBA, 0x30 0xBB, 0x34 0xBD, 0x3F 0xBE) but the pack holds only 0xBA, so on the other maps unarmed bots
+  walk to 0x2D's pickup nodes (0x34's nodes 31/61 loop, 0x30's lift node 29, no club on 0x3F). Needs a per-map
+  `ai.bin` and the functions those scripts call (player queries 0xAC, 0xBC, 0xA5; type-4 queries 6 and 16;
+  commands 0x7C, prop 7, type-4 0);
 1. Around the match:
    - ~~the end of a match and a STATS screen with RESTART and QUIT~~ (done);
    - ~~SET-UP: time 3-10 min or unlimited, lives 1-5 (last one standing when untimed), kill limit, bot skill
@@ -121,8 +134,8 @@ scenario 9 = Total War, 10 = Colors (scene 0x30), the reverse of the earlier not
    - pause (CONT./RESTART/QUIT): not online (it would freeze everyone);
    - bot caps by human count;
    - real lobby wiring.
-2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), ~~0x34 Bunker~~ (done, with the crossbow and shotgun; its mounted machine gun is left out), 0x3F Temple
-   (+caveman, item 0x40), 0x1A Vault (+Wise Guy, tommy gun, item 0x19, moving pickups). Per-map character sets and
+2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), ~~0x34 Bunker~~ (done, with the crossbow and shotgun; its mounted machine gun is left out), ~~0x3F Temple~~
+   (done, with the caveman and item 0x40), 0x1A Vault (+Wise Guy, tommy gun, item 0x19, moving pickups). Per-map character sets and
    cheat characters. The bots' navigation on those maps is unchecked.
 3. Team modes:
    - common: team screen with BALANCE, intro and outro cutscenes, team results;

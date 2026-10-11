@@ -41,7 +41,9 @@ use serde::{Deserialize, Serialize};
 /// 11: the match's SET-UP options and its end: [`MatchView`] carries the settings and the restart
 /// countdown, [`Combat`] what ranks a player (deaths, shots, the place it went out on, lives left),
 /// and a client votes to play again with [`Restart`].
-pub const PROTOCOL_ID: u64 = 11;
+/// 12: the cavemen, a third [`Side`] (bots on scene 0x3F), and a match's start item: the fighter
+/// carries it (conker-rules' `Fighter::start`, back after each respawn) and the club's combo window.
+pub const PROTOCOL_ID: u64 = 12;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

@@ -1,6 +1,9 @@
-//! A headless Deathmatch on scene 0x2D: one idle human (slot 0) and N bots, conker-sim's movement and
-//! conker-rules' `Match::step`, the bots driven by conker-bots. The oracle's counterpart is
-//! `lab/oracle/tools/bot_run.sh bot_idle 300 bot_long3` (1 idle human + 3 bots).
+//! A headless Deathmatch on scene 0x2D (`BOT_SCENE=30`, `34`: another scene): one idle human (slot 0)
+//! and N bots, conker-sim's movement and conker-rules' `Match::step`, the bots driven by conker-bots.
+//! The oracle's counterpart is `lab/oracle/tools/bot_run.sh bot_idle 300 bot_long3` (1 idle human +
+//! 3 bots). Another scene runs its own AI script ([`conker_bots::script`]), whose level natives
+//! (player queries 0xAC, 0xBC, the type-4 handles…) are not ported and answer 0: its numbers are
+//! neither the game's nor the server's (which runs 0x2D's script from the pack on every map).
 //!
 //! `CONKER_ROM=... cargo run --release -p conker-bots --example bot_match -- [frames=9000] [bots=3]
 //!   [out.csv] [seed]`
@@ -13,8 +16,9 @@ use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_camera::volume::CameraLevel;
 use conker_rules::Rng;
-use conker_rules::game::{Arena, Event, Match};
-use conker_rules::spawn::Spawn;
+use conker_rules::game::{Arena, Event, Fighter, Match};
+use conker_rules::spawn::{self, Spawn};
+use conker_rules::weapon;
 use conker_sim::collision::{CollisionWorld, Layer};
 use conker_sim::movement::Input;
 use conker_sim::trig::AcosTable;
@@ -39,7 +43,7 @@ fn main() {
     });
     let rom = std::env::var_os("CONKER_ROM").expect("CONKER_ROM");
     let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
-    let scene = 0x2D;
+    let scene = std::env::var("BOT_SCENE").map_or(0x2D, |s| usize::from_str_radix(&s, 16).unwrap());
     let placements = extract_scene::scene_placements(&rom, scene).unwrap();
     let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
     let mut world = CollisionWorld::layered(collision.triangles.iter().map(|t| {
@@ -67,9 +71,17 @@ fn main() {
             b15: s.byte_15,
         })
         .collect();
-    let mut arena = Arena::deathmatch(spawns, |n| {
-        placements[usize::from(n)].position.map(f32::from)
-    });
+    let (picks, spots) = weapon::pickups(scene as u16).expect("the scene's pickups");
+    let mut arena = Arena {
+        spawns,
+        pickups: (picks.iter().enumerate())
+            .map(|(k, p)| {
+                let at = spots.get(k).copied();
+                let at = at.unwrap_or(placements[usize::from(p.placement)].position);
+                (*p, at.map(f32::from))
+            })
+            .collect(),
+    };
     for (p, _) in &mut arena.pickups {
         if let (conker_rules::weapon::Gives::Weapon(w), Some((new, old))) = (&mut p.gives, give)
             && *w == old
@@ -90,7 +102,17 @@ fn main() {
 
     let players = 1 + bots;
     let rng = seed.map_or_else(Rng::default, |s| Rng { state: s });
-    let mut m = Match::deathmatch(&arena, 1, players, rng, LIVE);
+    // `Match::deathmatch` with the scene's start table.
+    let starts = spawn::starts(scene as u16).expect("the scene's start tables");
+    let mut r = rng;
+    spawn::place(&arena.spawns, 0, &mut r);
+    let fighters = (0..players)
+        .map(|i| {
+            let at = usize::from(starts.deathmatch[i % 16]);
+            Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, LIVE)
+        })
+        .collect();
+    let mut m = Match::new(&arena, fighters, r, LIVE);
     let slots: Vec<usize> = (1..players).collect();
     let mut ai = Bots::new(assets, players, &slots, DEFAULT_SKILL, rng).expect("bot assets");
     let mut lifts = Lifts::new(assets.triggers, scene as u8);

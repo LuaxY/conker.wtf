@@ -31,9 +31,10 @@ pub const FORMAT: u32 = 1;
 /// The manifest's path.
 pub const MANIFEST: &str = "pack.json";
 /// The folders of what a Deathmatch reads: its map, its characters (bank-01 models: the squirrels'
-/// soldier, 128, then the Tediz' Tedi, 117, conker-sim's `Side` order) and its weapon set.
+/// soldier, 128, the Tediz' Tedi, 117, then the cavemen's, 136: conker-sim's `Side` order) and its
+/// weapon set.
 pub const PACK_MAP: &str = "2d";
-pub const PACK_CHARACTERS: [&str; 2] = ["128", "117"];
+pub const PACK_CHARACTERS: [&str; 3] = ["128", "117", "136"];
 pub const PACK_WEAPONS: &str = "deathmatch";
 /// Entries of the game's acos table (`.game` data at 0x80085EC0: 62 + 64 + 6).
 pub const ACOS_LEN: usize = 132;

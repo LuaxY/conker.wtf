@@ -43,7 +43,7 @@ pub fn character(side: Side) -> String {
 }
 
 /// The sides, in [`Side`] order.
-const SIDES: [Side; 2] = [Side::Squirrels, Side::Tediz];
+const SIDES: [Side; 3] = [Side::Squirrels, Side::Tediz, Side::Cavemen];
 
 /// Spawn record whose camera the window shows until our player arrives (V: oracle player 1's).
 pub const FIRST_SPAWN: usize = 1;
@@ -78,11 +78,11 @@ pub fn shade_to_linear(color: &mut [f32; 4]) {
 
 /// Model units the game draws each side's model above the player's position, scaled with the model
 /// (the pack's `model_lift`), by [`Side`]: the s16 at +6 of the model's bank-0x11 record (43 for
-/// 117, 42 for 128), copied to obj+0xC8 at spawn (`func_150837D4`); the object matrix is at (x, y +
+/// 117, 42 for 128, 49 for 136), copied to obj+0xC8 at spawn (`func_150837D4`); the object matrix is at (x, y +
 /// obj+0x150 × obj+0xC8, z) (`func_1502DF38`). C, and V: the oracle's joint matrices equal the
 /// clips' roots lifted by 43 (idle, run, crouch); obj+0xC8 is 42.0 for a squirrel.
 #[derive(Resource)]
-struct ModelLift([f32; 2]);
+struct ModelLift([f32; 3]);
 
 /// A side's character: its scene and its clips' graph.
 struct Look {
@@ -98,7 +98,7 @@ impl Look {
     }
 }
 
-/// Both sides' characters, once loaded, by [`Side`].
+/// The sides' characters, once loaded, by [`Side`].
 #[derive(Resource)]
 struct Characters(Vec<Look>);
 

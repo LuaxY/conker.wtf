@@ -478,13 +478,16 @@ fn accelerate(speed: f32, target: f32) -> f32 {
 /// War: Total War puts team 0 on class 4 (model 128) and team 1 on class 3 (117); Deathmatch gives every
 /// slot class 3, unless a human picks a character in the menu, whose first is the squirrel (V: the
 /// oracle's obj+4). Both play the same clips under the same movement and combat rules (V); only their
-/// bodies differ ([`Other::player`], conker-rules' `damage::Body`).
+/// bodies differ ([`Other::player`], conker-rules' `damage::Body`). The cavemen (class 0xB, model 136,
+/// "Uga-Buga") are the bots of the original's Deathmatch on scene 0x3F (scenario 7): no base, the
+/// squirrel's bodies, the same clips and movement (V: `../lab/oracle/caveman_README.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
 pub enum Side {
     Squirrels,
     #[default]
     Tediz,
+    Cavemen,
 }
 
 /// Another body that pushes the player away when they overlap (`func_1505D6F0`): its position, and its
@@ -499,12 +502,12 @@ pub struct Other {
 
 impl Other {
     /// A multiplayer player of `side`, at scale 0.5: the Tedi's radius 23, centre 33 up, vertical
-    /// scale 23/45; the squirrel's 30, 33 and 30/66 (V: the oracle's obj+0xE4/0xE8/0xEC; +0xE6, 45
-    /// and 66, is the height the scale divides by).
+    /// scale 23/45; the squirrel's and the caveman's 30, 33 and 30/66 (V: the oracle's
+    /// obj+0xE4/0xE8/0xEC; +0xE6, 45 and 66, is the height the scale divides by).
     pub fn player(side: Side, pos: [f32; 3]) -> Self {
         let (radius, y_scale) = match side {
             Side::Tediz => (23, f32::from_bits(0x3F02_D82E)),
-            Side::Squirrels => (30, f32::from_bits(0x3EE8_BA2F)),
+            Side::Squirrels | Side::Cavemen => (30, f32::from_bits(0x3EE8_BA2F)),
         };
         Self {
             pos,

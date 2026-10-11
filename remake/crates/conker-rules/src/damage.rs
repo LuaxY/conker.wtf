@@ -82,6 +82,17 @@ pub const BLADE_SWING: DamageType = DamageType {
     reach: [55, 23, 36],
     ..ty(0x2F, 0x07, 10.0, 0.0, 5.0, 30, 0, 0)
 };
+/// Class 117's attacks 0x0C and 0x0D (the cavemen's class table is the same, V): the club's swing
+/// and its second swing (item 0x40), 110 ahead, 1 damage, reactions 0x25 and 0x26 (V
+/// combat6_e40, e40c: types logged at `func_1505B9C4`, entries read from the RAM).
+pub const CLUB_SWING: DamageType = DamageType {
+    reach: [55, 23, 36],
+    ..ty(0x25, 0x41, 10.0, 0.0, 5.0, 30, 0, 0)
+};
+pub const CLUB_COMBO: DamageType = DamageType {
+    reach: [55, 23, 36],
+    ..ty(0x26, 0x41, 10.0, 0.0, 5.0, 30, 0, 0)
+};
 
 /// Weapon 0x14's shot on the body (type 0x10 = `0x80099AC4`[2]): 1 damage, the 0xD3 stagger.
 pub const SHOT_BODY: DamageType = ty(0x20, 0x01, 20.0, 0.0, 6.0, 1, 0x80 | 10, 0x0400);
@@ -144,7 +155,20 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
     const STAGGER: &[(u16, u16)] = &[(anim::HIT, 18)];
     const SHOT_DEAD: &[(u16, u16)] = &[(anim::HIT, 18), (anim::DEATH_FALL, 52), (anim::DEAD, 81)];
     match (reaction, lethal) {
-        (0x33, false) => &[(anim::HIT_MELEE, 19)],
+        (0x33 | 0x25, false) => &[(anim::HIT_MELEE, 19)],
+        (0x26, false) => &[(anim::HIT_CLUB, 18)],
+        // The club's lethal second swing (V combat6_e40 1062-1213); a lethal first swing never
+        // traced (I: the same fall from its own hit).
+        (0x26, true) => &[
+            (anim::HIT_CLUB, 18),
+            (anim::DEATH_FALL, 52),
+            (anim::DEAD, 81),
+        ],
+        (0x25, true) => &[
+            (anim::HIT_MELEE, 19),
+            (anim::DEATH_FALL, 52),
+            (anim::DEAD, 81),
+        ],
         (AREA_STAGGER, true) => &[
             (anim::HIT, 18),
             (anim::DEATH_FALL, 52),
@@ -228,11 +252,11 @@ pub struct Hitbox {
 }
 
 impl Hitbox {
-    /// The Tedi's 26, 43 and 35; the squirrel soldier's 36, 64 and 44.
+    /// The Tedi's 26, 43 and 35; the squirrel soldier's and the caveman's 36, 64 and 44.
     pub fn of(side: Side) -> Self {
         let [radius, half, centre] = match side {
             Side::Tediz => [26.0, 43.0, 35.0],
-            Side::Squirrels => [36.0, 64.0, 44.0],
+            Side::Squirrels | Side::Cavemen => [36.0, 64.0, 44.0],
         };
         Self {
             radius,

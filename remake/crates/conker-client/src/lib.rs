@@ -150,10 +150,10 @@ pub struct Config {
     /// `log=DIRECTIVES`: more log filter directives (`EnvFilter` syntax, e.g. `conker_client=debug`
     /// for the `STATE` and `SEEN` lines); the browser has no `RUST_LOG`, which wins natively.
     pub log: Option<String>,
-    /// `side=squirrels|tediz`: the side to play on (its model), sent when joining; default the
-    /// server's pick, the side with fewer players.
+    /// `side=squirrels|tediz|cavemen`: the side to play on (its model), sent when joining; default
+    /// the server's pick, the side with fewer players (the Tediz against caveman bots).
     pub side: Option<Side>,
-    /// `map=2d|30|34`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
+    /// `map=2d|30|34|3f`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
     pub map: String,
 }
@@ -224,6 +224,7 @@ impl Config {
                     cfg.side = Some(match value.as_str() {
                         "squirrels" => Side::Squirrels,
                         "tediz" => Side::Tediz,
+                        "cavemen" => Side::Cavemen,
                         _ => return Err(bad()),
                     })
                 }
@@ -557,7 +558,7 @@ impl Clips {
 
 /// Each side's character's [`Clips`], by [`Side`] (the pack's `PACK_CHARACTERS` order).
 #[derive(Resource, Clone, Debug)]
-pub struct SideClips(pub [Clips; 2]);
+pub struct SideClips(pub [Clips; 3]);
 
 impl SideClips {
     pub fn of(&self, side: Side) -> &Clips {
@@ -1416,6 +1417,7 @@ mod tests {
         let side = |v| Config::from_pairs(query_pairs(v)).map(|c| c.side);
         assert_eq!(side("side=squirrels"), Ok(Some(Side::Squirrels)));
         assert_eq!(side("?side=tediz"), Ok(Some(Side::Tediz)));
+        assert_eq!(side("side=cavemen"), Ok(Some(Side::Cavemen)));
         assert!(side("side=bears").is_err());
     }
 

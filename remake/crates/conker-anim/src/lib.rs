@@ -123,6 +123,15 @@ pub mod combat {
     pub const SHOTGUN_HOLSTER: u16 = 0x1F8;
     pub const SHOTGUN_FIRE: u16 = 0x1F4;
     pub const SHOTGUN_FIRE_B: u16 = 0x235;
+    /// Item 0x40, the club (scene 0x3F's start item): draw 15, idle, holster 15, the swing 30 and,
+    /// after a hit, the second swing 27; walk and run picked by speed (V combat6_ctlw40, e40).
+    pub const CLUB_DRAW: u16 = 0x2C2;
+    pub const CLUB_IDLE: u16 = 0x10F;
+    pub const CLUB_HOLSTER: u16 = 0x2C3;
+    pub const CLUB_SWING: u16 = 0x113;
+    pub const CLUB_COMBO: u16 = 0x119;
+    pub const CLUB_WALK: u16 = 0x112;
+    pub const CLUB_RUN: u16 = 0x111;
     /// Grenade (C-down): pull 28, hold while held, throw 28.
     pub const GRENADE_PULL: u16 = 0x176;
     pub const GRENADE_HOLD: u16 = 0x177;
@@ -131,8 +140,10 @@ pub mod combat {
     pub const HIT: u16 = 0x11D;
     /// Hit by weapon 0x14's shot on the body (class 117's reaction 0x20: 30 frames, C).
     pub const HIT_SHOT: u16 = 0xD3;
-    /// Hit by melee 0x21: 19 frames.
+    /// Hit by melee 0x21 or the club's swing: 19 frames.
     pub const HIT_MELEE: u16 = 0x11B;
+    /// Hit by the club's second swing: 18 frames.
+    pub const HIT_CLUB: u16 = 0x11C;
     /// Blown up by a grenade (42 frames, 88 when lethal), getting up (42), recovering (30).
     pub const BLOWN_UP: u16 = 0xF3;
     pub const GET_UP: u16 = 0xF4;
@@ -252,7 +263,7 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         | combat::SHOTGUN_DRAW
         | combat::SHOTGUN_HOLSTER => (1.4, 4.0, 0.0),
         combat::MELEE_SWING_A | combat::MELEE_SWING | combat::BLADE_SWING => (1.3, 4.0, 0.0),
-        combat::HIT_MELEE => (1.5, 4.0, 0.0),
+        combat::HIT_MELEE | combat::HIT_CLUB => (1.5, 4.0, 0.0),
         combat::BLOWN_UP => (1.2, 4.0, 0.0),
         combat::GET_UP => (1.6, 4.0, 0.0),
         combat::RECOVER | combat::W14_DRAW | combat::W14_HOLSTER | combat::BURN_END => {
@@ -271,6 +282,10 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         | CROSSBOW_WALK => (armed_e(id, speed, target) * 0.0625 + 0.6, 4.0, 0.0),
         BLADE_RUN | SNIPER_RUN | GUN23_RUN | TWIN_RUN | PISTOL_RUN | GRENADE_RUN | FLAME_WALK
         | CROSSBOW_RUN | SHOTGUN_RUN => (armed_e(id, speed, target) / 22.0 + 0.4, 4.0, 0.0),
+        // The club's walk and run (its case of `func_15064B94`, C): e/8 + 0.3 and e/20 + 0.3 with
+        // the full target (V combat6_e40 801-820, ctlw40 951-985; the strafe's 65 % on 761-763).
+        combat::CLUB_WALK => (effective_speed(speed, target) * 0.125 + 0.3, 4.0, 0.0),
+        combat::CLUB_RUN => (effective_speed(speed, target) / 20.0 + 0.3, 4.0, 0.0),
         _ => (1.0, 4.0, 0.0),
     };
     Request {
@@ -312,6 +327,8 @@ pub fn request_at(id: u16, speed: f32, target: f32, percent: u8) -> Request {
         | combat::FLAME_WALK
         | combat::CROSSBOW_RUN
         | combat::SHOTGUN_RUN => e / 22.0 + 0.4,
+        combat::CLUB_WALK => e * 0.125 + 0.3,
+        combat::CLUB_RUN => e / 20.0 + 0.3,
         _ => return request(id, speed, target),
     };
     Request {
@@ -337,9 +354,13 @@ fn armed_e(id: u16, speed: f32, target: f32) -> f32 {
 
 /// The armed walk or run `func_15064B94` picks for the drawn weapon (s126+0x78) while the stick
 /// asks for `target` ≥ 1 (C); `None` for the weapons that walk with the plain gait (0x14) or below
-/// a target of 1.
-pub fn armed_move(weapon: u8, target: f32) -> Option<u16> {
+/// a target of 1. The club goes by the player's `speed` instead: walking from 1, running from 18
+/// (C; V combat6_ctlw40 968).
+pub fn armed_move(weapon: u8, speed: f32, target: f32) -> Option<u16> {
     use combat::*;
+    if weapon == 0x40 {
+        return (speed >= 1.0).then_some(if speed >= 18.0 { CLUB_RUN } else { CLUB_WALK });
+    }
     if target < 1.0 {
         return None;
     }
@@ -597,13 +618,20 @@ mod tests {
 
     #[test]
     fn armed_moves() {
-        assert_eq!(armed_move(0x21, 19.2), Some(combat::MELEE_WALK)); // e_w21
-        assert_eq!(armed_move(0x21, 10.0), Some(combat::MELEE_STEP));
-        assert_eq!(armed_move(0x22, 19.2), Some(combat::BLADE_WALK)); // e_w22
-        assert_eq!(armed_move(0x22, 35.0), Some(combat::BLADE_RUN));
-        assert_eq!(armed_move(0x09, 35.0), Some(combat::TWIN_RUN));
-        assert_eq!(armed_move(0x14, 35.0), None);
-        assert_eq!(armed_move(0x09, 0.5), None);
+        assert_eq!(armed_move(0x21, 0.0, 19.2), Some(combat::MELEE_WALK)); // e_w21
+        assert_eq!(armed_move(0x21, 0.0, 10.0), Some(combat::MELEE_STEP));
+        assert_eq!(armed_move(0x22, 0.0, 19.2), Some(combat::BLADE_WALK)); // e_w22
+        assert_eq!(armed_move(0x22, 0.0, 35.0), Some(combat::BLADE_RUN));
+        assert_eq!(armed_move(0x09, 0.0, 35.0), Some(combat::TWIN_RUN));
+        assert_eq!(armed_move(0x14, 0.0, 35.0), None);
+        assert_eq!(armed_move(0x09, 0.0, 0.5), None);
+        // The club by speed (combat6_ctlw40: 0x112 from speed 1, 0x111 at 18; idle below 1).
+        assert_eq!(armed_move(0x40, 17.0, 35.0), Some(combat::CLUB_WALK));
+        assert_eq!(armed_move(0x40, 18.0, 35.0), Some(combat::CLUB_RUN));
+        assert_eq!(armed_move(0x40, 0.5, 0.0), None);
+        // Its rates: e/8 + 0.3 walking (e_w40 801: 1.79), e/20 + 0.3 running (bot 65: 1.605 at 90 %).
+        assert!((request_at(combat::CLUB_WALK, 1.0, 19.2, 0).rate - 1.79).abs() < 1e-5);
+        assert!((request_at(combat::CLUB_RUN, 18.0, 35.0, 90).rate - 1.605).abs() < 1e-5);
         let r = request(combat::BLADE_RUN, 35.0, 35.0).rate;
         assert!((r - ((14.0 + 16.8) / 22.0 + 0.4)).abs() < 1e-6);
     }

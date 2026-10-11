@@ -36,10 +36,13 @@ pub const SLICE_SCENE: usize = 0x2D;
 pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// The clips that put Deathmatch's held models in the hand: the draws of weapons 0x09, 0x39, 0x23,
 /// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull, then the crossbow's and the
-/// shotgun's draws (conker-anim's ids; new ones go last, keeping the pack's scene order).
-pub const HELD_CLIPS: [u16; 12] = [
-    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7,
+/// shotgun's and the club's (0x40) draws (conker-anim's ids). The held list sorts by the game's
+/// action number, not by this order (the club's model is scene 3).
+pub const HELD_CLIPS: [u16; 13] = [
+    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2,
 ];
+/// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
+pub const CAVEMAN: usize = 136;
 /// How far below a floor plane a spawn point may sit and still stand on it (spawns on slopes sit
 /// up to ~1.3 units under the plane; the extract-scene example uses the same value).
 const FLOOR_TOLERANCE: f32 = 2.0;
@@ -452,12 +455,13 @@ fn held_gltf(models: &Level, scenes: Value, textures: &Textures, bin_uri: &str) 
     Ok(gltf)
 }
 
-/// The squirrels' soldier ([`SQUIRREL_SOLDIER`]) with the clips it plays: the Tedi's (`tedi`).
-pub fn squirrel(rom: &Rom, tedi: &Character) -> Result<Character> {
+/// Bank-01 model `entry` (the squirrels' soldier [`SQUIRREL_SOLDIER`], the [`CAVEMAN`]) with the
+/// clips it plays: the Tedi's (`tedi`; the same 28-joint rig).
+pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Character> {
     Ok(Character {
-        entry: SQUIRREL_SOLDIER,
+        entry,
         anim_entry: tedi.anim_entry,
-        model: parse_model(&rom.asset(&[0x01, SQUIRREL_SOLDIER])?)?,
+        model: parse_model(&rom.asset(&[0x01, entry])?)?,
         clips: tedi.clips.clone(),
     })
 }
@@ -475,12 +479,13 @@ pub fn map_name(scene: usize) -> String {
 
 /// The asset pack (`conker-extract pack`): the data files ([`conker_assets::Slice`]) of each map
 /// (the first one also writes the shared files), their levels, the characters
-/// ([`PACK_CHARACTERS`]: the squirrel soldier and the Tedi) and held models as `.gltf` + `.bin` +
+/// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
 /// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`.
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
-    let characters = [squirrel(rom, &tedi)?, tedi];
+    let caveman = on_tedi_rig(rom, CAVEMAN, &tedi)?;
+    let characters = [on_tedi_rig(rom, SQUIRREL_SOLDIER, &tedi)?, tedi, caveman];
     let (held, models, scenes) = held_level(rom)?;
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();
@@ -582,10 +587,25 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     Ok(out)
 }
 
-/// A map's level: the scene's ([`scene_level`]), its pickups' models moved to their spots where the
-/// game moves them off their placements ([`weapon::pickups`]).
+/// The placements a Deathmatch on `scene` hides from its start to its end (prop +0x6E set, V in the
+/// oracle's RAM at 3-57 s): 0x3F's props of its Raptor mode, the bone weapons on the weapon spots
+/// (15-22), three at the west nest (4-6) and four scene objects at (6026, 156, 2188) (0-3). The
+/// pack leaves them out of the level and the collision (I: on 0x2D the game builds no collision for
+/// hidden props, `conker_sim::collision::WALL_PLACEMENTS`).
+pub fn hidden_placements(scene: usize) -> &'static [usize] {
+    match scene {
+        0x3F => &[0, 1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 22],
+        _ => &[],
+    }
+}
+
+/// A map's level: the scene's ([`scene_level`]) without its [`hidden_placements`], its pickups'
+/// models moved to their spots where the game moves them off their placements
+/// ([`weapon::pickups`]).
 pub fn map_level(rom: &Rom, scene: usize) -> Result<Level> {
     let mut level = scene_level(rom, scene)?;
+    let hidden = hidden_placements(scene);
+    (level.instances).retain(|inst| inst.placement.is_none_or(|i| !hidden.contains(&i)));
     let (pickups, spots) = pickup_table(scene)?;
     for (p, spot) in pickups.iter().zip(spots) {
         for inst in &mut level.instances {
@@ -618,6 +638,7 @@ fn pack_data(
     let sink = table(SINK_AT, 96)?;
     Ok(assets::Slice {
         collision: (scene_collision(rom, scene, &placements)?.triangles.iter())
+            .filter(|t| !matches!(t.layer, Layer::Placement(i) if hidden_placements(scene).contains(&i)))
             .map(|t| assets::Triangle {
                 points: t.points,
                 layer: match t.layer {

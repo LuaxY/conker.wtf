@@ -179,6 +179,7 @@ fn ready(
             crate::render::level_scene(&cfg.map),
             character(Side::Squirrels),
             character(Side::Tediz),
+            character(Side::Cavemen),
         ]
         .iter()
         .all(|path| {

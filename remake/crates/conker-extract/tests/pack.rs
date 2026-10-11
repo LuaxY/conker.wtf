@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30, 0x34].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34, 0x3F].map(|scene| PackMap {
         scene,
         background: None,
     });
@@ -163,10 +163,16 @@ fn pack_reads_back_as_the_rom_path() {
             fields(s.byte_06, s.yaw, s.byte_14, s.byte_15)
         );
     }
-    // The squirrel soldier (128) plays the Tedi's (117) clips: the same 764, the same root motion.
-    let [squirrel, tedi] = &pack.characters[..] else {
-        panic!("two characters")
+    // The squirrel soldier (128) and the caveman (136) play the Tedi's (117) clips: the same 764,
+    // the same root motion.
+    let [squirrel, tedi, caveman] = &pack.characters[..] else {
+        panic!("three characters")
     };
+    assert_eq!(caveman.model_lift, 49);
+    assert_eq!(
+        (&caveman.clips, &caveman.root_clips),
+        (&tedi.clips, &tedi.root_clips)
+    );
     assert_eq!((tedi.clips.len(), tedi.root_clips.len()), (764, 10));
     assert_eq!(
         (&tedi.clips, &tedi.root_clips),
@@ -251,7 +257,7 @@ fn pack_reads_back_as_the_rom_path() {
     // The glTF files.
     let textures = rom.textures().unwrap();
     let tedi = extract_character::Character::load(&rom, 117).unwrap();
-    let squirrel = conker_extract::squirrel(&rom, &tedi).unwrap();
+    let squirrel = conker_extract::on_tedi_rig(&rom, 128, &tedi).unwrap();
     assert_eq!(squirrel.model.joints.len(), 28);
     let squirrel_glb = squirrel.gltf(&textures, true).unwrap().glb();
     for (path, glb) in [
@@ -270,18 +276,23 @@ fn pack_reads_back_as_the_rom_path() {
     }
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30", "34"]);
+    assert_eq!(manifest.maps, ["2d", "30", "34", "3f"]);
 
-    // Maps 0x30 and 0x34 against the ROM path: the same reads, their pickups on the oracle's spots
-    // (0x30's, their models moved there in the level) or on their placements (0x34's).
-    for (name, scene, records) in [("30", 0x30, 25), ("34", 0x34, 12)] {
+    // Maps 0x30, 0x34 and 0x3F against the ROM path: the same reads (less 0x3F's hidden
+    // placements), their pickups on the oracle's spots (0x30's, their models moved there in the
+    // level) or on their placements (0x34's, 0x3F's).
+    for (name, scene, records) in [("30", 0x30, 25), ("34", 0x34, 12), ("3f", 0x3F, 16)] {
         let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
         assert!(names.iter().all(|n| files.contains_key(n.as_str())));
         let map = conker_assets::Slice::load(name, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
         let placements = extract_scene::scene_placements(&rom, scene).unwrap();
         let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
-        assert_eq!(map.collision.len(), collision.triangles.len());
-        for (p, s) in map.collision.iter().zip(&collision.triangles) {
+        let hidden = conker_extract::hidden_placements(scene);
+        let shown: Vec<_> = (collision.triangles.iter())
+            .filter(|t| !matches!(t.layer, Layer::Placement(i) if hidden.contains(&i)))
+            .collect();
+        assert_eq!(map.collision.len(), shown.len());
+        for (p, s) in map.collision.iter().zip(shown) {
             assert_eq!(p.points.map(bits), s.points.map(bits));
             assert_eq!(p.surface, s.surface);
         }
@@ -359,7 +370,14 @@ fn pack_audio_reads_back() {
     let background = wav(&[0, 1, -1, 2], 22020);
     let other = wav(&[3, 4], 22020);
     let third = wav(&[5], 22020);
-    let maps = [(0x2D, &background), (0x30, &other), (0x34, &third)].map(|(scene, wav)| PackMap {
+    let fourth = wav(&[6, 7], 22020);
+    let maps = [
+        (0x2D, &background),
+        (0x30, &other),
+        (0x34, &third),
+        (0x3F, &fourth),
+    ]
+    .map(|(scene, wav)| PackMap {
         scene,
         background: Some(wav),
     });
@@ -375,10 +393,12 @@ fn pack_audio_reads_back() {
         [
             "characters/117",
             "characters/128",
+            "characters/136",
             "common",
             "maps/2d",
             "maps/30",
-            "maps/34"
+            "maps/34",
+            "maps/3f"
         ]
     );
 
@@ -408,14 +428,19 @@ fn pack_audio_reads_back() {
         bytes += pcm.len() * 2;
         listed.push(file);
     }
-    for (name, wav) in [("2d", &background), ("30", &other), ("34", &third)] {
+    for (name, wav) in [
+        ("2d", &background),
+        ("30", &other),
+        ("34", &third),
+        ("3f", &fourth),
+    ] {
         let file = format!("audio/{}", audio.events.maps[name].background[0].file);
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
-    // Scene 0x30's own surface kind 0x11 and 0x34's 6 and 0xE have footsteps; 0x2D's bubbles are
-    // the only emitters; 0x34's background is another sequence.
-    for kind in [0x11, 6, 0xE] {
+    // Scene 0x30's own surface kind 0x11, 0x34's 6 and 0xE and 0x3F's 7 have footsteps; 0x2D's
+    // bubbles are the only emitters; 0x34's and 0x3F's backgrounds are other sequences.
+    for kind in [0x11, 6, 0xE, 7] {
         assert!(
             audio.events.footsteps.surfaces.contains_key(&kind),
             "{kind}"
@@ -423,12 +448,19 @@ fn pack_audio_reads_back() {
     }
     assert_eq!(audio.events.maps["2d"].emitters.len(), 2);
     assert!(
-        audio.events.maps["30"].emitters.is_empty() && audio.events.maps["34"].emitters.is_empty()
+        ["30", "34", "3f"]
+            .iter()
+            .all(|m| audio.events.maps[*m].emitters.is_empty())
     );
     assert!(
         audio.events.maps["34"].background[0]
             .note
             .contains("sequence 36")
+    );
+    assert!(
+        audio.events.maps["3f"].background[0]
+            .note
+            .contains("sequence 84, channels 0-15, at volume 24000")
     );
     listed.sort();
     let under: Vec<&str> = files

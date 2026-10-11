@@ -580,6 +580,11 @@ struct Case {
     grenade_tol: f32,
     /// The last row compared, when the trace runs into something conker-sim does not model.
     end: Option<u32>,
+    /// The start item both players hold (holstered) and get back after a respawn, as the oracle's
+    /// poke of MP+0x1170 at read 23 gave it (`Fighter::start`).
+    start_item: Option<u8>,
+    /// Both players are cavemen (`CONKER_MP_CHARS=6,6`; ctlw40c's idle player 2 was a Tedi).
+    cavemen: bool,
 }
 
 const fn case(name: &'static str, start: u32, give: Option<(u32, u8)>) -> Case {
@@ -593,6 +598,17 @@ const fn case(name: &'static str, start: u32, give: Option<(u32, u8)>) -> Case {
         rng: None,
         grenade_tol: 0.5,
         end: None,
+        start_item: None,
+        cavemen: false,
+    }
+}
+
+/// The caveman wave (`combat6_*`, `caveman_README.md`): item 0x40 held from the start.
+const fn club(name: &'static str, start: u32, rng: &'static str) -> Case {
+    Case {
+        rng: Some(rng),
+        start_item: Some(0x40),
+        ..case(name, start, None)
     }
 }
 
@@ -613,7 +629,7 @@ const fn probe(name: &'static str, id: u8) -> Case {
 /// Positions are printed, not asserted: their gaps are conker-sim's (player-to-player pushes in
 /// e_w14b and e_w21, C-left/right strafing in buttons, ctl_cd_cr and k6/k10, a wall-push reversal
 /// in pick87) or root motion the port does not have (dead bodies in e_w22/e_w24, 0x16's Z in k7).
-const CASES: [Case; 57] = [
+const CASES: [Case; 61] = [
     case("combat_e_gren", 745, None),
     Case {
         rng: Some("combat4_e_w09_lldb"),
@@ -776,6 +792,20 @@ const CASES: [Case; 57] = [
         rng: Some("combat5_sg_e3_lldb"),
         ..encounter("combat5_sg_e3", 0x37)
     },
+    // The caveman wave (lab/oracle/caveman_README.md): item 0x40's controls held by a Tedi and by a
+    // caveman (its grenade's pull 0x175 and throw 0x16C are the Tedi's 0x176 and 0x16B here: 4
+    // events missing, 4 extra), and its swings and second swings to a kill, Tediz and cavemen.
+    club("combat6_ctlw40", 30, "combat6_ctlw40_lldb"),
+    Case {
+        known: 8,
+        cavemen: true,
+        ..club("combat6_ctlw40c", 30, "combat6_ctlw40c_lldb")
+    },
+    club("combat6_e40", 745, "combat6_e40_lldb"),
+    Case {
+        cavemen: true,
+        ..club("combat6_e40c", 745, "combat6_e40c_lldb")
+    },
 ];
 
 fn phase_code(m: &Match) -> u8 {
@@ -822,6 +852,10 @@ fn replay(c: &Case) -> Option<Report> {
             };
             let mut f = Fighter::new(&place, p as u8, start);
             f.body = r.state;
+            (f.start, f.weapon) = (c.start_item, c.start_item);
+            if c.cavemen {
+                f.side = conker_sim::movement::Side::Cavemen;
+            }
             (f.health, f.immune, f.stun, f.anim, f.grenades) = (
                 r.health,
                 r.raw.immune,
@@ -962,10 +996,10 @@ fn replay(c: &Case) -> Option<Report> {
             report.anim += usize::from(f.anim != want.raw.anim);
             let armed = (1..=40).any(|t| {
                 [
-                    0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x16, 0x26, 0x18, 0x37,
+                    0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x16, 0x26, 0x18, 0x37, 0x40,
                 ]
                 .iter()
-                .any(|&w| conker_anim::armed_move(w, t as f32) == Some(f.anim))
+                .any(|&w| conker_anim::armed_move(w, t as f32, t as f32) == Some(f.anim))
             });
             if armed && f.anim == want.raw.anim {
                 let percent = if f.body.prev_strafe {
@@ -1135,8 +1169,11 @@ fn respawns_match_the_picker() {
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|n| {
             let n = n.strip_suffix("_events.csv")?;
-            (n.starts_with("combat_") || n.starts_with("combat4_") || n.starts_with("combat5_"))
-                .then(|| n.to_string())
+            (n.starts_with("combat_")
+                || n.starts_with("combat4_")
+                || n.starts_with("combat5_")
+                || n.starts_with("combat6_"))
+            .then(|| n.to_string())
         })
         .collect();
     names.sort();

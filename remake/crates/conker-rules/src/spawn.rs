@@ -103,6 +103,18 @@ pub const COLORS_MASKS_30: [u32; 2] = [0x3FC0, 0x3_C03C];
 /// (I, the remake's choice): with sides alternating by slot this is the Deathmatch table.
 pub const DEATHMATCH_START_34: [u8; 16] = [7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
+/// Scene 0x3F Deathmatch (scenario 7): the same table, though the map has 16 records: slot s starts
+/// on record (s + 7) % 12 (V on the oracle, 1 human + 15 bots and 2 + 3, `../lab/oracle/map3f`).
+pub const DEATHMATCH_START_3F: [u8; 16] = DEATHMATCH_START_34;
+
+/// Scene 0x3F War: Raptor (scenario 2): team 0 (the Ugas, class 0xB, east, x > 3,000) starts on
+/// record 8 + k, team 1 (the raptors, class 9, west, by the nest) on record k, by team rank (V for
+/// k = 0-7, 2 humans + 14 bots, teams alternating by slot); each team respawns in its own half
+/// (masks V, set before the first respawn).
+pub const RAPTOR_START_3F: [[u8; 8]; 2] =
+    [[8, 9, 10, 11, 12, 13, 14, 15], [0, 1, 2, 3, 4, 5, 6, 7]];
+pub const RAPTOR_MASKS_3F: [u32; 2] = [0xFFFF_FF00, 0xFFFF_00FF];
+
 /// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
 /// record, and the side's respawn mask), from the War mode played on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +125,7 @@ pub struct Starts {
 }
 
 /// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
-/// split by slot parity), if known.
+/// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -130,6 +142,11 @@ pub const fn starts(scene: u16) -> Option<Starts> {
             deathmatch: DEATHMATCH_START_34,
             sides: [[7, 9, 11, 1, 3, 5, 7, 9], [8, 10, 0, 2, 4, 6, 8, 10]],
             side_masks: DEATHMATCH_MASKS,
+        }),
+        0x3F => Some(Starts {
+            deathmatch: DEATHMATCH_START_3F,
+            sides: RAPTOR_START_3F,
+            side_masks: RAPTOR_MASKS_3F,
         }),
         _ => None,
     }
@@ -287,6 +304,19 @@ mod tests {
         let s = starts(0x34).unwrap();
         for (k, &record) in DEATHMATCH_START_34.iter().enumerate() {
             assert_eq!(s.sides[k % 2][k / 2], record, "{k}");
+        }
+    }
+
+    /// 0x3F's sides are two bases at opposite ends of its 16 records, each respawning only on its
+    /// own records.
+    #[test]
+    fn temple_sides_are_two_bases() {
+        let s = starts(0x3F).unwrap();
+        for side in 0..2 {
+            for &record in &s.sides[side] {
+                assert!(s.side_masks[side] >> record & 1 == 1, "{side} {record}");
+                assert!(s.side_masks[1 - side] >> record & 1 == 0, "{side} {record}");
+            }
         }
     }
 }

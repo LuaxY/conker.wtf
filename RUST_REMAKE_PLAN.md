@@ -61,6 +61,10 @@ STATS results screen with RESTART/QUIT (the next match once every human chose RE
 asks the server's `/info` which map to load. Scene 0x2D is the **Total War** map (scenario 9), not Colors: names fixed.
 Then the Bunker (`--map 34`, scenario 4) and its two new weapons, the crossbow (0x18, an auto-aimed bolt) and the
 shotgun (0x37, a four-sphere blast), traced from the oracle (10 new combat replays, 57 in all).
+Then the Temple (`--map 3f`, scenario 7): its starts, pickups and the props its Deathmatch hides from the oracle, its
+sides from Raptor's two bases.
+With it the caveman (class 0xB, model 136; its bots there) and the club (item 0x40, everyone's start item), traced
+from the oracle (protocol 12); bots replan after a placement (lift, respawn) as in the game.
 
 **Asset pack** (2026-10-10, two sub-agents, no workflow). `conker-extract pack` exports once what multiplayer needs
 into `assets/` (205 files, 14.2 MB, 3.4 MB brotli; glTF + PNG + JSON, two raw script tables), read back bit-exact by

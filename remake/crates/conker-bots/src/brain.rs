@@ -435,7 +435,9 @@ impl World<'_> {
                 n.wait = 0;
             }
             0x19 => n.target = (a(2) & !0xF000) as u8,
-            0x1F | 0x5A | 0x7D => {}
+            0x1F | 0x7D => {}
+            // The match places the player; the AI only sees the placement's flag (`func_15172D28`).
+            0x5A => n.placed = true,
             0x5B => n.goal = by_id(self.graph, a(2)),
             0x5C => n.cur = by_id(self.graph, a(2)),
             0x5D => n.avoid = by_id(self.graph, a(2)),
@@ -596,7 +598,9 @@ impl World<'_> {
             if idle {
                 g.set(g::FIRE, p, -skill::FIRST[self.skill]);
             }
-            if hit_by & 0x80 != 0 {
+            // obj+0x22C bit 0x200 (a placement since the last frame), taken here.
+            let placed = std::mem::take(&mut self.npcs[p].placed);
+            if hit_by & 0x80 != 0 || placed {
                 g.set(g::STATE, p, 0);
                 g.set(g::REPLAN, p, 1);
             }
@@ -1060,6 +1064,7 @@ pub fn weapon_class(item: u8) -> i32 {
     match item {
         0x03 | 0x09 | 0x15 => 2,
         0x21 | 0x22 => 3,
+        0x40 => 3, // the club (I: melee like 0x21, as `give_range` has it)
         0x14 | 0x16 | 0x18 | 0x23 | 0x24 | 0x37 | 0x38 | 0x39 | 0x3F | 0x41 => 1,
         _ => 0,
     }
@@ -1126,6 +1131,45 @@ mod tests {
             (give_range(0x09), give_range(0x24), give_range(0x22)),
             (5000, 100_000, 500)
         );
+    }
+
+    /// A placement (match start, respawn, lift) is taken by the next frame: state 0 and a replan,
+    /// once (V: the oracle's 0x30 p6, lifted at read 323, state 6 → 0 at 324).
+    #[test]
+    fn a_placement_replans_once() {
+        let bodies = [Body {
+            health: 6,
+            is_bot: true,
+            ..Body::default()
+        }; 2];
+        let mut npcs = [Npc::default(); 2];
+        npcs[1].placed = true;
+        let (graph, world) = (Graph::default(), CollisionWorld::default());
+        let (mut rng, mut unknown) = (Rng::default(), Unknown::new());
+        let mut w = World {
+            bodies: &bodies,
+            npcs: &mut npcs,
+            graph: &graph,
+            world: &world,
+            rng: &mut rng,
+            humans: 0,
+            skill: 2,
+            unknown: &mut unknown,
+        };
+        let mut g = Globals::new(g::SIZE);
+        g.set_i32(g::ALIVE, 3);
+        g.set_i32(g::COUNT, 2);
+        for frame in 0..2 {
+            g.set(g::STATE, 0, 6);
+            g.set(g::STATE, 1, 6);
+            w.frame(&mut g);
+            let replan = i32::from(frame == 0);
+            assert_eq!((g.get(g::STATE, 0), g.get(g::REPLAN, 0)), (6, 0));
+            assert_eq!(
+                (g.get(g::STATE, 1), g.get(g::REPLAN, 1)),
+                (6 - 6 * replan, replan)
+            );
+        }
     }
 
     #[test]

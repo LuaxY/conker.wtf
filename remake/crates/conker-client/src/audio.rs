@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use conker_anim::AnimPlayer;
 use conker_anim::combat::{
     BLOWN_UP, BURN_END, BURNING, DEATH_BLAST, DEATH_SHOT, FLAME_HIT, GRENADE_HOLD, GRENADE_PULL,
-    GRENADE_THROW, HIT_MELEE, HIT_SHOT,
+    GRENADE_THROW, HIT_CLUB, HIT_MELEE, HIT_SHOT,
 };
 use conker_assets::audio::{
     Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
@@ -86,7 +86,7 @@ struct Pack {
     audio: Audio,
     held: Vec<Held>,
     pickups: Vec<Pickup>,
-    clips: [Vec<ClipSound>; 2],
+    clips: [Vec<ClipSound>; 3],
     background: Option<Background>,
     emitters: Vec<Emitter>,
 }
@@ -388,7 +388,8 @@ fn burning(p: &Seen) -> bool {
 }
 
 /// The weapon that hit `victim`, which the server does not send, from its first reaction (its
-/// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21, 0xD3
+/// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21 or the
+/// club 0x40 (the nearest holding it drawn), 0x11C the club's second swing, 0xD3
 /// weapon 0x14's shot or the crossbow's bolt, 0x69 the flame, 0x19C weapon 0x23; a blast (0xF3) is a
 /// rocket's when one went off this tick or the last (`rocket`), else the shotgun's or a grenade's;
 /// the kill 0x17E is the sniper's, melee 0x22's, the crossbow's or the shotgun's, and the stagger
@@ -405,7 +406,8 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
             .map(|o| o.weapon)
     };
     match victim.reaction {
-        HIT_MELEE => 0x21,
+        HIT_MELEE => nearest(&[0x40]).unwrap_or(0x21),
+        HIT_CLUB => 0x40,
         HIT_SHOT => nearest(&[SHOTS, 0x18]).unwrap_or(SHOTS),
         FLAME_HIT => 0x15,
         DEATH_BLAST => 0x23,

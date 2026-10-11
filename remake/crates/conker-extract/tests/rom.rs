@@ -121,7 +121,7 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 13);
+    assert_eq!(slice.held.len(), 14);
     for (i, h) in slice.held.iter().enumerate() {
         let node = held["scenes"][i]["nodes"][0].as_u64().unwrap() as usize;
         let mesh = held["nodes"][node]["mesh"].as_u64().unwrap() as usize;
