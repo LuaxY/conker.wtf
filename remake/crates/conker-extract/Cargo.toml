@@ -15,9 +15,10 @@ serde_json.workspace = true
 # `pack`: the asset pack's format, and the scene's pickups (what each placement gives).
 conker-assets = { path = "../conker-assets" }
 conker-rules = { path = "../conker-rules" }
+# `pack`: the scene's AI script (`conker_bots::script`).
+conker-bots = { path = "../conker-bots" }
 
 [dev-dependencies]
 gltf-json.workspace = true
 # The pack test compares with what the runtime builds from the ROM.
 conker-sim = { path = "../conker-sim" }
-conker-bots = { path = "../conker-bots" }

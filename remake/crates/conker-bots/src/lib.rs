@@ -25,6 +25,7 @@ pub mod npc;
 pub mod script;
 
 use brain::{Body, Unknown, World, g};
+use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::Rng;
 use conker_rules::game::{Arena, BUTTON_R, Event, Match};
 use conker_rules::weapon::Gives;
@@ -97,6 +98,8 @@ pub struct Bots {
     /// Per participant: its scope's yaw and pitch this frame ([`Bots::scopes`]).
     scopes: Vec<Option<(f32, f32)>>,
     noises: Vec<([f32; 3], f32)>,
+    /// The trigger records and their switches ([`World::zones`]).
+    zones: Vec<(CameraHint, bool)>,
     rng: Rng,
     skill: usize,
     started: bool,
@@ -132,6 +135,19 @@ impl Bots {
             aims: vec![None; n],
             scopes: vec![None; n],
             noises: Vec::new(),
+            zones: (assets.triggers.as_chunks::<0x34>().0.iter())
+                .map(|r| {
+                    let zone = CameraVolume::parse_record(r);
+                    let (on_floor, kind) = (r[0x16] & 1 != 0, r[0x17]);
+                    let hint = CameraHint {
+                        zone,
+                        on_floor,
+                        kind,
+                        command: 0,
+                    };
+                    (hint, r[0x14] == 1)
+                })
+                .collect(),
             rng,
             skill: usize::from(skill.min(4)),
             started: false,
@@ -264,6 +280,7 @@ impl Bots {
                 rng: &mut self.rng,
                 humans: self.humans,
                 skill: self.skill,
+                zones: &mut self.zones,
                 unknown: &mut unknown,
             };
             if !self.started {
@@ -343,6 +360,7 @@ impl Bots {
 
     /// The participants as the AI reads them.
     fn bodies(&self, m: &Match) -> Vec<Body> {
+        let places = m.places();
         self.slots
             .iter()
             .enumerate()
@@ -368,6 +386,7 @@ impl Bots {
                     hit_by: self.hit_by[k],
                     is_bot: k >= self.humans,
                     team: f.team,
+                    place: places[s],
                 }
             })
             .collect()

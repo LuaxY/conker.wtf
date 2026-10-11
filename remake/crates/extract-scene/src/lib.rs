@@ -351,6 +351,19 @@ pub struct SceneCollision {
     pub unresolved: Vec<usize>,
 }
 
+/// The placements whose models collide in a Deathmatch on `scene` (V in the oracle's RAM and under lldb,
+/// `lab/oracle/walls_README.md`): the game's layer 2, the props with `(+0x4F & 0x60) != 0x20` and `+0x6E`
+/// clear (`func_150A6568` and the line query's copy of it), which the floor query, the wall routine and the
+/// line query all search. Fewer than [`Placement::has_collision`]: the match sets `+0x4F |= 0x20` on its
+/// pickups and hides the other modes' props. Other scenes: none.
+pub fn deathmatch_solid(scene: usize) -> &'static [usize] {
+    match scene {
+        0x2D => &[2, 3, 4, 5, 6, 7, 10, 11, 40, 41, 42, 43, 44, 45],
+        0x34 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 29, 30, 31, 32],
+        _ => &[],
+    }
+}
+
 /// Builds `scene`'s collision: terrain, secondary layer, then every placement (from
 /// [`scene_placements`]) that adds collision, transformed to world space.
 pub fn scene_collision(

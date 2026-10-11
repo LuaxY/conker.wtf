@@ -5,11 +5,11 @@
 //! Layout, relative to the pack root (the pack's own `README.md` documents every file):
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
-//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`;
+//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`;
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
-//! - `game/`: `acos.json`, `sink.json`, `ai.bin`, `class.bin`;
+//! - `game/`: `acos.json`, `sink.json`, `class.bin`;
 //! - `audio/`: `sounds.json`, `events.json` and WAV files ([`audio::Audio`]);
 //! - `hud/`: `hud.json` and PNGs ([`hud::Hud`]).
 //!
@@ -247,14 +247,15 @@ pub struct Slice {
     pub acos: Vec<u16>,
     /// `game/sink.json`: per surface kind, the sink table (depth, change with speed, speed %).
     pub sink: [[i8; 3]; 32],
-    /// `game/ai.bin` (`[0x14, 0xBA]`, the multiplayer AI script) and `game/class.bin` (`[0x0F, 0]`,
-    /// the characters' class data): conker-bots' `Assets::ai` and `Assets::class`.
+    /// `maps/<map>/ai.bin` (`[0x14, id]`, the scene's multiplayer AI script) and `game/class.bin`
+    /// (`[0x0F, 0]`, the characters' class data): conker-bots' `Assets::ai` and `Assets::class`.
     pub ai: Vec<u8>,
     pub class: Vec<u8>,
 }
 
 /// The data files of a slice, relative to the pack root, in [`Slice::files`] order: the manifest,
-/// the map's five, the weapon set's, the game's four, then one per character.
+/// the map's five, the weapon set's, the game's two, the map's AI script, the game's class data,
+/// then one per character.
 fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
     let mut files = vec![
         MANIFEST.into(),
@@ -266,7 +267,7 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
         format!("weapons/{weapons}/held.json"),
         "game/acos.json".into(),
         "game/sink.json".into(),
-        "game/ai.bin".into(),
+        format!("maps/{map}/ai.bin"),
         "game/class.bin".into(),
     ];
     files.extend(

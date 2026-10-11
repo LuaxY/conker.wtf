@@ -108,25 +108,26 @@ shotgun (0x37). Leftovers:
 - 0x34: the mounted gun; in a corridor near start record 9 the camera sits steeply above the player (not compared
   with the original); a bot can loop jumping between
   nav nodes 60-62 for most of a match; surface kind 0xE's extra call and trigger kinds 12 and 17 are unread; its
-  background loop is not sample-exact (song 36 never repeats exactly);
+  background loop is not sample-exact (song 36 never repeats exactly); its boxes (placements 6-9, dispatch 2) stand
+  10 lower in the game while stood on, static here;
 - 0x3F: trigger kinds 5 and 18 and the per-frame music volume
   call are unread; the background loop is one 191.8 s loudness period of song 84 (not sample-exact); the oracle crashes
-  31 frames after its human dies in scenario 7 (HUD sprintf); `WALL_PLACEMENTS` (10, 11) are 0x2D's on every map
-  (pickup models on 0x30 and 0x3F); 0x30 still draws its hidden Colors flags;
+  31 frames after its human dies in scenario 7 (HUD sprintf; 0x2D's scenario 3 too, at read 485 after a bot's
+  death); ~~per-map wall placements and hidden props~~ (done);
 - crossbow and shotgun: the crossbow's hip shot moves the shooter about 5.3 units a shot in the game (not modelled);
   the held crossbow doesn't animate (string) and its bolts use the sniper's flight sound; the shotgun's point-blank
   sphere never hit in the traces; `--first-read` replays land bolts one frame late;
-- the pack: the map exports and the weapons' port rewrote `pack.json`, `audio/events.json`, `audio/sounds.json`,
-  `hud/hud.json` (additions only) and `weapons/deathmatch/held.{bin,gltf,json}` (13 models, new order), so pack edits
-  in those files would need re-applying. `assets/` equals a fresh four-map export with the caveman (919 files).
-- caveman and club (done, `--cavemen` or 0x3F): bots never draw the club (they run 0x2D's AI script, below); the
+- the pack: the map exports, the weapons' port and the fixes rewrote `pack.json`, `audio/events.json`,
+  `audio/sounds.json`, `hud/hud.json` (additions only), `weapons/deathmatch/held.{bin,gltf,json}` (14 models, new
+  order), `maps/*/collision.json` and `maps/{2d,30}/level.gltf`, so pack edits in those files would need re-applying.
+  `assets/` equals a fresh four-map export (922 files) plus the old `game/ai.bin`, which nothing reads any more.
+- caveman and club (done, `--cavemen` or 0x3F): the club is drawn 21% of the time by the bots (the game's 52%); the
   caveman's own grenade clips (the Tedi's play); the club's HUD icon one pixel left; a lethal first swing untraced;
   nobody listened to the club and caveman sounds;
-- bots: a placement now replans the AI as in the game (the 0x30 lift loop mostly gone). Each map has its own AI
-  script (0x2D 0xBA, 0x30 0xBB, 0x34 0xBD, 0x3F 0xBE) but the pack holds only 0xBA, so on the other maps unarmed bots
-  walk to 0x2D's pickup nodes (0x34's nodes 31/61 loop, 0x30's lift node 29, no club on 0x3F). Needs a per-map
-  `ai.bin` and the functions those scripts call (player queries 0xAC, 0xBC, 0xA5; type-4 queries 6 and 16;
-  commands 0x7C, prop 7, type-4 0);
+- bots: ~~per-map AI scripts~~ (done: `maps/<id>/ai.bin`, the scripts' missing functions, the AI memory grown to
+  0x26B0; query 0xF0 now answers the ranking place, which also changes 0x2D). Left: bots don't climb ledges (0x30's
+  sniper node 48); with few bots they camp far longer than the game's (a role changes only on death or the leader
+  rule); the trigger tests' camera part always answers outside;
 1. Around the match:
    - ~~the end of a match and a STATS screen with RESTART and QUIT~~ (done);
    - ~~SET-UP: time 3-10 min or unlimited, lives 1-5 (last one standing when untimed), kill limit, bot skill

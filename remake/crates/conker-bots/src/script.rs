@@ -1,6 +1,6 @@
 //! The game's level-script machine (`func_150ADAF0`, hand-written MIPS; C), which runs the multiplayer
-//! AI: the bytecode is the scene's script asset (`[0x14, 0xBA]` for the Deathmatch AI), read from
-//! the player's ROM. Its globals are the multiplayer struct (`*0x800D23B0`), so the game's C helpers
+//! AI: the bytecode is the scene's script asset (`[0x14, id]`, one per scene: [`crate::script()`]),
+//! read from the player's ROM. Its globals are the multiplayer struct (`*0x800D23B0`), so the game's C helpers
 //! and the script share them ([`Globals`]).
 //!
 //! An instruction is a u16: the opcode in bits 0-5, up to three operands whose modes sit in bits

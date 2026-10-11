@@ -65,6 +65,8 @@ Then the Temple (`--map 3f`, scenario 7): its starts, pickups and the props its 
 sides from Raptor's two bases.
 With it the caveman (class 0xB, model 136; its bots there) and the club (item 0x40, everyone's start item), traced
 from the oracle (protocol 12); bots replan after a placement (lift, respawn) as in the game.
+Then each map's own AI script for the bots and each map's solid and hidden props (the collision and levels of all
+four maps, from the oracle).
 
 **Asset pack** (2026-10-10, two sub-agents, no workflow). `conker-extract pack` exports once what multiplayer needs
 into `assets/` (205 files, 14.2 MB, 3.4 MB brotli; glTF + PNG + JSON, two raw script tables), read back bit-exact by

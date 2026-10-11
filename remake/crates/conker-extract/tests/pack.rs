@@ -143,8 +143,12 @@ fn pack_reads_back_as_the_rom_path() {
 
     // The client's slice.
     let slice = Slice::from_rom(bytes).unwrap();
-    assert_eq!(pack.collision.len(), slice.collision.len());
-    for (p, s) in pack.collision.iter().zip(&slice.collision) {
+    let solid = extract_scene::deathmatch_solid(0x2D);
+    let collision: Vec<_> = (slice.collision.iter())
+        .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
+        .collect();
+    assert_eq!(pack.collision.len(), collision.len());
+    for (p, s) in pack.collision.iter().zip(collision) {
         assert_eq!(p.points.map(bits), s.points.map(bits));
         let layer = match s.layer {
             Layer::Terrain => PackLayer::Terrain,
@@ -260,8 +264,11 @@ fn pack_reads_back_as_the_rom_path() {
     let squirrel = conker_extract::on_tedi_rig(&rom, 128, &tedi).unwrap();
     assert_eq!(squirrel.model.joints.len(), 28);
     let squirrel_glb = squirrel.gltf(&textures, true).unwrap().glb();
+    // The slice's level less 0x2D's hidden placements.
+    let level = conker_extract::map_level(&rom, 0x2D).unwrap();
+    let level_glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
     for (path, glb) in [
-        (conker_assets::level_gltf(PACK_MAP), &slice.level_glb),
+        (conker_assets::level_gltf(PACK_MAP), &level_glb),
         (
             conker_assets::character_gltf(PACK_CHARACTERS[0]),
             &squirrel_glb,
@@ -278,7 +285,25 @@ fn pack_reads_back_as_the_rom_path() {
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
     assert_eq!(manifest.maps, ["2d", "30", "34", "3f"]);
 
-    // Maps 0x30, 0x34 and 0x3F against the ROM path: the same reads (less 0x3F's hidden
+    // Each map's solid placements (the oracle's RAM) are those with collision flags less its
+    // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data.
+    for scene in [0x2D, 0x30, 0x34, 0x3F] {
+        let (pickups, _) = weapon::pickups(scene as u16).unwrap();
+        let hidden = conker_extract::hidden_placements(scene);
+        let placements = extract_scene::scene_placements(&rom, scene).unwrap();
+        let solid: Vec<usize> = (placements.iter().enumerate())
+            .filter(|(i, p)| p.has_collision() && !hidden.contains(i))
+            .filter(|(i, _)| pickups.iter().all(|k| usize::from(k.placement) != *i))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            solid,
+            extract_scene::deathmatch_solid(scene),
+            "scene {scene:#x}"
+        );
+    }
+
+    // Maps 0x30, 0x34 and 0x3F against the ROM path: the same reads (only their solid
     // placements), their pickups on the oracle's spots (0x30's, their models moved there in the
     // level) or on their placements (0x34's, 0x3F's).
     for (name, scene, records) in [("30", 0x30, 25), ("34", 0x34, 12), ("3f", 0x3F, 16)] {
@@ -287,9 +312,9 @@ fn pack_reads_back_as_the_rom_path() {
         let map = conker_assets::Slice::load(name, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
         let placements = extract_scene::scene_placements(&rom, scene).unwrap();
         let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
-        let hidden = conker_extract::hidden_placements(scene);
+        let solid = extract_scene::deathmatch_solid(scene);
         let shown: Vec<_> = (collision.triangles.iter())
-            .filter(|t| !matches!(t.layer, Layer::Placement(i) if hidden.contains(&i)))
+            .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
             .collect();
         assert_eq!(map.collision.len(), shown.len());
         for (p, s) in map.collision.iter().zip(shown) {
@@ -315,9 +340,9 @@ fn pack_reads_back_as_the_rom_path() {
             })
             .collect();
         assert_eq!(gives, table);
-        let [nav, triggers, ..] =
+        let [nav, triggers, ai, _] =
             conker_bots::Assets::paths(scene).map(|p| rom.asset(&p).unwrap().into_owned());
-        assert_eq!([&map.nav, &map.triggers], [&nav, &triggers]);
+        assert_eq!([&map.nav, &map.triggers, &map.ai], [&nav, &triggers, &ai]);
         let level = conker_extract::map_level(&rom, scene).unwrap();
         let glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
         check_gltf(&dir, &conker_assets::level_gltf(name), &glb);

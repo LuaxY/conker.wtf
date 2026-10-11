@@ -27,7 +27,9 @@ use extract_level::{
     Gltf, IDENTITY, Instance, Level, Mesh, Model, bundle_segments, scene_level, to_gltf,
 };
 pub use extract_scene::{Layer, SpawnPoint, Triangle};
-use extract_scene::{floor_below, scene_collision, scene_placements, scene_spawns};
+use extract_scene::{
+    deathmatch_solid, floor_below, scene_collision, scene_placements, scene_spawns,
+};
 use serde_json::{Value, json};
 
 /// The vertical slice's map: scene 0x2D, the oracle's Deathmatch scene.
@@ -588,12 +590,15 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
 }
 
 /// The placements a Deathmatch on `scene` hides from its start to its end (prop +0x6E set, V in the
-/// oracle's RAM at 3-57 s): 0x3F's props of its Raptor mode, the bone weapons on the weapon spots
-/// (15-22), three at the west nest (4-6) and four scene objects at (6026, 156, 2188) (0-3). The
-/// pack leaves them out of the level and the collision (I: on 0x2D the game builds no collision for
-/// hidden props, `conker_sim::collision::WALL_PLACEMENTS`).
+/// oracle's RAM and under lldb, `lab/oracle/walls_README.md`): 0x2D's Total War props (21-28, 37)
+/// and four scene objects (0, 1, 8, 9); 0x30's Colors flags (18, 19) and its placement 0; 0x3F's
+/// props of its Raptor mode, the bone weapons on the weapon spots (15-22), three at the west nest
+/// (4-6) and four scene objects at (6026, 156, 2188) (0-3); none on 0x34. The pack leaves them out
+/// of the level; the collision keeps only [`deathmatch_solid`] (never hidden ones).
 pub fn hidden_placements(scene: usize) -> &'static [usize] {
     match scene {
+        0x2D => &[0, 1, 8, 9, 21, 22, 23, 24, 25, 26, 27, 28, 37],
+        0x30 => &[0, 18, 19],
         0x3F => &[0, 1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 22],
         _ => &[],
     }
@@ -638,7 +643,7 @@ fn pack_data(
     let sink = table(SINK_AT, 96)?;
     Ok(assets::Slice {
         collision: (scene_collision(rom, scene, &placements)?.triangles.iter())
-            .filter(|t| !matches!(t.layer, Layer::Placement(i) if hidden_placements(scene).contains(&i)))
+            .filter(|t| !matches!(t.layer, Layer::Placement(i) if !deathmatch_solid(scene).contains(&i)))
             .map(|t| assets::Triangle {
                 points: t.points,
                 layer: match t.layer {
@@ -675,7 +680,7 @@ fn pack_data(
         // conker-bots' `Assets::paths`.
         triggers: rom.asset(&[0x0C, scene, 5])?.into_owned(),
         nav: rom.asset(&[0x19, scene])?.into_owned(),
-        ai: rom.asset(&[0x14, 0xBA])?.into_owned(),
+        ai: rom.asset(&[0x14, conker_bots::script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, 0])?.into_owned(),
         characters: (characters.iter())
             .map(|c| {

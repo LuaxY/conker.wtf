@@ -153,7 +153,10 @@ fn world(rom: &extract_core::Rom) -> conker_sim::collision::CollisionWorld {
     use conker_sim::collision::{CollisionWorld, Layer};
     let placements = extract_scene::scene_placements(rom, 0x2D).unwrap();
     let collision = extract_scene::scene_collision(rom, 0x2D, &placements).unwrap();
-    let mut w = CollisionWorld::layered(collision.triangles.iter().map(|t| {
+    let solid = extract_scene::deathmatch_solid(0x2D);
+    let triangles = (collision.triangles.iter())
+        .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
+    let mut w = CollisionWorld::layered(triangles.map(|t| {
         let layer = match t.layer {
             extract_scene::Layer::Terrain => Layer::Terrain,
             extract_scene::Layer::Secondary => Layer::Secondary,

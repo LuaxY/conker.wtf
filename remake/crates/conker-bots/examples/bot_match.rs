@@ -1,9 +1,8 @@
 //! A headless Deathmatch on scene 0x2D (`BOT_SCENE=30`, `34`: another scene): one idle human (slot 0)
 //! and N bots, conker-sim's movement and conker-rules' `Match::step`, the bots driven by conker-bots.
 //! The oracle's counterpart is `lab/oracle/tools/bot_run.sh bot_idle 300 bot_long3` (1 idle human +
-//! 3 bots). Another scene runs its own AI script ([`conker_bots::script`]), whose level natives
-//! (player queries 0xAC, 0xBC, the type-4 handles…) are not ported and answer 0: its numbers are
-//! neither the game's nor the server's (which runs 0x2D's script from the pack on every map).
+//! 3 bots). Another scene runs its own AI script ([`conker_bots::script`]), as the server does from
+//! the pack's `maps/<map>/ai.bin`; on 0x3F every player holds the club, as with the server's cavemen.
 //!
 //! `CONKER_ROM=... cargo run --release -p conker-bots --example bot_match -- [frames=9000] [bots=3]
 //!   [out.csv] [seed]`
@@ -46,7 +45,10 @@ fn main() {
     let scene = std::env::var("BOT_SCENE").map_or(0x2D, |s| usize::from_str_radix(&s, 16).unwrap());
     let placements = extract_scene::scene_placements(&rom, scene).unwrap();
     let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
-    let mut world = CollisionWorld::layered(collision.triangles.iter().map(|t| {
+    let solid = extract_scene::deathmatch_solid(scene);
+    let triangles = (collision.triangles.iter())
+        .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
+    let mut world = CollisionWorld::layered(triangles.map(|t| {
         let layer = match t.layer {
             extract_scene::Layer::Terrain => Layer::Terrain,
             extract_scene::Layer::Secondary => Layer::Secondary,
@@ -109,7 +111,10 @@ fn main() {
     let fighters = (0..players)
         .map(|i| {
             let at = usize::from(starts.deathmatch[i % 16]);
-            Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, LIVE)
+            let mut f = Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, LIVE);
+            // As the server's cavemen: on 0x3F everyone holds the club (the script's MP+0x1170).
+            f.start = (scene == 0x3F).then_some(weapon::CLUB.id);
+            f
         })
         .collect();
     let mut m = Match::new(&arena, fighters, r, LIVE);

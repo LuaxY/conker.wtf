@@ -25,10 +25,6 @@ pub use walls::{Body, Sweep, Swept};
 pub const NO_FLOOR: f32 = -10000.0;
 /// A floor is accepted up to this far above the reference height (`func_1510E950`'s `50.0`).
 pub const STEP_UP: f32 = 50.0;
-/// The placements of scene 0x2D the wall routine sees (layer 2, in this order): the plateau sides (models 14
-/// and 15). I: in the oracle's RAM they are the only placements with collision vertices; the other layer-2
-/// records are disabled (`+0x6E`) or never get vertices, and the props (`+0x4F & 0x60 == 0x20`) have none.
-pub const WALL_PLACEMENTS: [u16; 2] = [10, 11];
 
 const CELL: i32 = 512;
 /// Grid cells hold triangles within this of their XZ bounds: the floor routine's 2.
@@ -41,7 +37,8 @@ pub enum Layer {
     Terrain,
     /// Its segment 3 (wall layer 1).
     Secondary,
-    /// The model of placement `n` (wall layer 2 if in [`WALL_PLACEMENTS`]).
+    /// The model of placement `n` (wall layer 2). Give only the placements the game collides with: the
+    /// map's (the pack's collision holds no others; `extract_scene::deathmatch_solid` from the ROM).
     Placement(u16),
 }
 
@@ -76,7 +73,7 @@ pub struct CollisionWorld {
     /// Wall layers 0 (terrain) and 1 (secondary): their triangles (indices into `tris`) and quadtrees.
     layer_tris: [Vec<u32>; 2],
     walls: [Tree; 2],
-    /// Wall layer 2: each wall placement's triangles, in placement order.
+    /// Wall layer 2: each placement's triangles, in the given (placement) order.
     objects: Vec<std::ops::Range<u32>>,
     /// The terrain's surface words: the flag table the wall routine reads for every static layer.
     terrain_words: Vec<u32>,
@@ -130,7 +127,10 @@ impl CollisionWorld {
                     world.terrain_words.push(world.tris[i].surface);
                 }
                 Layer::Secondary => world.layer_tris[1].push(i as u32),
-                Layer::Placement(_) => {}
+                Layer::Placement(_) => match world.objects.last_mut() {
+                    Some(r) if layers[i - 1] == *layer => r.end += 1,
+                    _ => world.objects.push(i as u32..i as u32 + 1),
+                },
             }
         }
         for k in 0..2 {
@@ -139,15 +139,6 @@ impl CollisionWorld {
                 .map(|&i| &world.tris[i as usize])
                 .collect();
             world.walls[k] = Tree::build(&refs);
-        }
-        for p in WALL_PLACEMENTS {
-            let mine = |i: &usize| layers[*i] == Layer::Placement(p);
-            if let Some(first) = (0..layers.len()).find(mine) {
-                let end = (first..layers.len())
-                    .find(|i| !mine(i))
-                    .unwrap_or(layers.len());
-                world.objects.push(first as u32..end as u32);
-            }
         }
         world
     }

@@ -35,22 +35,30 @@ const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../lab/oracle")
 const START: u32 = 30;
 const TOLERANCE: f32 = 0.1;
 
+/// `scene`'s collision as the pack holds it: terrain, secondary, the placements a Deathmatch collides with.
+fn scene_world(rom: &extract_core::Rom, scene: usize) -> CollisionWorld {
+    let placements = extract_scene::scene_placements(rom, scene).unwrap();
+    let collision = extract_scene::scene_collision(rom, scene, &placements).unwrap();
+    let solid = extract_scene::deathmatch_solid(scene);
+    let triangles = (collision.triangles.iter())
+        .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
+    CollisionWorld::layered(triangles.map(|t| {
+        let layer = match t.layer {
+            extract_scene::Layer::Terrain => Layer::Terrain,
+            extract_scene::Layer::Secondary => Layer::Secondary,
+            extract_scene::Layer::Placement(i) => Layer::Placement(i as u16),
+        };
+        (t.points, t.surface.unwrap_or(0), layer)
+    }))
+}
+
 fn world() -> Option<&'static CollisionWorld> {
     static WORLD: OnceLock<Option<CollisionWorld>> = OnceLock::new();
     WORLD
         .get_or_init(|| {
             let rom = std::fs::read(std::env::var_os("CONKER_ROM")?).expect("read CONKER_ROM");
             let rom = extract_core::Rom::new(rom).expect("CONKER_ROM is the US ROM");
-            let placements = extract_scene::scene_placements(&rom, 0x2D).unwrap();
-            let scene = extract_scene::scene_collision(&rom, 0x2D, &placements).unwrap();
-            let mut world = CollisionWorld::layered(scene.triangles.iter().map(|t| {
-                let layer = match t.layer {
-                    extract_scene::Layer::Terrain => Layer::Terrain,
-                    extract_scene::Layer::Secondary => Layer::Secondary,
-                    extract_scene::Layer::Placement(i) => Layer::Placement(i as u16),
-                };
-                (t.points, t.surface.unwrap_or(0), layer)
-            }));
+            let mut world = scene_world(&rom, 0x2D);
             world.acos = AcosTable::from_game_data(&rom.game_data().unwrap());
             world.camera = Some(CameraLevel::new(
                 0x2D,
@@ -1449,4 +1457,59 @@ fn wall_zones_match_the_game() {
         eprintln!("  {b}");
     }
     assert!(rows > 0 && bad.is_empty());
+}
+
+/// The other maps' Deathmatch captures (1 human + 15 bots, 60 s): on every grounded row (y = floor_y)
+/// from read 30, the floor query at the player's position (full, then the last-triangle fast path the
+/// game uses while grounded) finds the game's floor, on the scene's collision with only its solid
+/// placements. The rows still off: 0x34's boxes 6-9 stand 10 lower in the game while stood on (placement
+/// dispatch 2, static here), and bots on lifts and slopes (untraced). With every placement's model the
+/// pickups' tops become floors: 134 and 24 rows off on 0x30 and 0x3F.
+#[test]
+fn floors_match_the_game_on_other_maps() {
+    let Some(rom) = std::env::var_os("CONKER_ROM") else {
+        return;
+    };
+    let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
+    for (scene, run, most) in [
+        (0x30, "map30/s5_h1b15", 127),
+        (0x34, "map34/s4_h1b15", 891),
+        (0x3F, "map3f/s7_h1b15", 17),
+    ] {
+        let Ok(text) = std::fs::read_to_string(PathBuf::from(ORACLE).join(run).join("trace.csv"))
+        else {
+            return;
+        };
+        let world = scene_world(&rom, scene);
+        let mut lines = text.lines();
+        let header: HashMap<&str, usize> = (lines.next().unwrap().split(',').enumerate())
+            .map(|(i, h)| (h, i))
+            .collect();
+        let (mut rows, mut off) = (0, Vec::new());
+        for c in lines.map(|l| l.split(',').collect::<Vec<_>>()) {
+            let f = |k: &str| c[header[k]].parse::<f32>().unwrap();
+            if c[header["mp"]] != "1" || c[header["y"]] != c[header["floor_y"]] || f("read") < 30.0
+            {
+                continue;
+            }
+            let [x, y, z] = ["x", "y", "z"].map(f);
+            let full = world.floor(x, z, y, y, None);
+            let got = full.and_then(|h| world.floor(x, z, y, y, Some(h.tri)));
+            rows += 1;
+            if got.is_none_or(|h| (h.y - y).abs() > 0.5) {
+                off.push((
+                    f("read") as u32,
+                    f("player") as u8,
+                    [x, y, z],
+                    got.map(|h| h.y),
+                ));
+            }
+        }
+        eprintln!(
+            "{run}: {rows} grounded rows, {} off {:?}",
+            off.len(),
+            &off[..off.len().min(3)]
+        );
+        assert!(rows > 0 && off.len() <= most);
+    }
 }

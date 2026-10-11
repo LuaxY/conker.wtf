@@ -8,6 +8,7 @@
 use crate::nav::{Graph, NONE};
 use crate::npc::{AT_GOAL, Npc};
 use crate::script::{Globals, Host};
+use conker_camera::volume::CameraHint;
 use conker_rules::Rng;
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
@@ -73,8 +74,9 @@ pub mod g {
     pub const AIM_Y: i32 = 0x17E8;
     pub const AIM_Z: i32 = 0x1828;
     pub const AIM_RATE: i32 = 0x1868;
-    /// Bytes of the struct plus the script's own globals (the AI script's highest is 0x2534 + 0x30).
-    pub const SIZE: usize = 0x2600;
+    /// Bytes of the struct plus the scripts' own globals: 0xBB's reach 0x26A8 (its pickup choice
+    /// at 0x2658-0x2694); in s5's RAM the next block starts at G+0x26B0.
+    pub const SIZE: usize = 0x26B0;
 }
 
 /// The bot skill tables (`0x800872B0`.., indexed by the skill byte `0x800E0BD0`: 0-4, INBRED,
@@ -117,6 +119,8 @@ pub struct Body {
     pub hit_by: u8,
     pub is_bot: bool,
     pub team: u8,
+    /// `0x800E0AC0[p]` (`func_151E565C`): the place, 1 the best; the scripts ask the humans'.
+    pub place: u8,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -132,6 +136,9 @@ pub struct World<'a> {
     pub rng: &'a mut Rng,
     pub humans: usize,
     pub skill: usize,
+    /// The level's trigger records (`*0x800D3098`, the zone natives' ids), each with its switch
+    /// (`+0x14` = 1: off), which type-4 commands 0 and 1 flip.
+    pub zones: &'a mut [(CameraHint, bool)],
     /// Each pickup's position (the arena's), for its nearest node.
     pub unknown: &'a mut Unknown,
 }
@@ -192,6 +199,18 @@ impl World<'_> {
         0
     }
 
+    /// Participant `p` is inside trigger `t`: its bit in the player's trigger set (`func_150A29C8`,
+    /// `0x800D30F0`), which `func_150A11C4` fills with `func_150A1DA0` (mode 0) at the start of each
+    /// player's update. Taken here on the current position (V: 79 of the 80 set bits and every
+    /// clear one of the type-3 triggers in the RAM of s4, s5 and s7; the miss, a player that had
+    /// moved since).
+    fn inside(&self, p: usize, t: usize) -> bool {
+        match (self.bodies.get(p), self.zones.get(t)) {
+            (Some(b), Some((z, off))) => !off && z.contains(b.old, b.pos, b.pos[1] - b.height),
+            _ => false,
+        }
+    }
+
     /// Natives 3 and 4 (handle tables `0x80088420` / `0x8008845C`): only the level-start fade calls
     /// (type 0xE) reach them in Deathmatch; they set screen fades.
     fn object(&mut self, native: i32, h: i32, _args: &[i32]) -> i32 {
@@ -204,11 +223,18 @@ impl World<'_> {
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
         match (kind(h), code) {
+            // `func_150AE140`: a handle of type 0 answers 0 (0xBE asks 0xCA of a participant index).
+            (0, _) => 0,
             // Type 1 (`func_1509C7C8`) 4: no cutscene running.
             (1, 4) => 1,
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
+            // Type 4, the triggers (`func_150A04D8`): 6, the player `a(2)` is inside; 16, someone is.
+            // ponytail: a camera handle (6) and 16's camera test (`func_150A2D84`, the humans' view
+            // eyes) read outside; the views are the clients'.
+            (4, 6) => i32::from(kind(a(2)) == 2 && self.inside(index(a(2)), index(h))),
+            (4, 0x10) => i32::from((0..self.bodies.len()).any(|p| self.inside(p, index(h)))),
             // Type 5, the level (`func_1509FE0C`).
             (5, 0x1D) => (1 << self.bodies.len()) - 1,
             (5, 0x1E) => i32::from(self.bodies.get(a(2) as usize).map_or(0, |b| b.team)),
@@ -247,6 +273,15 @@ impl World<'_> {
             // Props (type 3) 4: camera/zone setup at level start; the level (5) 0xA, 0xF: HUD and
             // music; (0xA, 0) a timer display.
             (3, 4) | (5, 0xA) | (5, 0xF) | (0xA, 0) | (3, 0) => 1,
+            // Props 7: a display flag (+0x73 bit 4); sounds (type 0xA, `func_1509E730`) 3: a fade.
+            (3, 7) | (0xA, 3) => 1,
+            // Triggers 0 and 1 (`func_150A2864`): switch one on, or off (`+0x14`).
+            (4, c @ (0 | 1)) => {
+                if let Some(z) = self.zones.get_mut(index(h)) {
+                    z.1 = c == 1;
+                }
+                1
+            }
             (0xF, 4) => {
                 self.init(g);
                 0
@@ -331,6 +366,16 @@ impl World<'_> {
         match code {
             0x91 => i32::from(n.script),
             0x93 => i32::from(b.health),
+            // `func_150859AC` 3: the stats record's +8 (`0x800D2144 + 0x1C·p`), 6 for every player
+            // in the RAM of s4, s5 and s7.
+            0xA5 if a(2) == 3 => 6,
+            // `func_150A2AEC`: the first listed trigger the player is in, | 0x4000; else 0.
+            0xAC => (args.get(2..).unwrap_or_default().iter())
+                .map(|&t| (t & 0xFFF) as usize)
+                .find(|&t| self.inside(p, t))
+                .map_or(0, |t| t as i32 | 0x4000),
+            // obj+0x13C, what it rides: nothing here (0 in every dump).
+            0xBC => 0,
             0x9A => match self.bodies.get(index(a(2))) {
                 Some(o) => {
                     let (dx, dz) = (b.pos[0] - o.pos[0], b.pos[2] - o.pos[2]);
@@ -360,7 +405,9 @@ impl World<'_> {
             0xD5 => 1,
             0xD6 => 0,
             0xDC => 0,
-            0xF0 => 0,
+            // obj+0, the object's type: 1, a player (every dump; the scripts look for 0x1F).
+            0xEF => 1,
+            0xF0 => i32::from(b.place),
             c => self.unknown(5, 2, c),
         }
     }
@@ -442,6 +489,7 @@ impl World<'_> {
             0x5C => n.cur = by_id(self.graph, a(2)),
             0x5D => n.avoid = by_id(self.graph, a(2)),
             0x5F => n.speed = n.speed.min(a(2) as f32),
+            0x7C => n.radius = a(2) as u8,
             0x60 => {
                 n.goal = by_id(self.graph, a(2));
                 n.cur = NONE;
@@ -1115,6 +1163,7 @@ fn prefer(g: &mut Globals, n: usize, rng: &mut Rng) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conker_camera::volume::CameraVolume;
 
     #[test]
     fn weapon_tables() {
@@ -1154,6 +1203,7 @@ mod tests {
             rng: &mut rng,
             humans: 0,
             skill: 2,
+            zones: &mut [],
             unknown: &mut unknown,
         };
         let mut g = Globals::new(g::SIZE);
@@ -1170,6 +1220,53 @@ mod tests {
                 (6 - 6 * replan, replan)
             );
         }
+    }
+
+    /// Type-4 queries 6 and 16, player query 0xAC and type-4 command 1 on one box (shape 2) with
+    /// one participant inside and one outside.
+    #[test]
+    fn trigger_natives() {
+        let mut r = [0; 0x34];
+        r[6..0xC].copy_from_slice(&[0, 100, 0, 200, 0, 100]);
+        r[0x15] = 3 << 2 | 2;
+        let zone = CameraVolume::parse_record(&r);
+        let hint = CameraHint {
+            zone,
+            on_floor: false,
+            kind: 0,
+            command: 0,
+        };
+        let at = |x| Body {
+            pos: [x, 10.0, 0.0],
+            old: [x, 10.0, 0.0],
+            ..Body::default()
+        };
+        let bodies = [at(50.0), at(150.0)];
+        let mut npcs = [Npc::default(); 2];
+        let (graph, world) = (Graph::default(), CollisionWorld::default());
+        let (mut rng, mut unknown) = (Rng::default(), Unknown::new());
+        let mut zones = [(hint, false)];
+        let mut w = World {
+            bodies: &bodies,
+            npcs: &mut npcs,
+            graph: &graph,
+            world: &world,
+            rng: &mut rng,
+            humans: 0,
+            skill: 2,
+            zones: &mut zones,
+            unknown: &mut unknown,
+        };
+        let mut g = Globals::new(g::SIZE);
+        let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
+        assert_eq!(q(&mut w, &[0x4000, 6, 0x2000]), 1);
+        assert_eq!(q(&mut w, &[0x4000, 6, 0x2001]), 0);
+        assert_eq!(q(&mut w, &[0x4000, 0x10]), 1);
+        assert_eq!(q(&mut w, &[0x2000, 0xAC, 0x4001, 0x4000]), 0x4000);
+        assert_eq!(q(&mut w, &[0x2001, 0xAC, 0x4000]), 0);
+        w.command(&mut Globals::new(0), 0x4000, 1, &[0x4000, 1]);
+        assert_eq!(q(&mut w, &[0x4000, 0x10]), 0);
+        assert!(w.unknown.is_empty());
     }
 
     #[test]

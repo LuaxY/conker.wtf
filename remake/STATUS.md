@@ -1,5 +1,68 @@
 # Status after wave 6 (2026-10-10)
 
+## Per-map solid placements and hidden props (2026-10-11)
+**`WALL_PLACEMENTS` (0x2D's 10 and 11 on every map) is gone: the pack's collision holds each map's solid placements
+only, and `CollisionWorld::layered` makes every placement it is given wall layer 2. 0x2D and 0x30 also leave out their
+hidden props (0x30's Colors flags).** Evidence and tools: `../lab/oracle/walls_README.md`.
+
+| Map | Solid (floors, walls, rays) | Hidden (out of the level and collision) |
+|---|---|---|
+| 0x2D | 2-7, 10, 11, 40-45 | 0, 1, 8, 9, 21-28, 37 |
+| 0x30 | none | 0, 18, 19 |
+| 0x34 | 0-12, 29-32 | none |
+| 0x3F | none | 0-6, 15-22 (as before) |
+
+The game's rule (C, V under lldb in s3/s4/s5/s7): layer 2 = props with `+0x6E` clear and `(+0x4F & 0x60) != 0x20`;
+the match sets 0x20 on its pickups. `extract_scene::deathmatch_solid` holds the table; `tests/pack.rs` checks it equals
+"collision flags, not hidden, not a pickup" from the ROM. `../assets` rewritten: `maps/{2d,30,34,3f}/collision.json`,
+`maps/{2d,30}/level.gltf`, `README.md`.
+
+| Check | Result |
+|---|---|
+| 0x2D (sim oracle tests) | unchanged: 28 traces, camera rays 0 of 2527 differ; wall zones: humans 0 of 161,317 rows differ, bots 6 of 80,625 (as before); wall trees match RAM |
+| Grounded floors vs the game (new `floors_match_the_game_on_other_maps`) | 0x30 127 of 25,908 rows off (134 with every placement), 0x34 891 of 26,444 (=), 0x3F 17 of 26,477 (24) |
+| Bots' sight (0x2D) | 139/142 (137) |
+| `smoke.sh` | 2d, 30, 34, 3f: 16/16 each, prediction error 0 |
+| Tests (target-net, `CONKER_ROM`) | conker-sim, -rules (combat 1157/1165, as before), -extract, -assets, -bots, -server, -client, extract-scene |
+| Screens | `../lab/screens/maps-fix/`: 0x30 with and without the flags, 0x3F's former walls (placements 10, 11) |
+
+Gaps: 0x34's boxes 6-9 stand 10 lower in the game while stood on (most of its 891 rows); 0x2D's 0 and 1 are shown for
+the first 51 frames in the game; scenario 3 (0x2D) crashes the oracle at read 485 with 15 bots.
+
+## Each map's own AI script, and the natives it calls (2026-10-11)
+**Bots run their scene's AI script, from the pack's `maps/<map>/ai.bin` (0x2D 0xBA, 0x30 0xBB, 0x34 0xBD, 0x3F 0xBE),
+with the level natives those scripts call. 0x30's bots fetch weapons and fight; 0x34's unarmed node loop is gone; on
+0x3F bots draw and swing the club and pick up guns.** `PROTOCOL_ID` unchanged.
+
+| Part | What |
+|---|---|
+| Pack | `maps/<map>/ai.bin` = `[0x14, conker_bots::script(scene)]` (conker-extract; conker-bots now a normal dependency); `Slice` reads it in place of `game/ai.bin`; the pack README. Added to `../assets`: `maps/{2d,30,34,3f}/ai.bin`; rewritten: `README.md`. `game/ai.bin` (0xBA, = `maps/2d/ai.bin`) is read by no code now but left in place (an old web build may still fetch it) |
+| Root cause on 0x30 (V) | the AI's globals were 0x2600 bytes; 0xBB keeps its weapon choice at G+0x2658-0x26A8 (s5's RAM: the next block starts at G+0x26B0). Its writes were dropped, so each bot's wanted weapon (G+0x2438) read 0 = unarmed: no bot fetched one, all went straight to attack (state 7) or a sniper spot. `g::SIZE` = 0x26B0; G+0x1EC0-0x26B0 then matches the oracle's but for the random draws (roles, wanted weapons) |
+| Natives (C; V as said) | type-0 handles → 0 (`func_150AE140`); player 0xA5 case 3 → 6 (stats +8, V: every player in s4/s5/s7 RAM); 0xAC: the first listed trigger the player is in, \| 0x4000 (`func_150A2AEC`); 0xBC → 0 (obj+0x13C, V: 0 in every dump); 0xEF → 1 (obj+0, V); 0xF0 → the player's place (`0x800E0AC0`, written by `func_151E565C`; V: the idle human's 1 → 14 in s4, bots 0). It was 0, which fired every script's rubber band ("a human leads and no bot has role 0: give one bot role 0") on every frame, on 0x2D too; type-4 queries 6 (the player is inside) and 16 (someone is) through `func_150A1DA0` mode 0 (`CameraHint::contains`; V: 79 of 80 set bits and every clear one of the type-3 triggers against the player bitsets `0x800D30F0` in s4/s5/s7 RAM); type-4 commands 0/1 (switch a trigger, `func_150A2864`); player command 0x7C (obj+0x23E, the arrival radius); prop 7 and sound 3 (a display flag, a music fade: no-ops) |
+| `bot_match` | on 0x3F every player starts with the club (as the server's cavemen) |
+
+| Check (2026-10-11) | Result |
+|---|---|
+| `bot_match`, 15 bots, 1,760 reads vs the oracle (s5, s4, s7 traces and RAM) | 0x30: 14/26/13 lift rides (seeds 1-3; oracle 26); longest stand-still per bot median 247 reads (oracle 155), max 1,675 (958). 0x34: median 187 (214), max 473 (499); unarmed 18% of bot-frames (oracle 32% of RAM samples). 0x3F: every bot holds the club, drawn 21% of bot-frames (oracle 52%), hits with 0x40 by 12 of 15 bots; 3 gun pickups |
+| 0x30 lift loop | none: ≤ 4 rides per bot in 60 s, but for one 3-round bounce on lifts 2/3 (seed 2: 6 rides in 200 ticks, then none; the oracle's p15: 4 in 380) |
+| 0x34 unarmed | no node loop; 5 bots 5 min: longest unarmed stretches 53-141 ticks, but one bot camped unarmed 3,395 ticks at a state-9 spot (node 39; gaps) |
+| 0x2D | 391/391 node changes; sight 139/142 (137 before, from the collision agent's solid-placement filter in `tests/oracle.rs`, not this change); bot tests 15 (new `trigger_natives`). The 0xF0 fix changes 0x2D matches (the rubber band now waits for a leading human) |
+| `bots.sh` (ports 5972-5988) | default 2 bots 150 s: 2d 6/7 (bot 1 no hit, the old flake), 30 5/7, 34 6/7, 3f 6/7 (each FAIL: a bot that hit but never died). 0x30: 3 bots 120 s 8/10, 27 hits, 4 kills, 12 pickups, 8 rides; 5 bots 150 s 15/16, 34 hits, 5 kills, 22 pickups, 10 rides (0xBA's, last section: 27/39 hits, 4/7 kills, 12/7 pickups, 19/37 rides). 0x34: 5 bots 150 s 16/16, 50 hits, 8 kills, 28 pickups (54, 13, 32); 3 bots 120 s, two runs: 7/10 and 8/10, 9 and 14 hits, 0 and 2 kills, 12 and 18 pickups (26, 4, 20: campers, gaps). 0x3F: 3 bots 150 s 10/10, 39 hits, 6 kills, 2 gun pickups |
+| `smoke.sh` | 2d (port 5965) and 3f (5970): 16/16 each, prediction error 0 |
+| Fresh export (`--map 2d --map 30 --map 34 --map 3f`, four `--background`s) | equals `../assets` for `ai.bin` ×4 and `README.md`; differs in `game/ai.bin` (kept, above) and in `maps/*/collision.json`, `maps/{2d,30}/level.gltf` (the collision agent's exporter work in progress, not merged into the pack) |
+| Tests (target-net, `CONKER_ROM`) | conker-bots (lib 15, oracle 3, rom 3), conker-assets, conker-extract `pack`, conker-server; clippy clean |
+
+Gaps:
+- 0x30: bots sent to sniper node id 48 stall against the wall the oracle's bots climb (state 235, a pull-up at
+  (1096, −624, −494)); the remake's bots don't climb ledges.
+- Camping: with few bots, 0xBD/0xBB bots stay in a camping state (9 or 1) far longer than the oracle's (a role changes
+  only on a death or the rubber band here; in s4 role-4 bots changed role by DL 700 with no death): `func_1508A6FC`'s
+  returned mask is ported as deaths only (I).
+- Query 16's camera test and camera handles on query 6 read "outside" (the views are the clients').
+- The zone test takes this frame's position (the game's bitset is from the start of the player's last update);
+  shapes 1 and 3 never fire (`Body::old` = pos; no type-3 trigger of the four maps uses them). 0xA5: case 3 only.
+- `(6, 3, 1)` (prop command 1) on 0x2D, 6 calls a match, as before.
+
 ## The caveman (class 0xB, model 136) and item 0x40, the club (2026-10-11)
 **Scene 0x3F's Deathmatch (scenario 7) as the original sets it up: caveman bots, Tedi humans, and every player
 holding the club from the start and after each respawn; `conker-server --cavemen` does the same on any map.**
@@ -57,7 +120,7 @@ Gaps:
   ignored as on 0x30.
 - `conker-sim`'s `WALL_PLACEMENTS` (10, 11) are 0x2D's on every map: on 0x3F they are the twin guns' and the katana's
   models (on 0x30 the same placements are pickups too). 0x30's Colors flags (placements 18, 19) and its placement 0
-  are hidden in its Deathmatch but still drawn there (left as they are: 0x30 unchanged).
+  are hidden in its Deathmatch but still drawn there (left as they are: 0x30 unchanged). Both fixed since (the top section).
 
 ## Bots on 0x30 and 0x34: the placement replan, and each scene's own AI script (2026-10-11)
 **A placement (match start, respawn, lift) now makes the AI replan on the next frame, as in the game: 0x30's
@@ -85,7 +148,7 @@ Gaps:
 - Per-map AI needs a pack change (`maps/<map>/ai.bin` = `[0x14, script(scene)]`, loaded per map) and the natives those
   scripts call: player queries 0xAC (`func_150A2AEC`, a trigger the player stands in, as a type-4 handle), 0xBC
   (obj+0x13C), 0xA5; type-4 handle queries 6 and 16, commands 0x7C, prop 7, type-4 0. Until then 0x30's and 0x34's
-  unarmed bots still loop on 0x2D's node ids (above).
+  unarmed bots still loop on 0x2D's node ids (above). Done since: "Each map's own AI script" (top).
 
 ## The crossbow 0x18 and the shotgun 0x37 (2026-10-11)
 **Both weapons play: pickups (0x34's, or `--give SLOT:READ:0x18`), draw, fire, hits and kills in the rules, the bots,

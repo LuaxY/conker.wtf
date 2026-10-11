@@ -7,8 +7,8 @@
 //!   line crosses (their four corners not all on one side) are tested; the first leaf with a hit ends the
 //!   walk, otherwise the walk goes on with the leaf 10 units past where the ray leaves this one, while that
 //!   point is within `len` (XZ distance) of the origin. The secondary layer is not searched.
-//! - Placements (layer 2, [`super::WALL_PLACEMENTS`]): every triangle, after the terrain; a hit must be
-//!   closer than the terrain's. The game first culls placements by a bounding sphere; scene 0x2D's two never
+//! - Placements (layer 2, [`super::Layer::Placement`]): every triangle, after the terrain; a hit must be
+//!   closer than the terrain's. The game first culls placements by a bounding sphere; scene 0x2D's never
 //!   get culled by a ray that could hit them (I; V on the captured rays).
 //! - Triangle (`0x150AD364`): the plane hit at `t ≥ 0`, inside the triangle's integer bounds widened by 1,
 //!   closer than the best so far, and inside the triangle by the signs of the three edge cross products on
