@@ -7,7 +7,8 @@
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
     Align, Anchor, Button, End, Glyph, Grenades, Health, Horizontal as H, Hud, Image, Iris, Lives,
-    Placed, Radar, Rank, Results, Reticle, Scope, Text, Texture, Tv, Vertical as V, Weapon,
+    Placed, Radar, Rank, Results, Reticle, Scope, Strip, Teams, Text, Texture, Tv, Vertical as V,
+    Weapon,
 };
 use extract_core::Rom;
 use extract_gbi::{Format, Tlut, decode, png};
@@ -21,7 +22,7 @@ const GLYPHS: usize = 95;
 
 /// (name, blob id, format, width, height, smooth): every texture the HUD draws, loaded as its
 /// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 12] = [
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 13] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -34,6 +35,7 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 12] = [
     ("rank_nd", 0xD21, Format::Rgba16, 16, 16, false),
     ("rank_rd", 0xEA2, Format::Rgba16, 16, 16, false),
     ("rank_th", 0x11B7, Format::Rgba16, 16, 16, false),
+    ("teams", 0xD10, Format::Rgba32, 32, 32, false),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):
@@ -213,6 +215,9 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             levels: vec![-690.0, -130.5, 828.5],
             level_mark: [0, 0, 0, 255],
             hidden_with: vec![0x21],
+            // The name colours 0x800AB62C by obj+0x328 − 1: 3 on team 0, 1 on team 1 (C
+            // `func_15093B58`; V `sides_s9`, the gas run's DL 3000 drew 0x78FF16).
+            team_colours: [[120, 255, 22, 255], [255, 55, 55, 255]],
         },
         reticle: Reticle {
             anchor: Anchor(H::Centre, V::Middle),
@@ -244,7 +249,37 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             colour: [0, 0, 0, 255],
             radius: IRIS.into(),
         },
+        strip: strip(),
         end: None,
+    }
+}
+
+/// Total War's team strip (`func_151E9D18`, V: the gas run's DL 3000 at `../lab/research/
+/// mp-original/total-war-gas-scratch/run1`, timed, 2 and 4 kills): texture 0xD10's cells, 16 x
+/// 16, sharp, the squirrels' at x 198 from texel x 0, the Tediz' at x 66 from 16; the flags (row
+/// 16) on the clock, the heads (row 0) untimed (C, HUD flag 0x100); the number `" %d"` from x 211
+/// and 79 (its space moves the pen 4), top 197, grey over a black shadow.
+fn strip() -> Strip {
+    let anchor = Anchor(H::Centre, V::Bottom);
+    let number = |x| Text {
+        anchor,
+        at: [x, 197],
+        align: Align::Left,
+        colour: [192, 192, 192, 255],
+        shadow: Some([0, 0, 0, 255]),
+    };
+    Strip {
+        anchor,
+        rects: [[198, 196, 16, 16], [66, 196, 16, 16]],
+        kills: [
+            image("teams", [0, 16, 16, 16]),
+            image("teams", [16, 16, 16, 16]),
+        ],
+        lives: [
+            image("teams", [0, 0, 16, 16]),
+            image("teams", [16, 0, 16, 16]),
+        ],
+        numbers: [number(215), number(83)],
     }
 }
 
@@ -290,7 +325,7 @@ pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
 /// tiles stored for a LOADBLOCK without dxt (odd rows' texels at x ^ 2); a sprite of several tiles
 /// (`.game` data's sprite records at 0x800859E0: tiles across, the first id) is one PNG. The stick
 /// is 0x7E8, the tile drawn (its record names 0x7E7). V: `lab/research/mp-original` (STATS screen).
-const END_TEXTURES: [(&str, usize, usize, bool); 11] = [
+const END_TEXTURES: [(&str, usize, usize, bool); 17] = [
     ("lives", 0xD14, 1, false),
     ("skull", 0xD0F, 1, true),
     ("stats", 0x816, 2, false),
@@ -302,6 +337,14 @@ const END_TEXTURES: [(&str, usize, usize, bool); 11] = [
     ("stat_icons", 0x888, 1, false),
     ("stat_deaths", 0x887, 1, false),
     ("players", 0x843, 1, false),
+    // Total War's header: sprites 0x50 SQUIRRELS, 0x51 TEDIZ, 0x52 YOU, 0x56 WIN, 0x57 LOSE, 0x58
+    // DRAW (`func_151E43DC`).
+    ("squirrels", 0x866, 3, false),
+    ("tediz", 0x869, 2, false),
+    ("you", 0x872, 2, false),
+    ("win", 0x86D, 2, false),
+    ("lose", 0x85B, 2, false),
+    ("draw", 0x853, 2, false),
 ];
 
 /// `end.json`'s layout, the original's draws (V, the oracle's display lists: `lab/research/
@@ -357,6 +400,32 @@ fn end_layout(textures: std::collections::BTreeMap<String, Texture>) -> End {
             restart: button(51, "restart"),
             quit: button(181, "quit"),
             stick: placed([132, 164, 32, 32], "stick", [0, 0, 32, 32]),
+        },
+        // `func_151E43DC`'s sprites centred on y 50 (V: its calls in `../lab/research/mp-original/
+        // total-war-teams.md` §6); `func_151EA15C` draws from its argument, 106, Deathmatch's
+        // 40 higher (V the rows, C the icons and labels), each row in `colours[team]` (C: 0x800ABA90
+        // + 4·team, red, blue, green, yellow in the RAM dumps).
+        teams: Teams {
+            down: 40,
+            draw: placed([116, 34, 64, 32], "draw", [0, 0, 64, 32]),
+            won: [
+                placed([86, 34, 64, 32], "you", [0, 0, 64, 32]),
+                placed([146, 34, 64, 32], "win", [0, 0, 64, 32]),
+            ],
+            lost: [
+                placed([86, 34, 64, 32], "you", [0, 0, 64, 32]),
+                placed([146, 34, 64, 32], "lose", [0, 0, 64, 32]),
+            ],
+            team_won: [
+                [
+                    placed([77, 34, 96, 32], "squirrels", [0, 0, 96, 32]),
+                    placed([172, 34, 64, 32], "win", [0, 0, 64, 32]),
+                ],
+                [
+                    placed([81, 34, 64, 32], "tediz", [0, 0, 64, 32]),
+                    placed([151, 34, 64, 32], "win", [0, 0, 64, 32]),
+                ],
+            ],
         },
     }
 }

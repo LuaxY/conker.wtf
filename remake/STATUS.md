@@ -1,5 +1,87 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Total War, part 2: the HUD and the team STATS (2026-10-12)
+**In Total War the client draws the team strip in place of its own kills and rank, the radar's blips by team (squirrels
+green, Tediz red; Deathmatch stays red), and after the end fade the team STATS: DRAW, YOU WIN / YOU LOSE (one human) or
+the winning team's name and WIN (more), the columns' icons, labels and rows 40 lower, each row with its team's place in
+its team's colour, the strip under them.** Not in it: the outro cutscene (the game plays the winner's, squirrels 2 /
+Tediz 4, then the STATS over it; here the STATS come right after the fade, as after a DRAW in the game); the gas batch's
+countdown. `PROTOCOL_ID` unchanged (13). Research: `../lab/research/mp-original/total-war-teams.md` §6.
+
+| Part | What |
+|---|---|
+| Pack | `hud.json`: `strip` (texture 0xD10 → `teams.png`, 16 × 16 cells: flags on the clock, heads untimed; the squirrels' at x 198, the Tediz' at 66, y 196; numbers grey C0C0C0 over a black shadow at 215/83, 197) and `radar.team_colours`; `end.json`: `teams` (`down` 40; sprites 0x58 DRAW, 0x52 YOU, 0x56 WIN, 0x57 LOSE, 0x50 SQUIRRELS, 0x51 TEDIZ → `draw/you/win/lose/squirrels/tediz.png`, centred on y 50 as STATS is on 20); `README.md`. Added to `../assets`: the 7 PNGs; rewritten (additive): `hud/hud.json`, `hud/end.json`, `README.md`. The new fields are required: a pack exported before this batch no longer loads |
+| Client | `Shown::strip` (each team's kills, untimed its lives left, summed over everyone's `Combat`), `Shown::header` (`header()`: `team_result`, then the human count), blips carry their colour, a results `Row` carries its colour (`rows(.., total_war)`: the team's place from `team_places` and colour, else as before) |
+
+Findings: the strip is V (the gas run's DL 3000 RAM dump, `../lab/research/mp-original/total-war-gas-scratch/run1`,
+walked with `../lab/hud/tools/hudwalk.py`: timed, Tediz 4 / squirrels 2; texels (16, 16) at x 66 and (0, 16) at 198;
+the numbers' format `" %d"` at 79/211, the space moving the pen 4); the heads row untimed is C (HUD flag 0x100). The
+STATS draw the strip live, as in the match (`func_151EA15C` passes 0x800E0BD3 == 2, which is 2 in every RAM dump). Row
+colours: table 0x800ABA90 = red, blue, green, yellow (V RAM) by team (C), so squirrels red, Tediz blue. hudwalk's
+RGBA32 view of 0xD10 is garbled (its TMEM model); `teams.png` equals the research's own decode (`spr.py`'s rule, as
+the 11 end PNGs). +0x70: no STATS column shows it (C `func_151EA15C`: place, accuracy, kills, headshots, deaths), so the
+forgiven-traitor difference noted in part 1 stays invisible; only the voice line would read it (not ported).
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line) | pass (exit 0): conker-rules 65 + combat + oracle + ROM, conker-bots, -server 16, -client 42, -sim, -anim, -assets, -extract (`pack.rs` reads the new `hud.json`/`end.json` back), extract-scene |
+| Client tests (with the new pack, no "skipping") | 42 (new `total_war_rows_and_header_go_by_team`, `total_war_matches_the_originals_draws`: strip rects/texels and digits at 83/215, no kills or rank, heads untimed, every header's rects, icons y 89, labels 104, rows 106/121 blue/red, the strip in the results' anchor); Deathmatch's layout and end tests unchanged but for the row's colour index |
+| Fresh export (the task's command) vs `../assets` | equal after the copy, but `game/ai.bin` (kept, as before); the 7 new PNGs equal `/tmp` decodes by `spr.py` pixel for pixel |
+| `cargo fmt`, clippy (conker-client, -assets, -extract, all targets; conker-client wasm32) | clean |
+| Native, `../lab/screens/total-war/shots.sh hud` (ports 5980/5982) | `hud-timed.png` (2d, 1 human + 3 bots, 45 s): flags at x 66/198 with 0 and 0, clock 2:16, no kills or rank; `hud-untimed.png` (2 bots, the Tediz one placed by the squirrels' base, 8 s): heads, Tediz 3 / squirrels 6, the lives digit 3, no clock; radar: a red Tediz and a green squirrel blip |
+| Native, `shots.sh stats` / `lose` (3-minute matches, ports 5980-5987, the shot 195 s in) | `you-win.png` (1 human alone: the Tediz empty, out), `you-lose.png` (a Tedi + an einstein squirrel bot placed in the Tediz' base: P1 2nd, 1 death, strip 0 / 1), `draw.png` (a human per side, idle: both 1st, P1 red, P2 blue), `team-win.png` and `team-win-tedi.png` (2 humans + 2 bots: TEDIZ WIN, the Tedi 1st in blue, the squirrel 2nd in red, strip 1 / 0), `draw-hud.png` (the Tedi's HUD at read 1500). At 1280 × 720 (× 3.33, centred) the header, icons (y 89), rows (106, 121) and strip (196) sit where the frame's numbers put them; RESTART/QUIT as before |
+
+Gaps: the outro cutscene (above); the icons' and labels' 40 (C: drawn from the rows' y, V for the rows); the heads row
+(C); the space's width from one dump; one human: the header goes by the viewer's team (the game's: slot 0's, its only
+human); a human gone from the match is no longer counted (the game counts the controllers that joined); the labels
+P1, P2 go by row as in Deathmatch (the game's by controller). `shots.sh`: bots take the squirrels in even slots, so a
+lone bot is the human squirrel's team-mate (its first `lose` run was a YOU WIN: the Tediz empty).
+
+## War: Total War, part 1: teams, the server mode, the bots (2026-10-12)
+**`conker-server --mode total-war` (map 2d only, not with `--cavemen`) plays scenario 9's rules: every player's team is
+its side (0 squirrels, 1 Tediz); friendly fire hurts in full but scores no hit, kill or headshot (the attacker's +0x70,
+`suicides`, counts it); the match ends on the clock (timed; the kill limit is not read) or once a team has no member in
+play (untimed); the teams rank by kills, then fewer shots, both equal a DRAW. Bots run 0xBA's team branches.** Not in
+it: the gas canister, gas and masks (next batch), the client's Total War HUD/STATS/outro. Findings:
+`../lab/research/mp-original/total-war-teams.md`.
+
+| Part | What |
+|---|---|
+| Rules | `Settings::total_war`; `hurt` scores by team (`func_151E5FF4`): hits, headshots and kills on other teams only, a death on the attacker's own team (itself included) in `suicides`; `Standing.team`; pure `team_places(&[Option<Standing>]) -> [u8; 2]` and `team_result(..) -> Option<team>` (`None` = DRAW) for the server and the client; `Match::ends` (team branch) and `Match::places` (each player its team's place) |
+| Net | `PROTOCOL_ID` 13: `MatchView.total_war`; `Combat.team` is the side in Total War (it already carried `team`, `side`, `kills`, `shots`, `out`, `lives_left`) |
+| Server | `--mode deathmatch\|total-war` (rejected off 2d or with `--cavemen`); `Game::team` (the side in Total War, else one per join); a client asking for the cavemen in Total War gets the smaller side; the per-second bot lines show `fight (enemy, target)` as slots; a warning every 10 s if the AI met an unknown native or faulted. `bots.sh` takes `MODE=` |
+| Client | `match_settings` carries `total_war`; `hud::standing` fills `team` (compile only); the `/info` doc says protocol 13 |
+| Bots | query 0xD5 = the FFA flag `0x8008FDC8` (0 in Total War); commands F 5 (`func_1508A1BC`, the ranking) and F 7 (`func_1508BF14`, a team shares out its targets: roles 2/3 first, each the enemy ranking it lowest, the score doubled per team-mate already on it; ported from the MIPS); F 0x11 / 0x17 (`func_1508B194` / `func_1508B1D4`: a human's +0x70, zeroed: the script's "Killed too many team mates!!!" makes a human with 4 every bot's enemy until it dies); `func_1508A6FC`'s team tally G+0xDDC on each death (the team roles at 0x37F2 reassign on net losses) |
+
+Decided: lives already go at the respawn moment (`out`, `lives_left` change at the end of the death sequence, V
+`elim`), so nothing changed there. The team branch's "no team that started with a human is in" falls under "< 2 teams"
+with two teams; that check waits for someone to be out, as Deathmatch's does (players join as they go). Not ported
+(I): untimed, the game ranks the teams in play by Σ(lives·6 + health) first, which nothing shows (the match ends only
+once a team is out); two teams out, the one whose last member went out first is 2nd (the game: team 0 first); the
++0x70 exemption for reaction 0x2D (no such reaction in the remake).
+
+Script calls stubbed for the gas batch (0xD5 = 0 reaches them): prop query (3, 0x21), a canister's carrier + 1 → 0 (no
+canister); the canisters' timers (G+0x1FD8, 300 + random(150)) run out after 600-900 frames and call prop command (3,
+0) and kind-0xE objects, no-ops as before; the script lists 25 pickups in Total War (+6 masks, gift 0x20), the mirror
+keeps the arena's 19. Not reached while nobody carries a canister: the countdown (G+0x1FE4, command F 1's HUD text),
+the gas kill (player command 0x2B), 0x2A, the kind-7 objects.
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line) | pass: conker-rules 65 (new: `a_team_kill_scores_no_hit_kill_or_headshot`, `teams_rank_by_kills_then_fewer_shots`, `total_war_ends_by_team`) + combat 3 + oracle 4 + ROM 2; conker-bots 15 + oracle 3 + ROM 4 (new `total_war_runs_the_team_branch`: G+0xE64 = [0, 2, 0, 2], every threat on the other team, 0 unknown natives over 1,000 frames with the canister stub hit 346 times, the traitor flip and its reset at the death); conker-server 16 (new `total_war_teams_are_the_sides`, `--mode` parse cases); -sim, -client 40, -anim, -assets, -extract, extract-scene |
+| Combat replays (Deathmatch) | output identical before and after (61 trace lines) |
+| `MODE=total-war HUMANS=1 BOTS=5 bots.sh 240` (port 5970; 1 idle human, put on the Tediz, + 5 bots: 3 v 3 as the oracle's `bots3v3`) | enemy G+0x11C on the other team in 631 of 631 bot-seconds with one (oracle 867/867), target G+0x31C 162/162; 38 hits, all on enemies, 9 kills (oracle: 59 hits, 56 on enemies, 1 team kill, 2 own grenades); 42 pickups, 3 lift rides; 0 panics, unknown natives or faults. 15/16: bot 4, a sniper (0x24) at its role spot on the south tower 219 of 247 s with 5 kills, never died; bot 2 camped (state 10, 0x39) |
+| `MAP=2d bots.sh 150` (Deathmatch, port 5974) | 6/7, 9 hits, 2 kills: as before (bot 1 without a hit, the known flake) |
+| `cargo fmt --check`, clippy (rules, sim, bots, server, client, all targets) | clean |
+
+Open: the takeover (script 0x4B16, command F 0xF = `func_1508E89C`: a human out, class 0xA, takes the healthiest
+team-mate bot) never runs, since query 0x1D (participants of class ≠ 0xA) answers everyone, as in Deathmatch; the
+client now ranks by `team_places`/`team_result` (the HUD batch above); command F 0x17 zeroes a forgiven traitor's +0x70 in
+the game (`func_1508B1D4`, called only at 0xC58/0x4B72 for G+0x2034 set), the remake keeps `suicides` whole and the
+bots count from a baseline (`World::forgiven`), so a results screen showing +0x70 would differ after a traitor's
+death (no STATS column shows +0x70, so nothing differs on screen); no oracle run
+(compared with the research's `bots3v3`); Deathmatch's per-join team (`joins as u8`) wraps after 256 joins (as before).
+
 ## Per-map solid placements and hidden props (2026-10-11)
 **`WALL_PLACEMENTS` (0x2D's 10 and 11 on every map) is gone: the pack's collision holds each map's solid placements
 only, and `CollisionWorld::layered` makes every placement it is given wall layer 2. 0x2D and 0x30 also leave out their

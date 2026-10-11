@@ -43,7 +43,9 @@ use serde::{Deserialize, Serialize};
 /// and a client votes to play again with [`Restart`].
 /// 12: the cavemen, a third [`Side`] (bots on scene 0x3F), and a match's start item: the fighter
 /// carries it (conker-rules' `Fighter::start`, back after each respawn) and the club's combo window.
-pub const PROTOCOL_ID: u64 = 12;
+/// 13: War: Total War on scene 0x2D: [`MatchView::total_war`] (and in the settings the fighter's
+/// rules run with); [`Combat::team`] is then the player's side.
+pub const PROTOCOL_ID: u64 = 13;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -69,7 +71,8 @@ pub struct Player(pub PlayerState);
 /// clients get of a player: its fighter (conker-rules' `Fighting`) goes to its own client only.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Combat {
-    /// The player's slot in the server's match, its team (Deathmatch: one each) and its hit stun
+    /// The player's slot in the server's match, its team (Deathmatch: one each; Total War: its side,
+    /// 0 the squirrels, 1 the Tediz) and its hit stun
     /// (obj+0x104): with `health` and `immune`, what another client's frame reads of it (a lock-on,
     /// a hit, a respawn pick).
     pub slot: u16,
@@ -83,7 +86,8 @@ pub struct Combat {
     pub drawn: bool,
     pub rounds: u8,
     pub grenades: u8,
-    /// Kills (the game's score) and own-grenade deaths.
+    /// Kills of other teams' players (the game's score), and deaths the player caused on its own
+    /// team, its own included (+0x70: team kills and suicides).
     pub kills: u16,
     pub suicides: u16,
     /// Frames left immune after a (re)spawn.
@@ -116,6 +120,9 @@ pub struct MatchView {
     pub lives: u8,
     pub kill_limit: u8,
     pub radar: bool,
+    /// War: Total War, not Deathmatch (conker-rules' `Settings::total_war`): teams are the sides,
+    /// the match ranks them (`team_places`, `team_result`), no kill limit.
+    pub total_war: bool,
     /// Over: ticks before the next match starts anyway (every human voting [`Restart`] starts it
     /// sooner).
     pub restart_in: u16,

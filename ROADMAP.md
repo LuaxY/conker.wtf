@@ -143,6 +143,14 @@ shotgun (0x37). Leftovers:
    - in order: Total War (gas masks, canister, gas; same map), Colors (flags, score 1-40), Beach (Frenchys vs Tediz,
      turret, escape), Heist (4 teams, money bag, vault), Raptor (raptor rig, eggs, baby);
    - the win rules aren't in the code found yet: trace them in the oracle first.
+   - **Total War part 1 done (2026-10-12, `--mode total-war`):** teams, friendly fire, team end and winner, the bots'
+     team branch, team HUD strip, radar colours, team STATS. Left (`lab/research/mp-original/total-war-gas.md`): the
+     two canisters (each team steals its own from the enemy base, item 0x25, ~0.8x speed, back home on death), trigger
+     5's 10 s countdown and HUD digit, the doorways' damage, the gas kill (credited to the deliverer, no team check),
+     the 6 masks (pickable only during the countdown, item 0x20) and the props they show/hide; the masks and canisters
+     must show in Total War on the scene Deathmatch hides them on. Also: the outro cutscenes (2/4), the team screen and
+     BALANCE, a human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, both teams out on
+     one frame. The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.
 5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.

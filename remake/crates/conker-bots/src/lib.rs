@@ -93,6 +93,8 @@ pub struct Bots {
     /// Per participant: the pickup whose weapon it holds (MP+0xEB0), and who hit it last frame.
     held: Vec<i32>,
     hit_by: Vec<u8>,
+    /// Per participant: its +0x70 when the AI last zeroed it ([`World::forgiven`]).
+    forgiven: Vec<u16>,
     /// Per participant: the point it aims at this frame while R is held.
     aims: Vec<Option<[f32; 3]>>,
     /// Per participant: its scope's yaw and pitch this frame ([`Bots::scopes`]).
@@ -132,6 +134,7 @@ impl Bots {
             humans,
             held: vec![-1; n],
             hit_by: vec![0; n],
+            forgiven: vec![0; n],
             aims: vec![None; n],
             scopes: vec![None; n],
             noises: Vec::new(),
@@ -282,6 +285,8 @@ impl Bots {
                 skill: self.skill,
                 zones: &mut self.zones,
                 unknown: &mut unknown,
+                ffa: !m.settings.total_war,
+                forgiven: &mut self.forgiven,
             };
             if !self.started {
                 self.started = true;
@@ -386,6 +391,7 @@ impl Bots {
                     hit_by: self.hit_by[k],
                     is_bot: k >= self.humans,
                     team: f.team,
+                    suicides: f.suicides,
                     place: places[s],
                 }
             })

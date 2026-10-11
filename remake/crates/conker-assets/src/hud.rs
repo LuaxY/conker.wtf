@@ -140,7 +140,8 @@ pub struct Rank {
 /// and a `blip`-sized square for every other living player within `range` frame pixels, `scale`
 /// pixels per game unit away. A blip on another level (`levels`: the heights between them) gets a
 /// `level_mark` bar above it (higher) or below it (lower). Holding a weapon in `hidden_with`
-/// keeps a player off it.
+/// keeps a player off it. In War: Total War a blip is in its player's team's `team_colours[team]`
+/// ([0] the squirrels', [1] the Tediz') instead of `blip_colour`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Radar {
     pub anchor: Anchor,
@@ -155,6 +156,20 @@ pub struct Radar {
     pub levels: Vec<f32>,
     pub level_mark: Rgba,
     pub hidden_with: Vec<u8>,
+    pub team_colours: [Rgba; 2],
+}
+
+/// War: Total War's team strip, in place of the own kills and rank (the results draw it too): per
+/// team, [0] the squirrels and [1] the Tediz, an icon over `rects[team]`, `kills[team]` in a match
+/// on the clock or `lives[team]` untimed, and the team's number as `numbers[team]`: its members'
+/// kills, untimed their lives left.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Strip {
+    pub anchor: Anchor,
+    pub rects: [[i16; 4]; 2],
+    pub kills: [Image; 2],
+    pub lives: [Image; 2],
+    pub numbers: [Text; 2],
 }
 
 /// While the aim camera is on with one of `weapons`: `image` over `rect`.
@@ -219,6 +234,7 @@ pub struct Hud {
     pub reticle: Reticle,
     pub scope: Scope,
     pub iris: Iris,
+    pub strip: Strip,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,
@@ -237,6 +253,9 @@ impl Hud {
             ("iris.image".into(), &self.iris.image),
         ];
         all.extend((self.weapon.icons.iter()).map(|(id, i)| (format!("weapon.icons.{id}"), i)));
+        for (name, icons) in [("kills", &self.strip.kills), ("lives", &self.strip.lives)] {
+            all.extend((icons.iter().enumerate()).map(|(n, i)| (format!("strip.{name}[{n}]"), i)));
+        }
         all
     }
 
@@ -351,14 +370,30 @@ pub struct Results {
     pub stick: Placed,
 }
 
+/// War: Total War's results: the columns' icons, the labels and the rows `down` lower than
+/// [`Results`] puts them, each row in its team's colour (`results.colours[team]`), the team strip
+/// ([`Strip`]) under them, and a header: `draw` when both teams are 1st; with one human, `won` or
+/// `lost` (YOU WIN, YOU LOSE: its team's place); with more, `team_won[team]` (the winning team's
+/// name and WIN; [0] the squirrels, [1] the Tediz).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Teams {
+    pub down: i16,
+    pub draw: Placed,
+    pub won: [Placed; 2],
+    pub lost: [Placed; 2],
+    pub team_won: [[Placed; 2]; 2],
+}
+
 /// `hud/end.json`: what the end of a match draws, in [`Hud::frame`] like the HUD: the lives left
-/// (untimed), the skull over the view of a player out of lives, and the results.
+/// (untimed), the skull over the view of a player out of lives, and the results (Total War's
+/// `teams`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct End {
     pub textures: BTreeMap<String, Texture>,
     pub lives: Lives,
     pub skull: Placed,
     pub results: Results,
+    pub teams: Teams,
 }
 
 impl End {
@@ -381,6 +416,13 @@ impl End {
                 .map(|(n, i)| (format!("results.icons[{n}].image"), &i.image)),
         );
         all.extend((r.labels.iter().enumerate()).map(|(n, i)| (format!("results.labels[{n}]"), i)));
+        let t = &self.teams;
+        let header = [("draw", &t.draw)].into_iter().chain(
+            (t.won.iter().map(|p| ("won", p)))
+                .chain(t.lost.iter().map(|p| ("lost", p)))
+                .chain(t.team_won.iter().flatten().map(|p| ("team_won", p))),
+        );
+        all.extend(header.map(|(name, p)| (format!("teams.{name}.image"), &p.image)));
         all
     }
 

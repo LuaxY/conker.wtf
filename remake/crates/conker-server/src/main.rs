@@ -1,5 +1,5 @@
 //! Authoritative multiplayer server: headless Bevy + lightyear, running a Deathmatch on scene 0x2D,
-//! 0x30, 0x34 or 0x3F (`--map`).
+//! 0x30, 0x34 or 0x3F (`--map`), or War: Total War on 0x2D (`--mode total-war`).
 //!
 //! ONE lightyear `Server` entity carries both transports on the same port number:
 //! WebTransport (UDP) and WebSocket (TCP). With `--cert`/`--cert-key` (PEM, e.g. Let's Encrypt's)
@@ -17,8 +17,9 @@
 //! too); leaving frees the slot, and nobody else changes slot (`Match::remove_player`). A client
 //! joins with its first message ([`Join`]): the side it asks for (squirrels or Tediz: the model and
 //! its body), else the side with fewer players (the squirrels on a tie). Bots take the squirrels in
-//! even slots, the Tediz in odd ones. The match stays a Deathmatch: every player is its own team,
-//! and only its starts and respawns keep to its side's half.
+//! even slots, the Tediz in odd ones. In a Deathmatch every player is its own team, and only its
+//! starts and respawns keep to its side's half; in Total War its side is its team (0 the squirrels,
+//! 1 the Tediz), which the rules score and rank by.
 //! Clients get [`Player`] (predicted by the owner) with conker-rules' [`Fighting`]
 //! (the fighter, predicted by the owner: its knock-back, death and respawn; sent to the owner only,
 //! [`FightingOwner`]), [`Combat`] and one [`MatchView`]. After each step every human's camera steps with what the rules know of it
@@ -61,8 +62,8 @@
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--cert PEM --cert-key PEM] [--token-key FILE]
-//!   [--token-addr ADDR:PORT] [--public IP[:PORT]]...
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] [--cert PEM --cert-key PEM]
+//!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
 //! - `--map 2d|30|34|3f`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
@@ -87,6 +88,9 @@
 //!   (default 23, the match going live).
 //! - `--give SLOT:READ:ID` hands a weapon as its pickup does at that read (the oracle's MP+0xEB0 poke).
 //! - `--cavemen`: scene 0x3F's Deathmatch on any map: caveman bots, every player holding item 0x40.
+//! - `--mode total-war`: the original's War: Total War (scenario 9), on map 2d only and without
+//!   `--cavemen`: teams are the sides, friendly fire scores no kill, the match ends on the clock or
+//!   (untimed) a team's last life, and the best team wins (conker-rules' `Settings::total_war`).
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -99,6 +103,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy_replicon::prelude::{AppVisibilityExt, SingleComponent, VisibilityFilter};
 use conker_assets::{PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, Slice};
+use conker_bots::brain::g;
 use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
@@ -230,6 +235,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--first-read" => setup.first_read = value()?.parse().map_err(|_| bad("first-read"))?,
             "--no-lagcomp" => setup.lagcomp = false,
             "--cavemen" => setup.cavemen = true,
+            "--mode" => {
+                setup.settings.total_war = match value()?.as_str() {
+                    "deathmatch" => false,
+                    "total-war" => true,
+                    v => return Err(bad(v)),
+                }
+            }
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
             "--time" | "--lives" | "--kills" | "--skill" | "--radar" => {
                 let v = value()?;
@@ -254,6 +266,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             }
             _ => return Err(format!("unknown flag {flag}")),
         }
+    }
+    // Total War is scenario 9, scene 0x2D's: its bases and the squirrels and Tediz as the teams.
+    if setup.settings.total_war && (net.map != "2d" || setup.cavemen) {
+        return Err("--mode total-war: map 2d only, without --cavemen".into());
     }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
@@ -291,7 +307,8 @@ fn main() {
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--cert PEM --cert-key PEM] [--token-key FILE] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] \
+             [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
     });
@@ -336,7 +353,7 @@ fn main() {
         .add_observer(on_disconnected)
         .add_observer(on_left)
         .add_observer(relink_evicted_session);
-    let bots = game.setup.bots;
+    let (bots, game_mode) = (game.setup.bots, game.setup.settings.total_war);
     app.insert_resource(game);
     app.add_systems(
         Startup,
@@ -420,7 +437,8 @@ fn main() {
             "token endpoint {token_addr}: {e} (another server's port? pick one with --token-addr)"
         ))
     });
-    info!("map {} (scene {scene:#X})", net.map);
+    let mode = ["Deathmatch", "War: Total War"][usize::from(game_mode)];
+    info!("map {} (scene {scene:#X}), {mode}", net.map);
     let map = net.map.clone();
     token::serve(
         listener,
@@ -543,7 +561,7 @@ struct Game {
     /// The map's start records and the sides' respawn masks.
     starts: Starts,
     m: Match,
-    /// Players that ever joined (the next team).
+    /// Players that ever joined (a Deathmatch's next team).
     joins: usize,
     setup: Setup,
     /// The tick the match (its clock) starts or started: the first join, or 5 s after the last
@@ -593,6 +611,16 @@ impl Game {
         taken.saturating_sub(self.setup.bots)
     }
 
+    /// The team of the next player to join on `side`: its own in a Deathmatch, its side's in Total
+    /// War (`0x800E0C00`: 0 the squirrels, 1 the Tediz).
+    fn team(&mut self, side: Side) -> u8 {
+        if self.setup.settings.total_war {
+            return side as u8;
+        }
+        self.joins += 1;
+        (self.joins - 1) as u8
+    }
+
     /// The bots' AI over the roster as it now stands.
     fn restart_bots(&mut self) {
         let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
@@ -613,9 +641,8 @@ impl Game {
             spawn_mask,
             bot: true,
             start: self.start_item(),
-            ..Fighter::new(&place, self.joins as u8, 0)
+            ..Fighter::new(&place, self.team(side), 0)
         };
-        self.joins += 1;
         self.m.players.push(fighter);
         self.restart_bots();
         info!(
@@ -879,10 +906,13 @@ fn join_player(
 ) {
     let tick = timeline.tick().0;
     let index = game.m.next_slot();
-    let side = asked.side.unwrap_or_else(|| game.smaller_side());
+    // Total War has two teams: a caveman asked for takes the smaller side.
+    let two_sides = game.setup.settings.total_war;
+    let side = (asked.side)
+        .filter(|&s| !two_sides || s != Side::Cavemen)
+        .unwrap_or_else(|| game.smaller_side());
     let (place, spawn_mask) = game.placement(index, side);
-    let team = game.joins as u8;
-    game.joins += 1;
+    let team = game.team(side);
     let fighter = Fighter {
         side,
         spawn_mask,
@@ -1401,6 +1431,7 @@ fn publish(
         lives: s.lives(),
         kill_limit: s.kills,
         radar: s.radar,
+        total_war: s.total_war,
         restart_in: game.restart_in(m.tick) as u16,
         phase: match m.phase() {
             Phase::Playing => 0,
@@ -1436,6 +1467,12 @@ fn log_players(
 ) {
     let tick = timeline.tick().0;
     let read = game.read(tick).map_or(String::from("-"), |r| r.to_string());
+    if let Some(b) = &game.ai.bots
+        && tick.is_multiple_of(300)
+        && (b.faults > 0 || !b.unknown.is_empty())
+    {
+        warn!("bots: {} faults, unknown natives {:?}", b.faults, b.unknown);
+    }
     for e in &events.0 {
         if !matches!(e, Event::Shot { .. }) {
             info!("EVENT t={tick} read={read} {e:?}");
@@ -1467,8 +1504,14 @@ fn log_players(
             let bots = game.ai.bots.as_ref();
             let ai = bots.and_then(|b| b.state(k?));
             let walk = bots.and_then(|b| b.npc(k?)).map(|n| (n.cur, n.waypoint));
+            // Its enemy (G+0x11C) and target (G+0x31C − 2), as slots.
+            let fight = bots.zip(k).map(|(b, k)| {
+                let slot = |p: i32| usize::try_from(p).ok().and_then(|p| b.slot(p));
+                let at = |off| b.globals().get(off, k);
+                (slot(at(g::ENEMY)), slot(at(g::TARGET) - 2))
+            });
             info!(
-                "tick {tick} player {:?} input {:?} ai {ai:?} walk {walk:?} pos ({x:.2}, {y:.2}, {z:.2}) state {} hp {} weapon {:#04x} kills {}",
+                "tick {tick} player {:?} input {:?} ai {ai:?} fight {fight:?} walk {walk:?} pos ({x:.2}, {y:.2}, {z:.2}) state {} hp {} weapon {:#04x} kills {}",
                 id.0,
                 input.map(|a| a.0),
                 p.state,
@@ -1537,6 +1580,8 @@ mod tests {
             "einstein",
             "--radar",
             "off",
+            "--mode",
+            "total-war",
         ]);
         let want = Settings {
             time: None,
@@ -1544,6 +1589,7 @@ mod tests {
             kills: 10,
             skill: 4,
             radar: false,
+            total_war: true,
         };
         assert_eq!(s, Ok(want));
         assert_eq!(
@@ -1559,8 +1605,31 @@ mod tests {
             ["--skill", "5"],
             ["--skill", "genius"],
             ["--radar", "yes"],
+            ["--mode", "ffa"],
         ] {
             assert!(settings(&bad).is_err(), "{bad:?}");
+        }
+        // Total War is scene 0x2D's, with its squirrels and Tediz.
+        assert!(settings(&["--mode", "total-war", "--map", "30"]).is_err());
+        assert!(settings(&["--cavemen", "--mode", "total-war"]).is_err());
+        assert!(!settings(&["--mode", "deathmatch"]).unwrap().total_war);
+    }
+
+    /// Total War: every player's team is its side (the bots alternate); a Deathmatch gives each
+    /// its own.
+    #[test]
+    fn total_war_teams_are_the_sides() {
+        for (total_war, teams) in [(true, [0, 1, 0]), (false, [0, 1, 2])] {
+            let mut g = game(Setup {
+                settings: Settings {
+                    total_war,
+                    ..Settings::default()
+                },
+                ..Setup::default()
+            });
+            let _ = (g.join_bot(0), g.join_bot(1), g.join_bot(2));
+            let got: Vec<u8> = g.m.players.iter().map(|f| f.team).collect();
+            assert_eq!(got, teams);
         }
     }
 

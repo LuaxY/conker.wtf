@@ -2,7 +2,8 @@
 //! pictures, layout and rules found in the oracle, `lab/hud`): health as chocolate, the held
 //! weapon's icon, grenades while one is in the hand, kills and rank, the clock, the radar, the aim
 //! reticle, the scope and the death iris; untimed, the lives left; out of lives, a skull; and once
-//! the match is over, the results (`hud/end.json`, [`End`]).
+//! the match is over, the results (`hud/end.json`, [`End`]). War: Total War draws its team strip in
+//! place of the kills and rank, the radar's blips by team, and its results' header.
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -22,9 +23,9 @@ use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
-    Align, Anchor, End, Horizontal, Hud, Image as Picture, Rgba, Text, Vertical,
+    Align, Anchor, End, Horizontal, Hud, Image as Picture, Placed, Rgba, Text, Vertical,
 };
-use conker_rules::game::{Standing, places};
+use conker_rules::game::{Standing, places, team_places, team_result};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, PeerId, Predicted};
 
@@ -72,8 +73,8 @@ pub struct Shown {
     /// The radar is on (SET-UP's radar: HUD flag 0x20).
     pub radar: bool,
     /// Other players for the radar: (right, ahead) of the player in game units, along the view,
-    /// and their level against the player's (-1 lower, 0, 1 higher).
-    pub blips: Vec<([f32; 2], i8)>,
+    /// their level against the player's (-1 lower, 0, 1 higher) and their blip's colour.
+    pub blips: Vec<([f32; 2], i8, Rgba)>,
     /// The reticle is up (R's aim with a weapon of [`conker_assets::hud::Reticle::weapons`]).
     pub reticle: bool,
     /// Looking through a scope: its zoom, 0 opened to 1 at the weapon's closest.
@@ -84,8 +85,27 @@ pub struct Shown {
     pub lives: Option<u8>,
     /// Out of lives: a skull over the view, no radar.
     pub out: bool,
-    /// The match is over: the results' rows ([`rows`]) and the menu's choice (0 RESTART, 1 QUIT).
-    pub results: Option<(Vec<[u32; 5]>, usize)>,
+    /// War: Total War: the team strip's numbers, [0] the squirrels', [1] the Tediz': their kills,
+    /// untimed (`lives` shown) their lives left; in place of the own kills and rank.
+    pub strip: Option<[u32; 2]>,
+    /// The match is over: the results' rows ([`rows`]: each with its colour) and the menu's choice
+    /// (0 RESTART, 1 QUIT).
+    pub results: Option<(Vec<Row>, usize)>,
+    /// Over in Total War: the results' header.
+    pub header: Option<Header>,
+}
+
+/// A results row ([`rows`]): its colour, an index of `results.colours`, and its five columns.
+pub type Row = (usize, [u32; 5]);
+
+/// Total War's results header (`func_151E43DC`): DRAW (both teams 1st); with one human, YOU WIN or
+/// YOU LOSE (whether its team won); with more, the winning team's name (0 the squirrels, 1 the
+/// Tediz) and WIN.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Header {
+    Draw,
+    You(bool),
+    Team(u8),
 }
 
 fn image(p: &Picture) -> (Tex, [f32; 4]) {
@@ -233,9 +253,11 @@ fn suffix(n: usize) -> usize {
 }
 
 /// The results' rows: one per human player (bots are not listed), in slot order, from everyone's
-/// (human, [`Combat`]): place, accuracy (hits × 100 / shots, truncated, at most 9999, 0 without a
-/// shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS).
-pub fn rows(all: &[(bool, &Combat)], kill_limit: u8) -> Vec<[u32; 5]> {
+/// (human, [`Combat`]): its colour (an index of `results.colours`: the row's; in Total War its
+/// team's, `func_151EA15C`), then place, accuracy (hits × 100 / shots, truncated, at most 9999, 0
+/// without a shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS). In Total
+/// War the place is the team's ([`team_places`], `0x800E0AC0[team]`).
+pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool) -> Vec<Row> {
     let mut standings = vec![
         None;
         all.iter()
@@ -246,41 +268,104 @@ pub fn rows(all: &[(bool, &Combat)], kill_limit: u8) -> Vec<[u32; 5]> {
     for (_, c) in all {
         standings[usize::from(c.slot)] = Some(standing(c));
     }
-    let place = places(&standings, kill_limit);
+    let place = if total_war {
+        let teams = team_places(&standings);
+        let of = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
+        standings.iter().map(|s| s.as_ref().map_or(0, of)).collect()
+    } else {
+        places(&standings, kill_limit)
+    };
     let mut humans: Vec<_> = all.iter().filter(|p| p.0).map(|p| p.1).collect();
     humans.sort_by_key(|c| c.slot);
-    (humans.into_iter())
-        .map(|c| {
+    (humans.into_iter().enumerate())
+        .map(|(n, c)| {
             let accuracy = (u32::from(c.hits) * 100)
                 .checked_div(u32::from(c.shots))
                 .unwrap_or(0);
-            [
+            let colour = if total_war { usize::from(c.team) } else { n };
+            let row = [
                 u32::from(place[usize::from(c.slot)]),
                 accuracy.min(9999),
                 u32::from(c.kills),
                 u32::from(c.headshots),
                 u32::from(c.deaths),
-            ]
+            ];
+            (colour, row)
+        })
+        .collect()
+}
+
+/// Total War's results header from everyone's (human, [`Combat`]) and the viewer's team: the
+/// original's rule by the number of humans (`func_151E43DC`; V `to_draw`, `you_win`, `you_lose`,
+/// `sq_win`: `lab/research/mp-original/total-war-teams.md` §4, §6).
+pub fn header(all: &[(bool, &Combat)], own_team: u8) -> Header {
+    let standings: Vec<_> = all.iter().map(|p| Some(standing(p.1))).collect();
+    match team_result(&standings) {
+        None => Header::Draw,
+        Some(t) if all.iter().filter(|p| p.0).count() == 1 => Header::You(t == own_team),
+        Some(t) => Header::Team(t),
+    }
+}
+
+/// Total War's team strip (`func_151E9D18`): each team's icon (`lives`: untimed) and number, kept
+/// at `anchor`.
+fn strip(hud: &Hud, numbers: [u32; 2], lives: bool, anchor: Anchor) -> Vec<Sprite> {
+    let t = &hud.strip;
+    let icons = if lives { &t.lives } else { &t.kills };
+    (0..2)
+        .flat_map(|team| {
+            let rect = t.rects[team].map(f32::from);
+            let mut out = vec![quad(&icons[team], rect, anchor, [255; 4], 5.0)];
+            let number = Text {
+                anchor,
+                ..t.numbers[team].clone()
+            };
+            out.extend(text(hud, &numbers[team].to_string(), None, &number, 5.0));
+            out
         })
         .collect()
 }
 
 /// The results over the frozen level: the header, the columns' icons, a row per human, the menu
-/// with `choice` lit.
-fn results(hud: &Hud, end: &End, rows: &[[u32; 5]], choice: usize) -> Vec<Sprite> {
-    let r = &end.results;
+/// with `choice` lit; in Total War (`header`) its header over the rest, which goes `down` lower.
+fn results(
+    hud: &Hud,
+    end: &End,
+    rows: &[Row],
+    choice: usize,
+    header: Option<Header>,
+) -> Vec<Sprite> {
+    let (r, t) = (&end.results, &end.teams);
     let white = [255; 4];
     let rect = |r: [i16; 4]| r.map(f32::from);
-    let mut out: Vec<Sprite> = (std::iter::once(&r.header).chain(&r.icons))
+    let down = if header.is_some() { t.down } else { 0 };
+    let team_header: &[Placed] = match header {
+        None => &[],
+        Some(Header::Draw) => std::slice::from_ref(&t.draw),
+        Some(Header::You(true)) => &t.won,
+        Some(Header::You(false)) => &t.lost,
+        Some(Header::Team(team)) => t.team_won.get(usize::from(team)).map_or(&[], |p| p),
+    };
+    let mut out: Vec<Sprite> = (std::iter::once(&r.header).chain(team_header))
         .chain([&r.stick])
         .map(|p| quad(&p.image, rect(p.rect), p.anchor, white, 5.0))
         .collect();
+    for p in &r.icons {
+        let [x, y, w, h] = p.rect;
+        out.push(quad(
+            &p.image,
+            rect([x, y + down, w, h]),
+            p.anchor,
+            white,
+            5.0,
+        ));
+    }
     for (k, b) in [&r.restart, &r.quit].into_iter().enumerate() {
         let image = if k == choice { &b.lit } else { &b.image };
         out.push(quad(image, rect(b.rect), b.anchor, white, 5.0));
     }
-    for (n, row) in rows.iter().enumerate() {
-        let dy = r.rows[1] * n as i16;
+    for (n, (colour, row)) in rows.iter().enumerate() {
+        let dy = r.rows[1] * n as i16 + down;
         if let Some(label) = r.labels.get(n) {
             let [_, _, w, h] = label.rect;
             let [x, y] = r.label;
@@ -292,7 +377,7 @@ fn results(hud: &Hud, end: &End, rows: &[[u32; 5]], choice: usize) -> Vec<Sprite
                 5.0,
             ));
         }
-        let colour = r.colours.get(n).copied().unwrap_or(white);
+        let colour = r.colours.get(*colour).copied().unwrap_or(white);
         for (column, (&x, &v)) in r.columns.iter().zip(row).enumerate() {
             let t = Text {
                 anchor: r.anchor,
@@ -314,8 +399,15 @@ fn results(hud: &Hud, end: &End, rows: &[[u32; 5]], choice: usize) -> Vec<Sprite
 
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
 pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
+    // Untimed matches count lives (the lives digit, the strip's lives).
+    let untimed = s.lives.is_some();
     if let (Some((rows, choice)), Some(end)) = (&s.results, &hud.end) {
-        return results(hud, end, rows, *choice);
+        let mut out = results(hud, end, rows, *choice, s.header);
+        // Total War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
+        if let Some(n) = s.strip {
+            out.extend(strip(hud, n, untimed, end.results.anchor));
+        }
+        return out;
     }
     let mut out = Vec::new();
     let white = [255; 4];
@@ -345,7 +437,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             1.0,
         ));
     }
-    for &([right, ahead], level) in s.blips.iter().filter(|_| radar) {
+    for &([right, ahead], level, colour) in s.blips.iter().filter(|_| radar) {
         // The game adds the offset in quarter pixels, truncated (C `func_15093B58`).
         let q = |v: f32| (v * r.scale * 4.0).trunc() / 4.0;
         let (x, y) = (q(right), -q(ahead));
@@ -354,7 +446,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         }
         let b = r.blip;
         let (bx, by) = (cx + x - b / 2.0, cy + y - b / 2.0);
-        out.push(solid([bx, by, b, b], r.anchor, r.blip_colour, 2.0));
+        out.push(solid([bx, by, b, b], r.anchor, colour, 2.0));
         if level != 0 {
             let y = if level > 0 { by - b / 2.0 } else { by + b };
             out.push(solid([bx, y, b, b / 2.0], r.anchor, r.level_mark, 2.0));
@@ -395,15 +487,21 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             }
         }
     }
-    // Kills, rank and clock.
-    out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
-    out.extend(text(
-        hud,
-        &format!("({})", s.rank),
-        Some(suffix(s.rank)),
-        &hud.rank.text,
-        5.0,
-    ));
+    // Kills and rank (HUD flags 0x400, 0x800), or Total War's team strip (0x200 timed, 0x100
+    // untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
+    match s.strip {
+        Some(n) => out.extend(strip(hud, n, untimed, hud.strip.anchor)),
+        None => {
+            out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
+            out.extend(text(
+                hud,
+                &format!("({})", s.rank),
+                Some(suffix(s.rank)),
+                &hud.rank.text,
+                5.0,
+            ));
+        }
+    }
     if let Some(secs) = s.secs {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
         out.extend(text(hud, &clock, None, &hud.clock, 5.0));
@@ -566,6 +664,7 @@ pub fn camera(commands: &mut Commands, target: Option<Handle<Image>>) {
 /// What ranks a player (conker-rules' [`places`]).
 pub fn standing(c: &Combat) -> Standing {
     Standing {
+        team: c.team,
         kills: c.kills,
         deaths: c.deaths,
         shots: c.shots,
@@ -589,21 +688,37 @@ fn shown(
     let ahead = Vec2::new(at.x - eye.x, at.z - eye.z).normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-ahead.y, ahead.x);
     let level = |y: f32| hud.radar.levels.iter().filter(|&&l| l <= y).count();
+    // Total War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328).
+    let r = &hud.radar;
+    let colour = |o: &Combat| {
+        let team = r.team_colours.get(usize::from(o.team));
+        (team.filter(|_| m.total_war).copied()).unwrap_or(r.blip_colour)
+    };
     let blips = (everyone.iter())
         .filter(|(_, o, predicted)| !predicted && o.health > 0)
         .filter(|(_, o, _)| !hud.radar.hidden_with.contains(&o.weapon))
-        .map(|(o, _, _)| {
+        .map(|(o, oc, _)| {
             let d = Vec2::new(o.pos[0] - p.pos[0], o.pos[2] - p.pos[2]);
             let higher = level(o.pos[1]).cmp(&level(p.pos[1])) as i8;
-            ([d.dot(right), d.dot(ahead)], higher)
+            ([d.dot(right), d.dot(ahead)], higher, colour(oc))
         })
         .collect();
     let scope = camera.follow.cam.scope;
-    // The place among everyone, this player first.
+    // The place among everyone, this player first; Total War's strip: each team's kills, untimed
+    // its lives left (`func_151E9D18`).
     let others = (everyone.iter()).filter(|o| !o.2).map(|o| o.1);
-    let all: Vec<_> = (std::iter::once(c).chain(others))
-        .map(|o| Some(standing(o)))
-        .collect();
+    let combats: Vec<_> = std::iter::once(c).chain(others).collect();
+    let all: Vec<_> = combats.iter().map(|o| Some(standing(o))).collect();
+    let mut strip = [0; 2];
+    for o in &combats {
+        if let Some(n) = strip.get_mut(usize::from(o.team)) {
+            *n += u32::from(if m.time == 0 {
+                u16::from(o.lives_left)
+            } else {
+                o.kills
+            });
+        }
+    }
     Shown {
         health: c.health,
         weapon: c.weapon,
@@ -620,7 +735,9 @@ fn shown(
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
         lives: (m.time == 0).then_some(c.lives_left),
         out: c.out > 0,
+        strip: m.total_war.then_some(strip),
         results: None,
+        header: None,
     }
 }
 
@@ -658,7 +775,8 @@ fn draw(
         let all: Vec<_> = (roster.iter())
             .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
             .collect();
-        shown.results = Some((rows(&all, m.kill_limit), menu.choice));
+        shown.results = Some((rows(&all, m.kill_limit, m.total_war), menu.choice));
+        shown.header = m.total_war.then(|| header(&all, own.1.team));
     }
     for s in sprites(&a.hud, &shown) {
         let key = (s.tex.clone(), s.uv.map(f32::to_bits), s.colour);
@@ -882,7 +1000,7 @@ mod tests {
         ] {
             let d = Vec2::new(bot[0] + 2267.0, bot[1] - 6016.0);
             let s = Shown {
-                blips: vec![([d.dot(right), d.dot(ahead)], 0)],
+                blips: vec![([d.dot(right), d.dot(ahead)], 0, hud.radar.blip_colour)],
                 ..state()
             };
             let blip = (sprites(&hud, &s).into_iter()).find(|q| q.tex == Tex::Solid);
@@ -968,9 +1086,38 @@ mod tests {
         };
         let (bot, p1, p2) = (c(0, 3, 0, 10, 5), c(1, 2, 1, 22, 2), c(2, 0, 1, 0, 0));
         assert_eq!(
-            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0),
-            [[2, 9, 2, 0, 1], [3, 0, 0, 0, 1]]
+            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0, false),
+            [(0, [2, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])]
         );
+    }
+
+    /// Total War: a human's place is its team's, its colour its team's; the header by the number
+    /// of humans (`func_151E43DC`).
+    #[test]
+    fn total_war_rows_and_header_go_by_team() {
+        let c = |slot, team, kills, shots| Combat {
+            slot,
+            team,
+            kills,
+            shots,
+            ..Combat::default()
+        };
+        // Tediz 2 kills (the bot's), squirrels 1: the Tediz win.
+        let (tedi, squirrel, bot) = (c(0, 1, 0, 3), c(1, 0, 1, 1), c(2, 1, 2, 5));
+        let all = [(true, &tedi), (true, &squirrel), (false, &bot)];
+        assert_eq!(
+            rows(&all, 0, true),
+            [(1, [1, 0, 0, 0, 0]), (0, [2, 0, 1, 0, 0])]
+        );
+        assert_eq!(header(&all, 0), Header::Team(1));
+        let alone = [(false, &tedi), (true, &squirrel), (false, &bot)];
+        assert_eq!(
+            (header(&alone, 0), header(&alone, 1)),
+            (Header::You(false), Header::You(true))
+        );
+        // Equal kills and shots: a DRAW (V `to_draw`).
+        let (a, b) = (c(0, 0, 0, 0), c(1, 1, 0, 0));
+        assert_eq!(header(&[(true, &a), (true, &b)], 0), Header::Draw);
     }
 
     /// The lives digit, the skull and the results where the oracle drew them (`lab/research/
@@ -998,7 +1145,7 @@ mod tests {
             [130.0, 92.0, 32.0, 32.0]
         );
         let over = Shown {
-            results: Some((vec![[1, 9, 2, 0, 1], [3, 0, 0, 0, 1]], 1)),
+            results: Some((vec![(0, [1, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])], 1)),
             ..state()
         };
         let at = |name: &str| -> Vec<[f32; 4]> {
@@ -1027,5 +1174,111 @@ mod tests {
         // P1's "1st 9% 2 0 1" in red: 7 quads (the suffix one), each over a black shadow.
         let red = (sprites(&hud, &over).into_iter()).filter(|q| q.colour == [255, 0, 0, 255]);
         assert_eq!(red.count(), 7);
+    }
+
+    /// Total War's strip where the original drew it (the gas run's DL 3000: timed, Tediz 4,
+    /// squirrels 2), no kills or rank; its results: the team header, the rest 40 lower, rows in
+    /// their team's colour (`lab/research/mp-original/total-war-teams.md` §6).
+    #[test]
+    fn total_war_matches_the_originals_draws() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            eprintln!("no pack hud/end.json: skipping");
+            return;
+        };
+        let at =
+            |s: &Shown, name: &str| -> Vec<([f32; 4], [f32; 4])> { rects(&hud, s, &texture(name)) };
+        let timed = Shown {
+            strip: Some([2, 4]),
+            ..state()
+        };
+        assert_eq!(
+            at(&timed, "teams"),
+            [
+                ([198.0, 196.0, 16.0, 16.0], [0.0, 16.0, 16.0, 32.0]),
+                ([66.0, 196.0, 16.0, 16.0], [16.0, 16.0, 32.0, 32.0]),
+            ]
+        );
+        let grey = (sprites(&hud, &timed).into_iter()).filter(|q| q.colour == [192, 192, 192, 255]);
+        let grey: Vec<_> = grey.map(|q| q.rect).collect();
+        assert_eq!(grey, [[215.0, 197.0, 7.0, 10.0], [83.0, 197.0, 8.0, 11.0]]);
+        // The clock's four glyphs only: no kills or rank.
+        let white = glyphs(&hud, &timed);
+        assert!(white.len() == 4 && white.iter().all(|g| g[1] >= 198.0));
+        let untimed = Shown {
+            strip: Some([1, 0]),
+            lives: Some(1),
+            secs: None,
+            ..state()
+        };
+        let uv: Vec<_> = at(&untimed, "teams").into_iter().map(|r| r.1).collect();
+        assert_eq!(uv, [[0.0, 0.0, 16.0, 16.0], [16.0, 0.0, 32.0, 16.0]]);
+        // Over: SQUIRRELS WIN, the columns' icons at y 89, the labels at 104, P1 (a Tedi) in blue
+        // at 106, P2 (a squirrel) in red at 121; the strip in the results' anchor.
+        let over = |header| Shown {
+            results: Some((vec![(1, [2, 0, 0, 0, 0]), (0, [1, 50, 1, 0, 0])], 0)),
+            header: Some(header),
+            ..timed.clone()
+        };
+        let rect = |s: &Shown, name: &str| -> Vec<[f32; 4]> {
+            at(s, name).into_iter().map(|r| r.0).collect()
+        };
+        let won = over(Header::Team(0));
+        assert_eq!(rect(&won, "stats"), [[116.0, 4.0, 64.0, 32.0]]);
+        assert_eq!(
+            (rect(&won, "squirrels"), rect(&won, "win")),
+            (
+                vec![[77.0, 34.0, 96.0, 32.0]],
+                vec![[172.0, 34.0, 64.0, 32.0]]
+            )
+        );
+        assert_eq!(
+            rect(&won, "stat_icons"),
+            [
+                [129.0, 89.0, 16.0, 16.0],
+                [158.0, 89.0, 16.0, 16.0],
+                [177.0, 89.0, 32.0, 16.0],
+            ]
+        );
+        assert_eq!(rect(&won, "stat_deaths"), [[218.0, 89.0, 16.0, 15.0]]);
+        assert_eq!(
+            rect(&won, "players"),
+            [[60.0, 104.0, 16.0, 16.0], [60.0, 119.0, 16.0, 16.0]]
+        );
+        let first = |colour: Rgba| {
+            (sprites(&hud, &won).into_iter())
+                .find(|q| q.colour == colour && matches!(q.tex, Tex::Glyph(_)))
+                .map(|q| q.rect[1])
+        };
+        assert_eq!(
+            (first([0, 0, 255, 255]), first([255, 0, 0, 255])),
+            (Some(106.0), Some(121.0))
+        );
+        let strip = (sprites(&hud, &won).into_iter()).filter(|q| q.tex == texture("teams"));
+        assert!(
+            strip
+                .map(|q| q.anchor)
+                .eq([Anchor(Horizontal::Centre, Vertical::Middle); 2])
+        );
+        assert_eq!(
+            rect(&over(Header::Team(1)), "tediz"),
+            [[81.0, 34.0, 64.0, 32.0]]
+        );
+        assert_eq!(
+            rect(&over(Header::Team(1)), "win"),
+            [[151.0, 34.0, 64.0, 32.0]]
+        );
+        assert_eq!(
+            rect(&over(Header::Draw), "draw"),
+            [[116.0, 34.0, 64.0, 32.0]]
+        );
+        let you = over(Header::You(false));
+        assert_eq!(
+            (rect(&you, "you"), rect(&you, "lose"), rect(&you, "win")),
+            (
+                vec![[86.0, 34.0, 64.0, 32.0]],
+                vec![[146.0, 34.0, 64.0, 32.0]],
+                vec![]
+            )
+        );
     }
 }

@@ -1062,6 +1062,7 @@ pub fn match_settings(m: &MatchView) -> Settings {
         lives: m.lives,
         kills: m.kill_limit,
         radar: m.radar,
+        total_war: m.total_war,
         ..Settings::default()
     }
 }

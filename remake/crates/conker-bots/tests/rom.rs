@@ -102,3 +102,78 @@ fn lifts_of_0x2d() {
     // Walking back out the way it came in does not trigger.
     assert_eq!(at(rows[2], rows[1]), None);
 }
+
+/// Total War (player query 0xD5 = 0): the script's team branch puts each participant on its team
+/// (G+0xE64 = team · 2), shares the enemies out among a team (`func_1508BF14`: a bot's threat is on
+/// the other team or none) and calls no native the port lacks, the gas canister's timers run out
+/// included; a human with 4 team kills and suicides is every bot's enemy (0x4CFE) until it dies
+/// (0xB52 zeroes its count).
+#[test]
+fn total_war_runs_the_team_branch() {
+    use conker_bots::{Assets, Bots, brain::g};
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, Settings};
+    use conker_sim::collision::CollisionWorld;
+    use conker_sim::movement::Input;
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x2D).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let graph = Graph::parse(assets.nav, assets.triggers).unwrap();
+    let at = |node: usize, team| {
+        let pos = graph.nodes[node].pos.map(f32::from);
+        let place = Placement {
+            index: 0,
+            pos,
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        Fighter::new(&place, team, 0)
+    };
+    let arena = Arena {
+        spawns: Vec::new(),
+        pickups: Vec::new(),
+    };
+    let players = vec![at(0, 0), at(40, 1), at(80, 0), at(120, 1)];
+    let settings = Settings {
+        total_war: true,
+        ..Settings::default()
+    };
+    let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
+    let mut bots = Bots::new(assets, 4, &[1, 2, 3], 2, Rng::default()).unwrap();
+    let (world, mut inputs) = (CollisionWorld::default(), vec![Input::default(); 4]);
+    let mut threats = 0;
+    for _ in 0..1000 {
+        bots.tick(&m, &arena, &world, &mut inputs);
+        let g = bots.globals();
+        for p in 1..4 {
+            let e = g.get(g::THREAT, p);
+            assert!(e == -1 || g.get(g::TEAM, e as usize) != g.get(g::TEAM, p));
+            threats += usize::from(e != -1);
+        }
+    }
+    let team = |b: &Bots, p| b.globals().get(g::TEAM, p);
+    assert_eq!(
+        (0..4).map(|p| team(&bots, p)).collect::<Vec<_>>(),
+        [0, 2, 0, 2]
+    );
+    assert!(threats > 0);
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+    m.players[0].suicides = 4;
+    bots.tick(&m, &arena, &world, &mut inputs);
+    assert_eq!(team(&bots, 0), 1, "the bots of both teams hunt it");
+    m.players[0].health = 0;
+    bots.tick(&m, &arena, &world, &mut inputs);
+    m.players[0].health = 6;
+    bots.tick(&m, &arena, &world, &mut inputs);
+    assert_eq!(team(&bots, 0), 0, "forgiven at its death");
+}

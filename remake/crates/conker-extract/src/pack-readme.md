@@ -39,10 +39,10 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
 | `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png` |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
-| `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png` | `end.json`'s pictures, the game's own textures |
+| `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
 
 ## Units and conventions
 
@@ -228,7 +228,8 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   view (up is where the camera looks). Every other living player within `range` pixels, at `scale`
   pixels per game unit, is a `blip`-pixel square in `blip_colour`; one on another level (`levels`:
   the heights between levels) gets a `level_mark` bar above the square if higher, below if lower.
-  A player holding a weapon in `hidden_with` is not shown.
+  A player holding a weapon in `hidden_with` is not shown. In War: Total War a blip is in its
+  player's team's `team_colours` entry instead (the first the squirrels', the second the Tediz').
 - `reticle`: while aiming (R) with one of `weapons`: the `image` over `rect`, in `colour`.
 - `scope`: while looking through a scope: the `ring` picture is a quarter (its centre at its bottom
   right corner), drawn four times mirrored, `quadrant` pixels each, around `centre`; `dots` copies
@@ -238,6 +239,10 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
 - `iris`: while dead the screen goes black but for a circle around `centre`: `radius[n]` pixels
   `n` frames before the respawn, nothing while the list has no entry. The `image` is a quarter of the
   circle's edge (opaque outside it), drawn four times mirrored, in `colour`.
+- `strip`: War: Total War's team strip, drawn instead of `score` and `rank` (and under the results):
+  per team (the first entry of each list the squirrels', the second the Tediz') its icon over
+  `rects`, from `kills` in a match on the clock or `lives` in one without, and its number as
+  `numbers` (text as above): its players' kills, or without a clock their lives left.
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.
@@ -252,6 +257,11 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
   each centred on one of `columns`, in the player's `colours[n]` over `shadow` drawn one pixel
   right and down; the menu's `restart` and `quit` (`image`, or `lit` while chosen) and the
   `stick` between them.
+- `teams`: War: Total War's results: the columns' icons, the labels and the rows `down` pixels lower,
+  each row in its team's colour (`results.colours`: the first the squirrels', the second the
+  Tediz'), `hud.json`'s `strip` under them, and a header: `draw` when both teams are first; with
+  one human player, `won` or `lost` (YOU WIN, YOU LOSE); with more, the winning team's
+  `team_won` entry (the first the squirrels', the second the Tediz': its name and WIN).
 
 ## Editing
 

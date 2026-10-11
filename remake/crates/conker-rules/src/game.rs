@@ -119,6 +119,11 @@ pub struct Settings {
     pub skill: u8,
     /// The HUD's radar (opt[17]: HUD flag 0x20).
     pub radar: bool,
+    /// War: Total War (scenario 9, scene 0x2D) instead of Deathmatch: not a SET-UP byte but the
+    /// scenario, whose free-for-all flag `0x8008FDC8` is 0. Every player's team is its side (0
+    /// squirrels, 1 Tediz), the match ends and ranks by team (`func_151E565C`'s team branch,
+    /// [`team_places`]) and the kill limit is not read.
+    pub total_war: bool,
 }
 
 impl Default for Settings {
@@ -129,6 +134,7 @@ impl Default for Settings {
             kills: 0,
             skill: 2,
             radar: true,
+            total_war: false,
         }
     }
 }
@@ -222,7 +228,8 @@ pub struct Fighter {
     pub grenades: u8,
     /// obj+0x109: the knock-back friction of the last hit.
     pub knock_k: u8,
-    /// gGameState+0x46+2i, capped at 9999; and own-grenade deaths.
+    /// gGameState+0x46+2i: kills of other teams' players, capped at 9999; and gGameState+0x70+0xC*i:
+    /// deaths this player caused on its own team, itself included (team kills and suicides).
     pub kills: u16,
     pub suicides: u16,
     /// `0x800E0AD0[i]`: deaths, each a life lost ([`Settings::lives`]).
@@ -231,8 +238,8 @@ pub struct Fighter {
     /// and grenade pulled (C `func_151D5148`, `func_15074840`, `func_15065A5C`; V: twin guns,
     /// chainsaw, grenade; I: the rocket, aimed shot and ray, and the flame counts none).
     pub shots: u16,
-    /// gGameState+0x66+0xC*i and +0x6A: the hits this player landed on others, and those on the
-    /// head (the results' accuracy and headshots).
+    /// gGameState+0x66+0xC*i and +0x6A: the hits this player landed on other teams' players, and
+    /// those on the head (the results' accuracy and headshots; `func_151E5FF4`: none on its own team).
     pub hits: u16,
     pub headshots: u16,
     /// A bot plays this slot (the end when no human is left in play).
@@ -500,9 +507,11 @@ pub enum Phase {
     Over,
 }
 
-/// What a player's place depends on ([`places`]).
+/// What a player's place depends on ([`places`], [`team_places`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Standing {
+    /// [`Fighter::team`].
+    pub team: u8,
     pub kills: u16,
     pub deaths: u16,
     pub shots: u16,
@@ -513,6 +522,7 @@ pub struct Standing {
 impl Standing {
     pub fn of(f: &Fighter) -> Self {
         Self {
+            team: f.team,
             kills: f.kills,
             deaths: f.deaths,
             shots: f.shots,
@@ -543,6 +553,42 @@ pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
             Some(s) => 1 + in_play().filter(|o| ahead(o, s)).count() as u8,
         })
         .collect()
+}
+
+/// The two teams' places in Total War, [0] the squirrels', [1] the Tediz' (`func_151E565C`'s team
+/// branch, `0x800E0AC0`): a team with no member in play is out and keeps the place it went out on,
+/// the first of the two out 2nd (an empty team is out from the start, as the original's unused
+/// teams are); the others rank by their members' kills, then fewer shots (s126+0x1AA, bots'
+/// included). Both on 1st is a DRAW. ponytail: kills in both timings; untimed, the game ranks the
+/// teams in play by Σ(lives·6 + health) first (C), which nothing shows: an untimed Total War ends
+/// only once a team is out (V `elim`), and the one left is 1st whatever it scored. Two teams out:
+/// the one whose last member went out first is 2nd (I; the original checks team 0 first, C).
+pub fn team_places(all: &[Option<Standing>]) -> [u8; 2] {
+    let members = |t: u8| all.iter().flatten().filter(move |s| s.team == t);
+    let sum = |t, f: fn(&Standing) -> u16| members(t).map(|s| u32::from(f(s))).sum::<u32>();
+    // A member's `out` is the players' place it went out on: the larger, the earlier.
+    let out = |t| {
+        (members(t).all(|s| s.out > 0)).then(|| members(t).map(|s| s.out).min().unwrap_or(u8::MAX))
+    };
+    let ahead = |a, b| {
+        let (ka, kb) = (sum(a, |s| s.kills), sum(b, |s| s.kills));
+        ka > kb || (ka == kb && sum(a, |s| s.shots) < sum(b, |s| s.shots))
+    };
+    [0, 1].map(|t| match (out(t), out(1 - t)) {
+        (Some(a), Some(b)) => 1 + u8::from(a > b),
+        (Some(_), None) => 2,
+        (None, Some(_)) => 1,
+        (None, None) => 1 + u8::from(ahead(1 - t, t)),
+    })
+}
+
+/// The winning team of [`team_places`] (0 squirrels, 1 Tediz); `None`: a DRAW, both 1st (the STATS'
+/// header `func_151E43DC`; V `to_draw`: 0-0 kills and shots).
+pub fn team_result(all: &[Option<Standing>]) -> Option<u8> {
+    match team_places(all) {
+        [1, 1] => None,
+        p => p.iter().position(|&r| r == 1).map(|t| t as u8),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -801,6 +847,12 @@ impl Match {
     /// The original's end conditions (`func_151E565C`, Deathmatch): the clock reached 0 (timed);
     /// a player has the kill limit; once a player is out of lives, fewer than 2 players are left
     /// in play, or no human (the game counts down its players and humans alive as they go out).
+    /// Total War (its team branch): the clock, or once a player is out, fewer than 2 teams with a
+    /// member in play (C; V `elim`). No kill limit (only the FFA branch reads opt[6], C), and a human
+    /// out while a team-mate plays on ends nothing (V `elim_tk`); the branch's "no team that started
+    /// with a human is in" falls under the 2 teams. The game's check needs no one out (a one-sided
+    /// roster ends at once there, which its team screen prevents); players join the remake's
+    /// matches as they go, so it waits for an elimination as Deathmatch's does.
     pub fn ends(&self) -> bool {
         let s = &self.settings;
         let taken = || (0..self.players.len()).filter(|i| !self.free.contains(i));
@@ -815,17 +867,27 @@ impl Match {
                 .map(|i| &self.players[i])
         };
         let time_up = s.time.is_some() && self.timer == 0;
+        if s.total_war {
+            let teams = [0, 1].iter().filter(|&&t| in_play().any(|f| f.team == t));
+            return time_up || (out().next().is_some() && teams.count() < 2);
+        }
         let kills = s.kills > 0 && taken().any(|i| self.players[i].kills >= u16::from(s.kills));
         let alone = out().next().is_some() && in_play().count() < 2;
         let no_human = out().any(|f| !f.bot) && in_play().all(|f| f.bot);
         time_up || kills || alone || no_human
     }
 
-    /// Every slot's place, 1 the best ([`places`]; free slots 0).
+    /// Every slot's place, 1 the best ([`places`]; in Total War its team's, [`team_places`]; free
+    /// slots 0).
     pub fn places(&self) -> Vec<u8> {
         let all: Vec<Option<Standing>> = (self.players.iter().enumerate())
             .map(|(i, f)| (!self.free.contains(&i)).then(|| Standing::of(f)))
             .collect();
+        if self.settings.total_war {
+            let teams = team_places(&all);
+            let place = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
+            return all.iter().map(|s| s.as_ref().map_or(0, place)).collect();
+        }
         places(&all, self.settings.kills)
     }
 
@@ -1590,7 +1652,8 @@ impl Match {
             // `func_15081E78` skips an immune or stunned living victim (C). The angle: V 0x6300 for
             // the facing 25345 on e_w24; the game's varies by up to 21 for the same aim
             // (combat4_w24 0x6302, combat4_pitch24 0x6313 and 0x6315; I: the rifle's pose).
-            if self.hurt(v, &kind, false, true, me.facing & !1, i, ev) && head {
+            if self.hurt(v, &kind, false, true, me.facing & !1, i, ev) && head && self.enemies(i, v)
+            {
                 self.players[i].headshots = self.players[i].headshots.saturating_add(1);
             }
         }
@@ -1781,6 +1844,7 @@ impl Match {
                 // (−0.871, 0, −0.491)).
                 let a = dir_angle(world, s.dir);
                 if self.hurt(v, &kind, false, true, a, s.owner, ev) {
+                    let head = head && self.enemies(s.owner, v);
                     let o = &mut self.players[s.owner];
                     o.headshots = o.headshots.saturating_add(u16::from(head));
                     // Its victim's death spin is a frame shorter than the sniper's (V combat4_w14,
@@ -1795,6 +1859,11 @@ impl Match {
                 self.shots.push((born, s));
             }
         }
+    }
+
+    /// Players `a` and `v` are on different teams (obj+0x128): in Deathmatch any two players.
+    fn enemies(&self, a: usize, v: usize) -> bool {
+        self.players[a].team != self.players[v].team
     }
 
     /// `func_1505B9C4` on player `v` (guards of `func_1505D024` for direct hits, `func_1505C7D8`'s
@@ -1849,21 +1918,22 @@ impl Match {
             first,
             t,
         );
-        if attacker != v {
-            let a = &mut self.players[attacker];
+        // The scorer (`func_151E5FF4`, V on Total War's friendly fire) credits hits and kills on
+        // other teams only; a death on the attacker's own team, its own included, counts in +0x70.
+        let enemy = self.enemies(attacker, v);
+        let a = &mut self.players[attacker];
+        if enemy {
             a.hits = a.hits.saturating_add(1);
+        }
+        if lethal && enemy {
+            a.kills = (a.kills + 1).min(9999);
+        } else if lethal {
+            a.suicides += 1;
         }
         let f = &mut self.players[v];
         if lethal {
             (f.weapon, f.drawn) = (None, false);
             f.deaths = f.deaths.saturating_add(1);
-            let team = f.team;
-            let a = &mut self.players[attacker];
-            if attacker == v {
-                a.suicides += 1;
-            } else if a.team != team {
-                a.kills = (a.kills + 1).min(9999);
-            }
         }
         ev.push(Event::Hit {
             victim: v,
@@ -3100,6 +3170,7 @@ mod tests {
                 deaths,
                 shots,
                 out,
+                ..Standing::default()
             })
         };
         let all = [
@@ -3117,5 +3188,89 @@ mod tests {
         // A 0-0 start: everyone shares 1st until someone fires (V: lab/hud kill, 2 shots → 2nd).
         assert_eq!(places(&[s(0, 0, 0, 0), s(0, 0, 0, 0)], 0), [1, 1]);
         assert_eq!(places(&[s(0, 0, 2, 0), s(0, 0, 0, 0)], 0), [2, 1]);
+    }
+
+    /// Friendly fire (V Total War's `ff_*`): full damage and the victim's death, but no hit, kill
+    /// or headshot for the attacker; the team kill counts in its +0x70 (`suicides`). In Deathmatch
+    /// every player is its own team: the same shot scores.
+    #[test]
+    fn a_team_kill_scores_no_hit_kill_or_headshot() {
+        for team in [1, 0] {
+            let (_, mut m, w) = duel();
+            m.players[1].team = team;
+            let mut ev = Vec::new();
+            m.ray(0, damage::SNIPER_BODY, [0.0, 0.0, 64.6], &w, &here, &mut ev);
+            let (a, v) = (&m.players[0], &m.players[1]);
+            assert_eq!((v.health, v.deaths), (0, 1));
+            let n = u16::from(team == 1);
+            assert_eq!((a.hits, a.headshots, a.kills, a.suicides), (n, n, n, 1 - n));
+        }
+    }
+
+    /// Total War's places (`func_151E565C`'s team branch): the teams' kills, then fewer shots,
+    /// both equal a DRAW; a team with every member out is behind, the first out of two 2nd.
+    #[test]
+    fn teams_rank_by_kills_then_fewer_shots() {
+        let s = |team, kills, shots, out| {
+            Some(Standing {
+                team,
+                kills,
+                deaths: 9,
+                shots,
+                out,
+            })
+        };
+        let all = [s(0, 1, 9, 0), s(1, 2, 0, 0), s(0, 2, 9, 0), None];
+        assert_eq!((team_places(&all), team_result(&all)), ([1, 2], Some(0)));
+        // Equal kills: fewer shots, bots' included (V `to_shots`).
+        assert_eq!(team_places(&[s(0, 1, 3, 0), s(1, 1, 2, 0)]), [2, 1]);
+        // Equal both: a DRAW (V `to_draw`).
+        let draw = [s(0, 0, 0, 0), s(1, 0, 0, 0)];
+        assert_eq!((team_places(&draw), team_result(&draw)), ([1, 1], None));
+        // Out, whatever its kills, until its last member is; one member in keeps it in.
+        let out = [s(0, 5, 0, 3), s(0, 0, 0, 2), s(1, 0, 9, 0)];
+        assert_eq!((team_places(&out), team_result(&out)), ([2, 1], Some(1)));
+        assert_eq!(
+            team_places(&[s(0, 5, 0, 3), s(0, 0, 0, 0), s(1, 0, 9, 0)]),
+            [1, 2]
+        );
+        // Both out: the first out (its last member on the higher place) is 2nd; an empty team is out.
+        assert_eq!(team_places(&[s(0, 0, 0, 2), s(1, 0, 0, 1)]), [2, 1]);
+        assert_eq!(team_places(&[s(1, 0, 0, 0)]), [2, 1]);
+    }
+
+    /// Total War ends by team: timed, the clock only (the kill limit is not read); untimed, once a
+    /// team's last member is out, not while a team-mate plays on (V `elim`, `elim_tk`).
+    #[test]
+    fn total_war_ends_by_team() {
+        let tw = |time, lives| Settings {
+            time,
+            lives,
+            kills: 1,
+            total_war: true,
+            ..Settings::default()
+        };
+        let (_, m, _, _) = pistol_kill(tw(Some(3), 3));
+        assert_eq!((m.players[0].kills, m.ended_at), (1, None));
+        let (_, m, _, _) = pistol_kill(tw(None, 1));
+        assert_eq!((m.ended_at, m.places()), (Some(171), vec![1, 2]));
+        let (arena, m, w) = duel();
+        let mut m = m.with(tw(None, 1));
+        let far = Placement {
+            index: 1,
+            pos: [-5000.0, 0.0, 0.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        m.players.push(Fighter::new(&far, 1, 0));
+        m.give(0, 0x39);
+        m.players[1].health = 2;
+        run(&mut m, &arena, &w, 200, |t| match t {
+            0 => BUTTON_B,
+            20 => BUTTON_Z,
+            _ => 0,
+        });
+        assert_eq!((m.players[1].out, m.ended_at), (3, None));
+        assert_eq!(m.places(), [1, 2, 2], "team 0 has the kill");
     }
 }

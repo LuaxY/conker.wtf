@@ -68,6 +68,12 @@ from the oracle (protocol 12); bots replan after a placement (lift, respawn) as 
 Then each map's own AI script for the bots and each map's solid and hidden props (the collision and levels of all
 four maps, from the oracle).
 
+**War: Total War, part 1** (2026-10-12, four sub-agents; protocol 13). `--mode total-war` on map 2d: teams by side,
+full friendly fire (a team kill credits nothing, +1 on +0x70), the clock or, untimed, a team out of lives ends it; the
+team with more kills wins, then fewer shots, else DRAW (`func_151E565C`). The bots run the script's team branch (query
+0xD5 = 0). The client draws the team strip, team radar colours and the team STATS header (YOU WIN/LOSE, SQUIRRELS/TEDIZ
+WIN, DRAW). Research: `lab/research/mp-original/total-war-{teams,gas}.md`. The gas canisters, gas and masks are next.
+
 **Asset pack** (2026-10-10, two sub-agents, no workflow). `conker-extract pack` exports once what multiplayer needs
 into `assets/` (205 files, 14.2 MB, 3.4 MB brotli; glTF + PNG + JSON, two raw script tables), read back bit-exact by
 the new crate `conker-assets`. The server (`--assets`), the native client and the browser load the pack: the page no

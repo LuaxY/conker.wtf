@@ -119,6 +119,8 @@ pub struct Body {
     pub hit_by: u8,
     pub is_bot: bool,
     pub team: u8,
+    /// gGameState+0x70+0xC·p: the deaths it caused on its own team, its own included.
+    pub suicides: u16,
     /// `0x800E0AC0[p]` (`func_151E565C`): the place, 1 the best; the scripts ask the humans'.
     pub place: u8,
 }
@@ -141,6 +143,12 @@ pub struct World<'a> {
     pub zones: &'a mut [(CameraHint, bool)],
     /// Each pickup's position (the arena's), for its nearest node.
     pub unknown: &'a mut Unknown,
+    /// The free-for-all flag `0x8008FDC8` (player query 0xD5): 1 in Deathmatch, 0 in Total War,
+    /// where the script runs its team branches.
+    pub ffa: bool,
+    /// Per participant, its +0x70 ([`Body::suicides`]) when the AI last zeroed it (command 0x17,
+    /// `func_1508B1D4`): the match keeps the count, the AI counts on from there.
+    pub forgiven: &'a mut [u16],
 }
 
 impl Host for World<'_> {
@@ -230,6 +238,9 @@ impl World<'_> {
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
+            // ponytail: 0x21, the gas canister's (props 27/28) carrier + 1: none, as the remake has
+            // no canister yet (the next batch's, with the gas and the masks).
+            (3, 0x21) => 0,
             // Type 4, the triggers (`func_150A04D8`): 6, the player `a(2)` is inside; 16, someone is.
             // ponytail: a camera handle (6) and 16's camera test (`func_150A2D84`, the humans' view
             // eyes) read outside; the views are the clients'.
@@ -261,7 +272,11 @@ impl World<'_> {
             (0xF, 4) => self.visibility(g, a(2) as usize, a(3)),
             (0xF, 5) => self.skill as i32,
             (0xF, 7) => give_range(a(2)),
-            (0xF, 0x11) => 0,
+            // `func_1508B194`: a human's +0x70 (a bot's 0); the team script turns a human with more
+            // than 3 on everyone's bots (0x4CFE, "Killed too many team mates!!!") until it dies.
+            (0xF, 0x11) => self.human(a(2)).map_or(0, |p| {
+                i32::from(self.bodies[p].suicides.saturating_sub(self.forgiven[p]))
+            }),
             (k, c) => self.unknown(5, k, c),
         }
     }
@@ -300,13 +315,34 @@ impl World<'_> {
                 self.threats(g);
                 0
             }
-            (0xF, 0x17) => 0,
-            (0xF, 1) | (0xF, 7) => 0,
+            // The team modes' frame (0xC88) ranks and shares out targets itself.
+            (0xF, 5) => {
+                self.rank(g);
+                0
+            }
+            (0xF, 7) => {
+                self.team_threats(g);
+                0
+            }
+            (0xF, 0x17) => {
+                if let Some(p) = self.human(a(2)) {
+                    self.forgiven[p] = self.bodies[p].suicides;
+                }
+                0
+            }
+            (0xF, 1) => 0,
             (k, c) => {
                 let _ = a(0);
                 self.unknown(6, k, c)
             }
         }
+    }
+
+    /// Participant `p` if it is a human with a +0x70 slot here.
+    fn human(&self, p: i32) -> Option<usize> {
+        usize::try_from(p)
+            .ok()
+            .filter(|&p| p < self.humans.min(self.bodies.len()).min(self.forgiven.len()))
     }
 
     /// `func_1508C9CC` (query 3): the next AI participant after G+0x1702, round robin.
@@ -402,7 +438,7 @@ impl World<'_> {
             0xCF => self.pick_node(p, args),
             0xD3 => weapon_class(b.item),
             0xD4 => i32::from(b.drawn),
-            0xD5 => 1,
+            0xD5 => i32::from(self.ffa),
             0xD6 => 0,
             0xDC => 0,
             // obj+0, the object's type: 1, a player (every dump; the scripts look for 0x1F).
@@ -564,6 +600,16 @@ impl World<'_> {
                     g.set(g::STATE, p, 0);
                     g.set(g::REEVAL, p, 1);
                     g.set(g::ENEMY, p, -1);
+                    // The teams' tally G+0xDDC by G+0xE64's value: −1 for the victim's, +1 for its
+                    // last attacker's if another (the team roles at 0x37F2 reassign on net losses).
+                    let team = g.get(g::TEAM, p);
+                    let tally = |team: i32| g::TEAM_COUNT + 4 * team;
+                    g.set_i32(tally(team), g.i32(tally(team)) - 1);
+                    let killer = (hit_by & 0x7F) as usize;
+                    if killer < count && g.get(g::TEAM, killer) != team {
+                        let other = g.get(g::TEAM, killer);
+                        g.set_i32(tally(other), g.i32(tally(other)) + 1);
+                    }
                     g.set(g::OVERRIDE, p, 0);
                     died |= bit;
                 }
@@ -786,6 +832,43 @@ impl World<'_> {
             least
         };
         g.set(g::THREAT_DIST, me, d);
+    }
+
+    /// `func_1508BF14` (command 7, the team modes): the team of the participant G+4 shares out its
+    /// targets. Each member, those in roles 2 and 3 (G+0x15C) first, takes the living enemy whose
+    /// ranking ([`Self::rank`]) scores it lowest, the score doubled for each member already on that
+    /// enemy: G+0x49C the enemy (−1 none), G+0x45C the score (10,000,000 none).
+    fn team_threats(&mut self, g: &mut Globals) {
+        let n = self.bodies.len();
+        // G+4 may be −1 (no AI this frame): the game then reads G+0xE60, the team mask.
+        let team = g.i32(g::TEAM + 4 * g.i32(g::CUR));
+        let mut taken = vec![0u32; n];
+        for first in [true, false] {
+            for t in 0..n {
+                if matches!(g.get(0x15C, t), 2 | 3) != first || g.get(g::TEAM, t) != team {
+                    continue;
+                }
+                let (mut best, mut least) = (-1i32, 10_000_000i32);
+                for (e, &on) in taken.iter().enumerate() {
+                    if g.get(g::HEALTH, e) <= 0 || g.get(g::TEAM, e) == team {
+                        continue;
+                    }
+                    let score = (16 * e..16 * e + 16)
+                        .take_while(|&k| g.get(g::RANK, k) != -1)
+                        .find(|&k| g.get(g::RANK, k) == t as i32)
+                        .map(|k| g.get(g::RANK_SCORE, k).wrapping_shl(on));
+                    if let Some(s) = score.filter(|&s| s < least) {
+                        (least, best) = (s, e as i32);
+                    }
+                }
+                // The game bumps a stack byte for −1.
+                if let Some(c) = usize::try_from(best).ok().and_then(|e| taken.get_mut(e)) {
+                    *c += 1;
+                }
+                g.set(g::THREAT_DIST, t, least);
+                g.set(g::THREAT, t, best);
+            }
+        }
     }
 
     /// `func_1508A1BC`: one participant v per frame (G+0x1704, round robin) ranks the enemies that
@@ -1205,6 +1288,8 @@ mod tests {
             skill: 2,
             zones: &mut [],
             unknown: &mut unknown,
+            ffa: true,
+            forgiven: &mut [],
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1256,6 +1341,8 @@ mod tests {
             skill: 2,
             zones: &mut zones,
             unknown: &mut unknown,
+            ffa: true,
+            forgiven: &mut [],
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);

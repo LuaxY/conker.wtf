@@ -340,7 +340,7 @@ pub fn info_url(cfg: &Config) -> String {
     format!("{}/info", url.rsplit_once('/').map_or("", |(base, _)| base))
 }
 
-/// The map named by the server's `/info` body (`{"map":"30","protocol":11}`), if this client
+/// The map named by the server's `/info` body (`{"map":"30","protocol":13}`), if this client
 /// speaks its protocol and knows the map.
 pub fn info_map(body: &[u8]) -> Result<String, String> {
     let info: serde_json::Value =
