@@ -113,8 +113,8 @@ Styling:
 | `0728-64x64-ci4rgba16-i.png` | 64×64 | khaki wall, plain olive band | neutral section band (Servers) |
 | `0729-64x64-ci4rgba16-i.png` | 64×64 | green riveted steel plate with X rivets | Squirrels card (Lobby picker) |
 | `1858-64x64-ci4rgba16-i.png` | 64×64 | red riveted steel plate | Tediz card |
-| `0730-32x64-ci8rgba16-i.png` | 32×64 | green banner with a winged "S" | hanging pennant on the Squirrels card |
-| `0606-32x64-ci8rgba16-i.png` | 32×64 | red banner with a lightning bolt | hanging pennant on the Tediz card |
+| `0730-32x64-ci8rgba16-i.png` + `0731-32x64-ci8rgba16-i.png` | 2 × 32×64 | the green banner's left and right halves (a winged "S"), side by side in the map | the Squirrels' banner |
+| `0606-32x64-ci8rgba16-i.png` + `0607-32x64-ci8rgba16-i.png` | 2 × 32×64 | the red banner's halves (a "T" between lightning bolts) | the Tediz' banner |
 | `3596-64x64-ci4rgba16-i.png`, `3597-64x64-ci4rgba16-i.png`, `3598-64x64-ci4rgba16-i.png`, `3599-64x64-ci4rgba16-i.png` | 4 × 64×64 | taped paper battle plan, laid out 2×2 in that order (3596 3597 / 3598 3599): "THEM" (teddy, gun) vs "US" (helmeted squirrel stick figure) | Home hero and Lobby art (128×128 at 3× = 384px) |
 | `1667-32x64-ci8rgba16-i.png` | 32×64 | "DANGER" poster with a gas-mask skull | 404 and error states |
 | `2300-32x32-ci8rgba16-i.png` | 32×32 | yellow and black hazard stripes under steel | divider (the CSS version is preferred) |
@@ -225,8 +225,9 @@ Cheeky, British, a bit crude, never cruel. Short lines, mostly in speech bubbles
   Black Ops One + Gloria Hallelujah, the system rounded font for body text, the pill (`.pill`, lit = hover, focus or
   current page), the CTA (`.cta`), the pub board with rivets (`.board`), the speech bubble (`.bubble`), hazard tape,
   the chrome menu words (`.chrome`: Servers in cyan, Controls in gold, the lobby's question in light purple `#b070ff`, as
-  `#9000d0` fails contrast on wood), the box-art homage logo, textures `0113`, `3596`-`3599`, `0730`, `0606`, `0729`,
-  `1858`, `1667`, `assets/hud/skull.png`, the cheeky copy (empty list, statuses, taglines, 404, loading lines), and on
+  `#9000d0` fails contrast on wood), the box-art homage logo, textures `0113`, `3596`-`3599`, `0730`+`0731`, `0606`+`0607`,
+  `0729`, `1858`, `1667`, `assets/hud/skull.png`, the cheeky copy (empty list, statuses, taglines, 404, loading lines), a pub chalkboard ("On tonight") for
+  the three selling points, and on
   `play.html` the iris, the chocolate loader and the bubble.
 - **Skipped**: the dark chrome text sprites (`squirrels.png`, `stats.png`, `win.png`...: they vanish on the dark wood),
   the HUD font digits, the iris wipe on the landing (it would break middle-click on "Join game"), the skull pop, the rain

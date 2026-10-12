@@ -51,7 +51,7 @@ host's port 5888) is gone from the list too: a game server started by hand is re
 
 **Imagery.** The map's own textures and HUD sprites, fetched at run time from `assets/` (the pack served next to the
 page; nothing is copied into this tree, and the screenshots that show them stay out of git): the brick wall behind the
-title (`0113`), the battle plan in four tiles (`3596`-`3599`), the Squirrels' and the Tediz' banners (`0730`, `0606`) and
+title (`0113`), the battle plan in four tiles (`3596`-`3599`), the Squirrels' and the Tediz' banners (two halves each: `0730` + `0731`, `0606` + `0607`) and
 riveted plates (`0729`, `1858`), the DANGER poster on the 404 (`1667`), all under `assets/maps/2d/textures/`, drawn with
 big pixels; and the HUD's skull (`assets/hud/skull.png`) on Kill and on an exited server. Without the pack every one
 falls back to CSS or a lucide icon (`Sprite` in `app/src/ui.tsx`): a paper "Them vs Us" note, flat banners with a

@@ -25,10 +25,8 @@ export const BRICKS = texture("0113-64x64");
 /** The Total War briefing's taped battle plan, THEM vs US, in four tiles: top left to bottom right. */
 export const PLAN = ["3596", "3597", "3598", "3599"].map((n) => texture(`${n}-64x64`));
 export const PLATES = { squirrels: texture("0729-64x64"), tediz: texture("1858-64x64") };
-const BANNERS = {
-  squirrels: `${TEXTURES}0730-32x64-ci8rgba16-i.png`,
-  tediz: `${TEXTURES}0606-32x64-ci8rgba16-i.png`,
-};
+// Each side's banner is two 32×64 textures side by side in the map: its left and right halves.
+const BANNERS = { squirrels: ["0730", "0731"], tediz: ["0606", "0607"] };
 export const DANGER = `${TEXTURES}1667-32x64-ci8rgba16-i.png`;
 const SKULL = "assets/hud/skull.png";
 
@@ -59,25 +57,31 @@ export function Sprite({
 
 const ICONS = { squirrels: Squirrel, tediz: Panda };
 
-/** The side's hanging banner from the map (32×64): the winged "S", or the lightning bolt. */
+/** The side's banner from the map, both halves (64×64): the winged "S", or the "T" between lightning bolts. */
 export function Banner({ side, className = "" }: { side: Side; className?: string }) {
+  const [failed, setFailed] = useState(false);
   const Icon = ICONS[side];
   return (
-    <span
-      aria-hidden
-      className={`grid aspect-[1/2] shrink-0 place-items-center ${SIDES[side].text} ${className}`}
-    >
-      <Sprite
-        src={BANNERS[side]}
-        fallback={
-          <span
-            className={`grid size-full place-items-center rounded-b-xl border-3 border-black ${SIDES[side].deep}`}
-          >
-            <Icon className="h-auto w-3/4" />
-          </span>
-        }
-        className="size-full drop-shadow-[4px_4px_0_#000]"
-      />
+    <span aria-hidden className={`grid aspect-square shrink-0 ${SIDES[side].text} ${className}`}>
+      {failed ? (
+        <span
+          className={`grid size-full place-items-center rounded-b-xl border-3 border-black ${SIDES[side].deep}`}
+        >
+          <Icon className="h-auto w-1/2" />
+        </span>
+      ) : (
+        <span className="grid size-full grid-cols-2 drop-shadow-[4px_4px_0_#000]">
+          {BANNERS[side].map((n) => (
+            <img
+              key={n}
+              src={`${TEXTURES}${n}-32x64-ci8rgba16-i.png`}
+              alt=""
+              onError={() => setFailed(true)}
+              className="pixelated size-full"
+            />
+          ))}
+        </span>
+      )}
     </span>
   );
 }

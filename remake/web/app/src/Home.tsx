@@ -120,19 +120,19 @@ const FEATURES = [
     icon: Swords,
     title: "Pick a side",
     text: "Squirrels or Tediz. Every weapon's on the floor.",
-    style: "bg-bone -rotate-3",
+    color: "text-amber",
   },
   {
     icon: Bot,
     title: "Bots included",
     text: "The original's AI fills the empty slots.",
-    style: "bg-amber rotate-2",
+    color: "text-squirrels",
   },
   {
     icon: Globe,
     title: "No install",
     text: "Rust and WebAssembly, right in the browser.",
-    style: "bg-lime -rotate-1",
+    color: "text-[#ff9a9a]",
   },
 ];
 
@@ -140,7 +140,7 @@ const FEATURES = [
 function BattlePlan() {
   const [failed, setFailed] = useState(false);
   return (
-    <figure className="relative mx-auto w-fit px-8 pb-6 sm:px-12">
+    <figure className="relative mx-auto w-fit p-8 sm:p-12">
       {failed ? (
         <div className="grid size-64 -rotate-2 place-items-center border-3 border-black bg-bone font-hand text-4xl text-ink shadow-[8px_8px_0_#000] sm:size-96 sm:text-5xl">
           <p className="text-center">
@@ -164,8 +164,8 @@ function BattlePlan() {
           ))}
         </div>
       )}
-      <Banner side="squirrels" className="absolute bottom-0 left-0 w-16 -rotate-6 sm:w-24" />
-      <Banner side="tediz" className="absolute right-0 bottom-0 w-16 rotate-6 sm:w-24" />
+      <Banner side="tediz" className="absolute top-0 right-0 size-16 rotate-6 sm:size-32" />
+      <Banner side="squirrels" className="absolute bottom-0 left-0 size-16 -rotate-6 sm:size-32" />
       <figcaption className="sr-only">
         The Squirrels' battle plan against the Tediz, from the game's Total War briefing.
       </figcaption>
@@ -219,19 +219,26 @@ export function Home() {
         </div>
       </section>
 
-      <section aria-label="Features" className="mx-auto max-w-6xl px-4 py-12">
-        <ul className="grid justify-items-center gap-8 sm:grid-cols-3">
-          {FEATURES.map(({ icon: Icon, title, text, style }) => (
-            <li
-              key={title}
-              className={`grid size-56 place-content-center justify-items-center gap-1 rounded-full border-3 border-black p-8 text-center text-night shadow-[6px_6px_0_#000] outline-2 -outline-offset-12 outline-black/40 outline-dashed ${style}`}
-            >
-              <Icon aria-hidden className="size-8" />
-              <h2 className="font-display text-xl">{title}</h2>
-              <p className="text-sm font-medium">{text}</p>
-            </li>
-          ))}
-        </ul>
+      <section aria-labelledby="tonight" className="mx-auto max-w-6xl px-4 py-12">
+        <div className="chalkboard">
+          <h2 id="tonight" className="chalk font-hand text-3xl text-bone">
+            On tonight
+          </h2>
+          <ul className="mt-4 grid gap-6 md:grid-cols-3">
+            {FEATURES.map(({ icon: Icon, title, text, color }) => (
+              <li
+                key={title}
+                className="border-dashed border-white/25 not-first:border-t-2 not-first:pt-6 md:not-first:border-t-0 md:not-first:border-l-2 md:not-first:pt-0 md:not-first:pl-6"
+              >
+                <h3 className={`chalk flex items-center gap-2 font-display text-2xl ${color}`}>
+                  <Icon aria-hidden className="size-6" />
+                  {title}
+                </h3>
+                <p className="chalk mt-1 font-hand text-bone/90">{text}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
       </section>
 
       <section aria-labelledby="controls" className="mx-auto max-w-6xl px-4 pt-6 pb-16">

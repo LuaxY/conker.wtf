@@ -83,7 +83,7 @@ export function Lobby() {
                   />
                   <Banner
                     side={id}
-                    className="relative w-16 transition group-has-checked:rotate-3"
+                    className="relative size-16 transition group-has-checked:rotate-3 sm:size-32"
                   />
                   <span className="relative">
                     <span
