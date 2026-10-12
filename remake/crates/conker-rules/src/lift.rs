@@ -7,12 +7,13 @@
 //! The navigation graph links the bottom and top of each lift (nodes 105-108 and 106-107 on 0x2D),
 //! so bots walk into them as part of a path.
 //!
-//! ponytail: a level rule, kept here because the bots need it and conker-rules lacks it; it belongs
-//! in `Match::step` (each player's update tests the triggers before it moves).
+//! The server rides them for every player and the client's prediction for its own; the bots restart
+//! their paths after a ride. ponytail: run beside `Match::step`, not in it (each player's update
+//! tests the triggers before it moves); move it in if the order ever matters.
 
+use crate::game::{Arena, Match};
+use crate::spawn::{self, Placement};
 use conker_camera::volume::CameraVolume;
-use conker_rules::game::{Arena, Match};
-use conker_rules::spawn::{self, Placement};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lift {

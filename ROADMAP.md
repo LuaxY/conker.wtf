@@ -164,6 +164,13 @@ shotgun (0x37). Leftovers:
      The mounted machine guns (0x30 ×2, 0x34 ×1) are done too (mount, the gun sight, fire, overheat, dismount,
      bots on them, Colors recreating them; drawn with the gunner's HUD). Left: the capture jingles, the touch radius (45, I), the
      end-phase fade, a join or leave restarting the script, untimed + unlimited never ending.
+   - **Beach playable (2026-10-13, `--map 2b --mode beach --score N`):** villagers (14 looks, item 0x3E's speed and
+     the bottles) vs at most 2 Tediz (the gun, the sniper and bazooka zones); escapes, the 90 s deadline, villager
+     deaths and escapes scoring, the plunger, the strike, from the level's AI script 0xB9; the HUD strip and countdown,
+     the escape fade, FRENCHYS WIN, the outros (cs4/cs3), the radio, detonation and strike effects, the lamps and
+     water; rockets along the aim. Left: half the bot matches still end later than the original's (more escapes,
+     V one run); the lamp flicker, the sweeping ground lights, the strike's ground mark, the outros' masks and song;
+     the music's two positional channels; the cap of 8 villagers.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.
 5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.

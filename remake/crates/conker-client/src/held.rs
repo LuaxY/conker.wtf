@@ -27,7 +27,7 @@ struct HeldModels(Vec<Held>);
 
 /// A player's held models: (index into [`HeldModels`], the entity under its joint).
 #[derive(Component)]
-struct Hands(Vec<(usize, Entity)>);
+pub(crate) struct Hands(Vec<(usize, Entity)>);
 
 /// The light on a canister's carrier (`lights.json`'s carried one; none on other maps).
 #[derive(Resource)]

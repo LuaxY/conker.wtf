@@ -41,10 +41,10 @@ impl Playing {
     }
 }
 
-/// Whether the match is a War mode (Total War, Colors), whose end plays the winning team's outro (as
-/// the server's `results_at` waits for it).
+/// Whether the match is a War mode (Total War, Colors, Beach), whose end plays the winning team's
+/// outro (as the server's `results_at` waits for it).
 pub fn team_mode(m: &MatchView) -> bool {
-    m.total_war || m.colors
+    m.total_war || m.colors || m.beach
 }
 
 /// Whether the match's results show: over, and past its outro if it has one.

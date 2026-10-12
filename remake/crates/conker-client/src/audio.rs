@@ -13,7 +13,12 @@
 //!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
 //!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I); a mounted
 //!   gun's state changing and its trigger let go ([`MatchView::guns`]), the local gunner's zoom and
-//!   aim moving.
+//!   aim moving; War: Beach's detonation ([`MatchView::cooldown`] going on: its three blasts and
+//!   debris, the presser's radio voice), strikes (a villager's [`Combat::deadline`] reaching 0: the
+//!   call and the villager's cry, the blast 40 frames on, debris), the plunger's radio voice in trigger
+//!   0x25 while it is ready, and the local escapee's radio line with the music ducked
+//!   ([`duck`]). Radio voices ([`Sounds::radio`]) are a human's: the click on, the voice its
+//!   cue's `delay` later, the click off once it has played, at most one every 300 ticks.
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
 //!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
@@ -36,15 +41,16 @@ use conker_anim::combat::{
     BLOWN_UP, BURN_END, BURNING, DEATH_BLAST, DEATH_SHOT, FLAME_HIT, GRENADE_HOLD, GRENADE_PULL,
     GRENADE_THROW, HIT_CLUB, HIT_MELEE, HIT_SHOT,
 };
+use conker_assets::audio::Line;
 use conker_assets::audio::{
     Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
 };
-use conker_assets::{Held, Manifest, PACK_CHARACTERS, Pickup};
+use conker_assets::{Held, Manifest, Pickup};
+use conker_camera::volume::CameraVolume;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
-use conker_rules::weapon::weapon;
-use conker_rules::{Rng, gun};
-use conker_sim::movement::Side;
+use conker_rules::weapon::{Attack, Weapon, weapon};
+use conker_rules::{Rng, beach, gun};
 use conker_sim::net::{Combat, GunView, MatchView, Player, PlayerId};
 use core::f32::consts::FRAC_PI_2;
 use core::time::Duration;
@@ -68,8 +74,15 @@ const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
 /// The background's voice id (the game's sound ids start at 1).
 const BACKGROUND: u16 = 0;
 /// A War outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
-/// sound ids end at 1762).
+/// sound ids end at 1762), War: Beach's escape line as `ESCAPE`.
 const VOICE: u16 = u16::MAX;
+const ESCAPE: u16 = VOICE - 0x100;
+/// War: Beach's radio: ticks between a player's voices (`0x800D9AB0`'s 600 VIs), the plunger's
+/// voice trigger, and the ticks after a blast its debris lands in (V ev2 655-694 after 617, ev3
+/// 1082-1109 after 1044).
+const RADIO_GAP: u32 = 300;
+const READY_ZONE: usize = 0x25;
+const DEBRIS: [i32; 2] = [38, 77];
 /// Ticks a loop with `ticks` fades out over once they have run (killing bullets' 1278, C
 /// `func_1000EBC4`; the length is I).
 const FADE: u32 = 12;
@@ -87,20 +100,25 @@ pub fn has_sound(manifest: &[u8]) -> bool {
 }
 
 /// The pack's sound data, the held models (Holding cues) and the pickups (Pickup cues), with each
-/// side's clip events sorted by clip.
+/// body's character ([`crate::characters`]) and clip events sorted by clip; the map's background,
+/// emitters, voice lines and (War: Beach) the plunger's voice trigger.
 #[derive(Resource)]
 struct Pack {
     audio: Audio,
     held: Vec<Held>,
     pickups: Vec<Pickup>,
-    clips: [Vec<ClipSound>; 3],
+    characters: Vec<&'static str>,
+    clips: Vec<Vec<ClipSound>>,
     background: Option<Background>,
     emitters: Vec<Emitter>,
+    lines: std::collections::BTreeMap<String, Line>,
+    ready_zone: Option<CameraVolume>,
 }
 
 /// Registers sound: the tick's events and voices ([`hear`], headless too) and, windowed, the device,
-/// the WAV loader and the mute key. `map`: whose ambience plays. `seed`: the client's own random
-/// sounds.
+/// the WAV loader and the mute key. `map`: whose ambience plays (`triggers`: its trigger table).
+/// `seed`: the client's own random sounds.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     app: &mut App,
     mut audio: Audio,
@@ -108,27 +126,40 @@ pub fn build(
     pickups: Vec<Pickup>,
     windowed: bool,
     map: &str,
+    triggers: &[u8],
     seed: u64,
 ) {
-    let mut clips = PACK_CHARACTERS.map(|c| audio.events.characters.remove(c).unwrap_or_default());
+    let characters = crate::characters(map);
+    let mut clips: Vec<_> = (characters.iter())
+        .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
+        .collect();
     for c in &mut clips {
         c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
     }
+    let ready_zone = (map == "2b")
+        .then(|| triggers.as_chunks::<0x34>().0.get(READY_ZONE))
+        .flatten()
+        .map(CameraVolume::parse_record);
     let map = audio.events.maps.get(map);
     let background = map.and_then(|m| m.background.first().cloned());
     let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
+    let lines = map.map_or_else(Default::default, |m| m.lines.clone());
     let bursts = vec![Burst::default(); emitters.len()];
     app.insert_resource(Pack {
         audio,
         held,
         pickups,
+        characters,
         clips,
         background,
         emitters,
+        lines,
+        ready_zone,
     });
     app.insert_resource(Sounds {
         rng: Rng::new(seed | 1),
         bursts,
+        duck: DUCK[0],
         ..default()
     });
     app.add_systems(
@@ -192,7 +223,8 @@ impl Src {
 #[derive(Clone, Copy)]
 struct Seen {
     slot: u16,
-    side: Side,
+    /// Its body ([`crate::body`]): its character's sounds.
+    body: usize,
     pos: [f32; 3],
     clock: AnimPlayer,
     /// The weapon held (0: none) and drawn: the local player's prediction, the others' [`Combat`].
@@ -210,6 +242,11 @@ struct Seen {
     carry: Option<(u8, bool)>,
     /// War: Colors: carrying flag f, and whether it is a bot ([`On::Flag`]).
     flag: Option<(u8, bool)>,
+    /// A bot (no radio), its team; War: Beach's escape freeze and deadline ([`Combat`]).
+    bot: bool,
+    team: u8,
+    freeze: u8,
+    deadline: u16,
 }
 
 /// A player as the last tick saw it.
@@ -358,6 +395,27 @@ struct Sounds {
     /// The mounted guns last tick, and the local gunner's zoom and aim ([`Self::gunner`]).
     guns: Vec<GunView>,
     turning: Option<Turning>,
+    /// War: Beach: the plunger's cooldown last tick (None before the first), the strikes called
+    /// (slot, where, the call's tick; till their blast), each speaker's last radio voice and the
+    /// radio voices playing (speaker, the tick the voice is due), the music's volume ([`duck`]).
+    cooldown: Option<u16>,
+    strikes: Vec<(u16, [f32; 3], u32)>,
+    radio_at: HashMap<u16, u32>,
+    radios: Vec<(u16, u32, usize)>,
+    duck: f32,
+}
+
+/// War: Beach's music volume while the escape's radio line plays: from 0x4650 down to 0x1E0A at
+/// 0x233 a frame, back at 0x1000 a frame once it is over (V snd ev 103-121, 308-312).
+const DUCK: [f32; 4] = [18000.0, 7690.0, 563.0, 4096.0];
+
+/// The music's volume a tick on from `level`, the line playing or not ([`DUCK`]).
+pub fn duck(level: f32, line: bool) -> f32 {
+    let [full, low, down, up] = DUCK;
+    match line {
+        true => (level - down).max(low),
+        false => (level + up).min(full),
+    }
 }
 
 /// The local gunner's zoom and aim (the scope's yaw target times its pitch target) last tick, and
@@ -381,9 +439,9 @@ fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum()
 }
 
-/// A side's character folder (cues name it).
-fn character(side: Side) -> &'static str {
-    PACK_CHARACTERS[side as usize]
+/// A player's character folder (cues name it).
+fn character<'a>(cx: &Cx<'a>, p: &Seen) -> &'a str {
+    cx.pack.characters.get(p.body).copied().unwrap_or_default()
 }
 
 /// Whether a clip event at `time` fires this tick: the clock passed it (`held.json`'s rule, V on the
@@ -538,7 +596,7 @@ impl Sounds {
                 && cue
                     .character
                     .as_deref()
-                    .is_none_or(|c| c == character(p.side))
+                    .is_none_or(|c| c == character(cx, p))
             {
                 self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
             }
@@ -600,7 +658,7 @@ impl Sounds {
     /// a shot, the scope, a hit.
     fn player(&mut self, cx: &Cx, was: &Seen, is: &Seen, all: &[(Seen, Seen)]) {
         let me = Src::player(is);
-        let clips = &cx.pack.clips[is.side as usize];
+        let clips = &cx.pack.clips[is.body];
         let first = clips.partition_point(|c| c.clip < is.clock.id);
         for e in clips[first..].iter().take_while(|c| c.clip == is.clock.id) {
             if !passes(&was.clock, &is.clock, e.time) {
@@ -618,13 +676,19 @@ impl Sounds {
         if let (Some((flag, bot)), None) = (is.flag, was.flag) {
             self.cues(cx, is, me, |on| *on == On::Flag { flag, bot });
         }
-        let fire =
-            |w: u8, p: &Seen| p.weapon == w && weapon(w).is_some_and(|w| w.fire.0 == p.clock.id);
+        // War: Beach's rockets fire with clip 0x207 (conker-rules' `beach::ROCKET_FIRE`).
+        let fire = |w: u8, p: &Seen| {
+            let rocket = |w: &Weapon| matches!(w.attack, Attack::Rocket { .. });
+            let clip = |w: &Weapon| {
+                w.fire.0 == p.clock.id || (rocket(w) && p.clock.id == beach::ROCKET_FIRE)
+            };
+            p.weapon == w && weapon(w).is_some_and(clip)
+        };
         for (i, cue) in cx.pack.audio.events.cues.iter().enumerate() {
             if !cue
                 .character
                 .as_deref()
-                .is_none_or(|c| c == character(is.side))
+                .is_none_or(|c| c == character(cx, is))
             {
                 continue;
             }
@@ -926,6 +990,166 @@ impl Sounds {
         }
     }
 
+    /// War: Beach (see the module doc): the detonation, the strikes, the plunger's voice trigger, the
+    /// local escapee's line and the music's duck, and the radio's clicks off.
+    fn beach(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let later = |s: &mut Self, i: usize, src: Src, delay: u16| {
+            let (tick, end) = (cx.tick + u32::from(delay), false);
+            s.later.push(Later {
+                tick,
+                cue: i,
+                src,
+                end,
+            });
+        };
+        let debris = |s: &mut Self, at: [f32; 3], n: i32| {
+            for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Debris) {
+                for _ in 0..n {
+                    let (dx, dz) = (s.between(-200, 200), s.between(-200, 200));
+                    let pos = [at[0] + dx as f32, at[1], at[2] + dz as f32];
+                    let delay = s.between(DEBRIS[0], DEBRIS[1]) as u16;
+                    later(s, i, Src::at(pos), delay);
+                }
+            }
+        };
+        if m.beach && self.cooldown == Some(0) && m.cooldown > 0 {
+            for (i, cue) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Detonation) {
+                let at = cue.at.map_or(cx.ear.pos, |a| a.map(f32::from));
+                later(self, i, Src::at(at), cue.delay);
+                let n = self.between(3, 4);
+                debris(self, at, n);
+            }
+            let presser = players
+                .iter()
+                .map(|p| p.1)
+                .find(|p| beach::Plunger::under(p.pos));
+            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS) {
+                self.radio(cx, &p, On::Plunger);
+            }
+        }
+        self.cooldown = m.beach.then_some(m.cooldown);
+        if !m.beach {
+            return;
+        }
+        for (was, is) in players {
+            if was.deadline > 0 && is.deadline == 0 && is.team == beach::VILLAGERS {
+                self.cues(cx, is, Src::at(is.pos), |on| *on == On::StrikeCall);
+                self.strikes.push((is.slot, is.pos, cx.tick));
+            }
+            let ready = cx.pack.ready_zone.is_some_and(|z| z.contains(is.pos));
+            if ready && m.cooldown == 0 && is.team == beach::VILLAGERS && is.health > 0 {
+                self.radio(cx, is, On::PlungerReady);
+            }
+            if is.local && was.freeze == 0 && is.freeze > 0 && is.team == beach::VILLAGERS {
+                self.line(cx);
+            }
+        }
+        let strikes = std::mem::take(&mut self.strikes);
+        for (slot, at, call) in strikes {
+            let blown = players
+                .iter()
+                .any(|p| p.1.slot == slot && p.1.reaction == BLOWN_UP);
+            if blown || cx.tick >= call + 40 {
+                self.world(cx, at, |on| *on == On::StrikeBlast);
+                let n = self.between(3, 4);
+                debris(self, at, n);
+            } else {
+                self.strikes.push((slot, at, call));
+            }
+        }
+        // A radio voice that has played: the click off.
+        let radios = std::mem::take(&mut self.radios);
+        for (slot, due, i) in radios {
+            let owner = Owner::Player(slot);
+            let speaking = |v: &Voice| v.owner == owner && cues[i].play.sounds.contains(&v.id);
+            if cx.tick <= due || self.voices.iter().any(speaking) {
+                self.radios.push((slot, due, i));
+            } else if let Some(p) = players.iter().find(|p| p.1.slot == slot) {
+                self.cues(cx, &p.1, Src::player(&p.1), |on| {
+                    *on == On::RadioClick { end: true }
+                });
+            }
+        }
+        let line = self.voices.iter().any(|v| v.id == ESCAPE && !v.stopped);
+        self.duck = duck(self.duck, line);
+        let [full, ..] = DUCK;
+        for v in self.voices.iter_mut().filter(|v| v.id == BACKGROUND) {
+            let b = cx
+                .pack
+                .background
+                .as_ref()
+                .map_or(32767.0, |b| f32::from(b.volume));
+            v.volume = b * self.duck / full;
+        }
+    }
+
+    /// A human's radio voice `on` (its character's), unless it spoke one in the last
+    /// [`RADIO_GAP`] ticks (`func_15103C14`): the click on at once on its voice slot, the voice its
+    /// cue's `delay` later, the click off once that has played (`func_15103910`). Bots' records are
+    /// not exported.
+    fn radio(&mut self, cx: &Cx, p: &Seen, on: On) {
+        if p.bot
+            || self
+                .radio_at
+                .get(&p.slot)
+                .is_some_and(|&t| cx.tick < t + RADIO_GAP)
+        {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        let voice = (cues.iter().enumerate()).find(|(_, c)| {
+            c.on == on && c.character.as_deref().is_none_or(|c| c == character(cx, p))
+        });
+        let Some((i, cue)) = voice else {
+            return;
+        };
+        self.radio_at.insert(p.slot, cx.tick);
+        self.cues(cx, p, Src::player(p), |o| {
+            *o == On::RadioClick { end: false }
+        });
+        let (tick, src, end) = (cx.tick + u32::from(cue.delay), Src::player(p), false);
+        self.later.push(Later {
+            tick,
+            cue: i,
+            src,
+            end,
+        });
+        self.radios.push((p.slot, tick, i));
+    }
+
+    /// The local escapee's radio line, unpositioned, unless it already plays.
+    fn line(&mut self, cx: &Cx) {
+        let Some(line) = cx.pack.lines.get("escape") else {
+            return;
+        };
+        if self.voices.iter().any(|v| v.id == ESCAPE && !v.stopped) {
+            return;
+        }
+        let v = Voice {
+            id: ESCAPE,
+            owner: Owner::World,
+            channel: Channel::Free,
+            tag: None,
+            pos: cx.ear.pos,
+            follows: None,
+            flat: true,
+            volume: f32::from(line.volume),
+            own: None,
+            near: 0.0,
+            far: 0.0,
+            base: MIX,
+            speed: 1.0,
+            looped: false,
+            until: None,
+            fade: None,
+            started: cx.tick,
+            stopped: false,
+            control: None,
+        };
+        self.push(cx, v);
+    }
+
     /// Plays every cue `matches` picks at `pos`, nobody's.
     fn world(&mut self, cx: &Cx, pos: [f32; 3], matches: impl Fn(&On) -> bool) {
         for cue in (cx.pack.audio.events.cues.iter()).filter(|c| matches(&c.on)) {
@@ -1136,7 +1360,7 @@ fn hear(
         let bot = id.is_some_and(|i| matches!(i.0, PeerId::Local(_)));
         let seen = Seen {
             slot: c.slot,
-            side: c.side,
+            body: crate::body(c),
             pos: p.pos,
             clock: anim.0,
             weapon,
@@ -1149,6 +1373,10 @@ fn hear(
             speed: p.xz_speed,
             carry: (c.carrying).then_some((c.team, bot)),
             flag: c.flag.map(|f| (f, bot)),
+            bot,
+            team: c.team,
+            freeze: c.freeze,
+            deadline: c.deadline,
         };
         match heard {
             Some(mut h) => {
@@ -1193,6 +1421,7 @@ fn hear(
     }
     s.grenades(&cx, grenades);
     s.match_sounds(&cx, m, &all);
+    s.beach(&cx, m, &all);
     s.guns(&cx, &m.guns, &all);
     let scope = camera.follow.cam.scope;
     let gunner = scope.on && scope.weapon == conker_camera::GUN;
@@ -1299,6 +1528,9 @@ fn open(
         if let Some(v) = &o.voice {
             sounds.insert(VOICE - n as u16, load(&v.file));
         }
+    }
+    if let Some(line) = pack.lines.get("escape") {
+        sounds.insert(ESCAPE, load(&line.file));
     }
     commands.insert_resource(Output { device, sounds });
 }
@@ -1703,7 +1935,7 @@ mod tests {
     fn hits_name_their_weapon() {
         let at = |slot, x: f32, weapon| Seen {
             slot,
-            side: Side::Tediz,
+            body: conker_sim::movement::Side::Tediz as usize,
             pos: [x, 0.0, 0.0],
             clock: AnimPlayer::default(),
             weapon,
@@ -1716,6 +1948,10 @@ mod tests {
             speed: 0.0,
             carry: None,
             flag: None,
+            bot: false,
+            team: 0,
+            freeze: 0,
+            deadline: 0,
         };
         let victim = Seen {
             reaction: conker_anim::combat::HIT,

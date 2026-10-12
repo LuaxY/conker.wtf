@@ -6,7 +6,10 @@
 //! War: Total War draws its team strip in place of the kills and rank, the radar's blips by team,
 //! its results' header, and a gassed player's haze under the HUD ([`haze`]); War: Colors its strip
 //! with the team scores, the carried flags' blinking icons ([`flag_icons`]), the flags on the radar
-//! and the capture's fade ([`capture_fade`]).
+//! and the capture's fade ([`capture_fade`]); War: Beach its strip with the villagers' head and the
+//! team scores, a villager's escape countdown, no radar, the escape's dim and fade in
+//! ([`escape_fade`]), the strike's flash ([`strike_flash`]) and its STATS (FRENCHYS WIN, no row
+//! for a villager).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -26,7 +29,7 @@ use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
-    Align, Anchor, End, Flash, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Text,
+    Align, Anchor, End, Flash, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Strip, Text,
     Vertical,
 };
 use conker_assets::outro::Outro;
@@ -110,6 +113,12 @@ pub struct Shown {
     pub results: Option<(Vec<Row>, usize)>,
     /// Over in Total War: the results' header.
     pub header: Option<Header>,
+    /// War: Beach: its strip ([`Hud::beach`]) in place of Total War's, its STATS header.
+    pub beach: bool,
+    /// War: Beach: a villager's seconds left to escape (90 down to 0).
+    pub escape: Option<u32>,
+    /// War: Beach: frames since the strike's blast on this player ([`strike_flash`]).
+    pub strike: Option<u32>,
 }
 
 /// A results row ([`rows`]): its colour, an index of `results.colours`, and its five columns.
@@ -421,8 +430,9 @@ fn suffix(n: usize) -> usize {
 /// (human, [`Combat`]): its colour (an index of `results.colours`: the row's; in Total War its
 /// team's, `func_151EA15C`), then place, accuracy (hits × 100 / shots, truncated, at most 9999, 0
 /// without a shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS). In Total
-/// War the place is the team's ([`team_places`], `0x800E0AC0[team]`).
-pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool) -> Vec<Row> {
+/// War the place is the team's ([`team_places`], `0x800E0AC0[team]`). War: Beach lists no villager
+/// (`func_151EA15C` on scenario 8: only rows of a team other than 0; V cs4, cs3, cs4h).
+pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool, beach: bool) -> Vec<Row> {
     let mut standings = vec![
         None;
         all.iter()
@@ -440,7 +450,9 @@ pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool) -> Vec<Row
     } else {
         places(&standings, kill_limit)
     };
-    let mut humans: Vec<_> = all.iter().filter(|p| p.0).map(|p| p.1).collect();
+    let listed =
+        |p: &&(bool, &Combat)| p.0 && !(beach && p.1.team == conker_rules::beach::VILLAGERS);
+    let mut humans: Vec<_> = all.iter().filter(listed).map(|p| p.1).collect();
     humans.sort_by_key(|c| c.slot);
     (humans.into_iter().enumerate())
         .map(|(n, c)| {
@@ -472,10 +484,9 @@ pub fn header(all: &[(bool, &Combat)], own_team: u8) -> Header {
     }
 }
 
-/// Total War's team strip (`func_151E9D18`): each team's icon (`lives`: untimed) and number, kept
-/// at `anchor`.
-fn strip(hud: &Hud, numbers: [u32; 2], lives: bool, anchor: Anchor) -> Vec<Sprite> {
-    let t = &hud.strip;
+/// Total War's team strip (`func_151E9D18`), or War: Beach's (`t`): each team's icon (`lives`:
+/// untimed) and number, kept at `anchor`.
+fn strip(hud: &Hud, t: &Strip, numbers: [u32; 2], lives: bool, anchor: Anchor) -> Vec<Sprite> {
     let icons = if lives { &t.lives } else { &t.kills };
     (0..2)
         .flat_map(|team| {
@@ -499,6 +510,7 @@ fn results(
     rows: &[Row],
     choice: usize,
     header: Option<Header>,
+    beach: bool,
 ) -> Vec<Sprite> {
     let (r, t) = (&end.results, &end.teams);
     let white = [255; 4];
@@ -509,7 +521,10 @@ fn results(
         Some(Header::Draw) => std::slice::from_ref(&t.draw),
         Some(Header::You(true)) => &t.won,
         Some(Header::You(false)) => &t.lost,
-        Some(Header::Team(team)) => t.team_won.get(usize::from(team)).map_or(&[], |p| p),
+        Some(Header::Team(team)) => {
+            let won = if beach { &t.beach_won } else { &t.team_won };
+            won.get(usize::from(team)).map_or(&[], |p| p)
+        }
     };
     let mut out: Vec<Sprite> = (std::iter::once(&r.header).chain(team_header))
         .chain([&r.stick])
@@ -637,11 +652,16 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // heads too (HUD flag 0x2000: `func_151E9D18`'s icon row 0, C; V e0 DL 360).
     let untimed = s.lives.is_some();
     let heads = untimed || s.flags.is_some();
+    let team_strip = if s.beach {
+        &hud.beach.strip
+    } else {
+        &hud.strip
+    };
     if let (Some((rows, choice)), Some(end)) = (&s.results, &hud.end) {
-        let mut out = results(hud, end, rows, *choice, s.header);
+        let mut out = results(hud, end, rows, *choice, s.header, s.beach);
         // War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
         if let Some(n) = s.strip {
-            out.extend(strip(hud, n, heads, end.results.anchor));
+            out.extend(strip(hud, team_strip, n, heads, end.results.anchor));
         }
         return out;
     }
@@ -737,7 +757,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // Kills and rank (HUD flags 0x400, 0x800), or Total War's team strip (0x200 timed, 0x100
     // untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
     match s.strip {
-        Some(n) => out.extend(strip(hud, n, heads, hud.strip.anchor)),
+        Some(n) => out.extend(strip(hud, team_strip, n, heads, team_strip.anchor)),
         None => {
             out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
             out.extend(text(
@@ -760,6 +780,21 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     }
     if let Some(n) = s.countdown {
         out.extend(text(hud, &n.to_string(), None, &hud.countdown, 5.0));
+    }
+    if let Some(n) = s.escape {
+        out.extend(text(hud, &n.to_string(), None, &hud.beach.escape, 5.0));
+    }
+    // Beach: the strike's flash, the iris's quarters in red then black around the view's centre.
+    if let Some(colour) = s.strike.and_then(strike_flash) {
+        let i = &hud.iris;
+        out.extend(quarters(
+            &i.image,
+            STRIKE_CENTRE,
+            192.0,
+            i.anchor,
+            colour,
+            8.0,
+        ));
     }
     // Aiming: the reticle; through a scope: the ring, its dots and the zoom bar.
     let t = &hud.reticle;
@@ -1030,6 +1065,35 @@ pub fn capture_fade(out: bool, vis: u16, frames: u32) -> u8 {
     if out { step } else { 255 - step }
 }
 
+/// War: Beach's escape on the escapee's own view (`command(p, 0x8B, …)`, `beach-presentation.md`
+/// §2): for the freeze's last 30 frames a fade to black over 30 VIs, which the script re-sends every
+/// frame, so the view stays at its first step, alpha 0x11 (V e1 DL 235-250: elapsed 2 of 30; the
+/// original's bug, kept: the view only dims); `since` frames after the respawn, the fade in from
+/// black over 100 VIs (V e1 DL 252, 254, 256, 270: 0xF5, 0xEB, 0xE1, 0x99).
+pub fn escape_fade(freeze: u8, since: Option<u32>) -> Option<u8> {
+    match (freeze, since) {
+        (1..=30, _) => Some(capture_fade(true, 30, 1)),
+        (0, Some(k)) if k < 50 => Some(capture_fade(false, 100, k)),
+        _ => None,
+    }
+}
+
+/// Where the strike's flash is centred (V ev3 DL 1046-1060).
+pub const STRIKE_CENTRE: [f32; 2] = [146.0, 83.0];
+
+/// The strike's flash on its victim's view `k` frames after the blast: the iris's quarters (I8
+/// 64 × 64), up to 384 wide, red with alpha 0xF8 → 0xC2, then black, fading (V ev3 DL 1046-1060; I:
+/// 7 frames each, straight between).
+pub fn strike_flash(k: u32) -> Option<Rgba> {
+    const HALF: u32 = 7;
+    let lerp = |a: f32, b: f32, k: u32| (a + (b - a) * k as f32 / HALF as f32) as u8;
+    match k {
+        0..HALF => Some([255, 0, 0, lerp(248.0, 194.0, k)]),
+        HALF..14 => Some([0, 0, 0, lerp(194.0, 0.0, k - HALF)]),
+        _ => None,
+    }
+}
+
 /// What ranks a player (conker-rules' [`places`]).
 pub fn standing(c: &Combat) -> Standing {
     Standing {
@@ -1116,16 +1180,16 @@ fn shown(
         kills: c.kills,
         rank: usize::from(places(&all, m.kill_limit)[0]),
         secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
-        radar: m.radar,
+        radar: m.radar && !m.beach,
         blips,
         reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
         scope: (scope.on && gun.is_none())
             .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
         gun,
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
-        lives: (m.time == 0 && !m.colors).then_some(c.lives_left),
+        lives: (m.time == 0 && !m.colors && !m.beach).then_some(c.lives_left),
         out: c.out > 0,
-        strip: match m.colors {
+        strip: match m.colors || m.beach {
             true => Some(m.scores.map(u32::from)),
             false => m.total_war.then_some(strip),
         },
@@ -1135,6 +1199,10 @@ fn shown(
         haze: (c.haze > 0).then_some(u32::from(c.haze)),
         results: None,
         header: None,
+        beach: m.beach,
+        escape: (m.beach && c.team == conker_rules::beach::VILLAGERS)
+            .then_some(u32::from(c.deadline) / 60),
+        strike: None,
     }
 }
 
@@ -1150,9 +1218,16 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
+    (playing, outros, blasts): (
+        Res<crate::outro::Playing>,
+        Res<crate::outro::Outros>,
+        Option<Res<crate::beach::Blasts>>,
+    ),
     timeline: Res<LocalTimeline>,
-    mut fading: Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
+    (mut fading, mut escaped): (
+        Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
+        Local<(u8, Option<u32>)>,
+    ),
     (mut fired, mut zoomed): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
         Local<(u32, f32, bool, Option<u32>)>,
@@ -1199,6 +1274,21 @@ fn draw(
                 }
                 _ => None,
             };
+            // Beach: the escape's dim, then its fade in from the respawn (the freeze's end); the
+            // strike's flash from its blast.
+            let freeze = own.1.freeze;
+            if escaped.0 > 0 && freeze == 0 {
+                escaped.1 = Some(tick);
+            }
+            escaped.0 = freeze;
+            let since = escaped.1.map(|t| tick.saturating_sub(t));
+            if let Some(alpha) = escape_fade(freeze, since).filter(|_| m.beach && m.phase == 0) {
+                shown.fade = Some(alpha);
+            }
+            let strikes = blasts.iter().flat_map(|b| &b.strikes);
+            shown.strike = (strikes.filter(|s| s.slot == own.1.slot))
+                .find_map(|s| s.blast)
+                .map(|t| tick.saturating_sub(t));
             // The own gun's shots, by barrel, from the tick this client sees each (the count only
             // falls when Colors recreates the gun).
             let manned = (m.guns.iter().enumerate()).find(|g| g.1.gunner == Some(own.1.slot));
@@ -1232,7 +1322,8 @@ fn draw(
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
                 let teams = crate::outro::team_mode(m);
-                shown.results = Some((rows(&all, m.kill_limit, teams), menu.choice));
+                let rows = rows(&all, m.kill_limit, teams, m.beach);
+                shown.results = Some((rows, menu.choice));
                 shown.header = teams.then(|| header(&all, own.1.team));
             }
             sprites(&a.hud, &shown)
@@ -1550,7 +1641,7 @@ mod tests {
         };
         let (bot, p1, p2) = (c(0, 3, 0, 10, 5), c(1, 2, 1, 22, 2), c(2, 0, 1, 0, 0));
         assert_eq!(
-            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0, false),
+            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0, false, false),
             [(0, [2, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])]
         );
     }
@@ -1570,7 +1661,7 @@ mod tests {
         let (tedi, squirrel, bot) = (c(0, 1, 0, 3), c(1, 0, 1, 1), c(2, 1, 2, 5));
         let all = [(true, &tedi), (true, &squirrel), (false, &bot)];
         assert_eq!(
-            rows(&all, 0, true),
+            rows(&all, 0, true, false),
             [(1, [1, 0, 0, 0, 0]), (0, [2, 0, 1, 0, 0])]
         );
         assert_eq!(header(&all, 0), Header::Team(1));
@@ -1871,6 +1962,116 @@ mod tests {
             [0, 25, 50].map(|k| capture_fade(false, 100, k)),
             [255, 128, 0]
         );
+    }
+
+    /// War: Beach's HUD where the original drew it (`lab/research/mp-original/
+    /// beach-presentation-scratch/hw/det1_dl_318`: a villager alone, 81 s to escape, Tediz 0,
+    /// villagers 1): the heads of `beach_teams` (the Tedi's row 0 at x 66, the villager's row 16 at
+    /// 198), the scores in grey, the countdown white at the top centre; no radar, no icon for 0x3E;
+    /// a Tedi has no countdown. The escape's dim and fade in, the strike's flash (V e1 DL 245-270,
+    /// ev3 DL 1046-1060); STATS: FRENCHYS WIN, no villager human's row.
+    #[test]
+    fn beach_matches_the_originals_draws() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            eprintln!("no pack hud/end.json: skipping");
+            return;
+        };
+        let villager = Shown {
+            strip: Some([1, 0]),
+            beach: true,
+            escape: Some(81),
+            weapon: 0x3E,
+            radar: false,
+            secs: None,
+            ..state()
+        };
+        assert_eq!(
+            rects(&hud, &villager, &texture("beach_teams")),
+            [
+                ([198.0, 196.0, 16.0, 16.0], [0.0, 16.0, 16.0, 32.0]),
+                ([66.0, 196.0, 16.0, 16.0], [0.0, 0.0, 16.0, 16.0]),
+            ]
+        );
+        assert!(rects(&hud, &villager, &texture("teams")).is_empty());
+        let grey =
+            (sprites(&hud, &villager).into_iter()).filter(|q| q.colour == [192, 192, 192, 255]);
+        let grey: Vec<_> = grey.map(|q| q.rect).collect();
+        assert_eq!(grey, [[215.0, 197.0, 6.0, 10.0], [83.0, 197.0, 8.0, 11.0]]);
+        assert_eq!(
+            glyphs(&hud, &villager),
+            [[140.0, 6.0, 148.0, 17.0], [147.0, 6.0, 153.0, 16.0]]
+        );
+        assert!(rects(&hud, &villager, &texture("radar")).is_empty());
+        // The atlas' only quads are health's pieces (5 wide): no weapon icon.
+        let atlas = (rects(&hud, &villager, &texture("atlas")).into_iter()).chain(rects(
+            &hud,
+            &villager,
+            &texture("atlas2"),
+        ));
+        assert!(atlas.map(|r| r.0[2]).all(|w| w == 5.0));
+        let tedi = Shown {
+            escape: None,
+            weapon: 0x24,
+            ..villager.clone()
+        };
+        assert!(glyphs(&hud, &tedi).is_empty());
+        // The escape: 0x11 for the freeze's last 30 frames (the re-sent fade), then 100 VIs in.
+        assert_eq!(
+            [31, 30, 1].map(|f| escape_fade(f, None)),
+            [None, Some(0x11), Some(0x11)]
+        );
+        assert_eq!(
+            [2, 4, 6, 20, 50].map(|k| escape_fade(0, Some(k))),
+            [Some(0xF5), Some(0xEB), Some(0xE1), Some(0x99), None]
+        );
+        assert_eq!(
+            [0, 7, 13, 14].map(strike_flash),
+            [
+                Some([255, 0, 0, 248]),
+                Some([0, 0, 0, 194]),
+                Some([0, 0, 0, 27]),
+                None
+            ]
+        );
+        // STATS: the villagers (team 0) win on score; only the Tedi human has a row.
+        let c = |slot, team, score| Combat {
+            slot,
+            team,
+            score,
+            ..Combat::default()
+        };
+        let (frenchy, tedi, bot) = (c(0, 0, 3), c(1, 1, 1), c(2, 0, 3));
+        let all = [(true, &frenchy), (true, &tedi), (false, &bot)];
+        assert_eq!(rows(&all, 0, true, true), [(1, [2, 0, 0, 0, 0])]);
+        assert_eq!(header(&all, 1), Header::Team(0));
+        let over = |header| Shown {
+            results: Some((rows(&all, 0, true, true), 0)),
+            header: Some(header),
+            ..villager.clone()
+        };
+        let rect = |s: &Shown, name: &str| -> Vec<[f32; 4]> {
+            (rects(&hud, s, &texture(name)).into_iter())
+                .map(|r| r.0)
+                .collect()
+        };
+        let won = over(Header::Team(0));
+        assert_eq!(
+            (rect(&won, "frenchys"), rect(&won, "win")),
+            (
+                vec![[65.0, 34.0, 96.0, 32.0]],
+                vec![[151.0, 34.0, 64.0, 32.0]]
+            )
+        );
+        assert!(rect(&won, "squirrels").is_empty() && rect(&won, "players").len() == 1);
+        assert_eq!(
+            rect(&over(Header::Team(1)), "tediz"),
+            [[81.0, 34.0, 64.0, 32.0]]
+        );
+        assert_eq!(
+            rect(&over(Header::Draw), "draw"),
+            [[116.0, 34.0, 64.0, 32.0]]
+        );
+        assert_eq!(rect(&won, "beach_teams").len(), 2);
     }
 
     /// A mounted gun's sight against the original's one view (`lab/research/mp-original/

@@ -7,6 +7,10 @@
 //!   after (the lamps' light assumed to saturate it, as the unlit level draws everything);
 //! - each other light while on (the red one, a shown canister's, `0xE017`, a carrier's) is a Bevy
 //!   point light too, for the characters and the lit models.
+//!
+//! War: Beach's lights (`maps/2b/lights.json`, `beach-presentation.md` §7: the two white lamps and
+//! the two red ones pulsing over the exits, all `calm`) are Bevy point lights all match (I: the
+//! lamps' flicker, behaviour 4, is not in the pack: steady).
 
 use bevy::color::Srgba;
 use bevy::mesh::VertexAttributeValues;
@@ -78,7 +82,7 @@ pub fn point_light(l: &Light, size: f32) -> PointLight {
 pub fn build(app: &mut App, lights: Lights, triggers: &[u8]) {
     let zone = (triggers.as_chunks::<0x34>().0.first()).map(CameraVolume::parse_record);
     let placed: Vec<Light> = (lights.lights.iter())
-        .filter(|l| !matches!(l.when, When::Calm | When::Carried))
+        .filter(|l| l.when != When::Carried)
         .cloned()
         .collect();
     app.insert_resource(Room {
@@ -103,16 +107,21 @@ pub fn build(app: &mut App, lights: Lights, triggers: &[u8]) {
 #[derive(Component)]
 struct Placed(Light);
 
-/// Shows each placed light while it shines, at its size this frame.
+/// Shows each placed light while it shines, at its size this frame (a frame a tick: the red light's
+/// 2.05 s pulse): Total War's by [`on`], War: Beach's calm ones all match (Total War's calm ones
+/// tint the room instead).
 fn shine(
     game: Query<&MatchView>,
     time: Res<Time>,
     mut lights: Query<(&Placed, &mut PointLight, &mut Visibility)>,
 ) {
     let Ok(m) = game.single() else { return };
-    let frames = time.elapsed_secs() * 60.0;
+    let frames = time.elapsed_secs() * conker_sim::TICK_HZ as f32;
     for (Placed(l), mut light, mut v) in &mut lights {
-        let shines = m.total_war && on(l, m.countdown > 0, m.props);
+        let shines = match l.when {
+            When::Calm => m.beach,
+            _ => m.total_war && on(l, m.countdown > 0, m.props),
+        };
         v.set_if_neq(match shines {
             true => Visibility::Inherited,
             false => Visibility::Hidden,
@@ -184,7 +193,7 @@ fn tint_room(
         info!("the room: {} vertices, y {lo} to {hi}", out.len());
         out
     });
-    let frames = time.elapsed_secs() * 60.0;
+    let frames = time.elapsed_secs() * conker_sim::TICK_HZ as f32;
     let shining: Vec<(Vec3, [f32; 3], f32)> = (lights.lights.iter())
         .filter(|l| l.when != When::Carried && on(l, alarm, m.props))
         .map(|l| {

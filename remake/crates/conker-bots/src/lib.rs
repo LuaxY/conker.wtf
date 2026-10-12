@@ -22,7 +22,7 @@
 //! `lab/oracle/bot_README.md` (outside this tree).
 
 pub mod brain;
-pub mod lift;
+pub use conker_rules::lift;
 pub mod nav;
 pub mod npc;
 pub mod script;

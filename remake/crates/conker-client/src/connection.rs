@@ -23,7 +23,7 @@
 
 use crate::{Config, FollowCamera, Transport};
 use bevy::prelude::*;
-use conker_sim::movement::{Input, Side};
+use conker_sim::movement::Input;
 use conker_sim::net::{DEFAULT_PORT, Join, JoinChannel, PlayerId};
 use core::time::Duration;
 use lightyear::link::SendPayload;
@@ -174,18 +174,13 @@ fn ready(
 ) -> bool {
     // The level and the characters (`render`'s assets): windowed clients connect once they loaded.
     let loaded = assets.is_none_or(|a| {
-        let character = crate::render::character;
-        [
-            crate::render::level_scene(&cfg.map),
-            character(Side::Squirrels),
-            character(Side::Tediz),
-            character(Side::Cavemen),
-        ]
-        .iter()
-        .all(|path| {
-            a.get_handle_untyped(path)
-                .is_some_and(|h| a.is_loaded_with_dependencies(&h))
-        })
+        let characters = crate::characters(&cfg.map).into_iter();
+        std::iter::once(crate::render::level_scene(&cfg.map))
+            .chain(characters.map(conker_assets::character_gltf))
+            .all(|path| {
+                a.get_handle_untyped(&path)
+                    .is_some_and(|h| a.is_loaded_with_dependencies(&h))
+            })
     });
     *calm = if loaded && time.delta_secs() < CALM_SECS {
         *calm + 1

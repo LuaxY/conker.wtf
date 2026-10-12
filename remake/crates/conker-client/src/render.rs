@@ -16,7 +16,7 @@
 //! them as is. Units are the game's: the map spans about 7,000 x 13,000 units.
 
 use crate::connection::NetStatus;
-use crate::{Anim, Config, FollowCamera, SideClips, hud_text};
+use crate::{Anim, BodyClips, Config, FollowCamera, body, hud_text};
 use bevy::app::AnimationSystems;
 use bevy::asset::AssetMetaCheck;
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
@@ -30,9 +30,8 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_dis
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use conker_anim::id;
-use conker_assets::{PACK_CHARACTERS, Slice, character_gltf, level_gltf, props_gltf};
+use conker_assets::{Slice, character_gltf, level_gltf, props_gltf};
 use conker_rules::gas;
-use conker_sim::movement::Side;
 use conker_sim::net::{Combat, MatchView, Player};
 use core::f32::consts::{FRAC_PI_2, TAU};
 
@@ -45,13 +44,6 @@ pub fn level_scene(map: &str) -> String {
 pub fn props_scene(map: &str) -> String {
     format!("{}#Scene0", props_gltf(map))
 }
-
-pub fn character(side: Side) -> String {
-    character_gltf(PACK_CHARACTERS[side as usize])
-}
-
-/// The sides, in [`Side`] order.
-const SIDES: [Side; 3] = [Side::Squirrels, Side::Tediz, Side::Cavemen];
 
 /// Spawn record whose camera the window shows until our player arrives (V: oracle player 1's).
 pub const FIRST_SPAWN: usize = 1;
@@ -84,15 +76,16 @@ pub fn shade_to_linear(color: &mut [f32; 4]) {
     }
 }
 
-/// Model units the game draws each side's model above the player's position, scaled with the model
-/// (the pack's `model_lift`), by [`Side`]: the s16 at +6 of the model's bank-0x11 record (43 for
-/// 117, 42 for 128, 49 for 136), copied to obj+0xC8 at spawn (`func_150837D4`); the object matrix is at (x, y +
-/// obj+0x150 × obj+0xC8, z) (`func_1502DF38`). C, and V: the oracle's joint matrices equal the
-/// clips' roots lifted by 43 (idle, run, crouch); obj+0xC8 is 42.0 for a squirrel.
+/// Model units the game draws each body's model above the player's position, scaled with the model
+/// (the pack's `model_lift`), by body ([`crate::characters`]): the s16 at +6 of the model's
+/// bank-0x11 record (43 for 117, 42 for 128, 49 for 136, 41 and 40 for the villagers 156 and 157),
+/// copied to obj+0xC8 at spawn (`func_150837D4`); the object matrix is at (x, y + obj+0x150 ×
+/// obj+0xC8, z) (`func_1502DF38`). C, and V: the oracle's joint matrices equal the clips' roots
+/// lifted by 43 (idle, run, crouch); obj+0xC8 is 42.0 for a squirrel.
 #[derive(Resource)]
-struct ModelLift([f32; 3]);
+struct ModelLift(Vec<f32>);
 
-/// A side's character: its scene and its clips' graph.
+/// A body's character: its scene and its clips' graph.
 struct Look {
     scene: Handle<WorldAsset>,
     graph: Handle<AnimationGraph>,
@@ -106,19 +99,22 @@ impl Look {
     }
 }
 
-/// The sides' characters, once loaded, by [`Side`].
+/// The bodies' characters ([`crate::characters`]), once loaded.
 #[derive(Resource)]
 struct Characters(Vec<Look>);
 
 impl Characters {
-    fn of(&self, side: Side) -> &Look {
-        &self.0[side as usize]
+    fn of(&self, body: usize) -> &Look {
+        &self.0[body]
     }
 }
 
-/// A player entity that has its model.
+/// A player entity that has its model: its body ([`crate::body`]) and the model's scene root.
 #[derive(Component)]
-pub(crate) struct Model;
+pub(crate) struct Model {
+    pub(crate) body: usize,
+    pub(crate) scene: Entity,
+}
 
 /// A bullet or grenade drawn this frame (respawned every frame from the [`MatchView`]).
 #[derive(Component)]
@@ -133,11 +129,11 @@ struct ProjectileLooks([(Handle<Mesh>, Handle<StandardMaterial>); 3]);
 #[derive(Component)]
 struct Hud;
 
-/// The posed parts of a player's model: its side, its `AnimationPlayer` and root joint (with its
+/// The posed parts of a player's model: its body, its `AnimationPlayer` and root joint (with its
 /// rest z).
 #[derive(Component)]
-struct Rig {
-    side: Side,
+pub(crate) struct Rig {
+    body: usize,
     animator: Entity,
     root: Entity,
     root_z: f32,
@@ -157,8 +153,9 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     };
     let free = cfg.view.is_some();
     let level = level_scene(&cfg.map);
-    let lift = |s: Side| f32::from(slice.characters[s as usize].model_lift);
-    app.insert_resource(ModelLift(SIDES.map(lift)));
+    let lift = |c: &conker_assets::Character| f32::from(c.model_lift);
+    app.insert_resource(ModelLift(slice.characters.iter().map(lift).collect()));
+    crate::beach::build(app, &slice.characters);
     let carried = (slice.lights.lights.iter())
         .find(|l| l.when == conker_assets::When::Carried)
         .cloned();
@@ -247,11 +244,13 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             load_characters.run_if(not(ready)),
             shade_vertex_colors,
             toggle_debug_camera,
+            rebuild_models,
             add_player_models.run_if(ready),
             place_players,
             pose_players.run_if(ready),
             follow_camera,
             crate::outro::show,
+            crate::beach::camera,
             draw_projectiles,
             add_props.run_if(ready),
             crate::outro::add_actors.run_if(ready),
@@ -272,8 +271,8 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     );
 }
 
-/// The sides' characters, one after the other once the level has loaded: each glTF, then its
-/// scene and clips from the loaded asset, each clip found by its animation's name (its side's
+/// The bodies' characters, one after the other once the level has loaded: each glTF, then its
+/// scene and clips from the loaded asset, each clip found by its animation's name (its body's
 /// [`crate::Clips`]). A glTF load polls other pending IO tasks from inside its texture tasks on
 /// the same thread, so a second load of a GLB (the level, or the character again through hundreds
 /// of labelled clip requests) nested inside it and overflowed the IO thread's stack in debug builds
@@ -283,7 +282,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
 fn load_characters(
     mut commands: Commands,
     assets: Res<AssetServer>,
-    clips: Res<SideClips>,
+    clips: Res<BodyClips>,
     gltfs: Res<Assets<Gltf>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut animations: ResMut<Assets<AnimationClip>>,
@@ -295,9 +294,10 @@ fn load_characters(
     if !level.is_some_and(|h| assets.is_loaded_with_dependencies(&h)) {
         return;
     }
-    let side = SIDES[looks.len()];
+    let bodies = crate::characters(&cfg.map);
+    let (body, path) = (looks.len(), character_gltf(bodies[looks.len()]));
     if loads.len() == looks.len() {
-        loads.push(assets.load(character(side)));
+        loads.push(assets.load(&path));
     }
     let handle = &loads[looks.len()];
     let Some(gltf) = gltfs
@@ -308,12 +308,9 @@ fn load_characters(
     };
     let mut ids = Vec::new();
     let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
-    for (id, name, ticks) in &clips.of(side).0 {
+    for (id, name, ticks) in &clips.of(body).0 {
         let Some(handle) = gltf.named_animations.get(name.as_str()) else {
-            warn!(
-                "{}: no animation {name} (animation id {id:#x})",
-                character(side)
-            );
+            warn!("{path}: no animation {name} (animation id {id:#x})");
             continue;
         };
         // The clocks loop on the game's duration; the glTF clips end a tick earlier.
@@ -330,7 +327,7 @@ fn load_characters(
         graph: graphs.add(graph),
         nodes: ids.into_iter().zip(nodes).collect(),
     });
-    if looks.len() == SIDES.len() {
+    if looks.len() == bodies.len() {
         commands.insert_resource(Characters(std::mem::take(&mut *looks)));
     }
 }
@@ -482,8 +479,8 @@ fn toggle_debug_camera(
     info!("debug camera {}", if state.enabled { "on" } else { "off" });
 }
 
-/// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each its side's
-/// model, lifted by its own model lift.
+/// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each its body's
+/// model ([`crate::body`]), lifted by its own model lift.
 #[allow(clippy::type_complexity)]
 fn add_player_models(
     players: Query<(Entity, &Combat), (With<Anim>, Without<Model>)>,
@@ -492,22 +489,39 @@ fn add_player_models(
     mut commands: Commands,
 ) {
     for (entity, combat) in &players {
-        commands
-            .entity(entity)
-            .insert((Transform::default(), Visibility::default(), Model));
-        let lift = lift.0[combat.side as usize];
-        commands
+        let body = body(combat);
+        let scene = commands
             .spawn((
-                WorldAssetRoot(characters.of(combat.side).scene.clone()),
-                Transform::from_xyz(0.0, MODEL_SCALE * lift, 0.0)
+                WorldAssetRoot(characters.of(body).scene.clone()),
+                Transform::from_xyz(0.0, MODEL_SCALE * lift.0[body], 0.0)
                     .with_scale(Vec3::splat(MODEL_SCALE)),
                 ChildOf(entity),
             ))
-            .observe(rig_ready);
+            .observe(rig_ready)
+            .id();
+        commands.entity(entity).insert((
+            Transform::default(),
+            Visibility::default(),
+            Model { body, scene },
+        ));
     }
 }
 
-/// The model's scene is in: hook its `AnimationPlayer` to its side's clips and find the root joint.
+/// A player whose body changed (War: Beach's villagers re-roll their class, and so maybe their
+/// model, at each respawn) loses its model, rig and held models: [`add_player_models`] gives it
+/// the new one.
+fn rebuild_models(players: Query<(Entity, &Combat, &Model)>, mut commands: Commands) {
+    for (entity, combat, model) in &players {
+        if body(combat) != model.body {
+            commands.entity(model.scene).despawn();
+            commands
+                .entity(entity)
+                .remove::<(Model, Rig, crate::held::Hands)>();
+        }
+    }
+}
+
+/// The model's scene is in: hook its `AnimationPlayer` to its body's clips and find the root joint.
 #[allow(clippy::too_many_arguments)]
 fn rig_ready(
     ready: On<WorldInstanceReady>,
@@ -515,14 +529,20 @@ fn rig_ready(
     children: Query<&Children>,
     animators: Query<(), With<AnimationPlayer>>,
     joints: Query<(&Name, &Transform)>,
-    combats: Query<&Combat>,
+    models: Query<&Model>,
     characters: Res<Characters>,
     mut commands: Commands,
 ) {
     let Ok(player) = parents.get(ready.entity).map(ChildOf::parent) else {
         return;
     };
-    let side = combats.get(player).map_or(Side::default(), |c| c.side);
+    // A model replaced before its scene came in.
+    let Some(body) = (models.get(player).ok())
+        .filter(|m| m.scene == ready.entity)
+        .map(|m| m.body)
+    else {
+        return;
+    };
     let mut animator = None;
     let mut root = None;
     for entity in children.iter_descendants(ready.entity) {
@@ -541,9 +561,9 @@ fn rig_ready(
     };
     commands
         .entity(animator)
-        .insert(AnimationGraphHandle(characters.of(side).graph.clone()));
+        .insert(AnimationGraphHandle(characters.of(body).graph.clone()));
     commands.entity(player).insert(Rig {
-        side,
+        body,
         animator,
         root,
         root_z,
@@ -576,7 +596,7 @@ fn pose_players(
         let Ok(mut animator) = animators.get_mut(rig.animator) else {
             continue;
         };
-        let character = characters.of(rig.side);
+        let character = characters.of(rig.body);
         let a = &anim.0;
         let w = a.prev_weight();
         let current = character.node(a.id);
@@ -787,8 +807,11 @@ fn log_loaded(
     cfg: Res<Config>,
 ) {
     let pending = pending.get_or_insert_with(|| {
-        let characters = SIDES.map(|s| format!("{}#Scene0", character(s)));
-        [vec![level_scene(&cfg.map)], characters.into()].concat()
+        let characters = crate::characters(&cfg.map).into_iter();
+        let characters = characters.map(|c| format!("{}#Scene0", character_gltf(c)));
+        std::iter::once(level_scene(&cfg.map))
+            .chain(characters)
+            .collect()
     });
     pending.retain(|path| {
         let done = assets

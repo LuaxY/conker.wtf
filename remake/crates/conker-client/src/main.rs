@@ -6,7 +6,7 @@
 
 use conker_assets::audio::Audio;
 use conker_assets::hud::{End, Hud};
-use conker_assets::{MANIFEST, PACK_CHARACTERS, PACK_WEAPONS, Slice};
+use conker_assets::{MANIFEST, PACK_WEAPONS, Slice};
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
@@ -29,7 +29,8 @@ fn main() {
     if cfg.map.is_empty() {
         cfg.map = conker_client::connection::server_map(&cfg).unwrap_or_else(|e| fail(e));
     }
-    let slice = Slice::load(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
+    let characters = conker_client::characters(&cfg.map);
+    let slice = Slice::load(&cfg.map, &characters, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
@@ -83,7 +84,8 @@ pub async fn start() -> Result<(), String> {
     }
     // Every file at once, from the folder Bevy's asset server reads the glTF models from.
     let root = bevy::asset::AssetPlugin::default().file_path;
-    let mut files = Slice::files(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS);
+    let characters = conker_client::characters(&cfg.map);
+    let mut files = Slice::files(&cfg.map, &characters, PACK_WEAPONS);
     files.extend([conker_assets::hud::HUD, conker_assets::hud::END].map(String::from));
     let requests: Vec<_> = (files.iter())
         .map(|f| conker_client::web::fetch(&format!("{root}/{f}")))
@@ -93,7 +95,7 @@ pub async fn start() -> Result<(), String> {
         bytes.insert(file, request.await?);
     }
     let sound = conker_client::audio::has_sound(bytes.get(MANIFEST).map_or(&[][..], |m| &m[..]));
-    let slice = Slice::load(&cfg.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
+    let slice = Slice::load(&cfg.map, &characters, PACK_WEAPONS, |p| {
         bytes.remove(p).ok_or("not fetched")
     })
     .map_err(|e| format!("{root}/{e}"))?;

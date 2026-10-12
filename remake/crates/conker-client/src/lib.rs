@@ -14,6 +14,7 @@
 //! Options come from CLI flags (`--transport ws`) or the page URL (`?transport=ws`), see [`Config`].
 
 pub mod audio;
+pub mod beach;
 pub mod connection;
 pub mod flags;
 pub mod guns;
@@ -64,8 +65,9 @@ use bevy::state::app::StatesPlugin;
 use conker_anim::{AnimPlayer, NONE, request_at};
 use conker_assets::audio::Audio;
 use conker_assets::hud::Hud;
-use conker_assets::{ClipInfo, Slice, SpawnPoint};
+use conker_assets::{ClipInfo, PACK_CHARACTERS, Slice, SpawnPoint};
 use conker_rules::gun;
+use conker_rules::lift::Lift;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::Grenade;
 use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Settings, Spawn};
@@ -562,13 +564,34 @@ impl Clips {
     }
 }
 
-/// Each side's character's [`Clips`], by [`Side`] (the pack's `PACK_CHARACTERS` order).
-#[derive(Resource, Clone, Debug)]
-pub struct SideClips(pub [Clips; 3]);
+/// War: Beach's villagers, models 156 (the men) and 157 (the women), packed with map 2b.
+pub const VILLAGERS: [&str; 2] = ["156", "157"];
 
-impl SideClips {
-    pub fn of(&self, side: Side) -> &Clips {
-        &self.0[side as usize]
+/// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
+/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`].
+pub fn characters(map: &str) -> Vec<&'static str> {
+    let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
+    PACK_CHARACTERS.into_iter().chain(villagers).collect()
+}
+
+/// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
+/// (`beach::model`: 156 below 0x1D, else 157), anyone else is its side's.
+pub fn body(c: &Combat) -> usize {
+    match c.class {
+        0x11..=0x20 => {
+            PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
+        }
+        _ => c.side as usize,
+    }
+}
+
+/// Each body's character's [`Clips`] (of [`characters`]).
+#[derive(Resource, Clone, Debug)]
+pub struct BodyClips(pub Vec<Clips>);
+
+impl BodyClips {
+    pub fn of(&self, body: usize) -> &Clips {
+        &self.0[body]
     }
 }
 
@@ -637,13 +660,14 @@ pub fn hud_text(c: &Combat, m: &MatchView) -> String {
 pub struct Spawns(pub Vec<SpawnPoint>);
 
 /// The match's static data the local player's prediction needs: the spawn records (a predicted
-/// respawn picks one, among its fighter's `spawn_mask`) and the scene's mounted guns at home (their
-/// bodies push it); pickups are the server's.
+/// respawn picks one, among its fighter's `spawn_mask`), the scene's mounted guns at home (their
+/// bodies push it) and its lifts (conker-bots' `lift`, which the server rides); pickups are the
+/// server's.
 #[derive(Resource, Clone, Debug)]
-pub struct MatchArena(pub Arena, pub Vec<gun::Gun>);
+pub struct MatchArena(pub Arena, pub Vec<gun::Gun>, pub Vec<Lift>);
 
 impl MatchArena {
-    pub fn new(spawns: &[SpawnPoint], scene: usize) -> Self {
+    pub fn new(spawns: &[SpawnPoint], scene: u16, triggers: &[u8]) -> Self {
         let spawns = spawns
             .iter()
             .map(|s| Spawn {
@@ -659,7 +683,8 @@ impl MatchArena {
             spawns,
             pickups: Vec::new(),
         };
-        Self(arena, gun::spawn(scene))
+        let lifts = conker_rules::lift::parse(triggers, scene as u8);
+        Self(arena, gun::spawn(scene.into()), lifts)
     }
 }
 
@@ -724,15 +749,15 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     let scene = map_scene(&cfg.map).expect("a known map");
     app.insert_resource(Collision(scene_world(&slice, scene)));
     let clips = slice.characters.iter().map(|c| Clips::new(&c.clips));
-    let clips: Vec<Clips> = clips.collect();
-    app.insert_resource(SideClips(clips.try_into().expect("a character per side")));
+    app.insert_resource(BodyClips(clips.collect()));
     app.insert_resource(Spawns(slice.spawns.clone()));
-    app.insert_resource(MatchArena::new(&slice.spawns, scene.into()));
+    app.insert_resource(MatchArena::new(&slice.spawns, scene, &slice.triggers));
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
+    let triggers = slice.triggers.clone();
     if cfg.headless {
         app.add_plugins((
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(tick / 2)),
@@ -751,6 +776,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
             pickups,
             !cfg.headless,
             &cfg.map,
+            &triggers,
             cfg.id,
         );
     }
@@ -1105,19 +1131,32 @@ fn own_tick(
     m.guns = arena.1.clone();
     let mut events = Vec::new();
     if !over && fighting.state.since <= tick {
+        // A lift before the step, as the server rides them, counted as a respawn (the camera cuts
+        // on its tick): the boxes (0x30's, 0x2B's) by where the player stands; 0x2D's gates need its
+        // last move, which the prediction doesn't keep (the server's ride corrects it). The record's
+        // jitter is this match's draw, not the server's (a correction of up to 40).
+        let b = m.players[slot].body;
+        let lift = (arena.2.iter()).find(|l| l.shape != 3 && l.takes(b.pos, b.pos, b.floor_y));
+        if let Some(l) = lift.filter(|_| m.players[slot].health != 0) {
+            let at = conker_rules::spawn::place(&arena.0.spawns, l.record, &mut m.rng);
+            let b = &mut m.players[slot].body;
+            (b.pos, b.floor_y) = (at.pos, at.pos[1]);
+            (b.facing, b.move_angle) = (at.facing, at.facing);
+            events.push(Event::Respawn { player: slot, at });
+        }
         let seen = |s: usize, v: usize| {
             (s == slot)
                 .then(|| shown.iter().find(|o| o.0 == v).map(|o| o.1))
                 .flatten()
         };
-        events = m.step_player(slot, &arena.0, input, world, &seen);
+        events.extend(m.step_player(slot, &arena.0, input, world, &seen));
     }
     (m, slot, events)
 }
 
 /// Client-side prediction: [`own_tick`], then the follow camera with what the rules know of the
 /// player (`Fighter::camera_view`: its weapon's aim, the scope, the twist), whose aim gate and
-/// scope go into the next tick ([`Aim`]). A predicted respawn cuts the camera to its record's on
+/// scope go into the next tick ([`Aim`]). A predicted respawn (or lift ride) cuts the camera to its record's on
 /// its own tick, as the server's does: `Combat.lives` arrives the client's lead later (V: 13 ticks
 /// at 150 ms each way, the view stuck at the body's old place meanwhile).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -1244,7 +1283,7 @@ fn predict_again(
 /// jump onto a mounted gun plays at 1.3 (the gun's launch, `gun::LAUNCH`).
 #[allow(clippy::type_complexity)]
 fn tick_anims(
-    clips: Res<SideClips>,
+    clips: Res<BodyClips>,
     game: Query<&MatchView>,
     mut players: Query<(
         &Player,
@@ -1277,8 +1316,8 @@ fn tick_anims(
         if launching && id == conker_anim::id::JUMP {
             req.rate = 1.3;
         }
-        let side = combat.map_or(Side::default(), |c| c.side);
-        anim.0.tick(req, clips.of(side).duration(id));
+        let body = combat.map_or(Side::default() as usize, body);
+        anim.0.tick(req, clips.of(body).duration(id));
         anim.1 = p.speed_percent;
     }
 }
@@ -1542,7 +1581,7 @@ mod tests {
             };
             Fighter::new(&place, 0, 5)
         };
-        let arena = MatchArena::new(&[], 0x2D).0;
+        let arena = MatchArena::new(&[], 0x2D, &[]).0;
         let m = known_match(9, 2, at(2.0), [(0, at(0.0)), (2, at(-1.0))], &[], &arena);
         assert_eq!((m.tick, m.players.len()), (9, 3));
         assert_eq!(m.players[0].body.pos[0], 0.0);
@@ -1593,6 +1632,61 @@ mod tests {
         c.anim = 0x7C; // twin guns firing
         assert_eq!(shown_anim(&p, Some(&c), true), 0x7C);
         assert_eq!(shown_anim(&p, None, false), u16::from(state::RUN));
+    }
+
+    /// The prediction rides 0x2B's lift 0 (a box, kind 8, to record 4; here record 1) on the tick its
+    /// player stands in it, as the server's ride: on the record (within its jitter), facing its way,
+    /// with a respawn's event (the camera's cut). Outside the box, no ride.
+    #[test]
+    fn the_prediction_rides_a_lift() {
+        let mut r = [0u8; 0x34];
+        for (k, v) in [-1063i16, -320, -4892, 262, 350, 100]
+            .into_iter()
+            .enumerate()
+        {
+            r[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        r[0x10..0x14].copy_from_slice(&45.8f32.to_be_bytes());
+        (r[0x15], r[0x17], r[0x1B]) = (8 << 2 | 2, 0x2B, 1);
+        let record = |position| SpawnPoint {
+            position,
+            byte_06: 0,
+            yaw: 175,
+            camera: [0.0; 3],
+            byte_14: 0,
+            byte_15: 0,
+        };
+        let arena = MatchArena::new(&[record([0; 3]), record([-2337, 1384, -3894])], 0x2B, &r);
+        let tick = |pos| {
+            let place = Placement {
+                index: 0,
+                pos,
+                facing: 0,
+                camera: [0.0; 3],
+            };
+            let f = Fighter::new(&place, 0, 5);
+            let (fighting, world) = (Fighting::new(0, &f), CollisionWorld::default());
+            let (m, i, events) = own_tick(
+                9,
+                false,
+                Settings::default(),
+                &f.body,
+                &fighting,
+                &Input::default(),
+                &Vec::new(),
+                &[],
+                &arena,
+                &world,
+            );
+            let rode = events
+                .iter()
+                .any(|e| matches!(e, Event::Respawn { at, .. } if at.index == 1));
+            (rode, m.players[i].body)
+        };
+        let (rode, b) = tick([-1060.0, -259.0, -4860.0]);
+        let off = Vec2::new(b.pos[0] + 2337.0, b.pos[2] + 3894.0).length();
+        assert!(rode && off <= 41.0 && b.facing == 175 << 8, "{off} {b:?}");
+        assert!(!tick([-827.0, -437.0, -4620.0]).0);
     }
 
     #[test]
