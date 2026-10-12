@@ -52,7 +52,9 @@ use serde::{Deserialize, Serialize};
 /// 16: War: Colors on scene 0x30: [`MatchView`]'s `colors`, `score_limit`, `scores`, `flags`
 /// ([`FlagView`]) and `fade`, [`Combat`]'s `flag` and `score`, `PlayerState::holding` (the
 /// carrier's speed is predicted) and the fighter's flag and poses (conker-rules' `Action::Pose`).
-pub const PROTOCOL_ID: u64 = 16;
+/// 17: the mounted guns on scenes 0x30 and 0x34: [`MatchView::guns`] ([`GunView`]), and the
+/// fighter's mount (conker-rules' `Fighter::gun`: the jump on, the seat and the trigger are predicted).
+pub const PROTOCOL_ID: u64 = 17;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -145,6 +147,26 @@ pub struct FlagView {
     pub pos: [f32; 3],
 }
 
+/// A mounted gun as the clients draw it (conker-rules' `gun`): model 138 at scale 0.5 at `pos`
+/// turned `yaw`, its barrels (joint 4) pitched `pitch` degrees, positive down.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct GunView {
+    pub pos: [f32; 3],
+    pub yaw: u16,
+    pub pitch: f32,
+    /// gun+0x232: 1 free, 2 a player jumping on, 3 manned, 4 firing, 5 the 30 frames after a
+    /// dismount, 0xB stopped (B or the overheat, 25 frames).
+    pub state: u8,
+    /// The gunner's slot, from the jump on.
+    pub gunner: Option<u16>,
+    /// Shots fired since the match (or the capture that recreated it) started, and the last one's
+    /// barrel (0 joint 5, `gun::muzzle`'s −side; 1 joint 7).
+    pub shots: u16,
+    pub barrel: u8,
+    /// s126+0x199: set by Z, cleared once let go with the lock off (the release's sound).
+    pub trigger: bool,
+}
+
 /// The match, on one replicated entity.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct MatchView {
@@ -194,6 +216,8 @@ pub struct MatchView {
     pub scores: [u16; 2],
     pub flags: [FlagView; 2],
     pub fade: Option<(bool, u16, u32)>,
+    /// The map's mounted guns (scene 0x30's two, 0x34's one; none elsewhere).
+    pub guns: Vec<GunView>,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

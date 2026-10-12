@@ -70,6 +70,9 @@ pub const GUN23_BULLET: DamageType = ty(0x31, 0x07, 120.0, 0.0, 4.0, 30, 0x80 | 
 pub const GRENADE_OUTER: DamageType = ty(0x2B, 0x02, 20.0, 70.0, 3.4, 1, 0x80 | 30, 0x3010);
 /// Grenade, inner blast (R 360): kills.
 pub const GRENADE_INNER: DamageType = ty(0x2C, 0x07, 0.0, 0.0, 0.0, 0, 0x80 | 30, 0x3010);
+/// The mounted gun's bullet (weapon 0x1B, entry 0x2C; V the RAM table, e1: 6 → 4, knocked back
+/// about 140, immune 30 frames after the stagger).
+pub const MG_BULLET: DamageType = ty(0x31, 0x02, 70.0, 25.0, 3.4, 5, 0x80 | 30, 0x0400);
 /// Pistol bullet.
 pub const PISTOL_BULLET: DamageType = ty(0x21, 0x02, 34.0, 0.0, 4.0, 30, 0, 0x2400);
 /// Class 117's attack 0x0F: melee 0x21's swing, 90 ahead, 46 up, radius 72 (at scale 0.5).
@@ -214,6 +217,8 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
             (anim::DEAD, 51),
         ],
         (0x31, true) => &[(anim::DEATH_BLAST, 35), (anim::DEATH_BLAST_FALL, 103)],
+        // The mounted gun's hit (V e1: 0x19C for 37 frames, flung back with two bounces).
+        (0x31, false) => &[(anim::DEATH_BLAST, 37)],
         // The flame's hit: the burning that follows is the movement's (`Fighter::burn`).
         (0x10, false) => &[(anim::FLAME_HIT, 5)],
         // Weapon 0x14's body hit: class 117's reaction 0x20 entry, 0xD3 for 30 frames (C).

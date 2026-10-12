@@ -651,6 +651,42 @@ pub fn root_motion(p: &mut PlayerState, world: &CollisionWorld) -> bool {
     true
 }
 
+/// One frame of the jump onto a mounted gun (conker-rules' `gun`; V m2, e1): the height by the
+/// velocity and gravity the launch set, x and z 0.2 of the way to `to` (the gun's origin, not its
+/// seat), the facing turned onto the move angle (at most 3072, a clockwise turn one short), and the
+/// wall routine as in the air: a ceiling stops the rise (V m2 72: 687, velocity 0).
+pub fn hop(p: &mut PlayerState, to: [f32; 2], world: &CollisionWorld) {
+    let old = p.pos;
+    p.pos[0] += (to[0] - old[0]) * 0.2;
+    p.pos[2] += (to[1] - old[2]) * 0.2;
+    integrate_y(p);
+    p.facing = turn_facing(p.facing, p.move_angle);
+    p.heading = heading_from_facing(p.facing);
+    p.y_vel = sweep_walls(p, world, old, p.y_vel);
+}
+
+/// A gunner on its mounted gun's seat (V m2, e1): there, facing and moving along the gun's `yaw`,
+/// still, its y velocity the ground's.
+pub fn sit(p: &mut PlayerState, seat: [f32; 3], yaw: u16) {
+    p.pos = seat;
+    (p.facing, p.move_angle, p.heading) = (yaw, yaw, heading_from_facing(yaw));
+    (p.airborne, p.y_vel, p.xz_speed, p.target_speed) = (false, GROUND_Y_VEL, 0.0, 0.0);
+}
+
+/// The jump back off a mounted gun on A (V m2 1601-1615): a standing jump at y velocity 26 and speed
+/// 30 along `angle`, A held (gravity 4 until let go, then 6.2), facing 0x1200 short of it until the
+/// landing (V: m1, m2 and c10m, all three at one gun yaw); [`step`] flies it from the next frame. I:
+/// the game's speed drops 0.875 a frame in this jump with the stick released (the remake's jump
+/// keeps it), and its first frame moves 17 (here none).
+pub fn leap(p: &mut PlayerState, angle: u16) {
+    p.state = state::JUMP;
+    (p.airborne, p.jumped, p.jump_held, p.turning) = (true, true, true, false);
+    (p.air_frames, p.lock, p.timer) = (1, 0, 0);
+    (p.y_vel, p.gravity, p.xz_speed, p.move_angle) = (26.0, GRAVITY_HELD, 30.0, angle);
+    p.facing = angle.wrapping_sub(0x1200);
+    p.heading = heading_from_facing(p.facing);
+}
+
 /// Advances the player by one frame (V for the rules tagged in this module).
 pub fn step(p: &mut PlayerState, input: &Input, world: &CollisionWorld) {
     step_among(p, input, world, Side::default(), &[]);

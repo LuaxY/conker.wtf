@@ -132,6 +132,9 @@ pub struct Body {
     pub stunned: bool,
     /// The pad's buttons (a human's: query 0xED cuts the capture's freeze short).
     pub buttons: u16,
+    /// s126+0x16C, +0x170: the scope's yaw and pitch while it is open (a bot on a mounted gun aims
+    /// it with its stick, [`World::attack`]).
+    pub scope: Option<(f32, f32)>,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -169,6 +172,8 @@ pub struct World<'a> {
     /// The script's level-start entry runs: `obj` only looks a flag up (it appears with the
     /// script's own create, 300 frames in: I, the objects stand unchanged in RAM before, e1).
     pub starting: bool,
+    /// Each mounted gun's gunner (a match slot; `conker_rules::gun`), by the gun's index.
+    pub gunners: Vec<Option<usize>>,
 }
 
 impl Host for World<'_> {
@@ -279,7 +284,8 @@ impl World<'_> {
             }
             // Colors (0xBB): `obj(0x20uu)` creates the flag of scene uid uu and answers its handle;
             // `obj2` destroys it. The mounted guns (uids 0x13, 0x14), destroyed and recreated after
-            // each capture, are not in the remake (I: answered as their handles were).
+            // each capture: the create brings gun uid − 0x13 back afresh ([`Effect::Gun`]; I: answered
+            // as their handles were).
             (3, 2) => match (colors::FLAGS.iter()).position(|f| usize::from(f.uid) == index(h)) {
                 Some(k) => {
                     if !self.starting {
@@ -287,7 +293,12 @@ impl World<'_> {
                     }
                     0x2000 | i32::from(colors::FLAGS[k].handle)
                 }
-                None if matches!(index(h), 0x13 | 0x14) => h - 1,
+                None if matches!(index(h), 0x13 | 0x14) => {
+                    if !self.starting {
+                        self.effects.push(Effect::Gun(index(h) - 0x13));
+                    }
+                    h - 1
+                }
                 None => self.unknown(native, 2, -1),
             },
             (4, 2) => match flag(h) {
@@ -328,6 +339,10 @@ impl World<'_> {
             (1, 4) => 1,
             // `func_15083E0C`: the object index of a scene uid (Colors' guns, 0x13 and 0x14).
             (2, 0xB7) => index(h) as i32 - 1,
+            // A mounted gun's +0x13C: its gunner (a participant) + 100, else 0 (`func_150BDB70`, C).
+            (2, 0xBC) if gun(h) => (self.gunners.get(index(h) - 0x12).copied().flatten())
+                .and_then(|s| self.slots.iter().position(|&x| x == s))
+                .map_or(0, |p| p as i32 + 100),
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
@@ -1307,6 +1322,38 @@ impl World<'_> {
         let to = conker_sim::movement::atan2_u16(-dz, dx);
         let to_deg = wrap360(f32::from(to) * 0.005_493_164);
         let n = &mut self.npcs[p];
+        if weapon == 0x1B {
+            // The mounted gun: the AI turns its scope with the stick, 8 a degree off the aim point's
+            // yaw (±90) and off its pitch from the eye, 67.5 up (±30, up looks down), and holds Z
+            // once both are within about 4° and it sees the target; R always (C). Z then stays
+            // held while it fights on (the pad's hold), so the gun overheats and fires again as
+            // the lock ends (V b30).
+            let wrap180 = |a: f32| {
+                let a = wrap360(a);
+                if a > 180.0 { a - 360.0 } else { a }
+            };
+            let (yaw, pitch) =
+                (b.scope).unwrap_or((wrap360(f32::from(b.facing) * 0.005_493_164), 0.0));
+            let off = wrap180(yaw - to_deg);
+            let ay = g.f32(g::AIM_Y + o);
+            let ay = ay + ((ty - jz as f32) - ay) * rate;
+            g.set_f32(g::AIM_Y + o, ay);
+            let rise = b.pos[1] + 67.5 - ay;
+            let target = wrap180(
+                f32::from(conker_sim::movement::atan2_u16(rise, d.max(1.0))) * 0.005_493_164,
+            );
+            let x = (off * 8.0).clamp(-90.0, 90.0);
+            let y = (wrap180(wrap180(pitch) - target) * 8.0).clamp(-30.0, 30.0);
+            n.stick = Some([x as i8, -y as i8]);
+            if (1.5 * x.hypot(y) - 20.0).max(0.0) - 80.0 < -50.0
+                && g.get(g::SEES, p) & (0x10001 << t) != 0
+            {
+                n.held |= 0x2000;
+            }
+            n.held |= 0x10;
+            n.hold = 1;
+            return !(-45.0..=45.0).contains(&off);
+        }
         let yaw = n
             .aim_yaw
             .unwrap_or(wrap360(f32::from(b.facing) * 0.005_493_164));
@@ -1513,6 +1560,7 @@ mod tests {
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
+            gunners: Vec::new(),
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1571,9 +1619,13 @@ mod tests {
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
+            gunners: vec![None, Some(1)],
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
+        // The mounted guns' +0x13C: gun 1 (0x2013) manned by slot 1, participant 1.
+        assert_eq!(q(&mut w, &[0x2012, 0xBC]), 0);
+        assert_eq!(q(&mut w, &[0x2013, 0xBC]), 101);
         assert_eq!(q(&mut w, &[0x4000, 6, 0x2000]), 1);
         assert_eq!(q(&mut w, &[0x4000, 6, 0x2001]), 0);
         assert_eq!(q(&mut w, &[0x4000, 0x10]), 1);

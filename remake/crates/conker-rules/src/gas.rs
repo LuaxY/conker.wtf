@@ -195,6 +195,10 @@ pub enum Effect {
     Respawn(usize),
     /// `command(0x50BB, 0x12, 0, 0, 0, n, out)`: the screen fades out (to black) or in, over n VIs.
     Fade(bool, u16),
+    /// The capture's reset (0xBB at 0x458C): `obj2` destroys both mounted guns, then `obj(0x2013)`
+    /// and `obj(0x2014)` create gun g (`crate::gun::places`) afresh: free, at its home yaw, level,
+    /// its gunner thrown off.
+    Gun(usize),
 }
 
 #[cfg(test)]

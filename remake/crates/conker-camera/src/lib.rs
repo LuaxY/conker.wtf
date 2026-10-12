@@ -149,6 +149,9 @@ pub struct PlayerView {
     /// 0x100 and 0x200 that would let it through stay clear in multiplayer (V camera4). 0 in every
     /// trace.
     pub attached: bool,
+    /// On a mounted gun (weapon 0x1B, with [`attached`](Self::attached)): its origin (gun+0x2C). The
+    /// scope's eye is then the gun's ([`gun_eye`]), turned with the player's facing (the gun's yaw).
+    pub gun: Option<[f32; 3]>,
 }
 
 impl PlayerView {
@@ -172,6 +175,7 @@ impl PlayerView {
             kind: 0,
             busy: false,
             attached: false,
+            gun: None,
         }
     }
 
@@ -190,6 +194,26 @@ impl PlayerView {
             || (self.stunned && !aims_with_body(weapon))
             || (self.kind == 1 && 15.0 < self.speed)
     }
+}
+
+/// The mounted gun's weapon id (`struct126+0x78` while on one).
+pub const GUN: u8 = 0x1B;
+
+/// The mounted gun's eye (`func_1512623C`: its joint 4's matrix × (0, 116, 130), C), for the gun at
+/// `origin` turned `yaw` (u16 angle) with its barrels pitched `pitch` degrees (positive down): joint 4,
+/// the barrels' pivot, sits 61.42 ahead and 52.265 up (the model's (0, 104.53, 122.84) at scale 0.5),
+/// the eye (0, 58, 65) from it. V m2: level, origin + (126.42 ahead, 110.27 up), to the hundredth;
+/// pitched, within 4 (I: the game's eye also lags the gun's turn a frame, its last matrix).
+pub fn gun_eye(origin: [f32; 3], yaw: u16, pitch: f32) -> [f32; 3] {
+    let (pc, ps) = (cos(pitch * DEG_TO_RAD), sin(pitch * DEG_TO_RAD));
+    let ahead = 61.42 + 65.0 * pc + 58.0 * ps;
+    let up = 52.265 + 58.0 * pc - 65.0 * ps;
+    let a = f32::from(yaw) * (360.0 / 65536.0) * DEG_TO_RAD;
+    [
+        origin[0] + ahead * cos(a),
+        origin[1] + up,
+        origin[2] - ahead * sin(a),
+    ]
 }
 
 /// `obj+0x40` as the game derives it from the facing (V: equal to the bit on every traced frame
@@ -327,6 +351,42 @@ pub struct Scope {
     /// set by a new weapon or by the stick moving outside the scope).
     pub weapon: u8,
     pub reset: bool,
+}
+
+impl Scope {
+    /// One frame of a bot's scope (`func_151279A0`, C), which has no camera: it opens level along
+    /// `heading - 90`, then the AI's virtual stick (s126+0x85, +0x86) moves the targets 0.025 degrees a
+    /// unit (stick right turns right, up looks down), the pitch within ±80, the springs as a human's.
+    pub fn steer(&mut self, heading: f32, stick: [i8; 2]) {
+        if !self.on {
+            let yaw = wrap360(heading - 90.0);
+            *self = Self {
+                on: true,
+                yaw,
+                yaw_target: yaw,
+                ..Self::default()
+            };
+        }
+        let k = 0.025;
+        self.yaw_target = wrap360(self.yaw_target - f32::from(stick[0]) * k);
+        self.pitch_target = (self.pitch_target + f32::from(stick[1]) * k).clamp(-80.0, 80.0);
+        spring_angle(
+            &mut self.yaw,
+            self.yaw_target,
+            &mut self.yaw_vel,
+            6.0,
+            8.0,
+            DT,
+        );
+        spring_angle(
+            &mut self.pitch,
+            self.pitch_target,
+            &mut self.pitch_vel,
+            6.0,
+            8.0,
+            DT,
+        );
+    }
 }
 
 /// How far weapon `weapon`'s scope zooms in, the least [`Scope::zoom`]`[0]` (`func_15126378`, C):
@@ -616,8 +676,19 @@ impl CameraState {
         if !s.on && stick != [0, 0] {
             s.reset = true;
         }
+        // The mounted gun's scope holds R itself and opens on the seat: its in-hand test is waived
+        // and its ground test is the gun's (`obj+0x28 == 0 || attached+0x28 == 0`).
+        let gun = w == GUN;
+        let buttons = if gun { buttons | R } else { buttons };
         let grounded = p.pos[1] == p.floor_y;
-        if !s.on && scoped(w) && buttons & R != 0 && p.in_hand && grounded && !p.stunned {
+        let in_hand = p.in_hand || matches!(w, GUN | 0x1F | 0x29);
+        if !s.on
+            && scoped(w)
+            && buttons & R != 0
+            && in_hand
+            && (grounded || p.attached)
+            && !p.stunned
+        {
             // It ends R's aim camera (func_151239CC with slot 1).
             if self.aim.on {
                 (self.volume, self.dist_target, self.height_target) =
@@ -633,7 +704,8 @@ impl CameraState {
                 };
                 (s.weapon, s.reset, s.zoom[0]) = (w, true, (0.0 - far) * share + far);
             }
-            if s.reset {
+            // The gun's scope always opens along the facing, level (V m2 84).
+            if s.reset || gun {
                 s.yaw_target = wrap360(p.heading - 90.0);
                 (s.pitch_target, s.pitch, s.yaw_vel, s.pitch_vel) = (0.0, 0.0, 0.0, 0.0);
                 (s.reset, s.yaw) = (false, s.yaw_target);
@@ -649,16 +721,30 @@ impl CameraState {
             (s.on, self.cut) = (false, true);
             return false;
         }
-        let eye = [p.pos[0], p.pos[1] + p.head * 0.75, p.pos[2]];
-        let open = (s.zoom[0] / far).clamp(0.0, 1.0);
-        let reach = 1.0 / ((90.0 - 25.0) * open + 25.0);
-        let reach = reach * reach;
-        let turn = |v: i8| {
-            let v = f32::from(v);
-            (if v < 0.0 { -1.0 } else { 1.0 }) * (v * v * reach)
+        let eye = match p.gun.filter(|_| gun) {
+            Some(origin) => gun_eye(origin, p.facing, s.pitch),
+            None => [p.pos[0], p.pos[1] + p.head * 0.75, p.pos[2]],
         };
-        s.yaw_target = wrap360(s.yaw_target - turn(stick[0]));
-        s.pitch_target = (s.pitch_target + turn(stick[1])).clamp(-80.0, 80.0);
+        let open = (s.zoom[0] / far).clamp(0.0, 1.0);
+        // The gun turns slower, a quarter (yaw) and half (pitch) of reach 19 to 31, at most 3 degrees a
+        // frame, its pitch within [-60, 50] (C; V m2: full stick 3 and 3, h1: half 0.8006 and 1.6011).
+        let (near, wide, pitches) = match gun {
+            true => (19.0, 31.0, (-60.0, 50.0)),
+            false => (25.0, 90.0, (-80.0, 80.0)),
+        };
+        let reach = 1.0 / ((wide - near) * open + near);
+        let reach = reach * reach;
+        let turn = |v: i8, share: f32| {
+            let v = f32::from(v);
+            let step = (if v < 0.0 { -1.0 } else { 1.0 }) * (v * v * reach);
+            if gun {
+                (step * share).clamp(-3.0, 3.0)
+            } else {
+                step
+            }
+        };
+        s.yaw_target = wrap360(s.yaw_target - turn(stick[0], 0.25));
+        s.pitch_target = (s.pitch_target + turn(stick[1], 0.5)).clamp(pitches.0, pitches.1);
         spring_angle(&mut s.yaw, s.yaw_target, &mut s.yaw_vel, 6.0, 8.0, DT);
         spring_angle(&mut s.pitch, s.pitch_target, &mut s.pitch_vel, 6.0, 8.0, DT);
         if w != 0x16 && w != 0x0C && buttons & 0xC != 0xC {
@@ -1642,6 +1728,40 @@ mod tests {
             flat,
         );
         assert!(!cam.scope.on && cam.aim.on);
+    }
+
+    /// The mounted gun's scope (V m2): open without R or the hand, level along the facing, from the
+    /// gun's eye; full stick turns 3° a frame either way, the yaw all the way round, the pitch
+    /// within [-60, 50]; half stick (34) 0.8006 and 1.6011 (V h1).
+    #[test]
+    fn the_gun_scope_opens_on_the_seat_and_clamps_its_pitch() {
+        let p = PlayerView {
+            weapon: GUN,
+            in_hand: false,
+            attached: true,
+            gun: Some([170.0, 544.0, 5938.0]),
+            facing: 15872,
+            heading: heading_from_facing(15872),
+            ..spawn_player()
+        };
+        let mut cam = settled();
+        cam.step_pad(&p, 0, [0, 0], &mut FloorOnly(flat));
+        assert!(cam.scope.on && cam.scope.pitch == 0.0);
+        assert_eq!(cam.eye, gun_eye([170.0, 544.0, 5938.0], 15872, 0.0));
+        let yaw = cam.scope.yaw_target;
+        cam.step_pad(&p, 0, [34, 34], &mut FloorOnly(flat));
+        assert!((wrap360(yaw - cam.scope.yaw_target) - 0.8006).abs() < 1e-3);
+        assert!((cam.scope.pitch_target - 1.6011).abs() < 1e-3);
+        for _ in 0..200 {
+            cam.step_pad(&p, 0, [75, 75], &mut FloorOnly(flat));
+        }
+        assert_eq!(cam.scope.pitch_target, 50.0);
+        for _ in 0..200 {
+            cam.step_pad(&p, 0, [75, -75], &mut FloorOnly(flat));
+        }
+        assert_eq!(cam.scope.pitch_target, -60.0);
+        // 400 frames at 3° (less the half-stick frame's 0.8): round and round.
+        assert!((wrap360(yaw - cam.scope.yaw_target) - wrap360(0.8006 + 1200.0)).abs() < 0.01);
     }
 
     #[test]

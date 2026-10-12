@@ -734,3 +734,132 @@ fn colors_bots_take_a_flag() {
     let (t, carrier) = taken.expect("a flag taken");
     assert!(carrier < 7, "by a bot, at {t}: slot {carrier}");
 }
+
+/// The mounted guns against the oracle (`lab/research/mp-original/mounted-gun.md` §5.4), each P1
+/// where the run's poke put it (on the floor). m2 (gun B, scene 0x30): P1 jumps on at read 61
+/// (the game's push-out of the gun's body first, which the remake lacks): 0x32 for 19 rows, then 0x38,
+/// the ceiling stops the rise at row 72 (687, velocity 0), the seat at 83, 0x1A1 from 84. e1 (scene
+/// 0x34): the jump from read 41 lands at 66; seated, 12° down, Z from read 100 hits P2 300 ahead
+/// once in 60 frames, on the first shot (6 → 4, 0x19C), and flings it about 140 back.
+#[test]
+fn mounted_guns_m2_and_e1() {
+    use conker_rules::game::Event;
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, gun};
+    use conker_sim::movement::{BUTTON_Z, Input};
+    let Some(rom) = rom() else { return };
+    let arena = Arena {
+        spawns: Vec::new(),
+        pickups: Vec::new(),
+    };
+    let place = |pos, facing| Placement {
+        index: 0,
+        pos,
+        facing,
+        camera: [0.0; 3],
+    };
+    let near = |a: [f32; 3], b: [f32; 3], d: f32| a.iter().zip(b).all(|(x, y)| (x - y).abs() < d);
+    // Script 0xBB walks a bot to node 3 or 0x50 for gun 0x2012 or 0x2013 (its +0x13C at
+    // G+0x25AC[0] or [1]): guns A and B, [`gun::places`]' order.
+    let graph = conker_bots::nav::Graph::parse(
+        &rom.asset(&[0x19, 0x30]).unwrap(),
+        &rom.asset(&[0x0C, 0x30, 5]).unwrap(),
+    )
+    .unwrap();
+    for (id, g) in [(3, 0), (0x50, 1)] {
+        let (n, at) = (graph.at(graph.by_id(id)), gun::places(0x30)[g].pos);
+        let d = ((n[0] - at[0]).powi(2) + (n[2] - at[2]).powi(2)).sqrt();
+        assert!(d < 400.0, "node {id:#x} {n:?}, gun {g} {at:?}");
+    }
+    let world = world(&rom, 0x30);
+    let players = vec![
+        Fighter::new(&place([170.0, 544.0, 5990.0], 50176), 0, 61),
+        Fighter::new(&place([-436.0, -914.41, -5917.0], 17152), 1, 61),
+    ];
+    let mut m = Match::new(&arena, players, Rng::default(), 61);
+    m.guns = gun::spawn(0x30);
+    let mut rows = std::collections::BTreeMap::new();
+    while m.tick <= 84 {
+        let t = m.tick;
+        m.step(&arena, &[Input::default(); 2], &world);
+        let f = &m.players[0];
+        rows.insert(
+            t,
+            (f.body.pos, f.body.y_vel, f.anim, f.gun.map(|g| g.state)),
+        );
+    }
+    assert_eq!(
+        (rows[&61].1, rows[&61].2, rows[&61].3),
+        (44.0, 0x32, Some(gun::LAUNCH))
+    );
+    assert!((rows[&62].0[1] - 565.12).abs() < 0.01, "{:?}", rows[&62]);
+    assert!(
+        (rows[&72].0[1] - 687.0).abs() < 0.5 && rows[&72].1 == 0.0,
+        "{:?}",
+        rows[&72]
+    );
+    assert_eq!(
+        (rows[&79].2, rows[&80].2, rows[&82].3),
+        (0x32, 0x38, Some(gun::LAUNCH))
+    );
+    assert_eq!(
+        (rows[&83].2, rows[&83].3, rows[&84].2),
+        (0x38, Some(gun::IDLE), 0x1A1)
+    );
+    assert!(
+        near(rows[&83].0, [166.91, 616.14, 6000.88], 0.01),
+        "{:?}",
+        rows[&83]
+    );
+
+    let world = self::world(&rom, 0x34);
+    let players = vec![
+        Fighter::new(&place([2465.0, 645.0, 500.0], 65280), 0, 41),
+        Fighter {
+            immune: 0,
+            ..Fighter::new(&place([2216.0, 645.0, 749.0], 16640), 1, 41)
+        },
+    ];
+    let mut m = Match::new(&arena, players, Rng::default(), 41);
+    m.guns = gun::spawn(0x34);
+    let mut hits = Vec::new();
+    while m.tick <= 170 {
+        let t = m.tick;
+        if m.players[0].seated() {
+            // Read 100's scope: the stick held up at 75-78 pitched it 12° down (gun+0x2E4 = 120).
+            (m.players[0].body.scope_yaw, m.players[0].scope_pitch) = (Some(225.0), 12.0);
+        }
+        let z = if (101..=160).contains(&t) {
+            BUTTON_Z
+        } else {
+            0
+        };
+        let inputs = [
+            Input {
+                buttons: z,
+                ..Input::default()
+            },
+            Input::default(),
+        ];
+        for e in m.step(&arena, &inputs, &world) {
+            if let Event::Hit {
+                victim: 1, damage, ..
+            } = e
+            {
+                hits.push((t, damage, m.players[1].anim));
+            }
+        }
+        if t == 65 || t == 66 {
+            assert_eq!(m.players[0].seated(), t == 66);
+        }
+    }
+    assert!(near(m.players[0].body.pos, [2472.52, 717.14, 492.48], 0.01));
+    assert!(m.guns[0].shots >= 8, "{}", m.guns[0].shots);
+    assert_eq!((hits, m.players[1].health), (vec![(101, 2, 0x19C)], 4));
+    let p = m.players[1].body.pos;
+    let d = ((p[0] - 2216.0).powi(2) + (p[2] - 749.0).powi(2)).sqrt();
+    assert!((110.0..170.0).contains(&d), "{d}");
+    eprintln!(
+        "e1: {} shots (V 13), P2 knocked {d:.1} (V 140.7)",
+        m.guns[0].shots
+    );
+}

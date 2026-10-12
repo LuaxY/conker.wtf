@@ -104,6 +104,8 @@ pub struct Npc {
     /// struct126 +0x16C: the aim yaw in degrees while R is held, and the point aimed at this frame.
     pub aim_yaw: Option<f32>,
     pub aim: Option<[f32; 3]>,
+    /// s126+0x85, +0x86: the virtual stick a mounted gun's scope turns with ([`crate::Bots`]).
+    pub stick: Option<[i8; 2]>,
     /// +0x22C bit 0x200: placed since the AI's last frame (the match start, a respawn, a lift). The
     /// placement (`func_15085430`) sets it; the AI's frame takes it: state 0 and a replan (V, the
     /// oracle on 0x30: p6 lifted at 323, cleared with the state at 324).
@@ -136,6 +138,7 @@ impl Default for Npc {
             pickup: 64,
             aim_yaw: None,
             aim: None,
+            stick: None,
             placed: false,
         }
     }

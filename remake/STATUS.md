@@ -1,5 +1,57 @@
 # Status after wave 6 (2026-10-10)
 
+## Mounted guns: the gameplay (2026-10-12)
+**The mounted machine guns now work on the server: two on map 30 (Deathmatch and War: Colors) and one on 34. A player
+who touches a free gun jumps onto its seat and turns the gun with the gun's own scope. Z fires the two barrels and
+overheats the gun after 300 frames; B stops it; A jumps off. Dying throws the gunner off. Bots mount, aim, hold fire
+and overheat as in the oracle's b30. In Colors the guns come back after each capture. The client draws none of it yet.**
+Research: `../lab/research/mp-original/mounted-gun.md` (§2-§5; runs m2, e1, e2, b30, b34).
+
+| Part | What |
+|---|---|
+| Rules | New `gun.rs`: `places`/`spawn` per scene; `Gun` (server-only, `Match.guns`: yaw, pitch, fire timer, barrel, shots, the dismount's wait); `Mount` (`Fighter.gun`, predicted: state, timer, budget 600, lock 150, trigger; `step(z, b)`); `seat`, `muzzle`, `barrel_dir`, `touches`. `game.rs` covers the whole cycle. **Touch:** state 1, no gunner, alive, no stun, scope or flag, `\|dxz\| < 44 + radius`. **Launch:** y-vel 44, gravity 3.2, immune 255, homing on the seat's xz. **Seat:** taken once falling below the origin + 50. **Seated:** the gun's yaw follows the scope; Z/B/A. **Fire:** the timer drops 1 a frame and fires a shot each time it goes below 0, then gains 4 + 4·rand; the barrels alternate. A human's shots go to the point 333 along the scope from `gun_eye`; a bot's go along the barrel, toed in. **A:** a leap to yaw + 0x8000 + 1024 with immune 20, and the gun stays in state 5 for 30 frames. **Hits:** the gunner stays seated unless the hit kills (reaction 0x2E, 0x17E) or knocks up faster than 30. `Effect::Gun(k)`: the capture's recreate. `damage::MG_BULLET` (entry 0x2C, reaction 0x31: 2 HP, 0x19C for 37 frames). `Bullet::aimed` (3-D, speed 252) |
+| Sim | `movement::{hop, sit, leap}` (the launch's homing, the seat, the jump back; `leap` also sets the facing to angle − 0x1200) |
+| Camera | Weapon `GUN` (0x1B). The scope opens by itself on the seat, with no in-hand test (`attached`). Rates 19 (yaw) and 31 (pitch), shares 0.25/0.5 clamped ±3; pitch clamped to [−60, 50] with no yaw limit; `spring_angle(6, 8)`. Also `gun_eye(origin, yaw, pitch)` and `Scope::steer(heading, stick)` |
+| Server | `PROTOCOL_ID` 17. The guns spawn at the match start, `MatchView.guns` is published every tick, and a `GUN t=… gun k state a -> b slot s` line is logged on each change |
+| Bots | `obj` creating uid 0x13/0x14 → `Effect::Gun`. Query 0xBC on 0x2012/0x2013 returns the gunner's participant + 100. The 0x1B attack (`func_1508CAD8`): the stick is 8 a degree off the aim (±90 yaw, ±30 pitch); Z once within about 4° and seen; R always; hold 1, so Z stays held while fighting. A seated shooter's shots make no noise (see I) |
+
+**Handoff for the client:**
+- **`MatchView.guns: Vec<GunView>`**, in `gun::places(scene)` order (0x30: A south, B north; 0x34: one); empty on other maps.
+  - `pos: [f32; 3]`: the origin (model 138 at 0.5).
+  - `yaw: u16`: the turn (forward = (cos a, −sin a) in x, z).
+  - `pitch: f32`: the degrees `joint_04` pitches down (positive down, ≈ −60..50 while manned, then decaying to 0 by 1/8 a frame).
+  - `state: u8`: 1 free, 2 a player jumping on, 3 manned, 4 firing, 5 the 30 frames after A, 0xB stopped (B or overheat, 25 frames). The pack's `On::Gun { from, to }` cues key on these changes. Play the fire clip, the belt scroll and the fire loop while it is 4.
+  - `gunner: Option<u16>`: the slot, from the jump (state 2) until A or death.
+  - `shots: u16`: counts every bullet. On each new one, flash `barrel` (0 = `joint_05` = `gun::muzzle(.., 0)`, on the −(sin a, cos a) side; 1 = `joint_07`). The pack draws barrel 0's HUD flash at x 205 (right). Check which side the world shows it on.
+  - `trigger: bool`: on from Z until Z is let go with the lock off. Its fall is the release (`On::GunStop`, 0x618-0x61A, at the gunner).
+- **The gunner** (predicted): `Fighter.gun: Option<gun::Mount>` (`gun` index, `at` origin, `state`, `budget`, `lock`, `trigger`) and `Fighter::seated()`. `Fighter::camera_view` gives weapon `conker_camera::GUN`, `attached: true` and `gun: Some(origin)`, so the scope opens by itself. The first-person eye is `conker_camera::gun_eye(origin, yaw, pitch)`, from the scope's yaw/pitch. The seated frame turns with `body.scope_yaw`/`scope_pitch` from `take_camera`. Draw the local gunner's gun from the scope, not from the lagging `GunView` (I). Use the gun HUD (`Hud.gun`) instead of the scope's.
+- **Clips:**
+  - Launch: `JUMP` 0x32 for 19 frames (the game plays it at 1.3; `request` gives 1.0), then `FALL` 0x38 until the seat.
+  - Seated: 0x1A1 (`anim::GUN_SEATED`), and 0x1A4 (`GUN_FIRING`) while the gunner's state is 4.
+  - Hits: an MG bullet plays 0x19C for 37 frames. Other non-lethal hits play their own hit clip on the seat (V e2: 0x11D). A death on the seat is 0x17E.
+  - The jump off is `JUMP`. Seat position: `gun::seat(origin, yaw)`.
+  - Sounds per the pack's handoff below (no sound per shot).
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `gun.rs` `m2_trigger` | m2's Z/B timeline row for row. Carry-over: Z 101-110 → state 4 to 130. Burst 171-230 → 3 at 250, budget 460. B at 291 → 0xB for 25 frames, lock 150. Overheat at 795 (budget 2 → 0xB, 25 frames, lock 0 at 870, the trigger falls then) |
+| `rom.rs` `mounted_guns_m2_and_e1` | m2: launch at 61 (y-vel 44, 0x32); top at 72; 0x38 at 80; seated at 83 at (166.91, 616.14, 6000.88); 0x1A1 at 84. e1: seated at 66; Z 101-160 gives 13 shots (V 13); the hit at 101 is 0x19C on P2, 6 → 4 HP; knocked 143.4 (V 140.7) |
+| `game.rs` `a_mounted_gun_takes_one_gunner` | a manned gun refuses a second player; 30 frames of Z give 4-8 shots; A gives state 5 for 30 frames, and then the other player gets on; a lethal hit detaches (gun FREE, 0x17E) |
+| camera `the_gun_scope_opens_on_the_seat_and_clamps_its_pitch` | opens without R; pitch clamped at −60/50; half stick at the half rates |
+| `bots.sh` (BOTS=5, 150 s) | `MAP=34`: 50 hits / 28 pickups (HEAD 50/28); `MAP=30`: 34/18 (HEAD 34/18); both event lists identical to HEAD's by read. No bot came near a gun in 150 s (b34's first mount was at read 1647) |
+| `bots.sh` `MAP=30 BOTS=7` 300 s | a bot jumps on gun A at 943, seated at 965 (22 frames; b30: 4895 → 4917), fires from 2910 (two 2-HP hits), is killed on it at 3217 and the gun goes 4 → 1 with no state 5 (V b30/b34) |
+| `bots.sh` `MODE=colors MAP=30 BOTS=6` 330 s | the gunner (slot 3) is on gun A at 664, and from 938 runs b30's cycle exactly: 4 for 299 frames, 0xB for 25, 3 for 50, 4 again (22 overheats; 7 hits). The capture at 3529 recreates both guns, and it is back on at 3980. Takes 2258/3162, capture 3439 (last runs 2171/3007, 3351/6630) |
+| Total War (`MAP=2d`) | unchanged: with the same start-tick parity as HEAD's run, the events are identical (22 hits, 18 pickups). Runs whose match starts on the other parity give 26/22 with or without this work |
+| `bun run test`, `bun run check`, `cargo test -p conker-camera`, wasm32 clippy of conker-client | pass |
+
+**Not done or I:**
+- **Seat and launch:** no push-out from the gun's body; the touch (radius 44, −90/+112) is I. The seat ignores the pitch (V m2: it moves a few units). The leap lacks its first-frame 17 and the 0.875 brake.
+- **Bots:** they don't lead (skill ≥ 3 not ported). A seated shooter's shots are not heard: in 0xBB/0xBD the noise state presses A off the seat, but b34's bot fired 144 frames on (V; no noise call found in `func_150FC614`'s chain, so I).
+- **Server and client:** the fire is server-only, so the gunner's shot counts reach the client late, and `Fighter.shots` may cause rollbacks.
+- **Hits and resets:** e1's knock angle (V 210.4°) vs the bullet direction's (~220°). A hurt gunner's trigger runs down with no buttons. `Effect::Gun` drops the gunner where the seat was (I).
+- **Logs:** the capture's recreate isn't in the `GUN` log (see `COLORS … Gun(k)`).
+- **Runs:** `bots.sh` binds port + 1 for tokens, so parallel runs need ports two apart (5970, 5972, …).
+
 ## Mounted guns: the pack (2026-10-12)
 **The pack now has what the client needs for the mounted machine guns on maps 30 and 34: the gun model with its fire
 loop, the gunner's sight, tapes, handles, zoom bar and muzzle flash, and the guns' sounds. Nothing uses them yet.**

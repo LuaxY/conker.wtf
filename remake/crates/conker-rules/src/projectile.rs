@@ -3,7 +3,7 @@
 //! against the static triangles and the player's cylinder.
 
 use conker_sim::collision::{Body, CollisionWorld, Sweep, Triangle};
-use conker_sim::movement::cos_sin;
+use conker_sim::movement::{atan2_u16, cos_sin};
 
 use crate::damage::{DamageType, Hitbox};
 use crate::weapon::{BULLET_RANGE, BULLET_SPEED};
@@ -191,13 +191,15 @@ pub fn hits_ellipsoid(
     (t <= len).then_some(t)
 }
 
-/// A bullet (the pool updated by `func_151C2734`): 300 units a frame along the shooter's facing.
+/// A bullet (the pool updated by `func_151C2734`): 300 units a frame along the shooter's facing, or
+/// the mounted gun's 252 along its aim ([`Bullet::aimed`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bullet {
     pub pos: [f32; 3],
-    /// Velocity per frame (+0x114) and its direction.
+    /// Velocity per frame (+0x114), its direction and length (+0x1A8).
     pub vel: [f32; 3],
     pub dir: [f32; 3],
+    pub speed: f32,
     /// Frames left (+0x19C): the distance to the wall it will hit, over the speed.
     pub life: f32,
     /// The knock-back angle it gives (`atan(direction) − 0x4000 | 1`).
@@ -220,7 +222,34 @@ impl Bullet {
             pos: muzzle,
             vel: dir.map(|d| d * BULLET_SPEED),
             dir,
+            speed: BULLET_SPEED,
             life: raycast(world, muzzle, dir, BULLET_RANGE) / BULLET_SPEED,
+            angle: angle | 1,
+            owner,
+            kind,
+        }
+    }
+
+    /// A bullet from `muzzle` along the unit `dir` (any pitch) at `speed` a frame; its knock-back
+    /// angle is the direction's in xz.
+    pub fn aimed(
+        world: &CollisionWorld,
+        owner: usize,
+        muzzle: [f32; 3],
+        dir: [f32; 3],
+        speed: f32,
+        kind: DamageType,
+    ) -> Self {
+        let angle = match &world.acos {
+            Some(a) => a.angle(dir[0], -dir[2]),
+            None => atan2_u16(-dir[2], dir[0]),
+        };
+        Self {
+            pos: muzzle,
+            vel: dir.map(|d| d * speed),
+            dir,
+            speed,
+            life: raycast(world, muzzle, dir, BULLET_RANGE) / speed,
             angle: angle | 1,
             owner,
             kind,
@@ -229,7 +258,7 @@ impl Bullet {
 
     /// How far this frame's sweep reaches.
     pub fn reach(&self) -> f32 {
-        self.life.min(1.0) * BULLET_SPEED
+        self.life.min(1.0) * self.speed
     }
 
     /// The step after a sweep that hit nothing; false once spent.

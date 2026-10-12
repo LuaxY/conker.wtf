@@ -122,14 +122,14 @@ use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
-use conker_rules::{Arena, Placement, Rng, Spawn, place};
+use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side};
 use conker_sim::net::{
-    Collision, Combat, DEFAULT_PORT, FlagView, Join, MatchView, PROTOCOL_ID, Player, PlayerId,
-    ProtocolPlugin, Restart, Saw, map_scene, scene_world,
+    Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID, Player,
+    PlayerId, ProtocolPlugin, Restart, Saw, map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -385,6 +385,7 @@ fn main() {
     game.cavemen = game.setup.cavemen || scene == 0x3F;
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
+    game.m.guns = gun::spawn(usize::from(scene));
     app.add_observer(on_link)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
@@ -1248,6 +1249,7 @@ fn simulate(
         }
         game.m = Match {
             free: std::mem::take(&mut game.m.free),
+            guns: gun::spawn(usize::from(game.ai.scene)),
             ..Match::new(&game.arena, fighters, game.m.rng, t)
         }
         .with(game.setup.settings);
@@ -1326,7 +1328,8 @@ fn simulate(
                 | Effect::LetGo(_)
                 | Effect::Score(..)
                 | Effect::Respawn(_)
-                | Effect::Fade(..) => info!("COLORS t={t} {e:?}"),
+                | Effect::Fade(..)
+                | Effect::Gun(_) => info!("COLORS t={t} {e:?}"),
                 _ => {}
             }
         }
@@ -1359,6 +1362,13 @@ fn simulate(
     {
         if let (None, Some(c)) = (was.carrier, f.carrier) {
             info!("COLORS t={t} flag {k} taken by slot {c}");
+        }
+    }
+    for k in 0..game.m.guns.len() {
+        let (was, now) = (pre.gun_state(k), game.m.gun_state(k));
+        if was != now {
+            let by = game.m.gunner(k).or(pre.gunner(k));
+            info!("GUN t={t} gun {k} state {was:#x} -> {now:#x} slot {by:?}");
         }
     }
     for (i, f) in held {
@@ -1404,7 +1414,7 @@ fn tested_bullets(pre: &Match, events: &[Event], world: &CollisionWorld) -> Vec<
     let mut out: Vec<Bullet> = pre.bullets.iter().map(|b| b.1).collect();
     for e in events {
         if let &Event::Shot { player, pos } = e
-            && let Some(f) = pre.players.get(player)
+            && let Some(f) = pre.players.get(player).filter(|f| !f.seated())
             && let Some(Attack::Bullets { kind, .. }) = f.weapon().map(|w| w.attack)
         {
             out.push(Bullet::fire(world, player, pos, f.body.facing, kind));
@@ -1575,6 +1585,21 @@ fn publish(
             pos: f.pos,
         }),
         fade: m.colors.fade,
+        guns: (m.guns.iter().enumerate())
+            .map(|(k, g)| GunView {
+                pos: g.place.pos,
+                yaw: g.yaw,
+                pitch: g.pitch10 as f32 / 10.0,
+                state: m.gun_state(k),
+                gunner: m.gunner(k).map(|i| i as u16),
+                shots: g.shots,
+                barrel: g.last,
+                trigger: m
+                    .gunner(k)
+                    .and_then(|i| m.players[i].gun)
+                    .is_some_and(|g| g.trigger),
+            })
+            .collect(),
     });
 }
 

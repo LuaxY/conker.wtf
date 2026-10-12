@@ -177,6 +177,11 @@ pub mod combat {
     pub const FLAG_PLANT: u16 = 0x22D;
     pub const CHEER: u16 = 0x19A;
     pub const LOSE: u16 = 0x2E7;
+    /// The mounted gun's gunner (conker-rules' `gun`): seated (16 frames, looped) and while the gun
+    /// fires (6); the jump onto it plays [`crate::id::JUMP`] at rate 1.3 (V m1, m2, c10m; C
+    /// `func_15064A14`).
+    pub const GUN_SEATED: u16 = 0x1A1;
+    pub const GUN_FIRING: u16 = 0x1A4;
     /// Total War's gas mask put on (state 81) and taken off (state 78), at 3 ticks a frame (V e2:
     /// anim speed 3, clock 3 … 57 over the 19 frames the rules hold them).
     pub const MASK_ON: u16 = 0x151;

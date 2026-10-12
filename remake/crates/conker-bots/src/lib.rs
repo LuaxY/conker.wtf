@@ -27,6 +27,7 @@ pub mod npc;
 pub mod script;
 
 use brain::{Body, Unknown, World, g};
+use conker_camera::Scope;
 use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::game::{Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
@@ -100,8 +101,10 @@ pub struct Bots {
     forgiven: Vec<u16>,
     /// Per participant: the point it aims at this frame while R is held.
     aims: Vec<Option<[f32; 3]>>,
-    /// Per participant: its scope's yaw and pitch this frame ([`Bots::scopes`]).
+    /// Per participant: its scope's yaw and pitch this frame ([`Bots::scopes`]), and on a mounted
+    /// gun the scope its stick turns.
     scopes: Vec<Option<(f32, f32)>>,
+    guns: Vec<Scope>,
     noises: Vec<([f32; 3], f32)>,
     /// The trigger records and their switches ([`World::zones`]).
     zones: Vec<(CameraHint, bool)>,
@@ -140,6 +143,7 @@ impl Bots {
             forgiven: vec![0; n],
             aims: vec![None; n],
             scopes: vec![None; n],
+            guns: vec![Scope::default(); n],
             noises: Vec::new(),
             zones: (assets.triggers.as_chunks::<0x34>().0.iter())
                 .map(|r| {
@@ -267,8 +271,11 @@ impl Bots {
                         self.hit_by[v] = 0x80 | a as u8;
                     }
                 }
+                // Not a mounted gun's: its fire (`func_150FC614`) calls no noise (C, as far as
+                // read), and the gunner hearing its own would press A off the seat (0xBB/0xBD's
+                // noise state) where the oracle's b34 bot fired 144 frames on (V; I).
                 Event::Shot { player, .. } => {
-                    if let Some(f) = m.players.get(player) {
+                    if let Some(f) = m.players.get(player).filter(|f| !f.seated()) {
                         self.noises.push((f.body.pos, 900.0));
                     }
                 }
@@ -320,6 +327,7 @@ impl Bots {
                 effects: &mut effects,
                 flags: m.colors.flags,
                 starting: !self.started,
+                gunners: (0..m.guns.len()).map(|k| m.gunner(k)).collect(),
             };
             if !self.started {
                 self.started = true;
@@ -376,10 +384,10 @@ impl Bots {
                 self.npcs
                     .iter_mut()
                     .zip(&mut self.aims)
-                    .zip(&mut self.scopes),
+                    .zip(self.scopes.iter_mut().zip(&mut self.guns)),
             )
             .skip(self.humans);
-        for ((&slot, &b), ((n, aimed), scope)) in bots {
+        for ((&slot, &b), ((n, aimed), (scope, gun))) in bots {
             (*aimed, *scope) = (None, None);
             let view = View {
                 pos: b.pos,
@@ -407,6 +415,15 @@ impl Bots {
             *scope = aim
                 .filter(|_| matches!(b.drawn, 0x14 | 0x24 | 0x18))
                 .map(|a| look(b.pos, a, world));
+            // On a mounted gun, R opens the gun's scope (`func_151279A0`, C) and the AI's stick
+            // turns it (`brain::World::attack`); let go, it shuts.
+            let stick = n.stick.take();
+            if b.drawn == conker_camera::GUN && held & 0x10 != 0 {
+                gun.steer(b.heading, stick.unwrap_or_default());
+                *scope = Some((gun.yaw, gun.pitch));
+            } else {
+                *gun = Scope::default();
+            }
             let toward = aim.unwrap_or(steer.toward);
             let mut input = drive(b, toward, steer.speed, aim.is_some(), world);
             input.buttons = held | pressed;
@@ -447,6 +464,7 @@ impl Bots {
                     health: f.health,
                     item,
                     drawn: match f.drawn {
+                        _ if f.seated() => conker_camera::GUN,
                         _ if f.carrying => gas::CANISTER,
                         true => f.weapon.unwrap_or(0),
                         false => 0,
@@ -459,6 +477,7 @@ impl Bots {
                     place: places[s],
                     stunned: f.stun != 0,
                     buttons: f.buttons,
+                    scope: f.body.scope_yaw.map(|y| (y, f.scope_pitch)),
                 }
             })
             .collect()

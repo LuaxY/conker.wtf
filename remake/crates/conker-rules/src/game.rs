@@ -35,6 +35,7 @@ use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
 use crate::flame::{self, Burn};
 use crate::gas::{self, Effect, Gas};
+use crate::gun::{self, Gun, Mount};
 use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
@@ -319,6 +320,9 @@ pub struct Fighter {
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
     /// facing.
     pub scope_pitch: f32,
+    /// On a mounted gun ([`gun`]): jumping onto it, then seated, until A, its death or a hit that
+    /// throws it off.
+    pub gun: Option<Mount>,
 }
 
 impl Fighter {
@@ -368,6 +372,7 @@ impl Fighter {
             gassed: None,
             flag: None,
             scope_pitch: 0.0,
+            gun: None,
         }
     }
 
@@ -389,6 +394,11 @@ impl Fighter {
 
     pub fn weapon(&self) -> Option<&'static Weapon> {
         self.weapon.and_then(weapon::weapon)
+    }
+
+    /// On a mounted gun's seat (not jumping onto it).
+    pub fn seated(&self) -> bool {
+        self.gun.is_some_and(|m| m.state != gun::LAUNCH)
     }
 
     /// s126+0x75: 0x80 | the current item (0x26, the grenade, from the pull to 15 frames into the
@@ -419,6 +429,7 @@ impl Fighter {
     /// every traced pull was unarmed).
     pub fn camera_weapon(&self) -> u8 {
         match self.action {
+            _ if self.seated() => conker_camera::GUN,
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0x26,
             Action::Holster | Action::GrenadeThrow { .. } => 0,
             Action::Draw => self.weapon.unwrap_or(0),
@@ -470,6 +481,8 @@ impl Fighter {
             twist: self.body.twist,
             stunned: self.stun != 0,
             aim_blocked: self.health == 0,
+            attached: self.seated(),
+            gun: self.gun.filter(|_| self.seated()).map(|m| m.at),
             ..conker_sim::follow::view(&self.body)
         }
     }
@@ -487,6 +500,7 @@ impl Fighter {
 
     fn idle_anim(&self) -> u16 {
         match self.weapon() {
+            _ if self.seated() => anim::GUN_SEATED,
             _ if self.flag.is_some() => anim::FLAG_IDLE,
             _ if self.carrying => anim::CARRY_IDLE,
             Some(w) if self.drawn => w.idle,
@@ -677,6 +691,9 @@ pub struct Match {
     /// Per slot, s126+0x1AF: how far it reaches for a pickup or canister ([`weapon::touches`]);
     /// [`weapon::REACH`] for a slot not listed. The bots' AI script sets a bot's each frame.
     pub reach: Vec<u8>,
+    /// The scene's mounted guns ([`gun::spawn`]; none in a client's copy: their touch and fire are
+    /// the server's, a gunner's own frame is predicted from its [`Fighter::gun`]).
+    pub guns: Vec<Gun>,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -752,6 +769,7 @@ impl Match {
             gas: Gas::default(),
             colors: Colors::default(),
             reach: Vec::new(),
+            guns: Vec::new(),
         }
     }
 
@@ -882,6 +900,9 @@ impl Match {
         }
         self.pickups(arena, &mut ev);
         self.gas.step(self.tick);
+        for g in &mut self.guns {
+            g.leave = g.leave.saturating_sub(1);
+        }
         let mut late = Vec::new();
         for i in 0..self.players.len() {
             if self.free.contains(&i) {
@@ -890,6 +911,7 @@ impl Match {
             let input = inputs.get(i).copied().unwrap_or_default();
             self.player(i, &input, arena, world, seen, &mut late, &mut ev);
         }
+        self.mounted_guns(world, &mut ev);
         self.burn(&mut ev);
         self.fly_bullets(seen, &mut ev);
         self.fly_rockets(world, seen, &mut ev);
@@ -930,6 +952,17 @@ impl Match {
             settings,
             ..self
         }
+    }
+
+    /// The slot of gun `k`'s gunner (jumping on or seated).
+    pub fn gunner(&self, k: usize) -> Option<usize> {
+        (self.players.iter()).position(|f| f.gun.is_some_and(|m| usize::from(m.gun) == k))
+    }
+
+    /// Gun `k`'s state (gun+0x232, [`gun::FREE`]..).
+    pub fn gun_state(&self, k: usize) -> u8 {
+        let mount = self.gunner(k).and_then(|i| self.players[i].gun);
+        self.guns[k].state(mount.as_ref())
     }
 
     /// Slot `i` holds a player still in play (not free, not out of lives).
@@ -1241,6 +1274,16 @@ impl Match {
                 }
                 Effect::Respawn(i) if i < 32 => self.colors.respawns |= 1 << i,
                 Effect::Fade(out, vis) => self.colors.fade = Some((out, vis, t)),
+                // Its gunner falls from where the seat was (I).
+                Effect::Gun(k) if k < self.guns.len() => {
+                    self.guns[k] = Gun::new(self.guns[k].place);
+                    for f in &mut self.players {
+                        if f.gun.is_some_and(|m| usize::from(m.gun) == k) {
+                            f.gun = None;
+                            (f.body.airborne, f.body.floor) = (true, None);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1333,6 +1376,49 @@ impl Match {
             return;
         }
         let held = |b: u16| input.buttons & b != 0;
+        // A mounted gun's gunner: the jump onto it (0x32 for 19 frames, then 0x38) until it comes
+        // down on the seat (V m2 61 → 83, e1 41 → 66), then the seat, which turns with the scope and
+        // where Z, B and A are all the buttons do (`crate::gun`).
+        if let Some(mut m) = f.gun {
+            if m.state == gun::LAUNCH {
+                movement::hop(&mut f.body, [m.at[0], m.at[2]], world);
+                f.immune = 255;
+                f.anim = match t - f.since < gun::LAUNCH_CLIP {
+                    true => id::JUMP,
+                    false => id::FALL,
+                };
+                let yaw = f.body.move_angle;
+                if f.body.pos[1] < m.at[1] + gun::MOUNT_HEIGHT && f.body.y_vel < 0.0 {
+                    movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+                    (m.state, f.immune) = (gun::IDLE, 0);
+                }
+                f.gun = Some(m);
+                return;
+            }
+            let yaw = (f.body.scope_yaw).map_or(f.body.facing, |y| {
+                (y * (65536.0 / 360.0)).round() as i32 as u16
+            });
+            f.body.prev_buttons = input.buttons;
+            // A jumps back off, immune 20 frames; the gun waits 30 before anyone takes it (V m2
+            // 1601-1630).
+            if held(BUTTON_A) && late & BUTTON_A == 0 {
+                movement::leap(&mut f.body, yaw.wrapping_add(0x8000 + 1024));
+                (f.gun, f.immune) = (None, 20);
+                f.set(Action::Free, id::JUMP, t);
+                if let Some(g) = self.guns.get_mut(usize::from(m.gun)) {
+                    g.leave = gun::LEAVE;
+                }
+                return;
+            }
+            m.step(held(BUTTON_Z), held(BUTTON_B) && late & BUTTON_B == 0);
+            f.anim = match m.state {
+                gun::FIRING => anim::GUN_FIRING,
+                _ => anim::GUN_SEATED,
+            };
+            movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+            f.gun = Some(m);
+            return;
+        }
         let pressed = |b: u16| held(b) && late & b == 0;
         let late_held = |b: u16| late & b != 0;
         let late_pressed = |b: u16| late_held(b) && late2 & b == 0;
@@ -2262,19 +2348,31 @@ impl Match {
         }
         let damage = kind.amount(area);
         f.health = f.health.saturating_sub(damage);
-        let reaction = if area && kind.reaction == 0x21 {
-            damage::AREA_STAGGER
-        } else {
-            kind.reaction
+        let lethal = f.health == 0;
+        // A gunner stays seated through a hit unless it dies (0x17E, falling off) or the hit throws
+        // it up faster than 30 (`func_1505B9C4`, C; V e2); one jumping onto a gun comes off (I).
+        let seated = f.seated();
+        let stays = seated && !lethal && kind.y_vel <= 30.0;
+        let reaction = match () {
+            _ if seated && lethal => 0x2E,
+            _ if area && kind.reaction == 0x21 => damage::AREA_STAGGER,
+            _ => kind.reaction,
         };
-        let b = &mut f.body;
-        if kind.aims() {
-            b.move_angle = (u16::from(kind.angle) << 8).wrapping_add(angle);
-        }
-        (b.xz_speed, b.y_vel, b.gravity, b.airborne) =
-            (kind.xz, kind.y_vel, kind.gravity, kind.y_vel > 0.0);
-        if b.airborne {
-            b.floor = None;
+        if !stays {
+            f.gun = None;
+            let b = &mut f.body;
+            if kind.aims() {
+                b.move_angle = (u16::from(kind.angle) << 8).wrapping_add(angle);
+            }
+            (b.xz_speed, b.y_vel, b.gravity, b.airborne) = (
+                kind.xz,
+                kind.y_vel,
+                kind.gravity,
+                kind.y_vel > 0.0 || seated,
+            );
+            if b.airborne {
+                b.floor = None;
+            }
         }
         f.knock_k = kind.k;
         f.fidget = Fidget::default();
@@ -2282,7 +2380,6 @@ impl Match {
             f.immune = n;
         }
         f.stun = STUN_HIT;
-        let lethal = f.health == 0;
         let first = damage::sequence(reaction, lethal)[0].0;
         f.set(
             Action::Hurt {
@@ -2383,7 +2480,16 @@ impl Match {
                 (f.stun, f.immune) = (STUN_DEAD, 255);
             }
         }
-        knock(f, reaction, step, world, others);
+        // Hit on its seat, a gunner stays there; its gun runs down as if let go (I).
+        match f.gun {
+            Some(mut m) => {
+                m.step(false, false);
+                let yaw = f.body.facing;
+                movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+                f.gun = Some(m);
+            }
+            None => knock(f, reaction, step, world, others),
+        }
     }
 
     fn respawn(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
@@ -2432,6 +2538,101 @@ impl Match {
             ..Fighter::new(&at, team, self.tick)
         };
         ev.push(Event::Respawn { player: i, at });
+    }
+
+    /// The mounted guns, after the players (their objects' slots follow; `func_150BDB70`, C): a free
+    /// gun launches the first player in slot order that touches it; a manned one turns with its
+    /// gunner, and fires while its gunner's state is [`gun::FIRING`] (`func_150FC614`, C; V e1): a
+    /// shot in the first frame, then one each time a timer losing 1 a frame drops below 0, which
+    /// then gains 4 to 8, from the barrels in turn. A human's bullets go to the point under the
+    /// sight ([`gun::SIGHT`]), a bot's along the barrel ([`gun::barrel_dir`]).
+    fn mounted_guns(&mut self, world: &CollisionWorld, ev: &mut Vec<Event>) {
+        let t = self.tick;
+        for k in 0..self.guns.len() {
+            let gunner = self.gunner(k);
+            let g = &mut self.guns[k];
+            let Some(i) = gunner else {
+                g.firing = false;
+                g.pitch10 -= g.pitch10 >> 3;
+                // The touch (`func_150BDB70` → `func_1505327C`, C): alive, unstunned, free to act,
+                // not in the scope, carrying nothing (I: the actions that hold a player stand in for
+                // obj+0x89, as for the flags).
+                let at = g.place.pos;
+                let toucher = self.players.iter().position(|f| {
+                    f.health > 0
+                        && f.stun == 0
+                        && f.gun.is_none()
+                        && f.body.scope_yaw.is_none()
+                        && f.flag.is_none()
+                        && !f.carrying
+                        && f.body.lock == 0
+                        && matches!(
+                            f.action,
+                            Action::Free
+                                | Action::Fire { .. }
+                                | Action::Aim { .. }
+                                | Action::Reload { .. }
+                        )
+                        && gun::touches(
+                            at,
+                            f.body.pos,
+                            Other::player(f.side, f.body.pos).radius.into(),
+                        )
+                });
+                if let (Some(i), 0) = (toucher, g.leave) {
+                    let yaw = g.yaw;
+                    let f = &mut self.players[i];
+                    (f.gun, f.drawn, f.immune) = (Some(Mount::new(k, at)), false, 255);
+                    f.set(Action::Free, id::JUMP, t);
+                    let b = &mut f.body;
+                    (b.state, b.airborne, b.floor) = (movement::state::JUMP, true, None);
+                    (b.y_vel, b.gravity) = (gun::LAUNCH_Y_VEL, gun::LAUNCH_GRAVITY);
+                    (b.xz_speed, b.target_speed, b.move_angle) = (0.0, 0.0, yaw);
+                }
+                continue;
+            };
+            let f = &self.players[i];
+            if !f.seated() {
+                continue;
+            }
+            g.yaw = f.body.facing;
+            let pitch = (f.scope_pitch + 180.0).rem_euclid(360.0) - 180.0;
+            g.pitch10 = (pitch * 10.0) as i32;
+            if f.gun.is_none_or(|m| m.state != gun::FIRING) {
+                g.firing = false;
+                continue;
+            }
+            if !g.firing {
+                (g.firing, g.timer) = (true, 0.0);
+            }
+            g.timer -= 1.0;
+            let shots = g.shots;
+            while g.timer < 0.0 {
+                let (at, yaw, b) = (g.place.pos, g.yaw, g.barrel);
+                let muzzle = gun::muzzle(at, yaw, pitch, b);
+                let dir = if f.bot {
+                    gun::barrel_dir(yaw, pitch, b, 1.0 + 6.0 * self.rng.next_f32())
+                } else {
+                    let eye = conker_camera::gun_eye(at, yaw, pitch);
+                    let (d, _) = aim(f);
+                    let v: [f32; 3] =
+                        core::array::from_fn(|j| eye[j] + d[j] * gun::SIGHT - muzzle[j]);
+                    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    v.map(|c| c / n)
+                };
+                let bullet = Bullet::aimed(world, i, muzzle, dir, gun::SPEED, damage::MG_BULLET);
+                ev.push(Event::Shot {
+                    player: i,
+                    pos: muzzle,
+                });
+                self.bullets.push((t, bullet));
+                (g.shots, g.last, g.barrel) = (g.shots.wrapping_add(1), b, b ^ 1);
+                g.timer += 4.0 + 4.0 * self.rng.next_f32();
+            }
+            // s126+0x1AA counts them (C).
+            let f = &mut self.players[i];
+            f.shots = f.shots.saturating_add(g.shots.wrapping_sub(shots));
+        }
     }
 
     fn fly_bullets(&mut self, seen: Seen, ev: &mut Vec<Event>) {
@@ -3927,5 +4128,87 @@ mod tests {
                 _ => assert_eq!(end, (0, None, Some(193))),
             }
         }
+    }
+
+    /// A mounted gun on the flat: both players touch it, the first in slot order jumps on and the
+    /// other is refused while it is manned; the gunner fires from both barrels and leaves with A,
+    /// and the gun waits 30 frames before the other takes it; that one's death throws it off with
+    /// no wait.
+    #[test]
+    fn a_mounted_gun_takes_one_gunner() {
+        let (arena, mut m, w) = duel();
+        let place = gun::Place {
+            pos: [0.0, 0.0, 300.0],
+            yaw: 0,
+        };
+        m.guns = vec![Gun::new(place)];
+        (m.players[0].body.pos, m.players[1].body.pos) = ([0.0, 0.0, 250.0], [0.0, 0.0, 350.0]);
+        let state = |m: &Match| m.gun_state(0);
+        let step = |m: &mut Match, b: u16| {
+            let inputs = [
+                Input {
+                    buttons: b,
+                    ..Input::default()
+                },
+                Input::default(),
+            ];
+            m.step(&arena, &inputs, &w)
+        };
+        step(&mut m, 0);
+        assert_eq!(
+            (state(&m), m.players[0].anim, m.players[1].gun),
+            (gun::LAUNCH, id::JUMP, None)
+        );
+        let mut n = 1;
+        while !m.players[0].seated() {
+            step(&mut m, 0);
+            n += 1;
+            assert!(n < 40 && m.players[1].gun.is_none());
+        }
+        assert_eq!((n, m.players[0].immune, m.players[1].gun), (26, 0, None));
+        assert_eq!(m.players[0].body.pos, gun::seat(place.pos, 0));
+        assert_eq!(m.players[0].camera_weapon(), conker_camera::GUN);
+        step(&mut m, 0);
+        assert_eq!(
+            (state(&m), m.players[0].anim),
+            (gun::IDLE, anim::GUN_SEATED)
+        );
+        let shots = (0..30)
+            .flat_map(|_| step(&mut m, BUTTON_Z))
+            .filter(|e| matches!(e, Event::Shot { .. }))
+            .count();
+        assert!((4..=8).contains(&shots), "{shots}");
+        assert_eq!(
+            (m.guns[0].shots as usize, m.players[0].shots as usize),
+            (shots, shots)
+        );
+        assert_eq!(
+            (state(&m), m.players[0].anim),
+            (gun::FIRING, anim::GUN_FIRING)
+        );
+        step(&mut m, BUTTON_A);
+        assert_eq!(
+            (m.players[0].gun, m.players[0].immune, state(&m)),
+            (None, 20, gun::LEAVING)
+        );
+        for _ in 0..29 {
+            step(&mut m, 0);
+            assert_eq!((state(&m), m.players[1].gun), (gun::LEAVING, None));
+        }
+        step(&mut m, 0);
+        assert_eq!(m.players[1].gun.map(|g| g.state), Some(gun::LAUNCH));
+        while !m.players[1].seated() {
+            step(&mut m, 0);
+        }
+        m.players[1].health = 1;
+        m.apply(&[Effect::Hit {
+            slot: 1,
+            kind: damage::MG_BULLET,
+            attacker: Some(0),
+        }]);
+        assert_eq!(
+            (m.players[1].gun, state(&m), m.players[1].anim),
+            (None, gun::FREE, anim::DEATH_SHOT)
+        );
     }
 }
