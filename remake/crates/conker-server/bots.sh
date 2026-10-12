@@ -2,9 +2,10 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f] [MODE=deathmatch|total-war|colors] [SCORE=1-40|unlimited]
+# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b] [MODE=deathmatch|total-war|colors|beach] [SCORE=1-40|unlimited]
 #   [SKILL=inbred|crap|normal|bastard|einstein] crates/conker-server/bots.sh [seconds=150].
-# All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures.
+# All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
+# MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -45,7 +46,16 @@ for b in $(seq 0 $((bots - 1))); do
   deaths=$(grep -c "EVENT .*Hit { victim: $b, attacker: [0-9]*, damage: [0-9]*, lethal: true" $logs/server.log)
   respawns=$(grep -c "EVENT .*Respawn { player: $b," $logs/server.log)
   report "bot $b moves ($n distinct positions a second)" $((n >= 10))
-  report "bot $b fights ($hits hits), dies ($deaths) and respawns ($respawns)" $((hits > 0 && deaths > 0 && respawns > 0))
+  if [[ ${MODE:-} == beach ]]; then
+    side=$(grep -oE "bot in slot $b on record .*" $logs/server.log | grep -oE '[A-Za-z]+$')
+    if [[ $side == Squirrels ]]; then
+      echo "     bot $b villager: dies ($deaths), respawns ($respawns)"
+    else
+      report "bot $b Tedi fights ($hits hits), dies ($deaths), respawns ($respawns)" $((hits > 0))
+    fi
+  else
+    report "bot $b fights ($hits hits), dies ($deaths) and respawns ($respawns)" $((hits > 0 && deaths > 0 && respawns > 0))
+  fi
   for id in $(seq 1 $humans); do
     n=$(moves "remote/interpolated player Local\\($b\\)" $logs/client$id.log)
     report "client $id sees bot $b move ($n positions)" $((n >= 3))
@@ -58,6 +68,14 @@ if [[ ${MODE:-} == colors ]]; then
   echo "colors: takes $(grep -c 'COLORS t=[0-9]* flag [01] taken' $logs/server.log)," \
     "drops $(grep -c 'COLORS t=[0-9]* LetGo' $logs/server.log), captures $caps" \
     "($(( caps * 60.0 / secs )) a minute) at t=$(grep -oE 'COLORS t=[0-9]+ Score' $logs/server.log | grep -oE '[0-9]+' | tr '\n' ' ')"
+fi
+if [[ ${MODE:-} == beach ]]; then
+  at() { grep -oE "BEACH t=[0-9]+ $1" $logs/server.log | grep -oE 't=[0-9]+' | tr '\n' ' ' }
+  echo "beach: escapes at $(at 'Respawn'); detonations at $(at 'Plunger\(true')"
+  echo "  strikes at $(at 'Strike'); villager points at $(at 'villager down')"
+  echo "  zone gives: $(grep -oE 'BEACH t=[0-9]+ Give\([0-9]+, (22|36)\)' $logs/server.log | wc -l | tr -d ' '), ejections: $(grep -c 'BEACH t=[0-9]* Place' $logs/server.log)," \
+    "gun mounts: $(grep -oE 'GUN t=[0-9]+ gun 0 state 0x1 -> 0x2 slot Some\([0-9]+\)' $logs/server.log | grep -oE 'Some\([0-9]+' | tr -d 'Some(' | tr '\n' ' ')"
+  echo "  $(grep -E 'match ends|villager down' $logs/server.log | tail -1)"
 fi
 report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))
 report "no panics" $(( ! $(cat $logs/*.log | grep -c 'panicked') ))

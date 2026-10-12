@@ -119,12 +119,20 @@ pub const ROCKET_OUTER_R: f32 = 300.0;
 /// script's player commands 0x2B and 0x2A; entries V from the RAM, d1).
 pub const GAS: DamageType = ty(0x2D, 0x07, 34.0, 0.0, 4.0, 30, 0x80 | 40, 0);
 pub const DOORWAY: DamageType = ty(0x0E, 0x41, 0.0, -50.0, 7.0, 1, 0, 0);
+/// War: Beach (`crate::beach`): the detonation's type 0x29 on every Tedi (reaction 0x2C, a kill,
+/// no credit; C, V plg: 87-91 frames to the respawn; I: the knock and immune of the inner blast),
+/// and the deadline's strike, type 0x39 (reaction 0x47, no damage, immune 36: C, V x1 2772; I: the
+/// move angle kept), whose blast 40 frames on kills as the detonation does (V x1 2812, ev3 1045:
+/// 0xF3; I: its type).
+pub const DETONATION: DamageType = ty(0x2C, 0x07, 0.0, 0.0, 0.0, 0, 0x80 | 30, 0);
+pub const STRIKE: DamageType = ty(0x47, 0x40, 0.0, 0.0, 4.0, 30, 0x80 | 36, 0);
 
 /// The damage type the script's player commands 0x2A and 0x2B name.
 pub fn script_type(id: i32) -> Option<DamageType> {
     match id {
         0x1F => Some(GAS),
         0x3B => Some(DOORWAY),
+        0x29 => Some(DETONATION),
         _ => None,
     }
 }
@@ -238,6 +246,8 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
             (anim::DEAD, 55),
         ],
         (0x0E, false) => &[(anim::DOORWAY_HIT, 59)],
+        // Beach's strike: the stagger for 40 frames, then its blast (`Match::hurt_frame`).
+        (0x47, false) => &[(anim::HIT, 40)],
         (0x0E, true) => &[(anim::DOORWAY_HIT, 59), (anim::DOORWAY_DEAD, 87)],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,

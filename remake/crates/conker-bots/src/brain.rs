@@ -10,6 +10,7 @@ use crate::npc::{AT_GOAL, Npc};
 use crate::script::{Globals, Host};
 use conker_camera::volume::CameraHint;
 use conker_rules::Rng;
+use conker_rules::beach::Plunger;
 use conker_rules::colors::{self, Pose};
 use conker_rules::damage;
 use conker_rules::gas::{self, Effect};
@@ -138,6 +139,8 @@ pub struct Body {
     /// s126+0x16C, +0x170: the scope's yaw and pitch while it is open (a bot on a mounted gun aims
     /// it with its stick, [`World::attack`]).
     pub scope: Option<(f32, f32)>,
+    /// The record's class (+0, `func_150859AC` 1; War: Beach's voices by it).
+    pub class: u8,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -177,6 +180,12 @@ pub struct World<'a> {
     pub starting: bool,
     /// Each mounted gun's gunner (a match slot; `conker_rules::gun`), by the gun's index.
     pub gunners: Vec<Option<usize>>,
+    /// War: Beach's plunger at the frame's start (its toucher a match slot).
+    pub plunger: Plunger,
+    /// War: Beach's first frame: the participants appear in it (`query(0x50B9, 0x1D)` answers 0, so
+    /// the respawn handler sees them all and the deadline starts 49 frames in: V `beach.md` §2.4,
+    /// x1's strike at read 2772; I for the other modes, left as they were).
+    pub appear: bool,
 }
 
 impl Host for World<'_> {
@@ -237,9 +246,15 @@ fn flag(h: i32) -> Option<usize> {
         .position(|f| usize::from(f.handle) == i)
 }
 
-/// The mounted guns' object indexes (scene uids 0x13, 0x14 less one, V `query(uid, 0xB7)`).
-fn gun(h: i32) -> bool {
-    kind(h) == 2 && matches!(index(h), 0x12 | 0x13)
+/// The mounted gun a handle names, by its index in the match: 0x30's (scene uids 0x13, 0x14 less
+/// one, V `query(uid, 0xB7)`; 0x34's one takes the first), and War: Beach's 0x2010 (uid 0x11, the
+/// map's only gun; no participant has an index past 15).
+fn gun(h: i32) -> Option<usize> {
+    match (kind(h), index(h)) {
+        (2, i @ (0x12 | 0x13)) => Some(i - 0x12),
+        (2, 0x10) => Some(0),
+        _ => None,
+    }
 }
 
 impl World<'_> {
@@ -253,7 +268,7 @@ impl World<'_> {
     /// player's update. Taken here on the current position (V: 79 of the 80 set bits and every
     /// clear one of the type-3 triggers in the RAM of s4, s5 and s7; the miss, a player that had
     /// moved since).
-    fn inside(&self, p: usize, t: usize) -> bool {
+    pub(crate) fn inside(&self, p: usize, t: usize) -> bool {
         match (self.bodies.get(p), self.zones.get(t)) {
             (Some(b), Some((z, off))) => !off && z.contains(b.old, b.pos, b.pos[1] - b.height),
             _ => false,
@@ -272,6 +287,14 @@ impl World<'_> {
             (3, 0xE) if h == 0xE013 => {
                 if let Some(slot) = self.slot(args.get(1).copied().unwrap_or(-1)) {
                     self.effects.push(Effect::Haze(slot));
+                }
+                0
+            }
+            // War: Beach's deadline strike on participant `a(1)` (`func_150FCFD4`); its smoke,
+            // light and sounds are the client's, as 0xE01B's detonation is.
+            (3, 0xE) if h == 0xE02A => {
+                if let Some(slot) = self.slot(args.get(1).copied().unwrap_or(-1)) {
+                    self.effects.push(Effect::Strike(slot));
                 }
                 0
             }
@@ -309,7 +332,7 @@ impl World<'_> {
                     self.effects.push(Effect::Flag(k, false));
                     0
                 }
-                None if gun(h) => 0,
+                None if gun(h).is_some() => 0,
                 None => self.unknown(native, 2, -1),
             },
             (_, k) => self.unknown(native, k, -1),
@@ -343,12 +366,20 @@ impl World<'_> {
             // `func_15083E0C`: the object index of a scene uid (Colors' guns, 0x13 and 0x14).
             (2, 0xB7) => index(h) as i32 - 1,
             // A mounted gun's +0x13C: its gunner (a participant) + 100, else 0 (`func_150BDB70`, C).
-            (2, 0xBC) if gun(h) => (self.gunners.get(index(h) - 0x12).copied().flatten())
+            (2, 0xBC) if gun(h).is_some() => (gun(h).and_then(|k| self.gunners.get(k)))
+                .copied()
+                .flatten()
                 .and_then(|s| self.slots.iter().position(|&x| x == s))
                 .map_or(0, |p| p as i32 + 100),
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
+            // War: Beach's plunger (id 0xFF): 0x1E its y (+0x12), 0x17 who stood on it last (its
+            // toucher | 0x2000; none: 0).
+            (3, 0x1E) if h & 0xFFF == 0xFF => self.plunger.y as i32,
+            (3, 0x17) if h & 0xFFF == 0xFF => (self.plunger.toucher)
+                .and_then(|s| self.slots.iter().position(|&x| x == s))
+                .map_or(0, |p| p as i32 | 0x2000),
             // 0x21: +0x80, a gas canister's toucher + 1 (0 for the other props here).
             (3, 0x21) => match Self::prop(h) {
                 Some(n) => (gas::CANISTERS.iter())
@@ -362,6 +393,7 @@ impl World<'_> {
             (4, 6) => i32::from(kind(a(2)) == 2 && self.inside(index(a(2)), index(h))),
             (4, 0x10) => i32::from((0..self.bodies.len()).any(|p| self.inside(p, index(h)))),
             // Type 5, the level (`func_1509FE0C`).
+            (5, 0x1D) if self.appear && !self.starting => 0,
             (5, 0x1D) => (1 << self.bodies.len()) - 1,
             (5, 0x1E) => i32::from(self.bodies.get(a(2) as usize).map_or(0, |b| b.team)),
             (5, 0x22) => {
@@ -382,10 +414,14 @@ impl World<'_> {
             (5, 0x24) => 0,
             (5, 0x25) => 0,
             (5, 0x26) => self.bodies.len() as i32,
+            // Music 3 on 0x61A8 (`func_151F2CDC() == 1`): War: Beach's escape jingle is playing.
+            // ponytail: never (the clients play it), so a human's freeze is always 150 frames.
+            (6, 3) => 0,
             // Type 15, the multiplayer helpers (`func_1509E3DC`).
             (0xF, 3) => self.next_ai(g),
             (0xF, 4) => self.visibility(g, a(2) as usize, a(3)),
             (0xF, 5) => self.skill as i32,
+            (0xF, 6) => self.pick_target(g, a(2) as usize),
             (0xF, 7) => give_range(a(2)),
             // `func_1508B194`: a human's +0x70 (a bot's 0); the team script turns a human with more
             // than 3 on everyone's bots (0x4CFE, "Killed too many team mates!!!") until it dies.
@@ -444,6 +480,17 @@ impl World<'_> {
             }
             // Props 7: a display flag (+0x73 bit 4); sounds (type 0xA, `func_1509E730`) 3: a fade.
             (3, 7) | (0xA, 3) => 1,
+            // War: Beach's plunger: 0xD sets +0x4F's bits a(2) and clears a(3); bit 4 holds it down.
+            (3, 0xD) if h & 0xFFF == 0xFF => {
+                match (a(2) & 4 != 0, a(3) & 4 != 0) {
+                    (true, _) => self.effects.push(Effect::Plunger(true)),
+                    (_, true) => self.effects.push(Effect::Plunger(false)),
+                    _ => {}
+                }
+                1
+            }
+            // Cameras (type 9) 0xC: War: Beach's cut to the detonation (one viewport): the client's.
+            (9, 0xC) => 1,
             // Triggers 0 and 1 (`func_150A2864`): switch one on, or off (`+0x14`).
             (4, c @ (0 | 1)) => {
                 if let Some(z) = self.zones.get_mut(index(h)) {
@@ -563,8 +610,11 @@ impl World<'_> {
             0x91 => i32::from(n.script),
             0x93 => i32::from(b.health),
             // `func_150859AC` 3: the stats record's +8 (`0x800D2144 + 0x1C·p`), 6 for every player
-            // in the RAM of s4, s5 and s7.
+            // in the RAM of s4, s5 and s7; 1: its +0, the class (War: Beach's voices).
             0xA5 if a(2) == 3 => 6,
+            0xA5 if a(2) == 1 => i32::from(b.class),
+            // s126+0x78, the drawn item (War: Beach's weapon zones).
+            0xAA => i32::from(b.drawn),
             // `func_150A2AEC`: the first listed trigger the player is in, | 0x4000; else 0.
             0xAC => (args.get(2..).unwrap_or_default().iter())
                 .map(|&t| (t & 0xFFF) as usize)
@@ -722,7 +772,12 @@ impl World<'_> {
             (0x53, Some(s)) => Some(Effect::Hold(s, a(2) as u8)),
             (0x45, Some(s)) => Pose::of(a(2)).map(|pose| Effect::Pose(s, pose)),
             (0x82, Some(s)) => Some(Effect::Respawn(s)),
-            (0x3F, _) => return 0,
+            // War: Beach: 0x1F the start record (the match keeps it as the respawn mask, Beach
+            // only), 0x27 the weapon zones' item (`func_15080620`); 0x54 the escaper's model fade
+            // and 0x8B a human's screen fade are the client's (from the escape's freeze).
+            (0x1F, Some(s)) => Some(Effect::Start(s, a(2) as u8)),
+            (0x27, Some(s)) => Some(Effect::Give(s, a(2) as u8)),
+            (0x3F | 0x54 | 0x8B, _) => return 0,
             _ => None,
         };
         if let Some(e) = effect {
@@ -1169,6 +1224,44 @@ impl World<'_> {
         }
     }
 
+    /// `func_15089F9C` (query 6, War: Beach's Tediz): the target of participant `p`, of those in play
+    /// (G+0x14) with no wall between their eyes (G+0x16C0[p] bit 16 + q: only enemy pairs are tested)
+    /// and G+0xE64 ≠ 3, the one whose xz distance d, clamped to the role's band (G+0x15C: 0, the east
+    /// top, 750-3500, else 1500-8000), scores best on sin(−π/2 + 2π·(d − lo)/(hi − lo)) + 1, the
+    /// band's middle; the first on a tie, −1 with none (C). ponytail: the start score
+    /// (`0x8009DA50`, in the compressed data) taken as −1, so any candidate beats none.
+    fn pick_target(&self, g: &Globals, p: usize) -> i32 {
+        let Some(me) = self.bodies.get(p) else {
+            return -1;
+        };
+        let (lo, hi) = match g.get(0x15C, p) {
+            0 => (750.0f32, 3500.0f32),
+            _ => (1500.0, 8000.0),
+        };
+        let (alive, sees) = (g.i32(g::ALIVE), g.get(g::SEES, p));
+        let mut best = (-1, -1.0f32);
+        for (q, o) in self
+            .bodies
+            .iter()
+            .enumerate()
+            .take(g.i32(g::COUNT).max(0) as usize)
+        {
+            if g.get(g::TEAM, q) == 3 || alive & 1 << q == 0 || sees & 1 << (16 + q) == 0 {
+                continue;
+            }
+            let (dx, dz) = (me.pos[0] - o.pos[0], me.pos[2] - o.pos[2]);
+            let d = (dx * dx + dz * dz).sqrt().clamp(lo, hi);
+            let score = ((d - lo) * (std::f32::consts::TAU / (hi - lo))
+                - std::f32::consts::FRAC_PI_2)
+                .sin()
+                + 1.0;
+            if best.1 < score {
+                best = (q as i32, score);
+            }
+        }
+        best.0
+    }
+
     /// `func_1508C5B8(0, pairs)` (query 4): each human tests its lines of sight to three enemy bots
     /// it does not see yet (the game measures their distance as the human's own x − z, so the first
     /// three in slot order), then `pairs` more pairs are tested round robin (G+0x1700/1701).
@@ -1581,6 +1674,8 @@ mod tests {
             flags: Default::default(),
             starting: false,
             gunners: Vec::new(),
+            plunger: Plunger::default(),
+            appear: false,
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1640,6 +1735,8 @@ mod tests {
             flags: Default::default(),
             starting: false,
             gunners: vec![None, Some(1)],
+            plunger: Plunger::default(),
+            appear: false,
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
@@ -1733,6 +1830,8 @@ mod tests {
                 flags: Default::default(),
                 starting: false,
                 gunners: Vec::new(),
+                plunger: Plunger::default(),
+                appear: false,
             };
             let mut g = Globals::new(g::SIZE);
             g.set_f32(g::AIM_RATE, 1.0);

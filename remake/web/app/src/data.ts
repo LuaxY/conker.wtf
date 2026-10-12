@@ -4,18 +4,20 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war" | "colors";
+export type Mode = "deathmatch" | "total-war" | "colors" | "beach";
 /** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target. */
 export const MODES: Record<Mode, { name: string; kills: boolean; lives: boolean; score: boolean }> =
   {
     deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
     "total-war": { name: "War: Total War", kills: false, lives: true, score: false },
     colors: { name: "War: Colors", kills: false, lives: false, score: true },
+    beach: { name: "War: Beach", kills: false, lives: false, score: true },
   };
 
-export type MapId = "2d" | "30" | "34" | "3f";
+export type MapId = "2b" | "2d" | "30" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
+  "2b": { name: "Beach 0x2B", modes: ["deathmatch", "beach"] },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
   "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },
   "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
@@ -36,7 +38,7 @@ export interface Settings {
   lives: number;
   /** 0-10, the kill limit (0: none): only in modes that have one. */
   kills: number;
-  /** Captures to win, 1-40, or none: only in modes that have one (War: Colors). */
+  /** The score to win, 1-40, or none: only in modes that have one (War: Colors, War: Beach). */
   score: number | "unlimited";
   radar: boolean;
 }

@@ -1,5 +1,53 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Beach: rules, server and bots (2026-10-13)
+**`conker-server --map 2b --mode beach [--score 1-40|unlimited]` (default 20) plays War: Beach (scenario 8). The villagers
+(team 0, the squirrels' side, item 0x3E: no attack) run for the tunnels under the Tediz' bunkers. The Tediz (team 1, at
+most 2) hold the bunker tops and the mounted gun. Script 0xB9 is the referee, as Colors' 0xBB is: the escapes, the
+plunger's detonation, the weapon zones and the 90 s deadline come through `gas::Effect`s. The match keeps the engine's
+part. Protocol 18. No client drawing (handoff below).** Research: `../lab/research/mp-original/beach.md`.
+
+| Part | What |
+|---|---|
+| `beach.rs` (new) | Teams, `MAX_TEDIZ` 2, `CLASSES` [0x1E, 0x14, 0x1D, 0x1F] (start, by villager order), `TEDI_CLASS` 3, `model` (156 below 0x1D, 157, Tedi 117), `reroll` (0x11 + rand & 0xF), `drive` (item 0x3E: 75 %, 150 % while the boost lasts, −2 VIs a frame), `BOOST` 600, `BOTTLE_RESPAWN` 30, `Plunger` (392 → 332 at 4 a frame when stood on or held, springs back a truncated tenth, settles at 383; its top at y 508), `EJECT` |
+| `game.rs` | `Settings.beach`; 6 lives never lost; `Fighter.class` (re-rolled each respawn) and `boost`; 0x3E's speed before the movement (not while crouched); a bottle gives 600 VIs of boost and returns 30 frames after it is touched; a villager's death scores for the Tediz when it registers (MG +35 frames, blast at its sequence's first state, reaction 0x2C at once); death points latch on the next frame, the script's points on the same frame; score end, places and standings as Colors'; `Match.plunger` stepped after the guns. Effects `Start` (respawn mask), `Give` (0 takes it), `Strike`, `Plunger`, `Place`. `damage.rs`: `DETONATION` (script 0x29: reaction 0x2C, 7, no attacker), `STRIKE` (0x47: HIT 40 frames, then `DETONATION`). `gun.rs`: `places(0x2B)` |
+| Bots (`brain.rs`, `lib.rs`) | 0xB9's natives. Queries (2, 0xBC) on 0x2010 (the gun's gunner), (3, 0x1E)/(3, 0x17) on 0x30FF (plunger y, presser), (5, 0x1D) 0 on the first frame, (6, 3) 0 (jingle), (0xF, 6) `pick_target` (`func_15089F9C`), player 0xA5 1 (class), 0xAA (drawn). Commands (3, 0xD) on 0x30FF (bit 4: held), (9, 0xC), player 0x1F/0x27 (effects), 0x54/0x8B (the client's); object 0xE02A (strike). Triggers 0x26/0x27 put a Tedi by the gun (`Place`) |
+| Server | `--mode beach` (2b only, no `--cavemen`); joins past 2 Tediz become villagers; start item and class by side; respawn mask from the script's record; `BEACH t=…` log lines (Start, Score, Respawn, Strike, Place, Plunger, Give, "villager down"), "match ends"; `bots.sh` `MODE=beach` (villager bots need only move; escapes, detonations, strikes, points, zone gives, ejections, gun mounts) |
+| Web | `data.ts`: mode `beach` (War: Beach, score), map `2b` (Deathmatch, Beach); `server.ts`'s whitelist follows |
+
+**Handoff (client agent).** Everything is in `MatchView` / `Combat` (net.rs), and the whole `Fighter` (`class`,
+`boost`) is replicated, so prediction already runs 0x3E's speed. Presentation details: `beach-presentation.md` and
+the pack section below.
+- `MatchView.beach`; `scores` = [villagers, Tediz], `score_limit`; the strip is `Hud.beach.strip`; the end screen is `beach_won`; outros cs4/cs3 through `places`.
+- `Combat.class` → `beach::model(class)` and `Character.looks[class]`. It changes on `Event::Respawn` (a new look after each escape or death).
+- `Combat.deadline` (VIs, human villagers only; 5400 → 0, −2 a frame): `Hud.beach.escape` shows `deadline / 60`.
+- **Strike** (deadline 0): `Event::Hit { damage: 0, attacker == victim }` on a villager, whose anim is HIT 0x11D for 40 frames → `StrikeCall` at it. Then `Hit { damage: 7, lethal }` and BLOWN_UP 0xF3 → `StrikeBlast`, `Debris`.
+- **Escape**: `Combat.freeze` > 0 (150 a human, 30 a bot, counting down). Fade the escapee's model; for a human, the radio line `lines.escape` and the music duck, then fade its view out over the last 30. `Event::Respawn` on the next villager record when it ends, then a fade in over 100 VIs.
+- **Detonation**: `MatchView.cooldown` 0 → 900 (it counts down; the plunger stays held until 20) → `Detonation` ×3, `Debris`, and the `Plunger` voice by the presser's class (the player `beach::Plunger::under` that frame). Add the camera cut 0x9002 for 60 frames if the only human is a villager. Each Tedi takes `Hit { damage: 7, attacker == victim }`.
+- `MatchView.plunger`: the plunger's y (392 home). Move placements 0, 4, 5 by `plunger − 392` (I: the groundwork saw all three at the same y; only prop 0 is modelled, so check they are one body). `PlungerReady` plays for a villager in trigger 0x25 while `cooldown == 0`.
+- `MatchView.holders`: [sniper zone (west top), bazooka zone (east top)] holders' slots. The original shows nothing for them.
+
+| Check (2026-10-13) | Result |
+|---|---|
+| `game.rs` tests | `beach_scores_and_ends` (MG death point 35 frames after hp 0, blast 88, the strike's blast at once, latched a frame later; a Tedi's none; escape point same frame, respawn on the named record; no lives lost), `beach_items` (V spd/spr: 26.25, 52.5 for 300 frames, crouch 14; bottle back in 30; a Tedi's bottle does nothing; zone item in and out), `beach_plunger` (392 → 332 in 15 frames, V wz 901-917; the hold) |
+| `conker-bots` `rom.rs` `beach_script_runs_the_match` (real 0xB9 on 0x2B) | 2 human villagers + a human Tedi. The detonation scores 1 villager point and kills the Tedi with no credit. The escape: a 150-frame freeze, then respawn on `[0,1,2,11]`'s next record. The strike at 2748 = V 2772 − 24, the death point at 2788 (V 2812). Scores [2, 1]; no unknown natives, no faults |
+| Server tests | `match_settings_parse` (beach: map 2b only, score 20), `beach_caps_the_tediz` (7 bots: sides S T S T S S S, classes 0x1E 3 0x14 3 0x1D 0x1F 0x1E, masks by record) |
+| `MODE=beach MAP=2b BOTS=7 bots.sh 300` (1 idle human villager, port 5970) vs V bots1 (Tediz 20-7 at read 8125) | 0 faults, 0 unknown natives, 0 panics. As in bots1, one Tedi (slot 3) was on the gun all match and the other took the bazooka on the east top, then the sniper on the west. The detonation was at read 4732 (bots1 4526): +2, both Tediz killed. The idle human's strikes were at reads 2771, 5560, 8349 (V 2772, 5562). **The score was the other way round: villagers 18, Tediz 10 by read 8808, no end.** That is 16 escapes (bots1 ~5), and 7 kills by the gunner in 30 hits (bots1 ~18). The villagers' runs (each ends in a death or an escape) come at the same rate, 26 by read 8808 vs bots1's 25 by 8125; only the lethal share differs (10/26 vs 20/25). So the cause is the bot gunner's hit rate (the mounted-gun section's known gap), not the escapes or the villagers' movement. Villager bots run at 393/s, 75 % of the 524/s of Total War's bots |
+| DM, TW, Colors vs HEAD (`d3c51bf` built in `target-net/head`; same pack, 7 bots, 150 s, ports 5970-5976) | Colors: event lists identical. TW: run-to-run timing splits it into the same two event lists in both builds (a HEAD run equals a new run through read 1500). DM: not checkable by read (the two new-build runs differ from each other); the unknown native `(6, 3, 1)` ×6 on 2d Deathmatch with 7 bots is HEAD's too |
+| `bun run test`, `bun run check` | pass |
+
+Gaps (V seen, C code, I inferred):
+- **Bots:** the Tediz' gunner kills about a third as often as bots1's (V). Villagers escape about 3× as often.
+- **I:** the escape's teleport and the Tedi ejection are where the C points but not read. The ejection spot is by the gun's seat.
+- **I:** the plunger's collision is static, so the presser stays at y 508 while it sinks (V: 448).
+- **I:** `pick_target`'s start score is −1 (the real one is in compressed data).
+- **I:** the strike's blast hurts no one else.
+- **I:** the jingle query always answers 0, so a human's freeze is always 150.
+- **I:** 0x3E's handler is skipped while crouched.
+- **I:** classes at the start go by villager order (V x1 shows 1e 14 1d 1f).
+- **C:** the villager cap (8, BALANCE) is not enforced.
+- **V:** villagers keep their 3 grenades; **I:** whether they can throw them.
+
 ## War: Beach's presentation in the pack (2026-10-13)
 **`conker-extract pack --map 2b` now also packs what War: Beach shows and plays: the villagers' 14 looks, Beach's two
 outros, the escape countdown, the Beach strip and its STATS header, the radio, detonation and strike sounds, Beach's

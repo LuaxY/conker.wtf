@@ -199,6 +199,17 @@ pub enum Effect {
     /// and `obj(0x2014)` create gun g (`crate::gun::places`) afresh: free, at its home yaw, level,
     /// its gunner thrown off.
     Gun(usize),
+    /// War: Beach (`crate::beach`, script 0xB9). Command 0x1F: the player's start record, the one it
+    /// respawns on (the match start's, and the next villager record after an escape).
+    Start(usize, u8),
+    /// Command 0x27 (`func_15080620`): the player's item is now `w` (0: none), the weapon zones'.
+    Give(usize, u8),
+    /// `obj(0xE02A, p)` (`func_150FCFD4`): the deadline's strike on the player.
+    Strike(usize),
+    /// Command 0xD on the plunger (+0x4F = a | (+0x4F & !b)): its bit 4, held down.
+    Plunger(bool),
+    /// The engine's triggers 0x26 and 0x27 (type 0, kind 5) put a Tedi off the villagers' beaches.
+    Place(usize, [f32; 3]),
 }
 
 #[cfg(test)]

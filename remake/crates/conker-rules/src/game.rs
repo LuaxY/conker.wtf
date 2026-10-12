@@ -30,6 +30,7 @@ use conker_sim::movement::{
 };
 
 use crate::Rng;
+use crate::beach::{self, Plunger};
 use crate::colors::{self, Colors, Pose};
 use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
@@ -132,8 +133,13 @@ pub struct Settings {
     /// sides, as in Total War; [`colors::LIVES`] lives never lost; the match ends on the clock or
     /// at [`Self::score`] captures, and the teams rank by captures first ([`team_places`]).
     pub colors: bool,
-    /// Colors' score target (opt[18]): 1-40, 0 unlimited (default [`colors::SCORE`]).
+    /// Colors' score target (opt[18]): 1-40, 0 unlimited (default [`colors::SCORE`]); Beach's too.
     pub score: u8,
+    /// War: Beach (scenario 8, scene 0x2B; [`crate::beach`]): the villagers (team 0, the squirrels)
+    /// escape, the Tediz (team 1) shoot. Teams are the sides; [`colors::LIVES`] lives never lost;
+    /// the team scores ([`Colors::scores`]) go up for an escape, the detonation and each villager's
+    /// death, and the match ends on the clock or at [`Self::score`]; teams rank as Colors' do.
+    pub beach: bool,
 }
 
 impl Default for Settings {
@@ -147,6 +153,7 @@ impl Default for Settings {
             total_war: false,
             colors: false,
             score: colors::SCORE,
+            beach: false,
         }
     }
 }
@@ -159,7 +166,7 @@ impl Settings {
 
     /// The lives each player starts with.
     pub fn lives(&self) -> u8 {
-        if self.colors {
+        if self.colors || self.beach {
             colors::LIVES
         } else if self.time.is_some() {
             TIMED_LIVES
@@ -323,6 +330,10 @@ pub struct Fighter {
     /// On a mounted gun ([`gun`]): jumping onto it, then seated, until A, its death or a hit that
     /// throws it off.
     pub gun: Option<Mount>,
+    /// War: Beach: the record's class (+0, [`beach::model`]: a villager's look, re-rolled at each
+    /// respawn; 0 in the other modes), and s126+0x12C, a bottle's boost in VIs ([`beach::drive`]).
+    pub class: u8,
+    pub boost: u16,
 }
 
 impl Fighter {
@@ -373,6 +384,8 @@ impl Fighter {
             flag: None,
             scope_pitch: 0.0,
             gun: None,
+            class: 0,
+            boost: 0,
         }
     }
 
@@ -694,6 +707,8 @@ pub struct Match {
     /// The scene's mounted guns ([`gun::spawn`]; none in a client's copy: their touch and fire are
     /// the server's, a gunner's own frame is predicted from its [`Fighter::gun`]).
     pub guns: Vec<Gun>,
+    /// War: Beach's plunger (stepped in Beach only).
+    pub plunger: Plunger,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -770,6 +785,7 @@ impl Match {
             colors: Colors::default(),
             reach: Vec::new(),
             guns: Vec::new(),
+            plunger: Plunger::default(),
         }
     }
 
@@ -886,6 +902,9 @@ impl Match {
         if self.phase() == Phase::Over {
             return ev;
         }
+        // The scores the frame's end tests: the script's (applied before the step) latch in their
+        // own frame, Beach's death points (scored in the step) in the next (V end1 212, bots1 8126).
+        let scores = self.colors.scores;
         // Colors: the script's respawns (command 0x82), the flags' fall, then their touch.
         for i in 0..self.players.len().min(32) {
             if self.colors.respawns & 1 << i != 0 && !self.free.contains(&i) {
@@ -912,6 +931,15 @@ impl Match {
             self.player(i, &input, arena, world, seen, &mut late, &mut ev);
         }
         self.mounted_guns(world, &mut ev);
+        if self.settings.beach {
+            let stood = (self.players.iter().enumerate()).position(|(i, f)| {
+                !self.free.contains(&i)
+                    && f.health > 0
+                    && !f.body.airborne
+                    && Plunger::under(f.body.pos)
+            });
+            self.plunger.step(stood);
+        }
         self.burn(&mut ev);
         self.fly_bullets(seen, &mut ev);
         self.fly_rockets(world, seen, &mut ev);
@@ -938,7 +966,7 @@ impl Match {
             }
         }
         self.timer = (self.timer - 2).max(0);
-        if self.ended_at.is_none() && self.ends() {
+        if self.ended_at.is_none() && self.ends_with(scores) {
             self.ended_at = Some(self.tick);
         }
         self.tick += 1;
@@ -980,6 +1008,11 @@ impl Match {
     /// roster ends at once there, which its team screen prevents); players join the remake's
     /// matches as they go, so it waits for an elimination as Deathmatch's does.
     pub fn ends(&self) -> bool {
+        self.ends_with(self.colors.scores)
+    }
+
+    /// [`Self::ends`] with the team scores `scores`.
+    fn ends_with(&self, scores: [u16; 2]) -> bool {
         let s = &self.settings;
         let taken = || (0..self.players.len()).filter(|i| !self.free.contains(i));
         let in_play = || {
@@ -994,10 +1027,11 @@ impl Match {
         };
         let time_up = s.time.is_some() && self.timer == 0;
         // Colors: the clock, or a team's score reaching the target (latched on the capture's frame,
-        // V e0 383; no score end at 0, and untimed then nothing ends it, I).
-        if s.colors {
+        // V e0 383; no score end at 0, and untimed then nothing ends it, I). Beach's the same
+        // (`func_151E565C`'s metric for scenario 8, C; V end1, end2, bots1).
+        if s.colors || s.beach {
             let target = u16::from(s.score);
-            return time_up || (target > 0 && self.colors.scores.iter().any(|&n| n >= target));
+            return time_up || (target > 0 && scores.iter().any(|&n| n >= target));
         }
         if s.total_war {
             let teams = [0, 1].iter().filter(|&&t| in_play().any(|f| f.team == t));
@@ -1009,11 +1043,11 @@ impl Match {
         time_up || kills || alone || no_human
     }
 
-    /// Every slot's place, 1 the best ([`places`]; in Total War and Colors its team's,
+    /// Every slot's place, 1 the best ([`places`]; in the War modes its team's,
     /// [`team_places`]; free slots 0).
     pub fn places(&self) -> Vec<u8> {
         let all = self.standings();
-        if self.settings.total_war || self.settings.colors {
+        if self.settings.total_war || self.settings.colors || self.settings.beach {
             let teams = team_places(&all);
             let place = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
             return all.iter().map(|s| s.as_ref().map_or(0, place)).collect();
@@ -1021,9 +1055,9 @@ impl Match {
         places(&all, self.settings.kills)
     }
 
-    /// Every slot's [`Standing`] (`None` for a free one), Colors' with its team's score.
+    /// Every slot's [`Standing`] (`None` for a free one), Colors' and Beach's with its team's score.
     pub fn standings(&self) -> Vec<Option<Standing>> {
-        let score = |f: &Fighter| match self.settings.colors {
+        let score = |f: &Fighter| match self.settings.colors || self.settings.beach {
             true => (self.colors.scores.get(usize::from(f.team)).copied()).unwrap_or(0),
             false => 0,
         };
@@ -1067,6 +1101,11 @@ impl Match {
                         f.grenades = (f.grenades + 3).min(weapon::MAX_GRENADES);
                         p.taken = None;
                     }
+                    // Beach's bottle: 600 VIs of boost, the item kept (a Tedi's never drains: V wz).
+                    Gives::Weapon(beach::ITEM) if t == at + 2 && self.settings.beach => {
+                        p.taken = None;
+                        self.players[who].boost = beach::BOOST;
+                    }
                     Gives::Weapon(id) if t == at + 2 => {
                         p.taken = None;
                         self.give(who, id);
@@ -1100,7 +1139,10 @@ impl Match {
             });
             if let Some(i) = toucher {
                 *p = PickupState {
-                    timer: weapon::PICKUP_RESPAWN,
+                    timer: match self.settings.beach {
+                        true => beach::BOTTLE_RESPAWN,
+                        false => weapon::PICKUP_RESPAWN,
+                    },
                     taken: Some((i, t)),
                 };
                 ev.push(Event::Pickup {
@@ -1282,6 +1324,35 @@ impl Match {
                             f.gun = None;
                             (f.body.airborne, f.body.floor) = (true, None);
                         }
+                    }
+                }
+                // Beach's (the other scripts send none of these but 0x1F, whose records the
+                // match's own masks already are).
+                Effect::Start(i, record) if self.settings.beach && record < 32 => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.spawn_mask = 1 << record;
+                    }
+                }
+                // A weapon taken goes holstered (the frame's action ends with it); the same one
+                // stays as it is.
+                Effect::Give(i, w) if self.players.get(i).is_some_and(|f| f.weapon != Some(w)) => {
+                    match w {
+                        0 => {
+                            let f = &mut self.players[i];
+                            (f.weapon, f.drawn) = (None, false);
+                        }
+                        w => self.give(i, w),
+                    }
+                }
+                Effect::Strike(i) if i < self.players.len() => {
+                    self.hurt(i, &damage::STRIKE, false, false, 0, None, &mut ev);
+                }
+                Effect::Plunger(held) => self.plunger.held = held,
+                Effect::Place(i, pos) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        let b = &mut f.body;
+                        (b.pos, b.xz_speed, b.y_vel) = (pos, 0.0, 0.0);
+                        (b.airborne, b.floor) = (true, None);
                     }
                 }
                 _ => {}
@@ -1845,6 +1916,17 @@ impl Match {
             _ => 0,
         };
         f.body.holding = f.flag.is_some();
+        // Beach's item 0x3E drives a villager, but for the crouch's 40 % (V spd: 14; I: its handler
+        // skipped in the crouch states, the boost kept).
+        use movement::state::{CROUCH, CROUCH_WALK};
+        let crouched = matches!(f.body.state, CROUCH | CROUCH_WALK);
+        if self.settings.beach
+            && f.team == beach::VILLAGERS
+            && f.weapon == Some(beach::ITEM)
+            && !crouched
+        {
+            f.body.speed_percent = beach::drive(&mut f.body.timer, &mut f.boost);
+        }
         if burning {
             burn_run(f, world, t, &others);
         } else {
@@ -2415,6 +2497,9 @@ impl Match {
             (f.weapon, f.drawn) = (None, false);
             (f.carrying, f.masked) = (false, false);
             f.deaths = f.deaths.saturating_add(1);
+            if reaction == 0x2C {
+                self.villager_down(v);
+            }
         }
         // An unowned hit names its victim as the attacker, as a player's own grenade does.
         ev.push(Event::Hit {
@@ -2455,8 +2540,16 @@ impl Match {
         };
         if over {
             let step = step + 1;
+            if lethal && step == 1 && reaction != 0x2C {
+                self.villager_down(i);
+            }
+            let f = &mut self.players[i];
             if usize::from(step) == seq.len() {
-                if lethal && !self.settings.colors && f.deaths >= u16::from(self.settings.lives()) {
+                let lives = !self.settings.colors && !self.settings.beach;
+                if (reaction, lethal) == (0x47, false) {
+                    // Beach's strike: its blast (I: no one else is hurt).
+                    self.hurt(i, &damage::DETONATION, false, false, 0, None, ev);
+                } else if lethal && lives && f.deaths >= u16::from(self.settings.lives()) {
                     // Out of lives: it stays down, out of play, on the last place of those still in
                     // play (the game counts places down from its participants, `0x800E0AA9`).
                     let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
@@ -2485,6 +2578,7 @@ impl Match {
             }
         }
         // Hit on its seat, a gunner stays there; its gun runs down as if let go (I).
+        let f = &mut self.players[i];
         match f.gun {
             Some(mut m) => {
                 m.step(false, false);
@@ -2494,6 +2588,17 @@ impl Match {
                 f.gun = Some(m);
             }
             None => knock(f, reaction, step, world, others),
+        }
+    }
+
+    /// Beach: a villager's death registers (`func_1507CD64` with the rules' bit 0x20, C): a point
+    /// for the Tediz. That is where the lethal sequence's first state ends, or at once for a
+    /// reaction 0x2C's (V bots1: 35 frames after hp 0 for the mounted gun's 0x31, 84-90 for a
+    /// blast, at once for the strike's and the detonation's; I: the hook).
+    fn villager_down(&mut self, i: usize) {
+        if self.settings.beach && self.players[i].team == beach::VILLAGERS {
+            let s = &mut self.colors.scores[usize::from(beach::TEDIZ)];
+            *s = s.saturating_add(1);
         }
     }
 
@@ -2523,6 +2628,11 @@ impl Match {
         let (hits, headshots, gassed) = (f.hits, f.headshots, f.gassed);
         let (buttons, late, side, spawn_mask, start) =
             (f.buttons, f.late, f.side, f.spawn_mask, f.start);
+        // Beach re-rolls a villager's class (I: after the pick's draws); the boost goes (V wz).
+        let class = match self.settings.beach {
+            true => beach::reroll(f.class, &mut self.rng),
+            false => f.class,
+        };
         // The pad carries over: a button held through the respawn is no new press (V combat4_dead2:
         // C-down held on, no new grenade).
         self.players[i] = Fighter {
@@ -2539,6 +2649,7 @@ impl Match {
             spawn_mask,
             start,
             gassed,
+            class,
             last_spawn: Some(at.index),
             ..Fighter::new(&at, team, self.tick)
         };
@@ -4211,5 +4322,191 @@ mod tests {
             (m.players[1].gun, state(&m), m.players[1].anim),
             (None, gun::FREE, anim::DEATH_SHOT)
         );
+    }
+
+    /// War: Beach (`beach.md` §2): a villager's death scores for the Tediz where it registers (the
+    /// mounted gun's 35 frames after hp 0, a blast's 88, the strike's blast at once: V bots1 732 →
+    /// 767, x1 2772 → 2812), latched a frame later (V bots1 8125 → 8126); a Tedi's scores nothing;
+    /// an escape's point latches in its own frame (V end1 212) and its respawn takes the record the
+    /// script named; lives are never lost.
+    #[test]
+    fn beach_scores_and_ends() {
+        let beach = |score| Settings {
+            beach: true,
+            score,
+            ..Settings::default()
+        };
+        let hit = |slot, kind, attacker| Effect::Hit {
+            slot,
+            kind,
+            attacker,
+        };
+        // The mounted gun's kill: the point when DEATH_BLAST (35 frames) ends.
+        let (arena, m, w) = duel();
+        let mut m = m.with(beach(1));
+        m.players[0].health = 2;
+        let t = m.tick;
+        m.apply(&[hit(0, damage::MG_BULLET, Some(1))]);
+        assert_eq!((m.players[0].health, m.players[1].kills), (0, 1));
+        run(&mut m, &arena, &w, 35, |_| 0);
+        assert_eq!(m.colors.scores, [0, 0]);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!((m.colors.scores, m.ended_at), ([0, 1], None));
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.ended_at, Some(t + 36));
+        assert_eq!(m.places(), [2, 1]);
+        // A blast's: when BLOWN_UP (88) ends, with the respawn; never out of lives.
+        let (arena, m, w) = duel();
+        let mut m = m.with(beach(0));
+        m.players[0].deaths = 10;
+        m.players[0].health = 2;
+        m.apply(&[hit(0, damage::GRENADE_OUTER, Some(1))]);
+        let ev = run(&mut m, &arena, &w, 89, |_| 0);
+        assert_eq!(m.colors.scores, [0, 1]);
+        let respawn = ev.iter().find(|e| matches!(e.1, Event::Respawn { .. }));
+        assert_eq!((respawn.map(|e| e.0), m.players[0].out), (Some(88), 0));
+        // The deadline's strike: HIT 40 frames, then the blast kills and scores at once; the
+        // respawn 88 frames on (V 89), the class re-rolled.
+        let (arena, m, w) = duel();
+        let mut m = m.with(beach(0));
+        m.players[0].class = 0x14;
+        m.apply(&[Effect::Strike(0)]);
+        assert_eq!((m.players[0].anim, m.players[0].immune), (anim::HIT, 36));
+        run(&mut m, &arena, &w, 40, |_| 0);
+        assert_eq!((m.players[0].health, m.colors.scores), (6, [0, 0]));
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let f = m.players[0];
+        assert_eq!(
+            (f.health, f.anim, m.colors.scores),
+            (0, anim::BLOWN_UP, [0, 1])
+        );
+        let ev = run(&mut m, &arena, &w, 89, |_| 0);
+        let respawn = ev.iter().find(|e| matches!(e.1, Event::Respawn { .. }));
+        assert_eq!(respawn.map(|e| e.0), Some(40 + 88));
+        assert!((0x11..=0x20).contains(&m.players[0].class));
+        // The detonation on a Tedi: dead, no credit, no point.
+        let (arena, m, w) = duel();
+        let mut m = m.with(beach(0));
+        let kind = damage::script_type(0x29).unwrap();
+        m.apply(&[hit(1, kind, None)]);
+        run(&mut m, &arena, &w, 89, |_| 0);
+        let (v, k) = (m.players[1], m.players[0]);
+        assert_eq!((v.deaths, k.kills, m.colors.scores), (1, 0, [0, 0]));
+        assert_eq!(v.health, HEALTH, "back 88 frames on (V 87-91)");
+        // An escape: the next start record, the team's point, the respawn there; the end latches
+        // in the same frame.
+        let (arena, m, w) = duel();
+        let mut m = m.with(beach(1));
+        let t = m.tick;
+        m.apply(&[Effect::Start(0, 1), Effect::Score(0, 1), Effect::Respawn(0)]);
+        let ev = run(&mut m, &arena, &w, 1, |_| 0);
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e.1, Event::Respawn { player: 0, at } if at.index == 1))
+        );
+        assert_eq!((m.players[0].spawn_mask, m.ended_at), (0b10, Some(t)));
+        assert_eq!(m.places(), [1, 2]);
+    }
+
+    /// Item 0x3E on a villager (V spd, spr): 75 % of the run (26.25), 150 % for the 300 frames of a
+    /// bottle's 600 VIs (52.5), the crouch-walk's 40 % (14); no draw, no attack. A bottle is back
+    /// 30 frames after its touch; a Tedi takes one for nothing. The weapon zones' item comes and goes.
+    #[test]
+    fn beach_items() {
+        let (mut arena, m, w) = duel();
+        arena.pickups = vec![(weapon::PICKUPS_2B[0], [0.0, 0.0, 3000.0])];
+        let mut m = Match::new(&arena, m.players, Rng::new(1), 0).with(Settings {
+            beach: true,
+            ..Settings::default()
+        });
+        m.players[0].start = Some(beach::ITEM);
+        m.players[1].body.pos = [5000.0, 0.0, 0.0];
+        let drive = |m: &mut Match, frames, buttons| {
+            let stick = Input {
+                stick_y: 80,
+                buttons,
+                ..Input::default()
+            };
+            for _ in 0..frames {
+                m.step(&arena, &[stick, Input::default()], &w);
+            }
+            m.players[0].body.xz_speed
+        };
+        assert!((drive(&mut m, 60, BUTTON_B) - 26.25).abs() < 0.01);
+        assert_eq!(
+            (m.players[0].weapon, m.players[0].drawn),
+            (Some(beach::ITEM), false)
+        );
+        m.players[0].boost = beach::BOOST;
+        assert!((drive(&mut m, 60, 0) - 52.5).abs() < 0.01);
+        assert!((drive(&mut m, 240, 0) - 52.5).abs() < 0.01);
+        assert_eq!(m.players[0].boost, 0);
+        assert!((drive(&mut m, 60, 0) - 26.25).abs() < 0.01);
+        run(&mut m, &arena, &w, 40, |_| 0);
+        drive(&mut m, 120, BUTTON_Z);
+        let b = m.players[0].body;
+        assert_eq!(b.state, movement::state::CROUCH_WALK);
+        assert!((b.xz_speed - 14.0).abs() < 0.01, "{}", b.xz_speed);
+        assert_eq!(m.players[0].shots, 0);
+        // The bottle: on it, the boost 2 frames on; back 30 frames after the touch.
+        m.players[0].body.pos = [0.0, 0.0, 3000.0];
+        let t = m.tick;
+        run(&mut m, &arena, &w, 3, |_| 0);
+        assert_eq!(m.players[0].boost, beach::BOOST - 2);
+        assert_eq!(m.pickups[0].timer, 30 - 2);
+        m.players[0].body.pos = [0.0, 0.0, 0.0];
+        m.players[1].body.pos = [0.0, 0.0, 3000.0];
+        run(&mut m, &arena, &w, 30 - 2, |_| 0);
+        assert_eq!(m.pickups[0].taken.map(|p| (p.0, p.1 - t)), Some((1, 30)));
+        run(&mut m, &arena, &w, 2, |_| 0);
+        assert_eq!(
+            (m.players[1].boost, m.players[1].weapon),
+            (beach::BOOST, None)
+        );
+        // The zones' gives.
+        m.apply(&[Effect::Give(1, 0x16)]);
+        assert_eq!(m.players[1].weapon, Some(0x16));
+        m.apply(&[Effect::Give(1, 0)]);
+        assert_eq!(m.players[1].weapon, None);
+    }
+
+    /// The plunger sinks 4 a frame under a player on its top, to 332 (V wz 901-917), and the
+    /// script's hold keeps it down.
+    #[test]
+    fn beach_plunger() {
+        let (arena, m, _) = duel();
+        let top = beach::TOP_Y;
+        let w = CollisionWorld::new([
+            (
+                [
+                    [-3000.0, top, 0.0],
+                    [-3000.0, top, 5000.0],
+                    [0.0, top, 5000.0],
+                ],
+                5,
+            ),
+            (
+                [[-3000.0, top, 0.0], [0.0, top, 5000.0], [0.0, top, 0.0]],
+                5,
+            ),
+        ]);
+        let mut m = m.with(Settings {
+            beach: true,
+            ..Settings::default()
+        });
+        m.players[0].body = PlayerState::spawn([-1470.0, top, 2350.0], 0);
+        m.players[1].body.pos = [5000.0, 0.0, 0.0];
+        run(&mut m, &arena, &w, 2, |_| 0);
+        assert_eq!(
+            (m.plunger.y, m.plunger.toucher),
+            (beach::HOME - 8.0, Some(0))
+        );
+        m.players[0].body.pos[0] = -1000.0;
+        m.apply(&[Effect::Plunger(true)]);
+        run(&mut m, &arena, &w, 20, |_| 0);
+        assert_eq!(m.plunger.y, 332.0);
+        m.apply(&[Effect::Plunger(false)]);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.plunger.y, 338.0);
     }
 }

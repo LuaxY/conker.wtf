@@ -956,3 +956,122 @@ fn mounted_guns_m2_and_e1() {
         m.guns[0].shots
     );
 }
+
+/// War: Beach's script 0xB9 on the match (`beach.md`): two human villagers and a human Tedi, idle.
+/// p1 stands on the plunger (the detonation: the villagers' point per Tedi, the Tedi killed with no
+/// credit), then steps into tunnel 0xD (the freeze of 150 frames, its point, the next villager
+/// record of the shared cycle [0, 1, 2, 11]); p0's 90 s deadline strikes it 2748 frames after the
+/// script's first (V x1, bots1: read 2772 from read 24), and its death 40 frames on is the Tediz'
+/// point. No native goes unanswered.
+#[test]
+fn beach_script_runs_the_match() {
+    use conker_bots::{Assets, Bots};
+    use conker_rules::gas::Effect;
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, Settings, Spawn, beach};
+    use conker_sim::movement::{Input, Side};
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x2B).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x2B);
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(&rom, 0x2B).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let at = |record: usize| Placement {
+        index: record,
+        pos: spawns[record].pos.map(f32::from),
+        facing: 0,
+        camera: [0.0; 3],
+    };
+    let villager = |record, class| Fighter {
+        side: Side::Squirrels,
+        start: Some(beach::ITEM),
+        class,
+        ..Fighter::new(&at(record), 0, 0)
+    };
+    let players = vec![
+        villager(1, 0x1E),
+        villager(0, 0x14),
+        Fighter {
+            class: beach::TEDI_CLASS,
+            ..Fighter::new(&at(3), 1, 0)
+        },
+    ];
+    let arena = Arena {
+        spawns,
+        pickups: Vec::new(),
+    };
+    let mut m = Match::new(&arena, players, Rng::default(), 0).with(Settings {
+        beach: true,
+        ..Settings::default()
+    });
+    let mut bots = Bots::new(assets, 3, &[], 2, Rng::default()).unwrap();
+    let mut inputs = [Input::default(); 3];
+    let (mut detonation, mut escape, mut strike, mut records) = (None, None, None, [0u8; 2]);
+    let mut point = None;
+    while m.tick < 2800 {
+        let t = m.tick;
+        match t {
+            100 => m.players[1].body.pos = [-1470.0, beach::TOP_Y, 2350.0],
+            // Node 4, inside trigger 0xD under the west bunker.
+            400 => m.players[1].body.pos = [-1606.0, -1411.0, -3944.0],
+            _ => {}
+        }
+        let effects = bots.tick(&m, &arena, &world, &mut inputs);
+        for e in &effects {
+            match *e {
+                Effect::Start(p, r) if t == 0 && p < 2 => records[p] = r,
+                Effect::Hit { slot: 2, .. } => detonation = detonation.or(Some(t)),
+                Effect::Respawn(1) => escape = escape.or(Some(t)),
+                Effect::Strike(p) => strike = strike.or(Some((t, p))),
+                _ => {}
+            }
+        }
+        m.apply(&effects);
+        bots.scopes(&mut m);
+        let before = m.colors.scores[1];
+        let ev = m.step(&arena, &inputs, &world);
+        if m.colors.scores[1] > before {
+            point = point.or(Some(t));
+        }
+        bots.observe(&ev, &m);
+    }
+    let cycle = [0u8, 1, 2, 11];
+    let k = cycle.iter().position(|&r| r == records[0]).unwrap();
+    assert_eq!(
+        records[1],
+        cycle[(k + 1) % 4],
+        "the villagers share the cycle"
+    );
+    let detonation = detonation.expect("the detonation");
+    assert!((110..130).contains(&detonation), "{detonation}");
+    let tedi = m.players[2];
+    assert_eq!(
+        (tedi.deaths, m.players[1].kills, m.players[1].suicides),
+        (1, 0, 0)
+    );
+    // The freeze: seen inside at 400, out 150 frames on (V esc/end1: 62 → 212) on the next record.
+    assert_eq!(escape, Some(550));
+    assert_eq!(
+        m.players[1].last_spawn,
+        Some(usize::from(cycle[(k + 2) % 4]))
+    );
+    assert_eq!(strike, Some((48 + 2700, 0)));
+    assert_eq!(point, Some(48 + 2700 + 40));
+    assert_eq!(m.colors.scores, [2, 1]);
+    assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
+    assert_eq!(bots.faults, 0);
+}

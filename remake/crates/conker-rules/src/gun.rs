@@ -1,7 +1,8 @@
 //! The mounted machine guns (model 138 at scale 0.5): two on scene 0x30 (Deathmatch and War:
-//! Colors), one on 0x34. A player who touches a free gun jumps onto its seat, turns it with the scope
-//! (weapon 0x1B, conker-camera), fires 252-a-frame bullets of type 0x2C from its two barrels while Z
-//! is held, overheats after 300 frames of fire, and leaves with A or its death. Research and runs
+//! Colors), one on 0x34, one on 0x2B (War: Beach). A player who touches a free gun jumps onto its
+//! seat, turns it with the scope (weapon 0x1B, conker-camera), fires 252-a-frame bullets of type 0x2C
+//! from its two barrels while Z is held, overheats after 300 frames of fire, and leaves with A or its
+//! death. Research and runs
 //! m1, m2, e1, e2, b30, b34: `../lab/research/mp-original/mounted-gun.md`.
 //!
 //! The gunner's side ([`Mount`], on the [`crate::Fighter`]) is predicted with the rest of its
@@ -62,7 +63,8 @@ pub struct Place {
 }
 
 /// The guns of `scene` (V §1: runtime objects in the slots after the players, the script's handles
-/// 0x2012 and 0x2013, scene uids 0x13 and 0x14): 0x30's A (south) and B (north), 0x34's one.
+/// 0x2012 and 0x2013, scene uids 0x13 and 0x14): 0x30's A (south) and B (north), 0x34's one, and
+/// 0x2B's (War: Beach, uid 0x11, the script's 0x2010; V `beach.md` §5: 60 from 0x30's A).
 pub fn places(scene: usize) -> &'static [Place] {
     const S30: [Place; 2] = [
         Place {
@@ -78,9 +80,14 @@ pub fn places(scene: usize) -> &'static [Place] {
         pos: [2428.0, 645.0, 537.0],
         yaw: 40960,
     }];
+    const S2B: [Place; 1] = [Place {
+        pos: [-337.0, -387.1, -3561.0],
+        yaw: 48896,
+    }];
     match scene {
         0x30 => &S30,
         0x34 => &S34,
+        0x2B => &S2B,
         _ => &[],
     }
 }

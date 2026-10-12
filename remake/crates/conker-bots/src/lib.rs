@@ -16,8 +16,9 @@
 //! Per frame: [`lift::Lifts::ride`] (and [`Bots::lifted`] for every slot it moved), [`Bots::tick`]
 //! (fills the bot slots' inputs and returns what the script did to the match, for `Match::apply`),
 //! [`Bots::scopes`] (the snipers' aim and the bots' pickup reach into the match), `Match::step`,
-//! then [`Bots::observe`] with the step's events. Total War runs the script with no bot too: it
-//! holds the gas. Notes, oracle numbers and the approximations:
+//! then [`Bots::observe`] with the step's events. The War modes run the script with no bot too: it
+//! holds Total War's gas, Colors' flags and Beach's escapes. Notes, oracle numbers and the
+//! approximations:
 //! `lab/oracle/bot_README.md` (outside this tree).
 
 pub mod brain;
@@ -32,7 +33,7 @@ use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::game::{Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::weapon::Gives;
-use conker_rules::{Rng, colors};
+use conker_rules::{Rng, beach, colors};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{Input, atan2_u16, deadzone, stick_angle};
 use nav::Graph;
@@ -324,7 +325,7 @@ impl Bots {
                 skill: self.skill,
                 zones: &mut self.zones,
                 unknown: &mut unknown,
-                ffa: !m.settings.total_war && !m.settings.colors,
+                ffa: !m.settings.total_war && !m.settings.colors && !m.settings.beach,
                 forgiven: &mut self.forgiven,
                 slots: &self.slots,
                 touched,
@@ -332,6 +333,8 @@ impl Bots {
                 flags: m.colors.flags,
                 starting: !self.started,
                 gunners: (0..m.guns.len()).map(|k| m.gunner(k)).collect(),
+                plunger: m.plunger,
+                appear: m.settings.beach && !self.started,
             };
             if !self.started {
                 self.started = true;
@@ -351,6 +354,16 @@ impl Bots {
             {
                 self.faults += 1;
             }
+            // War: Beach: the engine's triggers 0x26 and 0x27 (type 0, kind 5) put a Tedi off the
+            // villagers' beaches (I: done here, where the trigger table is).
+            if m.settings.beach {
+                for (k, b) in bodies.iter().enumerate() {
+                    let at = (beach::EJECT.iter()).find(|e| host.inside(k, e.0));
+                    if let Some(&(_, at)) = at.filter(|_| b.team == beach::TEDIZ && b.health > 0) {
+                        host.effects.push(Effect::Place(self.slots[k], at));
+                    }
+                }
+            }
         }
         self.unknown = unknown;
         self.hit_by.fill(0);
@@ -366,7 +379,7 @@ impl Bots {
                     effects.push(Effect::Carry(slot, carries));
                 }
             }
-        } else if !m.settings.colors {
+        } else if !m.settings.colors && !m.settings.beach {
             effects.clear();
         }
         let mut players: Vec<[f32; 3]> = bodies.iter().map(|b| b.pos).collect();
@@ -484,6 +497,7 @@ impl Bots {
                     stunned: f.stun != 0,
                     buttons: f.buttons,
                     scope: f.body.scope_yaw.map(|y| (y, f.scope_pitch)),
+                    class: f.class,
                 }
             })
             .collect()

@@ -54,7 +54,10 @@ use serde::{Deserialize, Serialize};
 /// carrier's speed is predicted) and the fighter's flag and poses (conker-rules' `Action::Pose`).
 /// 17: the mounted guns on scenes 0x30 and 0x34: [`MatchView::guns`] ([`GunView`]), and the
 /// fighter's mount (conker-rules' `Fighter::gun`: the jump on, the seat and the trigger are predicted).
-pub const PROTOCOL_ID: u64 = 17;
+/// 18: War: Beach on scene 0x2B: [`MatchView`]'s `beach`, `holders`, `plunger` and `cooldown`,
+/// [`Combat`]'s `class`, `freeze` and `deadline`, and the fighter's class and boost (the villagers'
+/// item 0x3E speed is predicted).
+pub const PROTOCOL_ID: u64 = 18;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -128,8 +131,16 @@ pub struct Combat {
     /// `anim` (conker-anim's `FLAG_*`).
     pub flag: Option<u8>,
     /// War: Colors: the player's team's score (what its place ranks by first: conker-rules'
-    /// `Standing::score`).
+    /// `Standing::score`). War: Beach's too.
     pub score: u16,
+    /// War: Beach: the record's class (conker-rules' `beach::model`: 156 below 0x1D, 157 from it, the
+    /// Tediz' 3 is 117), re-rolled at each respawn; frames left of the escape's freeze (G+0x224C: the
+    /// script's 150 for a human, 30 for a bot, from the frame after it stepped into a tunnel; the
+    /// player respawns on the next villager record as it ends); the 90 s deadline in VIs (G+0x1574,
+    /// human villagers only: the HUD's countdown is `deadline / 60`; 0 struck).
+    pub class: u8,
+    pub freeze: u8,
+    pub deadline: u16,
 }
 
 /// War: Colors' flag as the clients draw it (conker-rules' `colors::Flag`).
@@ -216,8 +227,17 @@ pub struct MatchView {
     pub scores: [u16; 2],
     pub flags: [FlagView; 2],
     pub fade: Option<(bool, u16, u32)>,
-    /// The map's mounted guns (scene 0x30's two, 0x34's one; none elsewhere).
+    /// The map's mounted guns (scene 0x30's two, 0x34's one, 0x2B's one; none elsewhere).
     pub guns: Vec<GunView>,
+    /// War: Beach (conker-rules' `Settings::beach`, `beach`): teams are the sides (0 the villagers,
+    /// 1 the Tediz), the score target is `score_limit` and `scores` the teams'; the weapon zones'
+    /// holders (the sniper's on the west bunker top, the bazooka's on the east top; slots); the
+    /// plunger's y (392 at home, 332 down) and the frames left of its cooldown (900 from the
+    /// detonation's frame: it stays down until 20 are left).
+    pub beach: bool,
+    pub holders: [Option<u16>; 2],
+    pub plunger: f32,
+    pub cooldown: u16,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

@@ -5,6 +5,7 @@
 //!
 //! Tags in the docs: V matched on oracle traces, C read in the recompiled code, I inferred.
 
+pub mod beach;
 pub mod colors;
 pub mod damage;
 pub mod fidget;

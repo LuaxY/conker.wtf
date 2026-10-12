@@ -1074,6 +1074,7 @@ pub fn match_settings(m: &MatchView) -> Settings {
         total_war: m.total_war,
         colors: m.colors,
         score: m.score_limit,
+        beach: m.beach,
         ..Settings::default()
     }
 }

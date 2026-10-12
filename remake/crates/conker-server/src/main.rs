@@ -62,15 +62,15 @@
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors] [--score 1-40|unlimited]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach] [--score 1-40|unlimited]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
 //! - `--map 2d|30|34|3f|2b`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
 //!   clients learn it from `GET /info` on the token endpoint ([`token`]) before loading the level. 2b (the
-//!   Beach, War: Beach's map) plays Deathmatch until that mode exists: its start records, the villagers'
-//!   two vitamin pickups (item 0x3E, unknown to the rules), no mounted gun.
+//!   Beach, War: Beach's map) plays Deathmatch too: its start records, the villagers' two vitamin
+//!   pickups (item 0x3E, no weapon there), its mounted gun.
 //! - `--token-key FILE` (or `CONKER_TOKEN_KEY`): 64 hex digits that sign the connect tokens; a
 //!   random key per start without it. `--token-addr`: the token endpoint (default `[::]`, port + 1;
 //!   production: loopback behind the static server).
@@ -100,6 +100,10 @@
 //!   without `--cavemen`: teams are the sides, lives are never lost, the level's AI script runs the
 //!   flags (conker-rules' `colors`), and the match ends on the clock or at `--score` captures
 //!   (1-40, default 20, `unlimited`: the clock only; untimed and unlimited, never).
+//! - `--mode beach`: the original's War: Beach (scenario 8), on map 2b only and without `--cavemen`:
+//!   the villagers (the squirrels' side, item 0x3E, no attack) against at most 2 Tediz; the level's
+//!   AI script runs the escapes, the detonation, the weapon zones and the 90 s deadline (conker-rules'
+//!   `beach`); lives are never lost, and the match ends on the clock or at `--score` (as Colors').
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -115,7 +119,6 @@ use conker_assets::{PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, Slice};
 use conker_bots::brain::g;
 use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
-use conker_rules::colors;
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
 use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, team_result};
@@ -125,6 +128,7 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
+use conker_rules::{beach, colors};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
@@ -264,10 +268,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--cavemen" => setup.cavemen = true,
             "--mode" => {
                 let s = &mut setup.settings;
-                (s.total_war, s.colors) = match value()?.as_str() {
-                    "deathmatch" => (false, false),
-                    "total-war" => (true, false),
-                    "colors" => (false, true),
+                (s.total_war, s.colors, s.beach) = match value()?.as_str() {
+                    "deathmatch" => (false, false, false),
+                    "total-war" => (true, false, false),
+                    "colors" => (false, true, false),
+                    "beach" => (false, false, true),
                     v => return Err(bad(v)),
                 }
             }
@@ -306,6 +311,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     if setup.settings.colors && (net.map != "30" || setup.cavemen) {
         return Err("--mode colors: map 30 only, without --cavemen".into());
     }
+    // Beach is scenario 8, scene 0x2B's.
+    if setup.settings.beach && (net.map != "2b" || setup.cavemen) {
+        return Err("--mode beach: map 2b only, without --cavemen".into());
+    }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
     }
@@ -342,7 +351,7 @@ fn main() {
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors] [--score 1-40|unlimited] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach] [--score 1-40|unlimited] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -477,9 +486,10 @@ fn main() {
             "token endpoint {token_addr}: {e} (another server's port? pick one with --token-addr)"
         ))
     });
-    let mode = match (settings.total_war, settings.colors) {
-        (true, _) => "War: Total War",
-        (_, true) => "War: Colors",
+    let mode = match (settings.total_war, settings.colors, settings.beach) {
+        (true, ..) => "War: Total War",
+        (_, true, _) => "War: Colors",
+        (.., true) => "War: Beach",
         _ => "Deathmatch",
     };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
@@ -592,7 +602,7 @@ impl Ai {
     }
 
     /// A fresh AI for `players` participants, the first `bots` of them bots, at `skill`; with no
-    /// bot only in Total War (`script`), whose AI script holds the gas.
+    /// bot only in the War modes (`script`), whose AI script referees them.
     fn restart(&mut self, players: usize, bots: usize, skill: u8, rng: Rng, script: bool) {
         let slots: Vec<usize> = (0..bots).collect();
         self.bots = (bots > 0 || script)
@@ -650,9 +660,29 @@ impl Game {
         }
     }
 
-    /// The item every player starts holding.
-    fn start_item(&self) -> Option<u8> {
-        self.cavemen.then_some(weapon::CLUB.id)
+    /// The item a player on `side` starts holding (War: Beach's villagers: 0x3E), and its class
+    /// (Beach's: the next villager's of [`beach::CLASSES`], the Tediz' 3; else 0).
+    fn start_item(&self, side: Side) -> Option<u8> {
+        match self.setup.settings.beach {
+            true => (side == Side::Squirrels).then_some(beach::ITEM),
+            false => self.cavemen.then_some(weapon::CLUB.id),
+        }
+    }
+
+    fn class(&self, side: Side) -> u8 {
+        match (self.setup.settings.beach, side) {
+            (false, _) => 0,
+            (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
+            (true, _) => beach::TEDI_CLASS,
+        }
+    }
+
+    /// War: Beach caps the Tediz at [`beach::MAX_TEDIZ`]: `side` past it takes the villagers'.
+    fn capped(&self, side: Side) -> Side {
+        match self.setup.settings.beach && self.members(Side::Tediz) >= beach::MAX_TEDIZ {
+            true => Side::Squirrels,
+            false => side,
+        }
     }
 
     /// Humans in the match (every taken slot after the bots).
@@ -664,7 +694,8 @@ impl Game {
     /// The team of the next player to join on `side`: its own in a Deathmatch, its side's in Total
     /// War and Colors (`0x800E0C00`: 0 the squirrels, 1 the Tediz).
     fn team(&mut self, side: Side) -> u8 {
-        if self.setup.settings.total_war || self.setup.settings.colors {
+        let s = self.setup.settings;
+        if s.total_war || s.colors || s.beach {
             return side as u8;
         }
         self.joins += 1;
@@ -678,8 +709,13 @@ impl Game {
     fn restart_bots(&mut self) {
         let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
         let s = self.setup.settings;
-        self.ai
-            .restart(players, bots, s.skill, rng, s.total_war || s.colors);
+        self.ai.restart(
+            players,
+            bots,
+            s.skill,
+            rng,
+            s.total_war || s.colors || s.beach,
+        );
         self.m.restart_gas();
     }
 
@@ -688,14 +724,15 @@ impl Game {
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
         let side = match self.cavemen {
             true => Side::Cavemen,
-            false => [Side::Squirrels, Side::Tediz][slot % 2],
+            false => self.capped([Side::Squirrels, Side::Tediz][slot % 2]),
         };
         let (place, spawn_mask) = self.placement(slot, side);
         let fighter = Fighter {
             side,
             spawn_mask,
             bot: true,
-            start: self.start_item(),
+            start: self.start_item(side),
+            class: self.class(side),
             ..Fighter::new(&place, self.team(side), 0)
         };
         self.m.players.push(fighter);
@@ -732,7 +769,12 @@ impl Game {
             let base = usize::from(side == Side::Tediz);
             let record = self.starts.sides[base][self.members(side) % 8];
             let place = place(&self.arena.spawns, usize::from(record), &mut self.m.rng);
-            return (place, self.starts.side_masks[base]);
+            // Beach: everyone respawns on its own record (the script's command 0x1F moves it).
+            let mask = match self.setup.settings.beach {
+                true => 1 << record,
+                false => self.starts.side_masks[base],
+            };
+            return (place, mask);
         };
         let record = usize::from(self.starts.deathmatch[slot % 16]);
         let r = &self.arena.spawns[record];
@@ -755,7 +797,7 @@ impl Game {
     /// the winning team's outro (none on a DRAW: `team_result`, as the clients' STATS rank the teams).
     fn results_at(&self) -> Option<u32> {
         let m = &self.m;
-        let outro = match m.settings.total_war || m.settings.colors {
+        let outro = match m.settings.total_war || m.settings.colors || m.settings.beach {
             true => team_result(&m.standings()).map_or(0, |t| self.outros[usize::from(t)]),
             false => 0,
         };
@@ -969,17 +1011,21 @@ fn join_player(
 ) {
     let tick = timeline.tick().0;
     let index = game.m.next_slot();
-    // Total War and Colors have two teams: a caveman asked for takes the smaller side.
-    let two_sides = game.setup.settings.total_war || game.setup.settings.colors;
+    // The War modes have two teams: a caveman asked for takes the smaller side (Beach: at most
+    // 2 Tediz).
+    let s = game.setup.settings;
+    let two_sides = s.total_war || s.colors || s.beach;
     let side = (asked.side)
         .filter(|&s| !two_sides || s != Side::Cavemen)
         .unwrap_or_else(|| game.smaller_side());
+    let side = game.capped(side);
     let (place, spawn_mask) = game.placement(index, side);
     let team = game.team(side);
     let fighter = Fighter {
         side,
         spawn_mask,
-        start: game.start_item(),
+        start: game.start_item(side),
+        class: game.class(side),
         ..Fighter::new(&place, team, tick)
     };
     if index < game.m.players.len() {
@@ -1170,7 +1216,20 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         haze: f.haze(tick).map_or(0, |k| k as u8),
         flag: f.flag,
         score: 0,
+        class: f.class,
+        freeze: 0,
+        deadline: 0,
     }
+}
+
+/// War: Beach's script globals ([`brain::g`] has the shared struct's; these are 0xB9's own): per
+/// participant the escape's freeze and the 90 s deadline (G+0x1574, `g::TIMER3`); the zones'
+/// holders (participants, −1 none) and the plunger's cooldown.
+mod beach_g {
+    pub const FREEZE: i32 = 0x224C;
+    pub const SNIPER: i32 = 0x230C;
+    pub const BAZOOKA: i32 = 0x2308;
+    pub const COOLDOWN: i32 = 0x22F4;
 }
 
 /// This tick's events, for [`publish`] and the logs.
@@ -1232,6 +1291,7 @@ fn simulate(
                 spawn_mask: f.spawn_mask,
                 bot: f.bot,
                 start: f.start,
+                class: f.class,
                 ..Fighter::new(&slot.place, f.team, t)
             };
             if since_live > 0 {
@@ -1247,6 +1307,7 @@ fn simulate(
                 spawn_mask: f.spawn_mask,
                 bot: true,
                 start: f.start,
+                class: f.class,
                 ..Fighter::new(&slot.place, f.team, t)
             };
         }
@@ -1318,6 +1379,11 @@ fn simulate(
         }
         let effects = bots.tick(&game.m, &game.arena, &world, &mut inputs);
         let countdown = game.m.gas.countdown;
+        let tag = if game.m.settings.beach {
+            "BEACH"
+        } else {
+            "COLORS"
+        };
         for e in &effects {
             match e {
                 Effect::Countdown(300) if countdown != 300 => info!("GAS t={t} delivered"),
@@ -1332,7 +1398,20 @@ fn simulate(
                 | Effect::Score(..)
                 | Effect::Respawn(_)
                 | Effect::Fade(..)
-                | Effect::Gun(_) => info!("COLORS t={t} {e:?}"),
+                | Effect::Gun(_) => info!("{tag} t={t} {e:?}"),
+                // Beach's: the start records, the strikes, the ejections, and the plunger's hold
+                // and the zones' gives when they change.
+                Effect::Start(..) | Effect::Strike(_) | Effect::Place(..)
+                    if game.m.settings.beach =>
+                {
+                    info!("BEACH t={t} {e:?}")
+                }
+                Effect::Plunger(held) if *held != game.m.plunger.held => info!("BEACH t={t} {e:?}"),
+                Effect::Give(i, w)
+                    if (game.m.players.get(*i)).is_some_and(|f| f.weapon.unwrap_or(0) != *w) =>
+                {
+                    info!("BEACH t={t} {e:?}")
+                }
                 _ => {}
             }
         }
@@ -1356,6 +1435,20 @@ fn simulate(
         game.m.step(&game.arena, &inputs, &world)
     });
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
+    // Beach's villager deaths score in the step.
+    if game.m.colors.scores != pre.colors.scores && game.m.settings.beach {
+        info!(
+            "BEACH t={t} villager down: scores {:?}",
+            game.m.colors.scores
+        );
+    }
+    if game.m.ended_at.is_some() && pre.ended_at.is_none() {
+        info!(
+            "t={t} match ends: places {:?}, scores {:?}",
+            game.m.places(),
+            game.m.colors.scores
+        );
+    }
     for (k, (was, f)) in pre
         .colors
         .flags
@@ -1520,6 +1613,7 @@ fn publish(
 ) {
     let m = &game.m;
     let standings = m.standings();
+    let beach = game.ai.bots.as_ref().filter(|_| m.settings.beach);
     for (slot, mut player, mut fighting, mut combat_state) in &mut players {
         let Some(f) = m.players.get(slot.index) else {
             continue;
@@ -1533,8 +1627,8 @@ fn publish(
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
         let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
-        if m.settings.colors {
-            // Colors: no life is lost; the team's score ranks the player.
+        if m.settings.colors || m.settings.beach {
+            // Colors and Beach: no life is lost; the team's score ranks the player.
             c.lives_left = colors::LIVES;
             c.score = standings
                 .get(slot.index)
@@ -1542,8 +1636,18 @@ fn publish(
                 .flatten()
                 .map_or(0, |s| s.score);
         }
+        if let Some((b, k)) = beach.and_then(|b| Some((b, b.by_slot(slot.index)?))) {
+            let g = b.globals();
+            c.freeze = g.get(beach_g::FREEZE, k).clamp(0, 255) as u8;
+            c.deadline = g.get(g::TIMER3, k).clamp(0, 0xFFFF) as u16;
+        }
         combat_state.set_if_neq(c);
     }
+    let holder = |off| {
+        let b = beach?;
+        b.slot(usize::try_from(b.globals().i32(off)).ok()?)
+            .map(|s| s as u16)
+    };
     let taken = game
         .arena
         .pickups
@@ -1603,6 +1707,10 @@ fn publish(
                     .is_some_and(|g| g.trigger),
             })
             .collect(),
+        beach: s.beach,
+        holders: [holder(beach_g::SNIPER), holder(beach_g::BAZOOKA)],
+        plunger: m.plunger.y,
+        cooldown: beach.map_or(0, |b| b.globals().i32(beach_g::COOLDOWN).max(0) as u16),
     });
 }
 
@@ -1787,6 +1895,44 @@ mod tests {
         );
         assert!(settings(&["--mode", "colors"]).is_err());
         assert!(settings(&["--mode", "colors", "--map", "30", "--cavemen"]).is_err());
+        // Beach is scene 0x2B's, with Colors' score target.
+        let b = settings(&["--mode", "beach", "--map", "2b"]).unwrap();
+        assert!(b.beach && !b.colors && !b.total_war && b.score == 20);
+        assert!(settings(&["--mode", "beach"]).is_err());
+        assert!(settings(&["--mode", "beach", "--map", "2b", "--cavemen"]).is_err());
+    }
+
+    /// War: Beach: the bots alternate sides until the Tediz are 2, then every one is a villager (a
+    /// human asking for the Tediz too), each villager with item 0x3E and the next start class,
+    /// respawning on its own record; the Tediz class 3.
+    #[test]
+    fn beach_caps_the_tediz() {
+        let mut g = game(Setup {
+            settings: Settings {
+                beach: true,
+                ..Settings::default()
+            },
+            ..Setup::default()
+        });
+        g.starts = starts(0x2B).unwrap();
+        for slot in 0..7 {
+            let _ = g.join_bot(slot);
+        }
+        let (s, t) = (Side::Squirrels, Side::Tediz);
+        let f = &g.m.players;
+        assert_eq!(
+            f.iter().map(|f| f.side).collect::<Vec<_>>(),
+            [s, t, s, t, s, s, s]
+        );
+        assert_eq!(
+            f.iter().map(|f| f.team).collect::<Vec<_>>(),
+            [0, 1, 0, 1, 0, 0, 0]
+        );
+        let classes: Vec<u8> = f.iter().map(|f| f.class).collect();
+        assert_eq!(classes, [0x1E, 3, 0x14, 3, 0x1D, 0x1F, 0x1E]);
+        assert_eq!((f[0].start, f[1].start), (Some(beach::ITEM), None));
+        assert_eq!((f[0].spawn_mask, f[1].spawn_mask), (1 << 1, 1 << 10));
+        assert_eq!(g.capped(Side::Tediz), Side::Squirrels);
     }
 
     /// Total War: every player's team is its side (the bots alternate); a Deathmatch gives each
