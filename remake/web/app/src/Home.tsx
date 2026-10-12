@@ -11,7 +11,8 @@ import {
   Swords,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { BRICKS, Emblem, Keys, SIDES, primary } from "./ui";
+import { useState } from "react";
+import { Banner, BRICKS, Keys, PLAN } from "./ui";
 
 interface Control {
   action: string;
@@ -118,121 +119,147 @@ const FEATURES = [
   {
     icon: Swords,
     title: "Pick a side",
-    text: "Squirrels or Tediz, one map, every weapon on the floor.",
+    text: "Squirrels or Tediz. Every weapon's on the floor.",
+    style: "bg-bone -rotate-3",
   },
-  { icon: Bot, title: "Bots included", text: "The original's AI fills the empty slots." },
-  { icon: Globe, title: "No install", text: "Rust and WebAssembly, right in the browser." },
+  {
+    icon: Bot,
+    title: "Bots included",
+    text: "The original's AI fills the empty slots.",
+    style: "bg-amber rotate-2",
+  },
+  {
+    icon: Globe,
+    title: "No install",
+    text: "Rust and WebAssembly, right in the browser.",
+    style: "bg-lime -rotate-1",
+  },
 ];
+
+/** The Total War briefing's battle plan, taped up between the two sides' banners. */
+function BattlePlan() {
+  const [failed, setFailed] = useState(false);
+  return (
+    <figure className="relative mx-auto w-fit px-8 pb-6 sm:px-12">
+      {failed ? (
+        <div className="grid size-64 -rotate-2 place-items-center border-3 border-black bg-bone font-hand text-4xl text-ink shadow-[8px_8px_0_#000] sm:size-96 sm:text-5xl">
+          <p className="text-center">
+            Them
+            <br />
+            <span className="text-2xl">vs</span>
+            <br />
+            Us
+          </p>
+        </div>
+      ) : (
+        <div className="grid size-64 -rotate-2 grid-cols-2 shadow-[8px_8px_0_#000] sm:size-96">
+          {PLAN.map((src) => (
+            <img
+              key={src}
+              src={src}
+              alt=""
+              onError={() => setFailed(true)}
+              className="pixelated size-full"
+            />
+          ))}
+        </div>
+      )}
+      <Banner side="squirrels" className="absolute bottom-0 left-0 w-16 -rotate-6 sm:w-24" />
+      <Banner side="tediz" className="absolute right-0 bottom-0 w-16 rotate-6 sm:w-24" />
+      <figcaption className="sr-only">
+        The Squirrels' battle plan against the Tediz, from the game's Total War briefing.
+      </figcaption>
+    </figure>
+  );
+}
 
 export function Home() {
   return (
     <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
-      <section className="relative overflow-hidden border-b-4 border-mud">
+      <section className="relative overflow-hidden border-b-3 border-black">
         <div
           aria-hidden
-          className="pixelated absolute inset-0 opacity-30"
-          style={{ backgroundImage: `url(${BRICKS})`, backgroundSize: "160px" }}
+          className="pixelated absolute inset-0 opacity-40"
+          style={{ backgroundImage: `url(${BRICKS})`, backgroundSize: "192px" }}
         />
         <div
           aria-hidden
-          className="absolute inset-0 bg-linear-to-b from-bunker/50 via-bunker/80 to-bunker"
+          className="absolute inset-0 bg-[radial-gradient(ellipse_at_70%_40%,rgb(248_168_32/0.18),transparent_60%),linear-gradient(to_bottom,rgb(18_12_8/0.6),rgb(18_12_8/0.85)_70%,var(--color-night))]"
         />
-        <div className="relative mx-auto grid max-w-6xl items-center gap-12 px-4 py-14 md:grid-cols-[1.25fr_1fr] md:py-24">
+        <div className="relative mx-auto grid max-w-6xl items-center gap-10 px-4 py-12 md:grid-cols-[1.15fr_1fr] md:py-20">
           <div>
-            <p className="font-stencil text-sm tracking-widest text-acorn uppercase">
+            <p className="font-stencil text-sm tracking-widest text-amber uppercase">
               Multiplayer Deathmatch, remade
             </p>
             <h1 className="cartoon mt-3 font-display text-6xl leading-[0.95] sm:text-7xl lg:text-8xl">
-              <span className="text-squirrels">Squirrels</span>{" "}
-              <span className="text-4xl text-khaki sm:text-5xl">vs</span>{" "}
-              <span className="text-tediz">Tediz</span>
+              <span className="bob inline-block text-squirrels">Squirrels</span>{" "}
+              <span className="inline-block -rotate-6 font-hand text-4xl text-bone normal-case [-webkit-text-stroke:0] [text-shadow:3px_3px_0_#000] sm:text-5xl">
+                vs
+              </span>{" "}
+              <span className="bob inline-block text-tediz [animation-delay:-1.2s]">Tediz</span>
             </h1>
-            <p className="mt-6 max-w-xl text-lg text-khaki/90">
+            <p className="mt-6 max-w-xl text-lg text-bone/90">
               The N64's foulest-mouthed Deathmatch, rebuilt in Rust and played in your browser. Grab
               a gun off the floor, cook a grenade, and settle the war one furry frag at a time. An
-              authoritative server keeps everyone honest.
+              authoritative server keeps everyone honest. Mostly.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-4">
-              <Link to="/servers" className={`${primary} px-8 py-4 text-xl`}>
+              <Link to="/servers" className="cta">
                 <Crosshair aria-hidden className="size-6" />
                 Join game
               </Link>
               <p className="text-sm text-dust">Keyboard and mouse, or a gamepad.</p>
             </div>
-            <p className="mt-6 rounded-lg border-2 border-acorn/50 bg-acorn/10 p-3 text-sm md:hidden">
-              Playing needs a keyboard or a gamepad. You can browse the servers here, then join from
-              a computer.
+            <p className="bubble mt-8 text-sm md:hidden">
+              Playing needs a keyboard or a gamepad. Have a look round the servers here, then join
+              from a computer.
             </p>
           </div>
-
-          <div className="flex items-start justify-center gap-3 sm:gap-6">
-            {(["squirrels", "tediz"] as const).map((side, i) => (
-              <motion.figure
-                key={side}
-                initial={{ opacity: 0, y: 30, rotate: 0 }}
-                animate={{ opacity: 1, y: 0, rotate: i ? 5 : -5 }}
-                transition={{ type: "spring", delay: 0.15 + i * 0.15 }}
-                className="grid justify-items-center gap-3"
-              >
-                <Emblem
-                  side={side}
-                  className={`size-32 rounded-2xl border-4 shadow-[8px_8px_0_#000] sm:size-44 ${SIDES[side].border}`}
-                />
-                <figcaption className="text-center">
-                  <span className={`cartoon block font-display text-3xl ${SIDES[side].text}`}>
-                    {SIDES[side].name}
-                  </span>
-                  <span className="font-stencil text-xs tracking-widest text-dust uppercase">
-                    {SIDES[side].tagline}
-                  </span>
-                </figcaption>
-              </motion.figure>
-            ))}
-          </div>
+          <BattlePlan />
         </div>
       </section>
 
-      <section
-        aria-label="Features"
-        className="mx-auto grid max-w-6xl gap-4 px-4 py-10 sm:grid-cols-3"
-      >
-        {FEATURES.map(({ icon: Icon, title, text }) => (
-          <div key={title} className="flex gap-3 rounded-xl border-2 border-mud bg-trench p-4">
-            <Icon aria-hidden className="mt-0.5 size-6 shrink-0 text-acorn" />
-            <div>
-              <h2 className="font-stencil uppercase">{title}</h2>
-              <p className="text-sm text-dust">{text}</p>
-            </div>
-          </div>
-        ))}
+      <section aria-label="Features" className="mx-auto max-w-6xl px-4 py-12">
+        <ul className="grid justify-items-center gap-8 sm:grid-cols-3">
+          {FEATURES.map(({ icon: Icon, title, text, style }) => (
+            <li
+              key={title}
+              className={`grid size-56 place-content-center justify-items-center gap-1 rounded-full border-3 border-black p-8 text-center text-night shadow-[6px_6px_0_#000] outline-2 -outline-offset-12 outline-black/40 outline-dashed ${style}`}
+            >
+              <Icon aria-hidden className="size-8" />
+              <h2 className="font-display text-xl">{title}</h2>
+              <p className="text-sm font-medium">{text}</p>
+            </li>
+          ))}
+        </ul>
       </section>
 
       <section aria-labelledby="controls" className="mx-auto max-w-6xl px-4 pt-6 pb-16">
-        <h2 id="controls" className="cartoon font-display text-5xl">
+        <div className="hazard -mx-4 mb-10 sm:mx-0" />
+        <h2 id="controls" className="chrome font-display text-5xl">
           Controls
         </h2>
         <p className="mt-2 max-w-2xl text-dust">
           Keyboard and mouse, or any standard gamepad (Xbox layout shown). Click into the game once
           so it gets the keys; a pad works while the game's window has focus.
         </p>
-        <div className="mt-8 grid gap-6 lg:grid-cols-3">
+        <div className="mt-8 grid gap-8 lg:grid-cols-3">
           {CONTROLS.map(({ group, icon: Icon, rows }) => (
-            <section
-              key={group}
-              aria-labelledby={`controls-${group}`}
-              className="rounded-2xl border-2 border-mud bg-trench p-5"
-            >
+            <section key={group} aria-labelledby={`controls-${group}`} className="board p-6">
               <h3
                 id={`controls-${group}`}
-                className="flex items-center gap-2 font-display text-3xl text-acorn"
+                className="cartoon flex items-center gap-2 font-display text-3xl text-amber"
               >
                 <Icon aria-hidden className="size-6" />
                 {group}
               </h3>
               <ul className="mt-2">
                 {rows.map((row) => (
-                  <li key={row.action} className="border-t border-mud py-3 first:border-0">
-                    <p className="font-stencil uppercase">{row.action}</p>
+                  <li
+                    key={row.action}
+                    className="border-t-2 border-dashed border-oak py-3 first:border-0"
+                  >
+                    <p className="font-display tracking-wide text-bone uppercase">{row.action}</p>
                     <p className="text-sm text-dust">{row.note}</p>
                     {row.keys.length + row.pad.length > 0 && (
                       <div className="mt-2 grid gap-1.5">

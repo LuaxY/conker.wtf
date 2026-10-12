@@ -1,51 +1,315 @@
 @import "tailwindcss";
 
+/* The look: the game's pub at night (its multiplayer menu hub), its lime-lit menu pills, the box art's
+   amber lettering, speech bubbles and war props. Palette and sources: ../../DESIGN.md. */
 @theme {
+  --font-sans: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
   --font-display: "Luckiest Guy", ui-rounded, system-ui, sans-serif;
   --font-stencil: "Black Ops One", ui-sans-serif, system-ui, sans-serif;
+  --font-hand: "Gloria Hallelujah", "Comic Sans MS", cursive;
 
-  --color-bunker: #14110b;
-  --color-trench: #1f1a12;
-  --color-mud: #2e2719;
-  --color-khaki: #efe4c8;
+  --color-night: #120c08;
+  --color-cellar: #2a1606;
+  --color-oak: #4a2508;
+  --color-bone: #f0e8d0;
   --color-dust: #b9ad8d;
-  --color-acorn: #f5a524;
-  --color-squirrels: #8cc63f;
-  --color-tediz: #ff5b4f;
-  --color-go: #6fd36f;
+  --color-amber: #f8a820;
+  --color-fur: #e07000;
+  --color-slate: #3a3f68;
+  --color-choc: #8c3908;
+  --color-lime: #56ff00;
+  --color-moss: #123f00;
+  --color-hazard: #d8c800;
+  --color-ink: #111111;
+  /* The game's own radar colours (assets/hud/hud.json). */
+  --color-squirrels: #78ff16;
+  --color-squirrels-deep: #386818;
+  --color-tediz: #ff3737;
+  --color-tediz-deep: #900000;
 }
 
 @layer base {
   html {
-    background: var(--color-bunker);
-    color: var(--color-khaki);
+    background: var(--color-night);
+    color: var(--color-bone);
     color-scheme: dark;
   }
+  /* A lamp over the bar, a vignette, and dark planks. */
   body {
     min-height: 100dvh;
     background:
-      radial-gradient(ellipse at top, rgb(245 165 36 / 0.08), transparent 60%),
-      repeating-linear-gradient(135deg, transparent 0 24px, rgb(255 255 255 / 0.015) 24px 48px);
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgb(248 168 32 / 0.14), transparent 70%),
+      radial-gradient(ellipse at center, transparent 50%, rgb(0 0 0 / 0.55)),
+      repeating-linear-gradient(90deg, transparent 0 118px, rgb(0 0 0 / 0.35) 118px 120px),
+      linear-gradient(var(--color-night), #1b0f06);
+    background-attachment: fixed;
   }
   :focus-visible {
-    outline: 3px solid var(--color-acorn);
-    outline-offset: 2px;
+    outline: 3px solid var(--color-lime);
+    outline-offset: 3px;
   }
 }
 
-/* The game's own textures, drawn as the N64 drew them: big pixels. */
-.pixelated {
-  image-rendering: pixelated;
+@layer components {
+  /* The game's own textures, drawn as the N64 drew them: big pixels. */
+  .pixelated {
+    image-rendering: pixelated;
+  }
+
+  /* Cartoon lettering, after the box art: a thick outline and a hard extrusion. */
+  .cartoon {
+    --outline: var(--color-night);
+    -webkit-text-stroke: 0.07em var(--outline);
+    paint-order: stroke fill;
+    text-shadow:
+      0.03em 0.04em 0 var(--outline),
+      0.06em 0.08em 0 var(--outline),
+      0.09em 0.12em 0 #000;
+    letter-spacing: 0.02em;
+  }
+  .cartoon-slate {
+    --outline: var(--color-slate);
+  }
+
+  /* The menu's glossy words (GAME1, OPTIONS, MULTI): one colour per word, from --c. 24px and up only. */
+  .chrome {
+    --c: var(--color-amber);
+    color: var(--c);
+    filter: drop-shadow(0.05em 0.07em 0 #000);
+    letter-spacing: 0.02em;
+  }
+  @supports (background-clip: text) {
+    .chrome {
+      background: linear-gradient(
+        180deg,
+        #fff6c0 0 12%,
+        var(--c) 38%,
+        color-mix(in srgb, var(--c), #000 40%) 78%,
+        #ffd040
+      );
+      background-clip: text;
+      color: transparent;
+    }
+  }
+
+  /* The game's pill buttons (TOTAL WAR, SET-UP, RESTART, QUIT): a black ring round a light bevel. Unlit:
+     bone with moss lettering. Lit (hover, focus, picked): dark, with the lime glow pulsing. */
+  .pill {
+    --lit: var(--color-lime);
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: var(--color-bone);
+    color: var(--color-moss);
+    padding-inline: 1.1rem;
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 -4px 0 2px #8a8a8a,
+      0 4px 0 #000;
+    transition:
+      transform 80ms,
+      box-shadow 80ms,
+      background-color 120ms,
+      color 120ms;
+  }
+  .pill:hover:not(:disabled),
+  .pill:focus-visible,
+  .pill[aria-current="page"],
+  .lit {
+    background: #0b1a04;
+    color: var(--lit);
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 0 0 4px #000,
+      0 4px 0 #000,
+      0 0 14px color-mix(in srgb, var(--lit), transparent 35%);
+    animation: glow 1.2s ease-in-out infinite alternate;
+  }
+  .pill:active:not(:disabled) {
+    transform: translateY(3px);
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 -4px 0 2px #8a8a8a,
+      0 1px 0 #000;
+  }
+  .pill:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+  .pill-red {
+    --lit: var(--color-tediz);
+  }
+
+  /* The big one (Join game, Run): amber, a black ring and a chocolate shadow. */
+  .cta {
+    display: inline-flex;
+    min-height: 3.25rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: linear-gradient(#ffd060, var(--color-amber) 45%, var(--color-fur));
+    color: var(--color-night);
+    padding-inline: 1.75rem;
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    text-shadow: 0 1px 0 rgb(255 255 255 / 0.45);
+    box-shadow:
+      inset 0 3px 0 rgb(255 255 255 / 0.5),
+      0 6px 0 var(--color-choc),
+      0 6px 0 3px #000;
+    transition:
+      transform 80ms,
+      box-shadow 80ms,
+      filter 120ms;
+  }
+  .cta:hover:not(:disabled) {
+    filter: brightness(1.08) saturate(1.1);
+    transform: translateY(-2px) rotate(-1deg);
+  }
+  .cta:active:not(:disabled) {
+    transform: translateY(4px);
+    box-shadow:
+      inset 0 3px 0 rgb(255 255 255 / 0.5),
+      0 2px 0 var(--color-choc),
+      0 2px 0 3px #000;
+  }
+  .cta:disabled {
+    cursor: not-allowed;
+    filter: grayscale(0.8) brightness(0.8);
+  }
+
+  /* A board in the pub: dark wood, a black edge, brass rivets and a hard shadow. */
+  .board {
+    --rivet: radial-gradient(circle, #f0c870 0 2px, #6b4210 2.5px 3.5px, transparent 4px);
+    border: 3px solid #000;
+    border-radius: 1rem;
+    background:
+      var(--rivet) left 6px top 6px / 12px 12px no-repeat,
+      var(--rivet) right 6px top 6px / 12px 12px no-repeat,
+      var(--rivet) left 6px bottom 6px / 12px 12px no-repeat,
+      var(--rivet) right 6px bottom 6px / 12px 12px no-repeat,
+      repeating-linear-gradient(
+        180deg,
+        transparent 0 22px,
+        rgb(0 0 0 / 0.18) 22px 24px,
+        transparent 24px 46px
+      ),
+      var(--color-cellar);
+    box-shadow:
+      inset 2px 2px 0 var(--color-oak),
+      6px 6px 0 #000;
+  }
+
+  /* The cutscenes' speech bubble: white, black hand lettering, a tail at the bottom left. */
+  .bubble {
+    position: relative;
+    border: 3px solid #000;
+    border-radius: 2rem;
+    background: #fff;
+    color: var(--color-ink);
+    padding: 0.9rem 1.4rem;
+    font-family: var(--font-hand);
+    line-height: 1.5;
+    box-shadow:
+      inset -6px -8px 0 #e4e4e4,
+      5px 5px 0 #000;
+  }
+  .bubble::after {
+    content: "";
+    position: absolute;
+    left: 2.5rem;
+    bottom: -18px;
+    width: 26px;
+    height: 20px;
+    background: #fff;
+    border: solid #000;
+    border-width: 0 3px 3px 0;
+    clip-path: polygon(0 0, 100% 0, 100% 100%);
+    transform: skewX(-25deg);
+  }
+
+  /* Hazard tape. */
+  .hazard {
+    height: 10px;
+    border-block: 2px solid #000;
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--color-hazard) 0 12px,
+      var(--color-night) 12px 24px
+    );
+  }
+
+  /* Native selects, skinned as the SET-UP screen's options: a dark pill with a lime chevron. */
+  .field {
+    height: 2.75rem;
+    width: 100%;
+    appearance: none;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: #0b0703;
+    color: var(--color-bone);
+    padding-inline: 1rem 2.25rem;
+    box-shadow: inset 0 0 0 2px var(--color-oak);
+  }
+  select.field {
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2356ff00' stroke-width='2.5'/%3E%3C/svg%3E")
+      right 1rem center / 12px 8px no-repeat #0b0703;
+  }
+  .field:hover:not(:disabled),
+  .field:focus-visible {
+    box-shadow:
+      inset 0 0 0 2px var(--color-lime),
+      0 0 10px rgb(86 255 0 / 0.35);
+  }
+  .field:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  /* Luckiest Guy's lowercase is a second, odd set of capitals: always use the real ones. */
+  .font-display {
+    text-transform: uppercase;
+  }
 }
 
-/* Cartoon title lettering: a thick dark outline and a hard drop shadow. */
-.cartoon {
-  -webkit-text-stroke: 0.06em var(--color-bunker);
-  paint-order: stroke fill;
-  text-shadow: 0.06em 0.08em 0 var(--color-bunker);
+@keyframes glow {
+  to {
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 0 0 4px #000,
+      0 4px 0 #000,
+      0 0 22px var(--lit);
+  }
+}
+@keyframes bob {
+  50% {
+    translate: 0 -4px;
+    rotate: 1deg;
+  }
+}
+.bob {
+  animation: bob 2.4s ease-in-out infinite;
 }
 
-/* Luckiest Guy's lowercase is a second, odd set of capitals: always use the real ones. */
-.font-display {
-  text-transform: uppercase;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

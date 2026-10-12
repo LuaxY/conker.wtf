@@ -12,7 +12,11 @@ the server's `/info` (which map it plays), its connect token (and, in dev, the c
 The site has two pages: `/` (`index.html`), the landing, and `/play.html`, the game. The landing is a Vite + React +
 TypeScript app in `app/`: Tailwind CSS, TanStack Router (hash URLs, so any static server serves every screen without a
 fallback), Zustand (your name, side and connection, kept in `localStorage`), Motion for the fade-ins, lucide-react icons,
-and its two fonts self-hosted with @fontsource (Luckiest Guy, Black Ops One). Build it with bun:
+and its three fonts self-hosted with @fontsource (Luckiest Guy, Black Ops One, Gloria Hallelujah; Apache-2.0 and OFL).
+The look follows the game's own menus and HUD: the pub at night, lime-lit pill buttons, the box art's amber lettering,
+speech bubbles, hazard tape and chocolate; [`DESIGN.md`](DESIGN.md) has the brief (palette, type, the pack's sprites,
+copy, references). All of it is CSS in `app/src/index.css` (`.pill`, `.cta`, `.board`, `.bubble`, `.chrome`, ...), and
+every animation stops under `prefers-reduced-motion`. Build it with bun:
 
 ```sh
 cd remake/web/app
@@ -28,9 +32,9 @@ Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDi
 
 | URL | Screen |
 |---|---|
-| `/#/` | Home: the pitch, "Join game", and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
-| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited). Under the list, "Create server": name, map, mode (the map's own), bots 0-15, bot skill, time (3-10 min or unlimited), lives (only with unlimited time), kill limit (none in Total War), radar; "Run" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
-| `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings; your side and connection (WebTransport or WebSocket); "Join game" (running servers only) |
+| `/#/` | Home: the pitch, "Join game", the Total War briefing's battle plan between the two sides' banners, and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
+| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server": name, map, mode (the map's own), bots 0-15, bot skill, time (3-10 min or unlimited), lives (only with unlimited time), kill limit (none in Total War), radar; "Run it" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
+| `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings; your side (two cards on the map's riveted plates) and connection (WebTransport or WebSocket); "Join game" (running servers only) |
 
 **Real data only.** `app/src/data.ts` holds the maps and the modes each plays (`MAPS`: a new mode, e.g. Colors on 30,
 goes into its maps' lists; `MODES` says whether it has a kill limit), the bot skills, and the calls to the dev web server's
@@ -45,10 +49,26 @@ host's port 5888) is gone from the list too: a game server started by hand is re
   `/api/servers`: several servers run at once, so `dist/digest.txt` (one server's at most) can't serve them all. The game
   page hands its URL to the client unchanged, and the client rejects any option it does not know (table below).
 
-**Imagery.** Three of the map's textures, fetched at run time from `assets/` (the pack served next to the page; nothing is
-copied into this tree): the Squirrels' "S" banner (`0172`), the Tediz' lightning badge (`0605`) and the brick wall behind
-the title (`0113`), drawn with big pixels. Without the pack the page shows lucide icons (a squirrel, a panda) and a plain
-background instead.
+**Imagery.** The map's own textures and HUD sprites, fetched at run time from `assets/` (the pack served next to the
+page; nothing is copied into this tree, and the screenshots that show them stay out of git): the brick wall behind the
+title (`0113`), the battle plan in four tiles (`3596`-`3599`), the Squirrels' and the Tediz' banners (`0730`, `0606`) and
+riveted plates (`0729`, `1858`), the DANGER poster on the 404 (`1667`), all under `assets/maps/2d/textures/`, drawn with
+big pixels; and the HUD's skull (`assets/hud/skull.png`) on Kill and on an exited server. Without the pack every one
+falls back to CSS or a lucide icon (`Sprite` in `app/src/ui.tsx`): a paper "Them vs Us" note, flat banners with a
+squirrel and a panda, plain plates.
+
+**The game page** (`play.html`) wears the same look with no build step and no web font of its own (it falls back to
+system fonts): an iris opens on the title, a chocolate bar fills while the pack loads, and the status line is a speech
+bubble ("Waking up the Tediz", "Counting the chocolate", "Bugger. Could not start: ..."). Its element ids, its options
+and how it starts the client are unchanged.
+
+**Redesign tested in Chrome** (2026-10-12, `bun run serve --port 8095 --game-ports 5940-5949`): every screen at 1440 px
+and 390 px wide (no horizontal scroll); Create server (2 bots, 3 min) → Run it → Lobby → Tediz → Join game opened
+`play.html?server=localhost%3A5940&transport=wt&side=tediz&digest=...`, connected over WebTransport with the HUD up (as a
+Tedi, headless Chrome); an exited server (SIGTERM) showed "Snuffed it (143)" and Clear removed it; Kill removed a
+running one; the empty list, a failed Run (dev server down), an unknown route (404), `play.html` with an unknown option
+and with an unreachable server, and the whole landing without the pack all behaved. Keyboard: Tab reaches every control
+with a lime focus ring; the side picker is a native radio group.
 
 **Tested in Chrome 153** (2026-10-10, the mock landing before the dev web server, built, on `http.server`, the debug server with `--bots 2 --port 5971`):
 Home → Join game → This machine → Join game opened `play.html?server=localhost%3A5971&transport=wt&side=tediz`, which the

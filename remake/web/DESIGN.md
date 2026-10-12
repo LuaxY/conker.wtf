@@ -218,3 +218,16 @@ Cheeky, British, a bit crude, never cruel. Short lines, mostly in speech bubbles
   `lab/hud/README.md` (HUD, iris, skull), `assets/hud/hud.json` and `end.json`, `assets/README.md`.
 - Not used: MobyGames, textures-resource.com and TCRF returned 403. I did not research late-N64 Rare UI
   (Banjo-Tooie, Perfect Dark, Jet Force Gemini).
+
+## 9. What the site took from this (2026-10-12)
+
+- **Used**: the palette tokens (`app/src/index.css` `@theme`, the game's radar colours for the sides), Luckiest Guy +
+  Black Ops One + Gloria Hallelujah, the system rounded font for body text, the pill (`.pill`, lit = hover, focus or
+  current page), the CTA (`.cta`), the pub board with rivets (`.board`), the speech bubble (`.bubble`), hazard tape,
+  the chrome menu words (`.chrome`: Servers in cyan, Controls in gold, the lobby's question in light purple `#b070ff`, as
+  `#9000d0` fails contrast on wood), the box-art homage logo, textures `0113`, `3596`-`3599`, `0730`, `0606`, `0729`,
+  `1858`, `1667`, `assets/hud/skull.png`, the cheeky copy (empty list, statuses, taglines, 404, loading lines), and on
+  `play.html` the iris, the chocolate loader and the bubble.
+- **Skipped**: the dark chrome text sprites (`squirrels.png`, `stats.png`, `win.png`...: they vanish on the dark wood),
+  the HUD font digits, the iris wipe on the landing (it would break middle-click on "Join game"), the skull pop, the rain
+  and the grawlix. Screenshots stay out of git: they show the pack's textures.

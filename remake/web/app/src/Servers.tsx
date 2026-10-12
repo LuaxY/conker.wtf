@@ -1,5 +1,5 @@
 import { getRouteApi, Link, useRouter } from "@tanstack/react-router";
-import { LogIn, Play, RefreshCw, Skull, X } from "lucide-react";
+import { LogIn, Play, RefreshCw, X } from "lucide-react";
 import { motion } from "motion/react";
 import { type FormEvent, type ReactNode, useState } from "react";
 import {
@@ -14,9 +14,10 @@ import {
   settingRows,
   SKILLS,
 } from "./data";
-import { button, field, primary, StatusBadge } from "./ui";
+import { SkullIcon, StatusBadge } from "./ui";
 
 const route = getRouteApi("/servers");
+const LABEL = "font-stencil text-sm tracking-wider text-dust uppercase";
 
 // One grid for the header and the rows: stacked on phones, columns from md up.
 const COLUMNS =
@@ -41,30 +42,27 @@ export function Servers() {
     >
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="cartoon font-display text-5xl">Servers</h1>
-          <p className="mt-1 text-dust">
+          <h1 className="chrome font-display text-6xl [--c:#00c0f0]">Servers</h1>
+          <p className="mt-2 text-dust">
             {servers === null
               ? "No server list on this site."
-              : `${servers.filter((s) => s.status === "running").length} running on this machine. Open one's lobby to join, or run a new one.`}
+              : `${servers.filter((s) => s.status === "running").length} running on this machine. Open one's lobby to join, or run your own.`}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={refreshing}
-          className={`${button} h-11 border-2 border-mud bg-trench px-4 hover:border-acorn`}
-        >
+        <button type="button" onClick={refresh} disabled={refreshing} className="pill">
           <RefreshCw aria-hidden className={`size-4 ${refreshing ? "animate-spin" : ""}`} />
           {refreshing ? "Refreshing" : "Refresh"}
         </button>
       </div>
 
+      <div className="hazard mt-6" />
+
       {servers === null ? (
-        <p className="mt-8 rounded-xl border-2 border-dashed border-mud p-6 text-dust">
-          The server list and "Create server" come from the dev web server (
-          <code className="text-khaki">cd remake/web/app && bun run serve</code>), which this site
-          is not served by. You can still{" "}
-          <a href="play.html" className="text-acorn underline">
+        <p className="bubble mt-10 max-w-2xl">
+          No server list here, mate. It and "Create server" come from the dev web server (
+          <code className="font-mono text-sm">cd remake/web/app && bun run serve</code>), which this
+          site is not served by. You can still{" "}
+          <a href="play.html" className="font-bold text-tediz-deep underline">
             play on this site's own game server
           </a>{" "}
           (port 5888).
@@ -73,14 +71,14 @@ export function Servers() {
         <>
           <div
             aria-hidden
-            className={`${COLUMNS} mt-8 hidden px-4 font-stencil text-xs text-dust uppercase md:grid`}
+            className={`${COLUMNS} mt-8 hidden px-5 font-stencil text-xs tracking-wider text-dust uppercase ${servers.length ? "md:grid" : ""}`}
           >
             <span>Server</span>
             <span>Map · mode</span>
             <span>Settings</span>
             <span>Status</span>
           </div>
-          <ul className="mt-2 grid gap-2">
+          <ul className="mt-3 grid gap-4">
             {servers.map((server) => (
               <li key={server.id}>
                 <ServerRow server={server} />
@@ -88,8 +86,8 @@ export function Servers() {
             ))}
           </ul>
           {servers.length === 0 && (
-            <p className="mt-6 rounded-xl border-2 border-dashed border-mud p-6 text-center text-dust">
-              No game server yet. Run one below.
+            <p className="bubble mt-6 max-w-xl">
+              Nobody's here. Even the Tediz went home. Run one below, you lazy git.
             </p>
           )}
           <CreateServer />
@@ -115,17 +113,17 @@ function ServerRow({ server: s }: { server: GameServer }) {
   };
 
   return (
-    <div
-      className={`${COLUMNS} rounded-xl border-2 border-mud bg-trench px-4 py-3 ${exited ? "opacity-60" : ""}`}
-    >
+    <div className={`${COLUMNS} board px-5 py-4 ${exited ? "opacity-70 grayscale" : ""}`}>
       <span className="min-w-0">
-        <span className="block font-semibold md:truncate">{s.name}</span>
+        <span className="block font-display text-xl tracking-wide text-amber md:truncate">
+          {s.name}
+        </span>
         <span className="block truncate font-mono text-xs text-dust">{s.address}</span>
       </span>
-      <span className="order-3 text-sm text-dust md:order-none">
+      <span className="order-3 col-span-2 text-sm text-bone md:order-none md:col-span-1">
         {MAPS[s.map].name} · {MODES[s.mode].name}
       </span>
-      <span className="order-4 text-sm text-dust md:order-none">
+      <span className="order-4 col-span-2 text-sm text-dust md:order-none md:col-span-1">
         {settingRows(s)
           .map(([label, value]) => `${label} ${value}`)
           .join(" · ")}
@@ -139,7 +137,7 @@ function ServerRow({ server: s }: { server: GameServer }) {
             to="/lobby/$serverId"
             params={{ serverId: s.id }}
             aria-label={`Lobby of ${s.name}`}
-            className={`${primary} h-10 px-3`}
+            className="pill"
           >
             <LogIn aria-hidden className="size-4" />
             Lobby
@@ -150,9 +148,9 @@ function ServerRow({ server: s }: { server: GameServer }) {
           onClick={kill}
           disabled={busy}
           aria-label={`${exited ? "Clear" : "Kill"} ${s.name}`}
-          className={`${button} h-10 border-2 border-mud bg-bunker px-3 hover:border-tediz hover:text-tediz`}
+          className="pill pill-red"
         >
-          {exited ? <X aria-hidden className="size-4" /> : <Skull aria-hidden className="size-4" />}
+          {exited ? <X aria-hidden className="size-4" /> : <SkullIcon />}
           {exited ? "Clear" : "Kill"}
         </button>
       </span>
@@ -192,7 +190,7 @@ function CreateServer() {
     setStarted("");
     try {
       const server = await createServer(form);
-      setStarted(`${server.name} is running at ${server.address}.`);
+      setStarted(`${server.name} is up at ${server.address}. Go on then.`);
       await router.invalidate({ sync: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -202,19 +200,17 @@ function CreateServer() {
   };
 
   return (
-    <section
-      aria-labelledby="create"
-      className="mt-10 rounded-2xl border-2 border-acorn/70 bg-trench p-5"
-    >
-      <h2 id="create" className="cartoon font-display text-3xl">
+    <section aria-labelledby="create" className="board mt-12 p-6 sm:p-8">
+      <p className="font-stencil text-sm tracking-widest text-lime uppercase">Set-up</p>
+      <h2 id="create" className="cartoon font-display text-4xl text-amber">
         Create server
       </h2>
-      <p className="text-sm text-dust">
+      <p className="mt-1 text-sm text-dust">
         Starts a game server on this machine. Several can run at once, each on its own port.
       </p>
-      <form onSubmit={run} className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <form onSubmit={run} className="mt-6 grid gap-x-4 gap-y-5 sm:grid-cols-2 lg:grid-cols-4">
         <label className="grid content-start gap-1 sm:col-span-2">
-          <span className="font-stencil text-sm text-dust uppercase">Name</span>
+          <span className={LABEL}>Name</span>
           <input
             name="name"
             required
@@ -222,7 +218,7 @@ function CreateServer() {
             autoComplete="off"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
-            className={field}
+            className="field"
           />
         </label>
         <Select
@@ -274,30 +270,30 @@ function CreateServer() {
           hint={MODES[form.mode].kills ? undefined : `None in ${MODES[form.mode].name}`}
         />
         <label className="grid content-start gap-1">
-          <span className="font-stencil text-sm text-dust uppercase">Radar</span>
-          <span className="flex h-11 items-center gap-3 rounded-lg border-2 border-mud bg-bunker px-3">
+          <span className={LABEL}>Radar</span>
+          <span className="field flex items-center gap-3">
             <input
               type="checkbox"
               name="radar"
               checked={s.radar}
               onChange={(e) => setting({ radar: e.target.checked })}
-              className="size-5 accent-acorn"
+              className="size-5 accent-lime"
             />
             On the HUD
           </span>
         </label>
         {map.note && <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">{map.note}</p>}
         <div className="flex flex-wrap items-center gap-4 sm:col-span-2 lg:col-span-4">
-          <button type="submit" disabled={pending} className={`${primary} px-8 py-3 text-lg`}>
+          <button type="submit" disabled={pending} className="cta">
             <Play aria-hidden className="size-5" />
-            {pending ? "Starting" : "Run"}
+            {pending ? "Starting…" : "Run it"}
           </button>
-          <output className="text-sm text-go">{started}</output>
+          <output className="text-sm text-lime">{started}</output>
         </div>
         {error && (
           <pre
             role="alert"
-            className="overflow-x-auto rounded-lg border-2 border-tediz/60 bg-bunker p-3 text-sm whitespace-pre-wrap text-tediz sm:col-span-2 lg:col-span-4"
+            className="overflow-x-auto rounded-xl border-3 border-tediz bg-black/70 p-4 text-sm whitespace-pre-wrap text-tediz sm:col-span-2 lg:col-span-4"
           >
             {error}
           </pre>
@@ -323,7 +319,7 @@ function Select<T extends string | number>({
 }): ReactNode {
   return (
     <label className="grid content-start gap-1">
-      <span className="font-stencil text-sm text-dust uppercase">{label}</span>
+      <span className={LABEL}>{label}</span>
       <select
         value={String(value)}
         disabled={hint !== undefined}
@@ -331,7 +327,7 @@ function Select<T extends string | number>({
           const found = options.find(([v]) => String(v) === e.target.value);
           if (found) onChange(found[0]);
         }}
-        className={`${field} disabled:opacity-50`}
+        className="field"
       >
         {options.map(([v, text]) => (
           <option key={String(v)} value={String(v)}>

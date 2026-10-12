@@ -7,3 +7,5 @@ web/assets
 web/index.html
 web/landing/
 web/app/node_modules/
+# Screenshots from checking the landing in a browser.
+web/app/screenshots/

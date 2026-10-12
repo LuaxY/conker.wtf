@@ -1,66 +1,117 @@
-import { Panda, Squirrel } from "lucide-react";
-import { useState } from "react";
+import { Panda, Skull, Squirrel } from "lucide-react";
+import { type CSSProperties, type ReactNode, useState } from "react";
 import type { Side, Status } from "./data";
 
 export const SIDES = {
   squirrels: {
     name: "Squirrels",
-    tagline: "The good guys",
+    tagline: "The good guys. Allegedly.",
     text: "text-squirrels",
-    border: "border-squirrels",
+    deep: "bg-squirrels-deep",
   },
-  tediz: { name: "Tediz", tagline: "The bad guys", text: "text-tediz", border: "border-tediz" },
+  tediz: {
+    name: "Tediz",
+    tagline: "Evil teddies. Still cuddly.",
+    text: "text-tediz",
+    deep: "bg-tediz-deep",
+  },
 } as const;
 
-// Textures of the asset pack the page is served with (assets/, next to it: the operator's own
-// export, never in this tree). Missing pack: the icons and the plain background show instead.
+// Images of the asset pack the page is served with (assets/, next to it: the operator's own export,
+// never in this tree). Every one has a fallback for a site without the pack. ../../DESIGN.md lists them.
 const TEXTURES = "assets/maps/2d/textures/";
-export const BRICKS = `${TEXTURES}0113-64x64-ci4rgba16-i.png`;
-const EMBLEMS = {
-  squirrels: `${TEXTURES}0172-64x64-ci4rgba16-i.png`,
-  tediz: `${TEXTURES}0605-64x64-ci4rgba16-i.png`,
+const texture = (name: string) => `${TEXTURES}${name}-ci4rgba16-i.png`;
+export const BRICKS = texture("0113-64x64");
+/** The Total War briefing's taped battle plan, THEM vs US, in four tiles: top left to bottom right. */
+export const PLAN = ["3596", "3597", "3598", "3599"].map((n) => texture(`${n}-64x64`));
+export const PLATES = { squirrels: texture("0729-64x64"), tediz: texture("1858-64x64") };
+const BANNERS = {
+  squirrels: `${TEXTURES}0730-32x64-ci8rgba16-i.png`,
+  tediz: `${TEXTURES}0606-32x64-ci8rgba16-i.png`,
 };
+export const DANGER = `${TEXTURES}1667-32x64-ci8rgba16-i.png`;
+const SKULL = "assets/hud/skull.png";
 
-export const button =
-  "inline-flex items-center justify-center gap-2 rounded-xl font-stencil uppercase tracking-wide transition active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50";
-export const primary = `${button} bg-acorn text-bunker shadow-[0_5px_0_#8a5a0c] hover:brightness-110 active:shadow-[0_2px_0_#8a5a0c]`;
-export const field =
-  "h-11 w-full rounded-lg border-2 border-mud bg-bunker px-3 text-khaki placeholder:text-dust/70 focus-visible:border-acorn";
-
-/** The side's banner from the map's own textures, over an icon in case the pack is missing. */
-export function Emblem({ side, className = "" }: { side: Side; className?: string }) {
+/** One of the pack's images, or `fallback` when the pack is missing. Always decorative. */
+export function Sprite({
+  src,
+  fallback,
+  className = "",
+  style,
+}: {
+  src: string;
+  fallback: ReactNode;
+  className?: string;
+  style?: CSSProperties;
+}) {
   const [failed, setFailed] = useState(false);
-  const Icon = side === "squirrels" ? Squirrel : Panda;
+  if (failed) return fallback;
+  return (
+    <img
+      src={src}
+      alt=""
+      onError={() => setFailed(true)}
+      className={`pixelated ${className}`}
+      style={style}
+    />
+  );
+}
+
+const ICONS = { squirrels: Squirrel, tediz: Panda };
+
+/** The side's hanging banner from the map (32×64): the winged "S", or the lightning bolt. */
+export function Banner({ side, className = "" }: { side: Side; className?: string }) {
+  const Icon = ICONS[side];
   return (
     <span
       aria-hidden
-      className={`relative grid shrink-0 place-items-center overflow-hidden bg-mud ${SIDES[side].text} ${className}`}
+      className={`grid aspect-[1/2] shrink-0 place-items-center ${SIDES[side].text} ${className}`}
     >
-      <Icon className="size-3/5" />
-      {!failed && (
-        <img
-          src={EMBLEMS[side]}
-          alt=""
-          onError={() => setFailed(true)}
-          className="pixelated absolute inset-0 size-full object-cover"
-        />
-      )}
+      <Sprite
+        src={BANNERS[side]}
+        fallback={
+          <span
+            className={`grid size-full place-items-center rounded-b-xl border-3 border-black ${SIDES[side].deep}`}
+          >
+            <Icon className="h-auto w-3/4" />
+          </span>
+        }
+        className="size-full drop-shadow-[4px_4px_0_#000]"
+      />
     </span>
   );
 }
 
+export function SkullIcon({ className = "size-5" }: { className?: string }) {
+  return (
+    <Sprite
+      src={SKULL}
+      fallback={<Skull aria-hidden className={className} />}
+      className={`[image-rendering:auto] ${className}`}
+    />
+  );
+}
+
 const STATUS: Record<Status, [label: string, style: string]> = {
-  starting: ["Starting", "bg-acorn/15 text-acorn"],
-  running: ["Running", "bg-go/15 text-go"],
-  exited: ["Exited", "bg-dust/15 text-dust"],
+  starting: ["Warming up", "border-amber text-amber"],
+  running: ["Running", "border-lime text-lime shadow-[0_0_10px_rgb(86_255_0/0.4)]"],
+  exited: ["Snuffed it", "border-dust/60 text-dust"],
 };
 
 export function StatusBadge({ status, code }: { status: Status; code: number | null }) {
   const [label, style] = STATUS[status];
   return (
     <span
-      className={`rounded-md px-2 py-0.5 font-stencil text-xs whitespace-nowrap uppercase ${style}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border-2 bg-black/60 px-2.5 py-0.5 font-stencil text-xs tracking-wider whitespace-nowrap uppercase ${style}`}
     >
+      {status === "exited" ? (
+        <SkullIcon className="size-4" />
+      ) : (
+        <span
+          aria-hidden
+          className={`size-2 rounded-full bg-current ${status === "starting" ? "animate-pulse" : ""}`}
+        />
+      )}
       {label}
       {status === "exited" && code !== null && ` (${code})`}
     </span>
@@ -69,8 +120,8 @@ export function StatusBadge({ status, code }: { status: Status; code: number | n
 
 // Face buttons in the Xbox layout's colours.
 const PAD_COLORS: Record<string, string> = {
-  A: "bg-go text-bunker border-[#3b8f3b] rounded-full min-w-8",
-  X: "bg-[#5ca4ff] text-bunker border-[#2f6bb8] rounded-full min-w-8",
+  A: "bg-[#5fd35f] text-ink border-[#2c7a2c] rounded-full min-w-9",
+  X: "bg-[#6cb0ff] text-ink border-[#2f6bb8] rounded-full min-w-9",
 };
 
 /** Key caps; lowercase words ("or", "+", "mouse") are drawn as text between them. */
@@ -84,7 +135,7 @@ export function Keys({ keys, pad = false }: { keys: string[]; pad?: boolean }) {
     ) : (
       <kbd
         key={i}
-        className={`inline-flex h-8 items-center justify-center rounded-md border-b-4 px-2 font-stencil text-sm whitespace-nowrap ${(pad && PAD_COLORS[key]) || "border-[#9d9172] bg-khaki text-bunker min-w-8"}`}
+        className={`inline-flex h-9 items-center justify-center rounded-lg border-2 border-b-[5px] px-2 font-display text-sm tracking-wide whitespace-nowrap shadow-[0_2px_0_#000] ${(pad && PAD_COLORS[key]) || "min-w-9 border-[#8d7f5c] bg-bone text-night"}`}
       >
         {key}
       </kbd>

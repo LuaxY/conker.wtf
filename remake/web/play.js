@@ -25,7 +25,7 @@ const digest = async () => {
 };
 
 await init();
-show("Loading the asset pack…");
+show("Counting the chocolate (loading the asset pack)…");
 const hash = await digest();
 const t0 = performance.now();
 // The client reads its options from the address once, in start(): the digest goes there only for
@@ -42,7 +42,7 @@ try {
   document.getElementById("intro").hidden = true;
   document.getElementById("game").focus();
 } catch (e) {
-  show(`Could not start: ${e?.message ?? e}. Reload to try again.`, true);
+  show(`Bugger. Could not start: ${e?.message ?? e}. Reload to try again.`, true);
 } finally {
   history.replaceState(null, "", address);
 }
