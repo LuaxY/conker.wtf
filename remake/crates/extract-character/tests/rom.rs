@@ -431,3 +431,32 @@ fn held_weapons() {
     // Weapon 0x14's knife leaves the hand 8 ticks into a throw.
     assert!(held[4].remove.contains(&(0xF7, 8.0)));
 }
+
+/// Total War's gas mask: the put-on (0x151) and take-off (0x14E) clips' bank-09 models, the same
+/// for the Tedi and the squirrel: #67 in the hand (joint 9), #66 on the head (joint 12). Each list
+/// stops at its first record not yet due (`held::due`): 0x14E's t59 holds back its later t24 and
+/// t58 records, so the hand's create there never fires (V e2: event index stuck at 2).
+#[test]
+fn gas_mask_models() {
+    let Some(rom) = rom() else { return };
+    for character in [117, 128] {
+        let mut held = held_models(rom, character, &[0x151, 0x14E]).unwrap();
+        held.sort_by_key(|h| h.entry);
+        let models: Vec<_> = (held.iter())
+            .map(|h| (h.entry, h.joint, h.create.clone(), h.remove.clone()))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                (66, 12, vec![(0x151, 59.0)], vec![(0x14E, 24.0)]),
+                (
+                    67,
+                    9,
+                    vec![(0x14E, 59.0), (0x151, 26.0)],
+                    vec![(0x14E, 59.0), (0x151, 59.0)]
+                ),
+            ],
+            "{character}"
+        );
+    }
+}

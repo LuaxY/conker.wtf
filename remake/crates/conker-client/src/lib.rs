@@ -17,6 +17,7 @@ pub mod audio;
 pub mod connection;
 pub mod held;
 pub mod hud;
+pub mod lights;
 pub mod render;
 pub mod results;
 pub mod smooth;

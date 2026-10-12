@@ -158,7 +158,11 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     let level = level_scene(&cfg.map);
     let lift = |s: Side| f32::from(slice.characters[s as usize].model_lift);
     app.insert_resource(ModelLift(SIDES.map(lift)));
-    crate::held::build(app, slice.held);
+    let carried = (slice.lights.lights.iter())
+        .find(|l| l.when == conker_assets::When::Carried)
+        .cloned();
+    crate::lights::build(app, slice.lights, &slice.triggers);
+    crate::held::build(app, slice.held, carried);
     // The pack has no `.meta` files: don't ask for one before each file.
     let mut assets = AssetPlugin {
         meta_check: AssetMetaCheck::Never,
@@ -346,7 +350,10 @@ fn setup_scene(
     free: bool,
     target: Option<Handle<Image>>,
 ) {
-    commands.spawn(WorldAssetRoot(assets.load(level.to_string())));
+    commands.spawn((
+        crate::lights::Lit,
+        WorldAssetRoot(assets.load(level.to_string())),
+    ));
     crate::hud::camera(commands, target.clone());
     // Only the character and the 27 level materials with normals are lit (I: direction and levels).
     commands.spawn((
@@ -652,7 +659,8 @@ fn add_props(
 ) {
     if !*added && game.single().is_ok_and(|m| m.total_war) {
         *added = true;
-        commands.spawn(WorldAssetRoot(assets.load(props_scene(&cfg.map))));
+        let props = WorldAssetRoot(assets.load(props_scene(&cfg.map)));
+        commands.spawn((crate::lights::Lit, props));
     }
 }
 

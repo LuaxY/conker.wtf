@@ -1,5 +1,55 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Total War, part 5: the gas's look and the mask clips (2026-10-12)
+**A gassed player's view gets the original's green/red scrolling haze (0xE013) from the script's call. During the
+countdown the shelter goes red (0xE016: lamps off, the red light pulsing), and a canister at home and a carrier shine
+green (0xE017, kind 0x10). The mask goes on and comes off with its clips (0x151 / 0x14E): predicted, no move, jump or
+fire, its sounds, the mask in the hand then on the head.** `PROTOCOL_ID` 15. Research:
+`../lab/research/mp-original/total-war-effects.md`.
+
+| Part | What |
+|---|---|
+| Rules | `Action::Mask { on }` for `gas::MASK_FRAMES` (19): the mask's delivery starts the put-on (anim 0x151), `Effect::Release` the take-off (0x14E), neither while hurt; from the second frame the stick and buttons are zeroed. `Effect::Haze(slot)`, `Fighter::gassed` (the call's frame, kept through a respawn), `Fighter::haze(tick)` (1-`gas::HAZE_FRAMES` = 150) |
+| Bots | object 3, kind 0xE, handle 0xE013 → `Haze(args[1]'s slot)` (0xBA at countdown 29, players outside trigger 0) |
+| Net, server | `PROTOCOL_ID` 15: `Combat.haze` (k, 0 none; `combat()` from `Fighter::haze`), the fighter's `Mask` and `gassed`; the `GAS` log lists `Haze`; the client's `/info` doc 15 |
+| Anim | `combat::MASK_ON` 0x151, `MASK_OFF` 0x14E, rate 3 (clock 3 … 57) |
+| Extract | `extract_character::due`: an event fires at the running max of the times before it (the dispatcher stops at the first record not yet due), for held models and clip sounds (existing events unchanged). `HELD_CLIPS` and `MATCH_CLIPS` add 0x151 / 0x14E: held #66 (joint 12) and #67 (joint 9) + 5 textures; events 0x63E t10, 0x69B t50 (put-on), 0x69C t18, 0x63F t59 (take-off) + 4 WAVs. HUD texture `haze` (0xA48 IA8 64×64) and `hud.json` `haze` (2 layers: colour, share, texels per pixel, t). `maps/<map>/lights.json` (`map_lights`: 2d's ambient (50,50,52), 2 lamps `calm`, red `countdown` 85 ± 55 step 0.1021, a green `shown` 60 ± 30 step 0.2021 per canister, a carrier's green 30; other maps none). `props.gltf` drops scene 2 (the 3/84 mask placeholder) |
+| Assets | `Lights`, `Light`, `When` (`Slice.lights`, the 12th data file), `hud::Haze`, `HazeLayer` |
+| Client HUD | `hud::haze`: two quads over the whole window (the iris's far margin), texels from the frame's top-left scrolling k/4 a frame, z 0.5/0.6 under the HUD; alpha min(4k, 128) then −8 a frame from k 132; its texture wraps (the other HUD textures still clamp) |
+| Client held | `mask_shows`: in 0x151 the last put-on event that fired decides (hand from frame 9); in 0x14E nothing; otherwise a masked player has the models whose last put-on event is a create (the head, from frame 20). `masked` from the prediction for the local player. The canister only (props scene 1), plus the carrier's point light |
+| Client lights | new `lights.rs`. During the countdown (`countdown > 0`), the level's and props' vertices inside trigger 0 (386, y −1550 … −979) get colour × min(1, ambient + Σ lit rgb × min(1, 2048·size/d²), none from 362√size), in display values, and are restored after. The red and green lights (not the calm lamps) are also Bevy `PointLight`s, 2500 lux where full |
+| Pack | `../assets`: `README.md`, `audio/events.json`, `sounds.json` + 1598, 1599, 1691, 1692.wav, `hud/haze.png`, `hud.json`, `maps/*/lights.json`, `maps/2d/props.gltf`, `weapons/deathmatch/held.*` + 5 textures |
+| Lab | `gas.sh fx` (port 5980; slot 3 placed by canister 1): `room.png`, `haze.png`, `hand.png`, `green.png`, `mask-on.png`, `carrier-light.png` |
+
+Lights: not faithful. The CBFD vertex lighting needs the level's light table, which is still open: about 30 lights,
+plus kind-5 lights whose role is unknown. So the remake keeps its unlit look outside the countdown and relights only
+the shelter (trigger 0) from the lights the research found. The camera's look-at going from +67.5 to +90 after the
+put-on: the mechanism is `func_15124C38`'s wall-hit share (C: 1.0 instead of 0.75 of the head's 90; no other branch
+gives +90), which the remake's `look_at_height` already has, so nothing to implement. The trigger is I (the turn
+the put-on finishes bringing the wall ray into a hit). Not reproduced: in `fx`, P2 on mask 21's spot had the wall
+hit from read 990 to 1437 (+90 throughout, no rise to see), and e2's spot (k23) was not tried.
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line + extract-character) | pass (exit 0): conker-rules 67 (`gas_canister_masks_and_hits`: put-on 19 frames, A/B/Z held do nothing, take-off, haze through a respawn), conker-client 46 (new `mask_in_hand_then_on_head`, `gas_haze_matches_the_originals_draws`: st (2, 32)/(2, 0), steps 1/0.5, env 32/16 at k 8, fade 0x70 … 0x10; `lights::reach_and_switches`), conker-bots ROM (`total_war_gas`: hazes for slots 1, 2, 4 at delivery + 271), conker-extract (`rom.rs` 16 held; `pack.rs` the props nodes end `03-55@28`, `03-55`, the mask's 4 sounds for 117 and 128), extract-character (new `gas_mask_models`, 117 and 128), -server, -sim, -anim, -assets, extract-scene |
+| Deathmatch combat replays | output identical to HEAD's (110 lines, `--nocapture`; HEAD from `git archive`) |
+| `cargo fmt --check`; clippy `-D warnings` (10 crates, all targets; conker-client wasm32) | clean |
+| Fresh export (the task's command) vs `../assets` | `diff -r` empty after the copy (950 files) |
+| `gas.sh dm` vs part 4's | `dm-cover.png` byte-identical; `dm-door.png` 2 ceiling pixels off by 1 level, from the 2 more (hidden) held models per player: without them, byte-identical (entity order; waiting for `MatchView` to skip them in Deathmatch moved them too, so kept) |
+| `gas.sh fx` (delivery at read 1000, haze from 1271, kill ~1300, mask off 1389) | `room.png` P1 in the shelter at 1100: dark red walls and door, the floor bright red under the light, digit 4; `haze.png` P2 masked at 1350: green wisps with darker red streaks over the whole view, HUD on top; `hand.png` P2 at 1016 holding the mask out in its right hand; `mask-on.png` P2 in the mask at 1150; `green.png` canister 1 at home and slot 3 beside it lit green on its canister side; `carrier-light.png` P1 carrying canister 0, its body and tail lit green |
+
+I or skipped: Bevy blends the HUD in linear light, the N64 in display values, so the haze reads stronger over dark
+areas (`haze.png`: a dark wall's G 74 → 134, where display-space blending gives at most 116), as every HUD quad.
+k = 1 in the state after the frame after the call (±1 frame against the DL counts). Characters keep the remake's
+sun and ambient, so the red light adds to them (the original: ambient + lights). The terrain by the canisters stays
+unchanged (only characters and lit models take their green). The room is trigger 0's box, not the light table.
+2048 (`lights::FULL`) takes clip space as world units (unmeasured; the knob). The lamps' flicker (behaviour 4) is not
+modelled. The swing phases come from the client's clock. On the mask: the original finishes a turn under way during
+the put-on (+3072 a frame to the move angle), which the remake's zeroed stick and idle cut short. The put-on brakes
+3 → 0.5 → 0 (V e2: 3 → 4 → 1.5 → 0). Hurt players skip the clips. The head mask shows from the idle after the
+put-on by rule (its create at t59 never fires). `0x80042778` = 5 (I: the muffled mask sound) is not done.
+Offscreen clients log bevy_light's `ShadowLodOrigin` warning (point lights with no window camera; no shadows used).
+
 ## War: Total War, part 4: the gas on the client (2026-10-12)
 **The client draws part 3's state: in Total War the doors, covers, masks and canisters show by `MatchView.props` /
 `taken`, a carrier holds the canister, a masked player wears the mask, the countdown digit prints mid-screen, the gas

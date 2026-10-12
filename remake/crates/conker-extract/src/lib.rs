@@ -38,10 +38,12 @@ pub const SLICE_SCENE: usize = 0x2D;
 pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// The clips that put Deathmatch's held models in the hand: the draws of weapons 0x09, 0x39, 0x23,
 /// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull, then the crossbow's and the
-/// shotgun's and the club's (0x40) draws (conker-anim's ids). The held list sorts by the game's
-/// action number, not by this order (the club's model is scene 3).
-pub const HELD_CLIPS: [u16; 13] = [
-    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2,
+/// shotgun's and the club's (0x40) draws (conker-anim's ids), and War: Total War's gas mask put on
+/// and taken off (0x151, 0x14E: bank-09 #67 in the hand, #66 on the head). The held list sorts by
+/// the game's action number, not by this order (the club's model is scene 3).
+pub const HELD_CLIPS: [u16; 15] = [
+    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2, 0x151,
+    0x14E,
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;
@@ -619,8 +621,8 @@ pub fn hidden_placements(scene: usize) -> &'static [usize] {
 pub const TOTAL_WAR_PROPS: [usize; 10] = [0, 1, 21, 22, 23, 24, 25, 26, 27, 28];
 
 /// 0x2D's Total War props (`maps/2d/props.gltf`): glTF scene 0 [`TOTAL_WAR_PROPS`] in place (named
-/// `model@placement` as the level's nodes), scenes 1 and 2 the canister's model (3/85) and the gas
-/// mask's (3/84) at the origin, for a carrier's hands and a wearer's head.
+/// `model@placement` as the level's nodes), scene 1 the canister's model (3/85) at the origin, for
+/// a carrier's hands (a worn mask is a held model, bank-09 #66).
 pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
     let scene = scene_level(rom, SLICE_SCENE)?;
     let mut level = Level::default();
@@ -643,16 +645,61 @@ pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
     for i in placed {
         add(&scene.meshes[i.mesh], i.placement, i.matrix);
     }
-    for model in [0x55, 0x54] {
-        let mesh = (scene.meshes.iter())
-            .find(|m| m.path == [0x03, model])
-            .context("0x2D: no canister or gas mask model")?;
-        add(mesh, None, IDENTITY);
-    }
-    let n = level.instances.len() - 2;
-    let scenes =
-        json!([{ "nodes": (0..n).collect::<Vec<_>>() }, { "nodes": [n] }, { "nodes": [n + 1] }]);
+    let canister = (scene.meshes.iter())
+        .find(|m| m.path == [0x03, 0x55])
+        .context("0x2D: no canister model")?;
+    add(canister, None, IDENTITY);
+    let n = level.instances.len() - 1;
+    let scenes = json!([{ "nodes": (0..n).collect::<Vec<_>>() }, { "nodes": [n] }]);
     Ok((level, scenes))
+}
+
+/// A map's lights (`maps/<map>/lights.json`): on 0x2D War: Total War's, else none. The level's own
+/// light table is not located, so these are constants (V: `../lab/research/mp-original/
+/// total-war-effects.md` §1, §3, the oracle's light objects and RSP lights): the viewports' ambient
+/// light; the shelter's two white lamps (kind 0x23: on but during the countdown, 0xBA's `obj` and
+/// `obj2` 0xE016; size 55, their flicker not kept), its red alarm light (kind 0x24, behaviour 1:
+/// the countdown only, 85 + 55 sin φ, φ += 0.1021 a frame); a green light on each canister at home
+/// (`obj(0xE017)`, behaviour 17: 60 + 30 sin φ, φ += 0.2021, at the prop) and one on its carrier
+/// (kind 0x10, size 30).
+fn map_lights(scene: usize) -> assets::Lights {
+    use assets::{Light, When};
+    if scene != SLICE_SCENE {
+        return assets::Lights::default();
+    }
+    let light = |at, rgb, (size, swing, step), when| Light {
+        at,
+        rgb,
+        size,
+        swing,
+        step,
+        when,
+    };
+    let (white, red, green) = ([255; 3], [255, 0, 0], [0, 255, 0]);
+    let canister = (60.0, 30.0, 0.2021);
+    let mut lights = vec![
+        light([650.0, -1191.0, 486.0], white, (55.0, 0.0, 0.0), When::Calm),
+        light(
+            [-1101.0, -1201.0, -229.0],
+            white,
+            (55.0, 0.0, 0.0),
+            When::Calm,
+        ),
+        light(
+            [-149.0, -1421.0, -43.0],
+            red,
+            (85.0, 55.0, 0.1021),
+            When::Countdown,
+        ),
+    ];
+    for (placement, at) in conker_rules::gas::CANISTERS {
+        lights.push(light(at, green, canister, When::Shown(placement)));
+    }
+    lights.push(light([0.0; 3], green, (30.0, 0.0, 0.0), When::Carried));
+    assets::Lights {
+        ambient: [50, 50, 52],
+        lights,
+    }
 }
 
 /// A map's level: the scene's ([`scene_level`]) without its [`hidden_placements`], its pickups'
@@ -732,6 +779,7 @@ fn pack_data(
         // conker-bots' `Assets::paths`.
         triggers: rom.asset(&[0x0C, scene, 5])?.into_owned(),
         nav: rom.asset(&[0x19, scene])?.into_owned(),
+        lights: map_lights(scene),
         ai: rom.asset(&[0x14, conker_bots::script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, 0])?.into_owned(),
         characters: (characters.iter())

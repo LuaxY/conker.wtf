@@ -1129,6 +1129,7 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         headshots: f.headshots,
         carrying: f.carrying,
         masked: f.masked,
+        haze: f.haze(tick).map_or(0, |k| k as u8),
     }
 }
 
@@ -1282,7 +1283,9 @@ fn simulate(
                 Effect::Show(n @ (27 | 28)) if !game.m.gas.prop(*n).is_some_and(|p| p.shown) => {
                     info!("GAS t={t} canister on placement {n} back")
                 }
-                Effect::Carry(..) | Effect::Gas(_) | Effect::Release(_) => info!("GAS t={t} {e:?}"),
+                Effect::Carry(..) | Effect::Gas(_) | Effect::Release(_) | Effect::Haze(_) => {
+                    info!("GAS t={t} {e:?}")
+                }
                 _ => {}
             }
         }

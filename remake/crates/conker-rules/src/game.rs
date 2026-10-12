@@ -194,6 +194,11 @@ pub enum Action {
         lethal: bool,
         step: u8,
     },
+    /// Total War's gas mask going on (`on`: state 81, clip 0x151) or coming off (state 78, 0x14E)
+    /// for [`gas::MASK_FRAMES`] frames: the player's stick and buttons do nothing from the second.
+    Mask {
+        on: bool,
+    },
 }
 
 /// A player: its movement state and everything combat adds (named after the game's fields).
@@ -287,6 +292,10 @@ pub struct Fighter {
     /// Total War: wearing a gas mask (its pickup holds the slot a weapon's would, MP+0xEB0), which
     /// the gas spares; lost on death, on another pickup, or when the script takes it off.
     pub masked: bool,
+    /// Total War: the frame the AI script's `obj(0xE013, p)` started this player's gassed screen
+    /// (`gas::Effect::Haze`), which runs its course whatever the player does (kept through a
+    /// respawn).
+    pub gassed: Option<u32>,
     /// s126+0x170: the scope's pitch in degrees (`conker_camera::Scope::pitch`, positive looks
     /// down). Set with `body.scope_yaw` after each camera step; the sniper's ray and weapon 0x14's
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
@@ -338,6 +347,7 @@ impl Fighter {
             combo: 0,
             carrying: false,
             masked: false,
+            gassed: None,
             scope_pitch: 0.0,
         }
     }
@@ -374,6 +384,13 @@ impl Fighter {
             _ if self.masked => 0x80 | gas::MASK,
             _ => self.weapon.map_or(0, |w| 0x80 | w),
         }
+    }
+
+    /// Frames into the gassed screen ([`Self::gassed`]) as of frame `tick` (the next to run): 1 in
+    /// the frame after the script's call, up to [`gas::HAZE_FRAMES`]; `None` before or after.
+    pub fn haze(&self, tick: u32) -> Option<u32> {
+        let k = tick.checked_sub(self.gassed? + 1)?;
+        (1..=gas::HAZE_FRAMES).contains(&k).then_some(k)
     }
 
     /// s126+0x78, the weapon the camera works with (`conker_camera::PlayerView::weapon`): the drawn
@@ -928,11 +945,15 @@ impl Match {
                         self.give(who, id);
                     }
                     // The mask takes the weapon's place (V d2: MP+0xEB0 13 → 19, s126+0x75 0xA1 →
-                    // 0xA0, as a weapon's two frames after the touch).
+                    // 0xA0, as a weapon's two frames after the touch) and goes on (V e2: state 81
+                    // from that frame; I: not while hurt).
                     Gives::Mask if t == at + 2 => {
                         p.taken = None;
                         let f = &mut self.players[who];
                         (f.weapon, f.drawn, f.masked) = (None, false, true);
+                        if !matches!(f.action, Action::Hurt { .. }) {
+                            f.set(Action::Mask { on: true }, anim::MASK_ON, t);
+                        }
                     }
                     _ => {}
                 }
@@ -1011,9 +1032,19 @@ impl Match {
                     let attacker = attacker.filter(|&a| a < self.players.len());
                     self.hurt(slot, &kind, false, false, 0, attacker, &mut ev);
                 }
+                // The mask comes off with its clip (V e2: state 78 from the frame the script deletes
+                // it; I: not while hurt).
                 Effect::Release(i) => {
                     if let Some(f) = self.players.get_mut(i) {
+                        if f.masked && !matches!(f.action, Action::Hurt { .. }) {
+                            f.set(Action::Mask { on: false }, anim::MASK_OFF, t);
+                        }
                         f.masked = false;
+                    }
+                }
+                Effect::Haze(i) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.gassed = Some(t);
                     }
                 }
                 // The canister in hand: holstered, and whatever the player was doing ends (I).
@@ -1135,6 +1166,10 @@ impl Match {
                 f.set(Action::Free, w.idle, t)
             }
             (Action::CButton, Some(w)) if n >= C_STATE => f.set(Action::Free, w.idle, t),
+            (Action::Mask { .. }, _) if n >= gas::MASK_FRAMES => {
+                let anim = f.idle_anim();
+                f.set(Action::Free, anim, t);
+            }
             (Action::GrenadeThrow { .. }, _) if n >= THROW => {
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
@@ -1486,6 +1521,12 @@ impl Match {
             // An A pressed in the hold is spent (V combat6_ctlw40 130: no jump after the club's swing).
             (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, mv.buttons & !(C_BUTTONS | BUTTON_A));
             f.body.prev_strafe = false;
+        }
+        // The mask's clips: the first frame moves as the one before it, then the stick and buttons
+        // are let go (V e2: speed 3 → 4 → 1.5 → 0 with the stick held, no jump, fire or move in
+        // e3; I: the clip's own state, whose turn to the move angle the remake's idle cuts short).
+        if matches!(f.action, Action::Mask { .. }) && t > f.since {
+            (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, 0);
         }
         let start = f.body.pos;
         // A draw or a holster holds the player still through the frame it ends in (obj+0x89 = 0xFF
@@ -2155,7 +2196,7 @@ impl Match {
         self.rng.next_u32();
         self.rng.next_u32();
         let (kills, suicides, deaths, shots, bot) = (f.kills, f.suicides, f.deaths, f.shots, f.bot);
-        let (hits, headshots) = (f.hits, f.headshots);
+        let (hits, headshots, gassed) = (f.hits, f.headshots, f.gassed);
         let (buttons, late, side, spawn_mask, start) =
             (f.buttons, f.late, f.side, f.spawn_mask, f.start);
         // The pad carries over: a button held through the respawn is no new press (V combat4_dead2:
@@ -2173,6 +2214,7 @@ impl Match {
             side,
             spawn_mask,
             start,
+            gassed,
             last_spawn: Some(at.index),
             ..Fighter::new(&at, team, self.tick)
         };
@@ -3430,14 +3472,65 @@ mod tests {
         assert_eq!((m.players[0].masked, m.gas.toucher(0)), (false, None));
         m.players[1].team = 0;
         m.apply(&[Effect::Countdown(300)]);
+        // Player 0 runs off the mask as it touches it: delivered two frames later, it goes on (state
+        // 81, clip 0x151) for 19 frames. That frame moves as before (speed 3), then the stick, A
+        // and Z do nothing: it brakes 2.5 and stays (V e2: 3 → 4 → 1.5 → 0; e3).
+        let run = Input {
+            stick_y: 82,
+            ..Input::default()
+        };
         for _ in 0..3 {
-            m.step(&arena, &idle, &w);
+            m.step(&arena, &[run, Input::default()], &w);
         }
-        assert!(m.players[0].masked && m.players[0].item(m.tick) == 0xA0);
+        let f = m.players[0];
+        assert!(f.masked && f.item(m.tick) == 0xA0);
+        assert_eq!(
+            (f.action, f.anim),
+            (Action::Mask { on: true }, anim::MASK_ON)
+        );
+        assert_eq!((f.since, f.body.xz_speed), (m.tick - 1, 3.0));
         assert_eq!(m.gas.toucher(0), Some(1));
         assert_eq!(m.gas.shown() & 1 << canister, 0);
+        let pressing = Input {
+            buttons: BUTTON_A | BUTTON_Z | BUTTON_B,
+            ..run
+        };
+        let mut speeds = Vec::new();
+        for _ in 1..gas::MASK_FRAMES {
+            m.step(&arena, &[pressing, Input::default()], &w);
+            speeds.push(m.players[0].body.xz_speed);
+            assert_eq!(m.players[0].anim, anim::MASK_ON);
+        }
+        assert_eq!(speeds[..3], [0.5, 0.0, 0.0]);
+        let f = m.players[0];
+        assert_eq!((f.body.pos[1], f.body.state), (0.0, movement::state::IDLE));
+        m.step(&arena, &[Input::default(); 2], &w);
+        assert_eq!(m.players[0].action, Action::Free);
+        // The script takes it off: state 78, clip 0x14E, as long.
         m.apply(&[Effect::Release(0)]);
-        assert!(!m.players[0].masked);
+        let f = m.players[0];
+        assert!(!f.masked);
+        assert_eq!(
+            (f.action, f.anim),
+            (Action::Mask { on: false }, anim::MASK_OFF)
+        );
+        for _ in 0..gas::MASK_FRAMES {
+            m.step(&arena, &[pressing, Input::default()], &w);
+            assert_eq!(m.players[0].anim, anim::MASK_OFF);
+        }
+        m.step(&arena, &[Input::default(); 2], &w);
+        assert_eq!(m.players[0].action, Action::Free);
+        // The gassed screen's start outlives a respawn.
+        m.apply(&[Effect::Haze(0)]);
+        let haze = m.tick;
+        m.respawn(0, &arena, &mut Vec::new());
+        assert_eq!(m.players[0].gassed, Some(haze));
+        let f = m.players[0];
+        let k = [1, 2, 150, 151].map(|k| f.haze(haze + 1 + k));
+        assert_eq!(
+            (f.haze(haze + 1), k),
+            (None, [Some(1), Some(2), Some(150), None])
+        );
 
         // The carrier: holstered, no draw, no crouch, 80 % of the run's 35 (d1: +1 a frame to within
         // 1 of 28, then +0.01; 35 without the canister).

@@ -7,7 +7,10 @@
 //!   argument, until a time of 900 or more. Opcode 105 creates the attachments of action `argument`
 //!   (`func_15072DD8`), 106 removes them (`func_15072E38`). An event fires in the frame the clip's
 //!   clock reaches its time (V: f32 clock, twin guns' draw t 15 at 15.4, holster t 14 at 15.4 after
-//!   13.999998, flamethrower t 9 at 9.0).
+//!   13.999998, flamethrower t 9 at 9.0). The dispatcher stops at the first record not yet due, so
+//!   a record fires at the latest time of those before it ([`due`]; V: the mask's take-off 0x14E,
+//!   whose t 59 record holds back the t 24 and t 55 ones after it,
+//!   `../lab/research/mp-original/total-war-effects.md` §4).
 //! - An action (`func_15083568`): a header at `0x80086CC4 + 8·(action − 1)` (records pointer, u8
 //!   count), then 16-byte records: byte 3 the kind (1 and 2 make a bank-09 attachment,
 //!   `func_15030AF4`; 0 a child object of class byte 0, the bank-01 model of that entry,
@@ -62,12 +65,13 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
         if route.aux_offset == 0 {
             continue;
         }
-        let mut at = route.aux_offset as usize + 0x10;
+        let (mut at, mut last) = (route.aux_offset as usize + 0x10, 0.0);
         loop {
             let time = f32::from_bits(be32(&table, at)?);
             if time >= 900.0 {
                 break;
             }
+            let time = due(&mut last, time);
             let op = be32(&table, at + 4)? & 0xFF;
             if op == CREATE || op == REMOVE {
                 events.push((id as u16, time, op == CREATE, be32(&table, at + 8)?));
@@ -105,6 +109,13 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
         }
     }
     Ok(held)
+}
+
+/// When a route's next event fires: at its time, or at the latest time of the records before it
+/// (`last`, which it updates), since `func_1506AD30` stops at the first record not yet due (C).
+pub fn due(last: &mut f32, time: f32) -> f32 {
+    *last = last.max(time);
+    *last
 }
 
 /// The part lists of a bank-09 attachment model (`func_1502FE10`): header words 0/1 are the part

@@ -165,6 +165,10 @@ pub mod combat {
     pub const DOORWAY_DEAD: u16 = 0xF6;
     pub const CARRY_MOVE: u16 = 0xD7;
     pub const CARRY_IDLE: u16 = 0xD8;
+    /// Total War's gas mask put on (state 81) and taken off (state 78), at 3 ticks a frame (V e2:
+    /// anim speed 3, clock 3 … 57 over the 19 frames the rules hold them).
+    pub const MASK_ON: u16 = 0x151;
+    pub const MASK_OFF: u16 = 0x14E;
     /// Flame hit (5), then the burning run while the fire lasts, and its bump off a wall (11).
     pub const FLAME_HIT: u16 = 0x69;
     pub const BURNING: u16 = 0x4C;
@@ -277,6 +281,7 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
             (2.0, 4.0, 0.0)
         }
         combat::FLAME_HIT => (1.1, 4.0, 0.0),
+        combat::MASK_ON | combat::MASK_OFF => (3.0, 4.0, 0.0),
         // The burning run: e/24 (`func_15064B94`, C; V 7/6 at speed 28 on e_w15).
         combat::BURNING => (e / 24.0, 4.0, 0.0),
         // Armed locomotion (`func_15064B94`, C): e counts the target at the weapon's speed

@@ -225,8 +225,9 @@ fn gas_props_of_0x2d() {
 /// random(150) script ticks in (one every other frame), the player of team 0 who touches it carries
 /// it from the next frame (or the one after), the delivery in the shelter starts the 300-frame countdown, the doorway
 /// hurts 1 a frame in its last 90, the gas kills whoever is outside the shelter and unmasked on the
-/// 300th, crediting the deliverer with the enemies only, the masks come off 89 frames later and the
-/// canister is back home 300 + random(150) ticks after the delivery.
+/// 300th, crediting the deliverer with the enemies only, the gassed screen starts for those outside
+/// 29 frames before, the masks come off 89 frames later and the canister is back home 300 +
+/// random(150) ticks after the delivery.
 #[test]
 fn total_war_gas() {
     use conker_bots::{Assets, Bots};
@@ -298,9 +299,14 @@ fn total_war_gas() {
     let (mut shown, mut touched, mut carried, mut delivered) = (None, None, None, None);
     let (mut back, mut sound, mut unmasked) = (None, Vec::new(), None);
     let mut doors = Vec::new();
-    let mut hits = Vec::new();
+    let (mut hits, mut hazes) = (Vec::new(), Vec::new());
     for t in 0..3000 {
         let effects = bots.tick(&m, &arena, &world, &mut [Input::default(); 5]);
+        for e in &effects {
+            if let conker_rules::gas::Effect::Haze(slot) = e {
+                hazes.push((t, *slot));
+            }
+        }
         let masked = m.players[4].masked;
         let mut ev = m.apply(&effects);
         if unmasked.is_none() && masked && !m.players[4].masked {
@@ -381,6 +387,10 @@ fn total_war_gas() {
         .collect();
     assert_eq!(gassed, [(300, 1, true), (300, 2, true)]);
     assert_eq!(unmasked.map(|u| u - d), Some(389));
+    // The gassed screen: at countdown 29, with the gas's sound, for everyone outside the shelter
+    // (trigger 0), masked (4) or not; not the deliverer inside (0), nor the doorway's dead (3).
+    let hazes: Vec<_> = hazes.iter().map(|h| (h.0 - d, h.1)).collect();
+    assert_eq!(hazes, [(271, 1), (271, 2), (271, 4)]);
     assert_eq!(
         sound
             .iter()

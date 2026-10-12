@@ -283,8 +283,8 @@ fn pack_reads_back_as_the_rom_path() {
     ] {
         check_gltf(&dir, &path, glb);
     }
-    // 0x2D's Total War props: its doors, masks and canisters in place, then the canister and the
-    // mask at the origin, a glTF scene each.
+    // 0x2D's Total War props: its doors, masks and canisters in place, then the canister at the
+    // origin, a glTF scene each.
     let (props, scenes) = conker_extract::props_level(&rom).unwrap();
     let mut gltf = extract_level::to_gltf(&props, &textures, "").unwrap();
     let mut json: Value = serde_json::from_str(&gltf.json).unwrap();
@@ -292,7 +292,7 @@ fn pack_reads_back_as_the_rom_path() {
         .map(|n| n["name"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(names[..3], ["04-2d-04@0", "04-2d-05@1", "03-54@21"]);
-    assert_eq!(names[9..], ["03-55@28", "03-55", "03-54"]);
+    assert_eq!(names[9..], ["03-55@28", "03-55"]);
     json["scenes"] = scenes;
     gltf.json = json.to_string();
     check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
@@ -552,6 +552,18 @@ fn pack_audio_reads_back() {
     assert_eq!(audio.events.footsteps.surfaces[&5][1], [577, 578, 579, 580]);
     let swing = play_at("117", 0x12A, 0.0);
     assert!(matches!(swing, Some(ClipAction::Play(p)) if p.sounds == [1314, 1315, 1316]));
+    // The gas mask's put-on (0x63E at t10, 0x69B at t50) and take-off (0x69C at t18; its 0x63F
+    // behind the t59 record, `held::due`), both characters (C, total-war-effects.md §4).
+    for character in ["117", "128"] {
+        let sounds = |clip, time| match play_at(character, clip, time) {
+            Some(ClipAction::Play(p)) => p.sounds,
+            _ => vec![],
+        };
+        assert_eq!(
+            [(0x151, 10.0), (0x151, 50.0), (0x14E, 18.0), (0x14E, 59.0)].map(|(c, t)| sounds(c, t)),
+            [vec![0x63E], vec![0x69B], vec![0x69C], vec![0x63F]]
+        );
+    }
     let cue = |on: &On, character: Option<&str>| {
         (audio.events.cues.iter())
             .find(|c| &c.on == on && c.character.as_deref() == character)

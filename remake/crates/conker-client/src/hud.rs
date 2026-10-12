@@ -3,7 +3,8 @@
 //! weapon's icon, grenades while one is in the hand, kills and rank, the clock, the radar, the aim
 //! reticle, the scope and the death iris; untimed, the lives left; out of lives, a skull; and once
 //! the match is over, the results (`hud/end.json`, [`End`]). War: Total War draws its team strip in
-//! place of the kills and rank, the radar's blips by team, and its results' header.
+//! place of the kills and rank, the radar's blips by team, its results' header, and a gassed
+//! player's haze under the HUD ([`haze`]).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -17,13 +18,13 @@ use std::collections::HashMap;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{RenderTarget, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::image::{ImageLoaderSettings, ImageSampler};
+use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
-    Align, Anchor, End, Horizontal, Hud, Image as Picture, Placed, Rgba, Text, Vertical,
+    Align, Anchor, End, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Text, Vertical,
 };
 use conker_rules::game::{Standing, places, team_places, team_result};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
@@ -90,6 +91,8 @@ pub struct Shown {
     pub strip: Option<[u32; 2]>,
     /// Total War: the gas countdown's seconds ([`countdown`]).
     pub countdown: Option<u32>,
+    /// Total War: frames into this player's gassed screen (1-150, [`Combat::haze`]).
+    pub haze: Option<u32>,
     /// The match is over: the results' rows ([`rows`]: each with its colour) and the menu's choice
     /// (0 RESTART, 1 QUIT).
     pub results: Option<(Vec<Row>, usize)>,
@@ -399,6 +402,31 @@ fn results(
     out
 }
 
+/// Total War's gassed screen `k` frames in (object 0xE013, draw `func_151D2830`, update
+/// `func_151D275C`): each of [`Haze::layers`] over the whole view (the iris's `far` margin around the
+/// frame), its texels from the frame's top-left scrolling k/4 a frame, under the HUD; alpha min(4k,
+/// 128) up to k = 132, then 8 less a frame, times the layer's share.
+fn haze(h: &Haze, k: u32) -> Vec<Sprite> {
+    let alpha = (4 * k)
+        .min(128)
+        .min(128u32.saturating_sub(8 * k.saturating_sub(132)));
+    let (tex, far, s) = (image(&h.image).0, 10_000.0, k as f32 / 4.0);
+    (h.layers.iter().zip([0.5, 0.6]))
+        .map(|(l, z)| {
+            let [r, g, b] = l.colour;
+            let (lo, hi) = (-far * l.texel, far * l.texel);
+            Sprite {
+                tex: tex.clone(),
+                uv: [lo + s, lo + l.t, hi + s, hi + l.t],
+                rect: [-far, -far, 2.0 * far, 2.0 * far],
+                anchor: Anchor(Horizontal::Centre, Vertical::Middle),
+                colour: [r, g, b, (alpha as f32 * l.share) as u8],
+                z,
+            }
+        })
+        .collect()
+}
+
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
 pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // Untimed matches count lives (the lives digit, the strip's lives).
@@ -411,7 +439,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         }
         return out;
     }
-    let mut out = Vec::new();
+    let mut out = s.haze.map_or_else(Vec::new, |k| haze(&hud.haze, k));
     let white = [255; 4];
     // Untimed: the lives left; out of them, the skull.
     if let (Some(n), Some(end)) = (s.lives, &hud.end) {
@@ -611,12 +639,18 @@ pub fn build(app: &mut App, hud: Hud) {
         move |assets: Res<AssetServer>,
               mut meshes: ResMut<Assets<Mesh>>,
               mut commands: Commands| {
-            let load = |file: &str, smooth: bool| -> Handle<Image> {
-                let sampler = if smooth {
-                    ImageSampler::linear()
+            // The haze's texture wraps (G_TX_WRAP, mask 6); the others clamp.
+            let load = |file: &str, smooth: bool, wrap: bool| -> Handle<Image> {
+                let mut sampler = if smooth {
+                    ImageSamplerDescriptor::linear()
                 } else {
-                    ImageSampler::nearest()
+                    ImageSamplerDescriptor::nearest()
                 };
+                if wrap {
+                    sampler.address_mode_u = ImageAddressMode::Repeat;
+                    sampler.address_mode_v = ImageAddressMode::Repeat;
+                }
+                let sampler = ImageSampler::Descriptor(sampler);
                 let settings = move |s: &mut ImageLoaderSettings| s.sampler = sampler.clone();
                 assets
                     .load_builder()
@@ -625,9 +659,16 @@ pub fn build(app: &mut App, hud: Hud) {
             };
             let end = hud.end.iter().flat_map(|e| &e.textures);
             let textures = (hud.textures.iter().chain(end))
-                .map(|(name, t)| (name.clone(), (load(&t.file, t.smooth), t.size)))
+                .map(|(name, t)| {
+                    let wrap = *name == hud.haze.image.texture;
+                    (name.clone(), (load(&t.file, t.smooth, wrap), t.size))
+                })
                 .collect();
-            let glyphs = hud.font.iter().map(|g| load(&g.file, false)).collect();
+            let glyphs = hud
+                .font
+                .iter()
+                .map(|g| load(&g.file, false, false))
+                .collect();
             let quad = meshes.add(Rectangle::new(1.0, 1.0));
             commands.insert_resource(HudAssets {
                 hud: hud.clone(),
@@ -753,6 +794,7 @@ fn shown(
         out: c.out > 0,
         strip: m.total_war.then_some(strip),
         countdown: countdown(m.countdown),
+        haze: (c.haze > 0).then_some(u32::from(c.haze)),
         results: None,
         header: None,
     }
@@ -1225,6 +1267,46 @@ mod tests {
         let [dx, dy] = g.offset.map(f32::from);
         let x = 150.0 - ((w - 1.0) / 2.0).floor() + dx;
         assert_eq!(glyphs(&hud, &s), [[x, 86.0 + dy, x + w, 86.0 + dy + h]]);
+    }
+
+    /// Total War's gassed screen against the original's draws (`total-war-effects.md` §2, e1's
+    /// `hudwalk` at DL 1080, k = 8: st (2, 32) and (2, 0) at the frame's top-left, steps 1 and 0.5,
+    /// env 00ff0020 and ff000010; e2's fade 0x70 … 0x10), under everything else.
+    #[test]
+    fn gas_haze_matches_the_originals_draws() {
+        let Some(hud) = pack_hud() else { return };
+        let haze = |k| Shown {
+            haze: Some(k),
+            ..state()
+        };
+        let quads: Vec<Sprite> = sprites(&hud, &haze(8))
+            .into_iter()
+            .filter(|q| q.tex == texture("haze"))
+            .collect();
+        let at_origin = |q: &Sprite| {
+            let step = (q.uv[2] - q.uv[0]) / q.rect[2];
+            (
+                step,
+                [q.uv[0] - q.rect[0] * step, q.uv[1] - q.rect[1] * step],
+            )
+        };
+        assert_eq!(
+            quads
+                .iter()
+                .map(|q| (at_origin(q), q.colour))
+                .collect::<Vec<_>>(),
+            [
+                ((1.0, [2.0, 32.0]), [0, 255, 0, 32]),
+                ((0.5, [2.0, 0.0]), [255, 0, 0, 16])
+            ]
+        );
+        let mut others = (sprites(&hud, &haze(8)).into_iter()).filter(|q| q.tex != texture("haze"));
+        assert!(others.all(|q| q.z > quads[1].z && quads[1].z > quads[0].z));
+        let alpha = |k| sprites(&hud, &haze(k))[0].colour[3];
+        assert_eq!(
+            [1, 2, 32, 132, 134, 136, 146, 148, 150].map(alpha),
+            [4, 8, 128, 128, 0x70, 0x60, 0x10, 0, 0]
+        );
     }
 
     /// Total War's strip where the original drew it (the gas run's DL 3000: timed, Tediz 4,

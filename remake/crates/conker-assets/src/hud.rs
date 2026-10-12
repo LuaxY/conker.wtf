@@ -217,6 +217,24 @@ pub struct Iris {
     pub radius: Vec<u16>,
 }
 
+/// War: Total War's gassed screen (`obj(0xE013, p)`, drawn by `func_151D2830`): over the player's
+/// whole view and under the rest of the HUD, one quad per layer of `image` (repeating), its colour
+/// times the texture's, its alpha the screen's strength times `share`; `texel` texels a frame
+/// pixel, texel (k / 4, `t`) at the frame's top left on the screen's k-th frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Haze {
+    pub image: Image,
+    pub layers: [HazeLayer; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HazeLayer {
+    pub colour: [u8; 3],
+    pub share: f32,
+    pub texel: f32,
+    pub t: f32,
+}
+
 /// `hud/hud.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hud {
@@ -237,6 +255,7 @@ pub struct Hud {
     pub strip: Strip,
     /// War: Total War's gas countdown: the seconds left until the gas kills.
     pub countdown: Text,
+    pub haze: Haze,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,
@@ -253,6 +272,7 @@ impl Hud {
             ("scope.ring".into(), &self.scope.ring),
             ("scope.dot".into(), &self.scope.dot),
             ("iris.image".into(), &self.iris.image),
+            ("haze.image".into(), &self.haze.image),
         ];
         all.extend((self.weapon.icons.iter()).map(|(id, i)| (format!("weapon.icons.{id}"), i)));
         for (name, icons) in [("kills", &self.strip.kills), ("lives", &self.strip.lives)] {

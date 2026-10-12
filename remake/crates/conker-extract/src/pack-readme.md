@@ -18,18 +18,19 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 |---|---|
 | `pack.json` | `format` (the pack format; a server reads only its own), `source_rom_sha1` (for reference), the folders under `maps/`, `characters/` and `weapons/`, `audio`: the folders under `audio/` that hold sound (absent in a pack without sound), and `hud`: whether the pack has `hud/` |
 | `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map) |
-| `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister and scene 2 the gas mask at the origin (in a carrier's hands, on a wearer's head). Textures in `textures/` with the level's |
+| `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister at the origin (in a carrier's hands). Textures in `textures/` with the level's |
 | `maps/<map>/collision.json` | What players stand on and run into, in the game's build order |
 | `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30, 12 on 0x34, 16 on 0x3F) |
 | `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D and War: Total War's 6 gas masks, 17 on 0x30, 16 on 0x34, 10 on 0x3F) |
 | `maps/<map>/triggers.json` | The scene's trigger records: camera volumes and hints, bot zones, lifts |
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
+| `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, none on the others |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
-| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two): glTF scene `i` is `held.json[i]` |
+| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
@@ -40,7 +41,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
 | `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons), `haze.png` (its gassed screen) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -133,6 +134,19 @@ The bots' waypoints, in index order:
 
 There are at most 255 nodes.
 
+### `maps/<map>/lights.json`
+The original's renderer lights some of the level (on 0x2D its tunnels, towers and the shelter
+under the middle; the client draws the rest as the vertex colours say): a lit point's colour is its
+vertex colour times `ambient` plus, per light, the light's `rgb` times min(1, size × 2048 / d²), d
+units away. The level's own light table is not exported; this file holds the lights War: Total
+War's gas switches, which the client draws:
+- `at`: where it is (unused for `carried`), `rgb` its colour;
+- `size`, `swing`, `step`: its size is `size + swing × sin φ`, φ stepping `step` (radians) a
+  frame; the light reaches `362 × √size` units;
+- `when`: `calm` (outside the gas countdown: the shelter's lamps), `countdown` (during it: the
+  shelter's red alarm), `{"shown": N}` (while the prop on placement N is shown: a gas canister at
+  home), `carried` (on each player carrying a canister).
+
 ### `characters/<id>/character.json`
 - `model_lift`: model units the model is drawn above the player (43 for 117, 42 for 128, 49 for 136).
 - `clips`: one entry per animation of `character.gltf`. The client finds a clip's animation by its
@@ -158,8 +172,13 @@ One entry per glTF scene of `held.gltf`, in order:
 - `entry`: the model, whose meshes are named `09-<entry>-<part>` in hex (the crossbow, a child
   object: `01-6e-<list>`, its bank-01 model in its bind pose; for reference: glTF scene `i` is
   entry `i`).
-- `joint`: the character joint it hangs from (`joint_09`, the right hand; `joint_04`, the left).
-- `create` and `remove`: `[animation id, tick]` events that show and hide it.
+- `joint`: the character joint it hangs from (`joint_09`, the right hand; `joint_04`, the left;
+  `joint_12`, the head).
+- `create` and `remove`: `[animation id, tick]` events that show and hide it. An event fires once
+  the animation's clock reaches its tick (the game reads a clip's events in order and stops at the
+  first not yet due, so a tick here is never below an earlier event's of the same clip).
+- The gas mask (War: Total War): entry 67 in the hand while its put-on (animation 337) plays,
+  entry 66 on the head while it is worn after that; neither while it comes off (animation 334).
 
 ### `game/acos.json`, `game/sink.json`
 - `acos.json`: acos(x) in units of π/65536, at 132 sample points (x = i·512, then 0x7800 + i·32,
@@ -248,6 +267,10 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   `rects`, from `kills` in a match on the clock or `lives` in one without, and its number as
   `numbers` (text as above): its players' kills, or without a clock their lives left.
 - `countdown`: War: Total War's gas countdown (text as above): the seconds left until the gas kills.
+- `haze`: War: Total War's gassed screen, over the whole view of a player caught outside the
+  shelter, under the rest of the HUD, for 150 frames (fading in over 32, out from the 132nd): per
+  layer, `image` repeated, `texel` texels a pixel, starting at texel (frame / 4, `t`) and drifting
+  a quarter texel a frame, in `colour` at the screen's strength times `share`.
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.

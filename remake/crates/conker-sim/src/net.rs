@@ -47,7 +47,9 @@ use serde::{Deserialize, Serialize};
 /// rules run with); [`Combat::team`] is then the player's side.
 /// 14: Total War's gas: [`MatchView`]'s `countdown`, `gas` and `props`, [`Combat`]'s `carrying` and
 /// `masked` (and the fighter's: the carrier's speed and lock-out are predicted).
-pub const PROTOCOL_ID: u64 = 14;
+/// 15: the gas's look: [`Combat::haze`] (the fighter's start of it), and the fighter's mask clips
+/// (conker-rules' `Action::Mask`: their lock-out is predicted).
+pub const PROTOCOL_ID: u64 = 15;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -113,6 +115,9 @@ pub struct Combat {
     /// `anim`), wearing a gas mask (item 0x20).
     pub carrying: bool,
     pub masked: bool,
+    /// Total War: frames into this player's gassed screen (1-150; 0 none), which its own client
+    /// draws over its view (conker-rules' `Fighter::gassed`).
+    pub haze: u8,
 }
 
 /// The match, on one replicated entity.

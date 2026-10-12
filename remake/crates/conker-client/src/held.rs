@@ -5,8 +5,9 @@
 //! Its own animation events show and hide it: the draw clip's event puts it in the hand, the
 //! holster clip's takes it away. The item is the grenade while its clips play, else the player's
 //! weapon; with no event fired yet, a drawn weapon and the held grenade show.
-//! In War: Total War a carrier holds the gas canister and a wearer has the gas mask on
-//! ([`GAS_JOINTS`]).
+//! In War: Total War a carrier holds the gas canister ([`GAS_JOINT`]) and shines its green light
+//! (the pack's carried light, [`crate::lights`]), and the gas mask (bank-09 #67 in the hand, #66 on
+//! the head) follows its own clips ([`mask_shows`]).
 
 use crate::render::MODEL_SCALE;
 use crate::{Anim, Config};
@@ -14,8 +15,8 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use conker_anim::AnimPlayer;
-use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
-use conker_assets::{Held, PACK_WEAPONS, held_gltf, props_gltf};
+use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW, MASK_OFF, MASK_ON};
+use conker_assets::{Held, Light, PACK_WEAPONS, held_gltf, props_gltf};
 use conker_rules::net::Fighting;
 use conker_rules::weapon::weapon;
 use conker_sim::net::{Combat, MatchView};
@@ -28,20 +29,25 @@ struct HeldModels(Vec<Held>);
 #[derive(Component)]
 struct Hands(Vec<(usize, Entity)>);
 
-/// A player's gas canister and gas mask (War: Total War), under their joints.
-#[derive(Component)]
-struct GasHands([Entity; 2]);
+/// The light on a canister's carrier (`lights.json`'s carried one; none on other maps).
+#[derive(Resource)]
+struct CarryLight(Option<Light>);
 
-/// Where the canister (`props.gltf`'s scene 1) and the mask (scene 2) hang: the root joint
-/// (`joint_00`), upright with its middle between the hands of the carry clips (0xD8's first frame:
-/// hands at x ±31, 43 up, 26 forward), and the head (`joint_12`); offsets in the joint's frame
-/// (model units). I: no clip creates them (no create event in any route table's 0xD7, 0xD8, 0x4E,
-/// 0x51), the game's weapon manager draws item 0x25 by a path not read; joints and offsets fitted.
-pub const GAS_JOINTS: [(u8, [f32; 3]); 2] = [(0, [0.0, -30.0, 24.0]), (12, [0.0, 0.0, 0.0])];
+/// A player's gas canister (War: Total War), under its joint, and its carried light.
+#[derive(Component)]
+struct GasHands(Entity, Option<Entity>);
+
+/// Where the canister (`props.gltf`'s scene 1) hangs: the root joint (`joint_00`), upright with its
+/// middle between the hands of the carry clips (0xD8's first frame: hands at x ±31, 43 up, 26
+/// forward); offset in the joint's frame (model units). I: no clip creates it (no create event in
+/// any route table's 0xD7, 0xD8, 0x4E, 0x51), the game's weapon manager draws item 0x25 by a path
+/// not read; joint and offset fitted.
+pub const GAS_JOINT: (u8, [f32; 3]) = (0, [0.0, -30.0, 24.0]);
 
 /// The systems that hang the held models on every player's joints and show them.
-pub fn build(app: &mut App, held: Vec<Held>) {
+pub fn build(app: &mut App, held: Vec<Held>, carried: Option<Light>) {
     app.insert_resource(HeldModels(held));
+    app.insert_resource(CarryLight(carried));
     app.add_systems(Update, (hang, show, hang_gas, show_gas).chain());
 }
 
@@ -68,6 +74,27 @@ pub fn shows(h: &Held, weapon_id: u8, drawn: bool, clock: &AnimPlayer) -> bool {
         Some(((_, t), false)) => clock.id != away && drawn && clock.time - t >= 2.0 * clock.rate,
         None if grenade => clock.id == GRENADE_HOLD,
         None => drawn,
+    }
+}
+
+/// Whether gas-mask model `h` (its create events are in the put-on clip [`MASK_ON`]) shows on a
+/// player wearing a mask or not (`masked`) whose animation clock is `clock`. In the put-on the last
+/// of its put-on events that fired decides (the hand's create at t26: frame 9); in the take-off
+/// ([`MASK_OFF`]) nothing shows (neither of its creates fires, `extract_character::due`); else a
+/// wearer has the models whose last put-on event is a create (the head, from the idle after the
+/// put-on: V frame 20 on e2; I: its create at t59 never fires, the path that draws it is not read).
+pub fn mask_shows(h: &Held, masked: bool, clock: &AnimPlayer) -> bool {
+    let created = |at: f32| {
+        (h.create.iter().map(|&e| (e, true)))
+            .chain(h.remove.iter().map(|&e| (e, false)))
+            .filter(|((id, t), _)| *id == MASK_ON && *t <= at)
+            .max_by(|a, b| a.0.1.total_cmp(&b.0.1))
+            .is_some_and(|(_, create)| create)
+    };
+    match clock.id {
+        MASK_ON => created(clock.time),
+        MASK_OFF => false,
+        _ => masked && created(f32::INFINITY),
     }
 }
 
@@ -119,8 +146,9 @@ fn hang(
     }
 }
 
-/// In War: Total War, once a player's held models hang, its canister and mask go under their joints
-/// ([`GAS_JOINTS`]), hidden, at the world's size (the props are not drawn at the players' half).
+/// In War: Total War, once a player's held models hang, its canister goes under its joint
+/// ([`GAS_JOINT`]), hidden, at the world's size (the props are not drawn at the players' half), and
+/// the carried light at the player's position (V e1: on the carrier's object).
 #[allow(clippy::too_many_arguments)]
 fn hang_gas(
     players: Query<Entity, (With<Hands>, Without<GasHands>)>,
@@ -128,6 +156,7 @@ fn hang_gas(
     children: Query<&Children>,
     names: Query<&Name>,
     cfg: Res<Config>,
+    carried: Res<CarryLight>,
     assets: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     mut gltf: Local<Option<Handle<Gltf>>>,
@@ -143,37 +172,38 @@ fn hang_gas(
     else {
         return;
     };
+    let name = format!("joint_{:02}", GAS_JOINT.0);
     for player in &players {
-        let joint = |j: u8| {
-            let name = format!("joint_{j:02}");
-            (children.iter_descendants(player))
-                .find(|&e| names.get(e).is_ok_and(|n| n.as_str() == name))
-        };
-        let [Some(root), Some(head)] = GAS_JOINTS.map(|(j, _)| joint(j)) else {
+        let Some(root) = (children.iter_descendants(player))
+            .find(|&e| names.get(e).is_ok_and(|n| n.as_str() == name))
+        else {
             continue;
         };
-        let joints = [root, head];
-        let hands = std::array::from_fn(|k| {
-            let at = Transform::from_translation(Vec3::from(GAS_JOINTS[k].1));
-            let part = commands.spawn((
-                WorldAssetRoot(g.scenes[k + 1].clone()),
-                at.with_scale(Vec3::splat(MODEL_SCALE.recip())),
-                Visibility::Hidden,
-                ChildOf(joints[k]),
-            ));
-            part.id()
+        let at = Transform::from_translation(Vec3::from(GAS_JOINT.1));
+        let part = (commands.spawn((
+            WorldAssetRoot(g.scenes[1].clone()),
+            at.with_scale(Vec3::splat(MODEL_SCALE.recip())),
+            Visibility::Hidden,
+            ChildOf(root),
+        )))
+        .id();
+        let light = (carried.0.as_ref()).map(|l| {
+            let light = (crate::lights::point_light(l, l.size), Visibility::Hidden);
+            commands
+                .spawn((light, Transform::IDENTITY, ChildOf(player)))
+                .id()
         });
-        commands.entity(player).insert(GasHands(hands));
+        commands.entity(player).insert(GasHands(part, light));
     }
 }
 
-/// Shows the canister while its player carries it, the mask while it wears one (the server's
-/// [`Combat`]: neither is predicted).
+/// Shows the canister and its light while its player carries it (the server's [`Combat`]: not
+/// predicted).
 fn show_gas(players: Query<(&Combat, &GasHands)>, mut visibility: Query<&mut Visibility>) {
     for (c, hands) in &players {
-        for (shown, &part) in [c.carrying, c.masked].iter().zip(&hands.0) {
+        for part in [Some(hands.0), hands.1].into_iter().flatten() {
             if let Ok(mut v) = visibility.get_mut(part) {
-                v.set_if_neq(match shown {
+                v.set_if_neq(match c.carrying {
                     true => Visibility::Inherited,
                     false => Visibility::Hidden,
                 });
@@ -182,8 +212,8 @@ fn show_gas(players: Query<(&Combat, &GasHands)>, mut visibility: Query<&mut Vis
     }
 }
 
-/// Shows or hides each player's held models. The local player's weapon state is its prediction,
-/// the clock's own source; the others' is the server's.
+/// Shows or hides each player's held models. The local player's weapon and mask state is its
+/// prediction, the clock's own source; the others' is the server's.
 #[allow(clippy::type_complexity)]
 fn show(
     players: Query<(
@@ -197,14 +227,21 @@ fn show(
     mut visibility: Query<&mut Visibility>,
 ) {
     for (anim, hands, combat, fighting, predicted) in &players {
-        let (weapon_id, drawn) = match (fighting, combat) {
-            (Some(f), _) if predicted => (f.state.weapon.unwrap_or(0), f.state.drawn),
-            (_, Some(c)) => (c.weapon, c.drawn),
-            _ => (0, false),
+        let (weapon_id, drawn, masked) = match (fighting, combat) {
+            (Some(f), _) if predicted => {
+                (f.state.weapon.unwrap_or(0), f.state.drawn, f.state.masked)
+            }
+            (_, Some(c)) => (c.weapon, c.drawn, c.masked),
+            _ => (0, false, false),
         };
         for &(i, entity) in &hands.0 {
+            let h = &held.0[i];
+            let shown = match h.create.iter().any(|c| c.0 == MASK_ON) {
+                true => mask_shows(h, masked, &anim.0),
+                false => shows(h, weapon_id, drawn, &anim.0),
+            };
             if let Ok(mut v) = visibility.get_mut(entity) {
-                v.set_if_neq(match shows(&held.0[i], weapon_id, drawn, &anim.0) {
+                v.set_if_neq(match shown {
                     true => Visibility::Inherited,
                     false => Visibility::Hidden,
                 });
@@ -263,6 +300,51 @@ mod tests {
             [7.0, 8.0, 9.0, 10.0].map(thrown),
             [true, false, false, true]
         );
+    }
+
+    /// The gas mask's models (events as extracted, ROM-tested in extract-character) at the put-on's
+    /// rate: the hand from frame 9 to the put-on's end, the head from the idle after it until the
+    /// take-off; nothing in the take-off (V: e2's attachment calls).
+    #[test]
+    fn mask_in_hand_then_on_head() {
+        let hand = Held {
+            entry: 67,
+            joint: 9,
+            create: vec![(MASK_OFF, 59.0), (MASK_ON, 26.0)],
+            remove: vec![(MASK_OFF, 59.0), (MASK_ON, 59.0)],
+        };
+        let head = Held {
+            entry: 66,
+            joint: 12,
+            create: vec![(MASK_ON, 59.0)],
+            remove: vec![(MASK_OFF, 24.0)],
+        };
+        let mut c = AnimPlayer::default();
+        let frames: Vec<[bool; 2]> = (0..conker_rules::gas::MASK_FRAMES)
+            .map(|_| {
+                c.tick(conker_anim::request(MASK_ON, 0.0, 0.0), 999);
+                [&hand, &head].map(|h| mask_shows(h, true, &c))
+            })
+            .collect();
+        let first = frames.iter().position(|s| s[0]).map(|i| i + 1);
+        assert_eq!(first, Some(9));
+        assert!(frames[8..].iter().all(|&s| s == [true, false]));
+        let idle = clock(conker_anim::id::IDLE, 3.0, 1.0);
+        assert_eq!(
+            [&hand, &head].map(|h| mask_shows(h, true, &idle)),
+            [false, true]
+        );
+        assert_eq!(
+            [&hand, &head].map(|h| mask_shows(h, false, &idle)),
+            [false, false]
+        );
+        for time in [3.0, 30.0, 57.0] {
+            let off = clock(MASK_OFF, time, 3.0);
+            assert_eq!(
+                [&hand, &head].map(|h| mask_shows(h, true, &off)),
+                [false, false]
+            );
+        }
     }
 
     /// The pack's draw events at conker-anim's draw rates fire on the frame the rules attach each

@@ -6,9 +6,9 @@
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
-    Align, Anchor, Button, End, Glyph, Grenades, Health, Horizontal as H, Hud, Image, Iris, Lives,
-    Placed, Radar, Rank, Results, Reticle, Scope, Strip, Teams, Text, Texture, Tv, Vertical as V,
-    Weapon,
+    Align, Anchor, Button, End, Glyph, Grenades, Haze, HazeLayer, Health, Horizontal as H, Hud,
+    Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle, Scope, Strip, Teams, Text, Texture,
+    Tv, Vertical as V, Weapon,
 };
 use extract_core::Rom;
 use extract_gbi::{Format, Tlut, decode, png};
@@ -21,8 +21,10 @@ const CHARS_AT: usize = 0x8008_5930 - GAME_DATA;
 const GLYPHS: usize = 95;
 
 /// (name, blob id, format, width, height, smooth): every texture the HUD draws, loaded as its
-/// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 13] = [
+/// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready); the last, War:
+/// Total War's gassed screen's (`func_151D2830`; V: white, alpha 1-7 of 15, equal to the RAM's at
+/// 0x8023B390, `../lab/research/mp-original/total-war-effects.md` §2).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 14] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -36,6 +38,7 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 13] = [
     ("rank_rd", 0xEA2, Format::Rgba16, 16, 16, false),
     ("rank_th", 0x11B7, Format::Rgba16, 16, 16, false),
     ("teams", 0xD10, Format::Rgba32, 32, 32, false),
+    ("haze", 0xA48, Format::Ia8, 64, 64, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):
@@ -259,6 +262,26 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             align: Align::Centre,
             colour: white,
             shadow: None,
+        },
+        // `func_151D2830` (C; V e1 DL 1080, `hudwalk`): two texrects of 0xA48 over the viewport,
+        // bilinear, wrapping, combiner TEXEL0 × ENV: env (0, 255, 0, the strength), 1 texel a
+        // pixel from t 32; env (255, 0, 0, half of it), half a texel a pixel from t 0.
+        haze: Haze {
+            image: image("haze", [0, 0, 64, 64]),
+            layers: [
+                HazeLayer {
+                    colour: [0, 255, 0],
+                    share: 1.0,
+                    texel: 1.0,
+                    t: 32.0,
+                },
+                HazeLayer {
+                    colour: [255, 0, 0],
+                    share: 0.5,
+                    texel: 0.5,
+                    t: 0.0,
+                },
+            ],
         },
         end: None,
     }

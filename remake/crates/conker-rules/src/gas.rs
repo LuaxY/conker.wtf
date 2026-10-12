@@ -35,6 +35,14 @@ pub const CANISTERS: [(u16, [f32; 3]); 2] =
 pub const CANISTER: u8 = 0x25;
 pub const MASK: u8 = 0x20;
 
+/// Frames the mask's put-on (state 81) and take-off (78) hold the player: 19, idle on the 20th (V
+/// e2: rows 1004-1022 and 1193-1211; their clips end on that frame at 3 ticks a frame).
+pub const MASK_FRAMES: u32 = 19;
+
+/// Frames the gassed screen runs ([`Effect::Haze`]): its timer goes 2 a frame and the object goes
+/// at 301 (`func_151D275C`, C; V e1: drawn in 150 frames).
+pub const HAZE_FRAMES: u32 = 150;
+
 /// A prop as the engine keeps it for the script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Prop {
@@ -164,6 +172,9 @@ pub enum Effect {
     Release(usize),
     /// G+0xFF0, the forced item, is (or is no longer) the canister: the player carries it.
     Carry(usize, bool),
+    /// `obj(0xE013, p)` (`func_151D26C0`, 0xBA at countdown 29 for each player outside trigger 0,
+    /// masked or not): the player's gassed screen starts (its own view only; the client draws it).
+    Haze(usize),
 }
 
 #[cfg(test)]

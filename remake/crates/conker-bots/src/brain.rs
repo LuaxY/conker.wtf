@@ -230,13 +230,20 @@ impl World<'_> {
     }
 
     /// Natives 3 and 4 (handle tables `0x80088420` / `0x8008845C`): start and stop. In Deathmatch
-    /// only the level-start fades (type 0xE) reach them. Total War's gas starts effects (0xE013 the
-    /// gassed screen, 0xE016 the gas, 0xE017 a canister's return) and sounds (type 7: 0x74CF the
-    /// gas's loop, which it keeps the handle of and stops; 0x7599 and 0x7640 a canister taken):
-    /// the client's to show from the match's state, but the gas's sound, whose span is the
-    /// script's ([`Effect::Gas`]).
-    fn object(&mut self, native: i32, h: i32, _args: &[i32]) -> i32 {
+    /// only the level-start fades (type 0xE) reach them. Total War's gas starts effects (0xE013 a
+    /// player's gassed screen, [`Effect::Haze`]; 0xE016 the room's alarm lights, 0xE017 a
+    /// canister's light) and sounds (type 7: 0x74CF the gas's loop, which it keeps the handle of
+    /// and stops; 0x7599 and 0x7640 a canister taken): the client's to show from the match's
+    /// state, but the gas's sound, whose span is the script's ([`Effect::Gas`]), and the gassed
+    /// screen, whose players are the script's (those outside trigger 0).
+    fn object(&mut self, native: i32, h: i32, args: &[i32]) -> i32 {
         match (native, kind(h)) {
+            (3, 0xE) if h == 0xE013 => {
+                if let Some(slot) = self.slot(args.get(1).copied().unwrap_or(-1)) {
+                    self.effects.push(Effect::Haze(slot));
+                }
+                0
+            }
             (_, 0xE) => 0,
             (3, 7) if h == 0x74CF => {
                 self.effects.push(Effect::Gas(true));
