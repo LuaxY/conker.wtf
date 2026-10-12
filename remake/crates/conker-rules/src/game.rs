@@ -30,6 +30,7 @@ use conker_sim::movement::{
 };
 
 use crate::Rng;
+use crate::colors::{self, Colors, Pose};
 use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
 use crate::flame::{self, Burn};
@@ -126,6 +127,12 @@ pub struct Settings {
     /// squirrels, 1 Tediz), the match ends and ranks by team (`func_151E565C`'s team branch,
     /// [`team_places`]) and the kill limit is not read.
     pub total_war: bool,
+    /// War: Colors (scenario 10, scene 0x30; [`crate::colors`]): capture the flag. Teams are the
+    /// sides, as in Total War; [`colors::LIVES`] lives never lost; the match ends on the clock or
+    /// at [`Self::score`] captures, and the teams rank by captures first ([`team_places`]).
+    pub colors: bool,
+    /// Colors' score target (opt[18]): 1-40, 0 unlimited (default [`colors::SCORE`]).
+    pub score: u8,
 }
 
 impl Default for Settings {
@@ -137,6 +144,8 @@ impl Default for Settings {
             skill: 2,
             radar: true,
             total_war: false,
+            colors: false,
+            score: colors::SCORE,
         }
     }
 }
@@ -149,7 +158,9 @@ impl Settings {
 
     /// The lives each player starts with.
     pub fn lives(&self) -> u8 {
-        if self.time.is_some() {
+        if self.colors {
+            colors::LIVES
+        } else if self.time.is_some() {
             TIMED_LIVES
         } else {
             self.lives
@@ -199,6 +210,9 @@ pub enum Action {
     Mask {
         on: bool,
     },
+    /// War: Colors' flag and capture poses ([`colors::Pose`]): the stick and buttons do nothing
+    /// while they last.
+    Pose(Pose),
 }
 
 /// A player: its movement state and everything combat adds (named after the game's fields).
@@ -296,6 +310,10 @@ pub struct Fighter {
     /// (`gas::Effect::Haze`), which runs its course whatever the player does (kept through a
     /// respawn).
     pub gassed: Option<u32>,
+    /// War: Colors: the flag carried (its index in [`colors::FLAGS`]; obj+0x13C = the flag + 100):
+    /// no weapon drawn or used, A and Z do nothing, B puts it down, 0.8 of the speed
+    /// (`PlayerState::holding`), until the script makes it let go ([`colors::Flag`]).
+    pub flag: Option<u8>,
     /// s126+0x170: the scope's pitch in degrees (`conker_camera::Scope::pitch`, positive looks
     /// down). Set with `body.scope_yaw` after each camera step; the sniper's ray and weapon 0x14's
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
@@ -348,6 +366,7 @@ impl Fighter {
             carrying: false,
             masked: false,
             gassed: None,
+            flag: None,
             scope_pitch: 0.0,
         }
     }
@@ -377,6 +396,7 @@ impl Fighter {
     /// (the trace row).
     pub fn item(&self, tick: u32) -> u8 {
         match self.action {
+            _ if self.flag.is_some() => 0,
             _ if self.carrying => 0x80 | gas::CANISTER,
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0xA6,
             Action::GrenadeThrow { .. } if tick <= self.since + RELEASE + 1 => 0xA6,
@@ -467,6 +487,7 @@ impl Fighter {
 
     fn idle_anim(&self) -> u16 {
         match self.weapon() {
+            _ if self.flag.is_some() => anim::FLAG_IDLE,
             _ if self.carrying => anim::CARRY_IDLE,
             Some(w) if self.drawn => w.idle,
             _ => u16::from(self.body.state),
@@ -549,6 +570,8 @@ pub struct Standing {
     pub shots: u16,
     /// [`Fighter::out`].
     pub out: u8,
+    /// War: Colors: the player's team's score ([`Colors::scores`]), 0 in the other modes.
+    pub score: u16,
 }
 
 impl Standing {
@@ -559,6 +582,7 @@ impl Standing {
             deaths: f.deaths,
             shots: f.shots,
             out: f.out,
+            score: 0,
         }
     }
 }
@@ -587,11 +611,12 @@ pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
         .collect()
 }
 
-/// The two teams' places in Total War, [0] the squirrels', [1] the Tediz' (`func_151E565C`'s team
-/// branch, `0x800E0AC0`): a team with no member in play is out and keeps the place it went out on,
-/// the first of the two out 2nd (an empty team is out from the start, as the original's unused
-/// teams are); the others rank by their members' kills, then fewer shots (s126+0x1AA, bots'
-/// included). Both on 1st is a DRAW. ponytail: kills in both timings; untimed, the game ranks the
+/// The two teams' places in Total War and Colors, [0] the squirrels', [1] the Tediz'
+/// (`func_151E565C`'s team branch, `0x800E0AC0`): a team with no member in play is out and keeps
+/// the place it went out on, the first of the two out 2nd (an empty team is out from the start, as
+/// the original's unused teams are); the others rank by their score (Colors' captures,
+/// [`Standing::score`]; metric 8, C, V t1, t3), then their members' kills, then fewer shots
+/// (s126+0x1AA, bots' included). Both on 1st is a DRAW (V t0). ponytail: kills in both timings; untimed, the game ranks the
 /// teams in play by Σ(lives·6 + health) first (C), which nothing shows: an untimed Total War ends
 /// only once a team is out (V `elim`), and the one left is 1st whatever it scored. Two teams out:
 /// the one whose last member went out first is 2nd (I; the original checks team 0 first, C).
@@ -602,9 +627,11 @@ pub fn team_places(all: &[Option<Standing>]) -> [u8; 2] {
     let out = |t| {
         (members(t).all(|s| s.out > 0)).then(|| members(t).map(|s| s.out).min().unwrap_or(u8::MAX))
     };
+    let score = |t| members(t).map(|s| s.score).max().unwrap_or(0);
     let ahead = |a, b| {
         let (ka, kb) = (sum(a, |s| s.kills), sum(b, |s| s.kills));
-        ka > kb || (ka == kb && sum(a, |s| s.shots) < sum(b, |s| s.shots))
+        let tie = ka == kb && sum(a, |s| s.shots) < sum(b, |s| s.shots);
+        score(a) > score(b) || (score(a) == score(b) && (ka > kb || tie))
     };
     [0, 1].map(|t| match (out(t), out(1 - t)) {
         (Some(a), Some(b)) => 1 + u8::from(a > b),
@@ -645,6 +672,8 @@ pub struct Match {
     pub free: BTreeSet<usize>,
     /// Total War's gas: the props the AI script drives and its countdown ([`Self::apply`]).
     pub gas: Gas,
+    /// War: Colors' flags and scores ([`Self::apply`]).
+    pub colors: Colors,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -718,6 +747,7 @@ impl Match {
             rng,
             free: BTreeSet::new(),
             gas: Gas::default(),
+            colors: Colors::default(),
         }
     }
 
@@ -736,7 +766,10 @@ impl Match {
         f.weapon = Some(id);
         f.drawn = false;
         f.masked = false;
-        if !matches!(f.action, Action::Hurt { .. } | Action::Free) {
+        if !matches!(
+            f.action,
+            Action::Hurt { .. } | Action::Free | Action::Pose(_)
+        ) {
             let anim = f.idle_anim();
             f.set(Action::Free, anim, self.tick);
         }
@@ -755,6 +788,7 @@ impl Match {
         for f in &mut self.players {
             f.burn = f.burn.filter(|b| b.attacker != i);
         }
+        self.let_go(i);
         self.players[i] = Fighter::vacant(self.tick);
         self.free.insert(i);
     }
@@ -830,6 +864,18 @@ impl Match {
         if self.phase() == Phase::Over {
             return ev;
         }
+        // Colors: the script's respawns (command 0x82), the flags' fall, then their touch.
+        for i in 0..self.players.len().min(32) {
+            if self.colors.respawns & 1 << i != 0 && !self.free.contains(&i) {
+                self.respawn(i, arena, &mut ev);
+            }
+        }
+        self.colors.respawns = 0;
+        for f in &mut self.colors.flags {
+            if f.released != Some(self.tick) {
+                f.fall(world);
+            }
+        }
         self.pickups(arena, &mut ev);
         self.gas.step(self.tick);
         let mut late = Vec::new();
@@ -859,6 +905,11 @@ impl Match {
         // combat4_w24; C: `func_150636F0` runs after the objects' updates, I: after the render).
         for (i, kind, origin) in rays {
             self.ray(i, kind, origin, world, seen, &mut ev);
+        }
+        for f in &mut self.colors.flags {
+            if let Some(c) = f.carrier.and_then(|c| self.players.get(c)) {
+                f.pos = colors::held(c.body.pos, c.body.facing);
+            }
         }
         self.timer = (self.timer - 2).max(0);
         if self.ended_at.is_none() && self.ends() {
@@ -905,6 +956,12 @@ impl Match {
                 .map(|i| &self.players[i])
         };
         let time_up = s.time.is_some() && self.timer == 0;
+        // Colors: the clock, or a team's score reaching the target (latched on the capture's frame,
+        // V e0 383; no score end at 0, and untimed then nothing ends it, I).
+        if s.colors {
+            let target = u16::from(s.score);
+            return time_up || (target > 0 && self.colors.scores.iter().any(|&n| n >= target));
+        }
         if s.total_war {
             let teams = [0, 1].iter().filter(|&&t| in_play().any(|f| f.team == t));
             return time_up || (out().next().is_some() && teams.count() < 2);
@@ -915,18 +972,51 @@ impl Match {
         time_up || kills || alone || no_human
     }
 
-    /// Every slot's place, 1 the best ([`places`]; in Total War its team's, [`team_places`]; free
-    /// slots 0).
+    /// Every slot's place, 1 the best ([`places`]; in Total War and Colors its team's,
+    /// [`team_places`]; free slots 0).
     pub fn places(&self) -> Vec<u8> {
-        let all: Vec<Option<Standing>> = (self.players.iter().enumerate())
-            .map(|(i, f)| (!self.free.contains(&i)).then(|| Standing::of(f)))
-            .collect();
-        if self.settings.total_war {
+        let all = self.standings();
+        if self.settings.total_war || self.settings.colors {
             let teams = team_places(&all);
             let place = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
             return all.iter().map(|s| s.as_ref().map_or(0, place)).collect();
         }
         places(&all, self.settings.kills)
+    }
+
+    /// Every slot's [`Standing`] (`None` for a free one), Colors' with its team's score.
+    pub fn standings(&self) -> Vec<Option<Standing>> {
+        let score = |f: &Fighter| match self.settings.colors {
+            true => (self.colors.scores.get(usize::from(f.team)).copied()).unwrap_or(0),
+            false => 0,
+        };
+        (self.players.iter().enumerate())
+            .map(|(i, f)| {
+                (!self.free.contains(&i)).then(|| Standing {
+                    score: score(f),
+                    ..Standing::of(f)
+                })
+            })
+            .collect()
+    }
+
+    /// Colors: player `i` lets go of the flag it carries, which falls from its hand.
+    fn let_go(&mut self, i: usize) {
+        let t = self.tick;
+        let Some(f) = self.players.get_mut(i) else {
+            return;
+        };
+        let Some(k) = f.flag.take() else {
+            return;
+        };
+        let at = colors::held(f.body.pos, f.body.facing);
+        if let Some(flag) =
+            (self.colors.flags.get_mut(usize::from(k))).filter(|g| g.carrier == Some(i))
+        {
+            flag.carrier = None;
+            (flag.pos, flag.fall, flag.released, flag.dropped) =
+                (at, Some(colors::FALL), Some(t), true);
+        }
     }
 
     fn pickups(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
@@ -996,6 +1086,41 @@ impl Match {
                 (p.flag, p.since, p.shown) = (i as i32 + 1, t, false);
             }
         }
+        // Colors: a flag is touched by a player of the team that takes it, alive, holding nothing,
+        // not held (obj+0x89) nor stunned (`func_150597FC`, C); it grabs it at once (state 213,
+        // V e1 326 → 327) and holds it from then on (obj+0x13C; the script hears of it next).
+        // ponytail: the actions that hold the player (draws, grenades, hits, poses) stand in for
+        // obj+0x89's other setters.
+        for k in 0..colors::FLAGS.len() {
+            let flag = self.colors.flags[k];
+            if !flag.touchable(t) {
+                continue;
+            }
+            let toucher = self.players.iter().position(|f| {
+                f.health > 0
+                    && f.flag.is_none()
+                    && !f.carrying
+                    && f.stun == 0
+                    && f.body.lock == 0
+                    && matches!(
+                        f.action,
+                        Action::Free
+                            | Action::Fire { .. }
+                            | Action::Aim { .. }
+                            | Action::Reload { .. }
+                    )
+                    && colors::takes(k, f.team)
+                    && colors::touches(flag.pos, f.body.pos)
+            });
+            if let Some(i) = toucher {
+                let f = &mut self.players[i];
+                (f.flag, f.drawn) = (Some(k as u8), false);
+                let (clip, ..) = Pose::Grab.clip();
+                f.set(Action::Pose(Pose::Grab), clip, t);
+                let flag = &mut self.colors.flags[k];
+                (flag.carrier, flag.fall) = (Some(i), None);
+            }
+        }
     }
 
     /// Carries out what the AI script did this frame ([`gas::Effect`]), before [`Self::step`];
@@ -1062,18 +1187,69 @@ impl Match {
                         f.carrying = false;
                     }
                 }
+                Effect::Flag(k, shown) if k < colors::FLAGS.len() => {
+                    if let Some(c) = self.colors.flags[k].carrier
+                        && let Some(f) = self.players.get_mut(c)
+                    {
+                        f.flag = None;
+                    }
+                    self.colors.flags[k] = colors::Flag {
+                        shown,
+                        pos: colors::FLAGS[k].home,
+                        ..colors::Flag::default()
+                    };
+                }
+                Effect::LetGo(k) => {
+                    if let Some(c) = self.colors.flags.get(k).and_then(|f| f.carrier) {
+                        self.let_go(c);
+                    }
+                }
+                Effect::Settle(k) => {
+                    if let Some(f) = self.colors.flags.get_mut(k) {
+                        f.dropped = false;
+                    }
+                }
+                Effect::Score(team, n) => {
+                    if let Some(s) = self.colors.scores.get_mut(usize::from(team)) {
+                        *s = s.saturating_add(n);
+                    }
+                }
+                // The capture's poses take over whatever the player was doing, a hit's included
+                // (I; nobody is hurt through them: the script keeps everyone immune).
+                Effect::Pose(i, pose) => {
+                    if let Some(f) = self.players.get_mut(i).filter(|f| f.health > 0) {
+                        let (clip, ..) = pose.clip();
+                        f.set(Action::Pose(pose), clip, t);
+                    }
+                }
+                Effect::Immune(i, n) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.immune = n;
+                    }
+                }
+                Effect::Hold(i, n) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.body.lock = n;
+                    }
+                }
+                Effect::Respawn(i) if i < 32 => self.colors.respawns |= 1 << i,
+                Effect::Fade(out, vis) => self.colors.fade = Some((out, vis, t)),
                 _ => {}
             }
         }
         ev
     }
 
-    /// The gas as at the match start, for a script started afresh: no canister carried, no mask
-    /// worn.
+    /// The gas (and Colors' flags) as at the match start, for a script started afresh: no canister
+    /// or flag carried, no mask worn; Colors' scores stay.
     pub fn restart_gas(&mut self) {
         self.gas = Gas::default();
+        self.colors = Colors {
+            scores: self.colors.scores,
+            ..Colors::default()
+        };
         for f in &mut self.players {
-            (f.carrying, f.masked) = (false, false);
+            (f.carrying, f.masked, f.flag) = (false, false, None);
         }
     }
 
@@ -1116,6 +1292,13 @@ impl Match {
             })
             .flatten()
             .map(|l| l.1);
+        // Colors: a pose lets go of the carried flag on its frame (the put-down 20 frames in, the
+        // plant 19: V b1 370, e0 402).
+        if let Action::Pose(pose) = self.players[i].action
+            && pose.clip().2 == Some(t - self.players[i].since)
+        {
+            self.let_go(i);
+        }
         let f = &mut self.players[i];
         let (late, late2) = (f.buttons, f.late);
         (f.late, f.buttons) = (f.buttons, input.buttons);
@@ -1170,6 +1353,10 @@ impl Match {
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
             }
+            (Action::Pose(pose), _) if n >= pose.clip().1 => {
+                let anim = f.idle_anim();
+                f.set(Action::Free, anim, t);
+            }
             (Action::GrenadeThrow { .. }, _) if n >= THROW => {
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
@@ -1219,7 +1406,12 @@ impl Match {
         {
             f.action = Action::Free;
         }
-        if f.action == Action::Free && !aiming && !f.carrying {
+        // Colors: holding a flag, B puts it down and nothing else starts (V b1, h2, e1).
+        if f.flag.is_some() && f.action == Action::Free && pressed(BUTTON_B) {
+            let (clip, ..) = Pose::PutDown.clip();
+            f.set(Action::Pose(Pose::PutDown), clip, t);
+        }
+        if f.action == Action::Free && !aiming && !f.carrying && f.flag.is_none() {
             if late_pressed(C_DOWN) && f.grenades > 0 && armed.is_none_or(|w| w.c_button.is_none())
             {
                 f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
@@ -1528,6 +1720,14 @@ impl Match {
         if matches!(f.action, Action::Mask { .. }) && t > f.since {
             (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, 0);
         }
+        // Colors: A and Z do nothing holding a flag (V h2 Z 400, e1 A 350); a pose holds the
+        // player from its first frame (obj+0x89 = 255, V e1 grab, b1 put-down).
+        if f.flag.is_some() {
+            mv.buttons &= !(BUTTON_A | BUTTON_Z);
+        }
+        if matches!(f.action, Action::Pose(_)) {
+            (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, 0);
+        }
         let start = f.body.pos;
         // A draw or a holster holds the player still through the frame it ends in (obj+0x89 = 0xFF
         // from `func_15063E84`, C; V combat5_sg_e3 765-774: the stick held through the shotgun's
@@ -1547,6 +1747,7 @@ impl Match {
             (_, Some(w)) if f.drawn => w.id,
             _ => 0,
         };
+        f.body.holding = f.flag.is_some();
         if burning {
             burn_run(f, world, t, &others);
         } else {
@@ -1585,6 +1786,10 @@ impl Match {
             use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
             f.anim = match (w.filter(|_| f.drawn), f.body.state) {
                 _ if still => f.idle_anim(),
+                (_, state @ (JUMP | RUN_JUMP | FALL | LAND)) if f.flag.is_some() => {
+                    u16::from(state)
+                }
+                _ if f.flag.is_some() => colors::carry_clip(f.body.xz_speed),
                 // The canister's run and stand (V d1: 215 from the frame after the carry, 216
                 // standing; I: the jumps' plain states).
                 (_, state @ (JUMP | RUN_JUMP | FALL | LAND)) if f.carrying => u16::from(state),
@@ -2143,7 +2348,7 @@ impl Match {
         if over {
             let step = step + 1;
             if usize::from(step) == seq.len() {
-                if lethal && f.deaths >= u16::from(self.settings.lives()) {
+                if lethal && !self.settings.colors && f.deaths >= u16::from(self.settings.lives()) {
                     // Out of lives: it stays down, out of play, on the last place of those still in
                     // play (the game counts places down from its participants, `0x800E0AA9`).
                     let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
@@ -2175,6 +2380,7 @@ impl Match {
     }
 
     fn respawn(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
+        self.let_go(i);
         let team = self.players[i].team;
         // Bodies count where they lie: the picker reads every other team's obj+0x14 with no health
         // test (C `func_15084D70`), and a dead body's stays where it fell until its own respawn (V
@@ -3388,6 +3594,7 @@ mod tests {
                 deaths: 9,
                 shots,
                 out,
+                score: 0,
             })
         };
         let all = [s(0, 1, 9, 0), s(1, 2, 0, 0), s(0, 2, 9, 0), None];
@@ -3407,6 +3614,20 @@ mod tests {
         // Both out: the first out (its last member on the higher place) is 2nd; an empty team is out.
         assert_eq!(team_places(&[s(0, 0, 0, 2), s(1, 0, 0, 1)]), [2, 1]);
         assert_eq!(team_places(&[s(1, 0, 0, 0)]), [2, 1]);
+        // Colors: the score first, whatever the kills (V t1: S 1-0 beats the Tediz' 3 kills), then
+        // the kills (t3: 0-0, the Tediz' 3 kills win), all equal a DRAW (t0).
+        let scored = |team, kills, score| {
+            Some(Standing {
+                score,
+                ..s(team, kills, 0, 0).unwrap()
+            })
+        };
+        let t1 = [scored(0, 0, 1), scored(1, 3, 0), scored(1, 0, 0)];
+        assert_eq!((team_places(&t1), team_result(&t1)), ([1, 2], Some(0)));
+        let t3 = [scored(0, 0, 0), scored(1, 3, 0)];
+        assert_eq!(team_result(&t3), Some(1));
+        let t0 = [scored(0, 0, 2), scored(1, 0, 2)];
+        assert_eq!(team_result(&t0), None);
     }
 
     /// Total War ends by team: timed, the clock only (the kill limit is not read); untimed, once a
@@ -3442,6 +3663,83 @@ mod tests {
         });
         assert_eq!((m.players[1].out, m.ended_at), (3, None));
         assert_eq!(m.places(), [1, 2, 2], "team 0 has the kill");
+    }
+
+    /// Colors: lives are never lost; the score target ends the match on the capture's frame, the
+    /// clock otherwise, and the teams rank by score first; untimed with no target nothing ends it.
+    /// A flag's taker grabs it, then holds it: no weapon, Z and A do nothing, 0.8 of the speed.
+    #[test]
+    fn colors_ends_ranks_and_carries() {
+        let colors = |time, score| Settings {
+            time,
+            score,
+            colors: true,
+            ..Settings::default()
+        };
+        let (_, m, _, ev) = pistol_kill(colors(None, 0));
+        assert_eq!(
+            (m.players[1].deaths, m.players[1].out, m.ended_at),
+            (1, 0, None)
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e.1, Event::Respawn { player: 1, .. }))
+        );
+        assert_eq!(m.places(), [1, 2], "the kill, at 0-0");
+        let (arena, m, w) = duel();
+        let mut m = m.with(colors(Some(3), 2));
+        m.apply(&[Effect::Score(1, 1)]);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!((m.ended_at, m.places()), (None, vec![2, 1]));
+        m.apply(&[Effect::Score(1, 1)]);
+        let t = m.tick;
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.ended_at, Some(t));
+        let (arena, m, w) = duel();
+        let mut m = m.with(colors(Some(3), 0));
+        m.timer = 2;
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert!(m.ended_at.is_some());
+        // The carry: player 0 (team 0) on the red flag, a weapon drawn.
+        let (arena, m, w) = duel();
+        let mut m = m.with(colors(None, 0));
+        m.give(0, 0x39);
+        run(
+            &mut m,
+            &arena,
+            &w,
+            30,
+            |t| if t == 0 { BUTTON_B } else { 0 },
+        );
+        assert!(m.players[0].drawn);
+        m.apply(&[Effect::Flag(0, true)]);
+        m.colors.flags[0].pos = m.players[0].body.pos;
+        m.colors.flags[1] = m.colors.flags[0];
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let f = &m.players[0];
+        assert_eq!((f.flag, f.drawn, f.anim), (Some(0), false, anim::FLAG_GRAB));
+        assert_eq!(m.players[1].flag, None, "the green flag is team 0's own");
+        let mut speeds = Vec::new();
+        for t in 0..60 {
+            let stick = Input {
+                stick_y: 80,
+                buttons: if t % 2 == 0 { BUTTON_Z | BUTTON_A } else { 0 },
+                ..Input::default()
+            };
+            m.step(&arena, &[stick, Input::default()], &w);
+            speeds.push(m.players[0].body.xz_speed);
+        }
+        let f = &m.players[0];
+        assert_eq!(
+            (f.shots, f.body.airborne, f.anim),
+            (0, false, anim::FLAG_RUN)
+        );
+        assert_eq!(
+            speeds[15..19],
+            [0.0, 0.75, 1.5, 2.25],
+            "17 frames held, then +0.75"
+        );
+        assert!(speeds.iter().all(|&s| s <= 28.0), "{speeds:?}");
     }
 
     /// Total War's gas on the match: the carrier's speed and lock-out, the masks' gate, the

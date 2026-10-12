@@ -26,11 +26,11 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
 | `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, none on the others |
-| `maps/<map>/outros.json` | War: Total War's victory outros on 0x2D (the original's cutscenes 2 and 4), none on the others |
+| `maps/<map>/outros.json` | The War victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), none on the others |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
-| `characters/135/`, `characters/90/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer) and 90 (a stitched Tedi): the outros' actors, each with the one clip it loops (`outros.json` says which); no `character.json` |
+| `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier) and 90 (a stitched Tedi): the outros' actors, each with the clips they play (`outros.json` says which); no `character.json` |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
@@ -41,9 +41,9 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/events.json` | Which game event plays which sound, at what volume, from where |
 | `audio/common/*.wav` | Sounds anyone makes: weapons, footsteps, hits, pickups, explosions (16-bit mono PCM, the game's own rates) |
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
-| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3) |
+| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (its outros' speech bubble) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -150,23 +150,31 @@ War's gas switches, which the client draws:
   home), `carried` (on each player carrying a canister).
 
 ### `maps/<map>/outros.json`
-War: Total War's victory outros, one per winning team (`winner`: 0 the squirrels, 1 the Tediz; a
-DRAW plays none), from the original's cutscene `cutscene` of scene 0x2D. Times `t` are the
-cutscene's clock, 60 a second (2 a tick): tick k of the outro shows t = min(2k, `length`); the
-results come up after it, over its last picture.
-- `camera`: the eye moves along `path` (two points) by `along` (0-100 %), looking along `yaw` + 90°
-  and `pitch` (degrees); 50° vertical field of view. Each channel is keys `{t, value, catmull}`:
-  Catmull-Rom to the next key when `catmull`, else linear; the value holds outside the keys;
-- `actor`: the one character on screen (`character` under `characters/`, its glTF's `animation`,
-  `ticks` long), standing at `at` facing `facing` (the game's 16-bit angle), drawn `scale` big and
-  `lift` model units up; it loops its clip from the outro's start, `rate` clip ticks a tick;
-- `fade`: the picture fades in from `rgb` over `duration`;
+The War victory outros, one per winning team (`winner`: 0 the squirrels, 1 the Tediz; a DRAW plays
+none), from the original's cutscene `cutscene` of the map's scene (Total War's 2 and 4 on 0x2D,
+Colors' 1 and 5 on 0x30). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
+outro shows t = min(2k, `length`), a command at t from the first tick with t ≤ 2k (tick 1 at the
+earliest); the results come up after it, over its last picture. Fields an outro doesn't use are left
+out (Total War's are the simplest case).
+- `camera`: the eye moves along `path` (one point or more, Catmull-Rom, by arc length) by `along`
+  (0-100 %), looking along `yaw` + 90° and `pitch` (degrees); 50° vertical field of view. Each
+  channel is keys `{t, value, catmull}`: Catmull-Rom to the next key when `catmull`, else linear;
+  the value holds outside the keys. `cuts`: the cameras it cuts to, each from its `from`;
+- `actor`, then `cast`: the characters on screen (`character` under `characters/`, its glTF's
+  `animation`, `ticks` long), standing at `at` facing `facing` (the game's 16-bit angle), or
+  walking `path` by `along` and turning by `yaw` (facing = `yaw` + 90°), drawn `scale` big and
+  `lift` model units up. Each plays its clip from tick 1, `rate` clip ticks a tick, looping, or
+  `once` (it holds its last tick), then each of `plays` from its `t` (the same clip again goes on
+  where it was);
+- `fade`: the picture fades in from `rgb` over `duration`: alpha 255 − elapsed · 255 / `duration`,
+  in integers;
 - `voice`: `file` (under `audio/`) plays at `t`;
 - `subtitles`: the speech bubble, `pages` (each `lines` from its `t`, the last up to `close`),
   drawn in the HUD's frame at `anchor`: the bubble's `quads` (`texture` under `hud.json`'s
   textures, `rect` x, y, width, height, `uv` its texels, x1 < x0 mirrored, `colour`), then the lines
   upper case in the HUD font, black, left-aligned in a block whose left is `text[0]` − ⌈widest / 2⌉
-  and 12 pixels a line around the middle line's top at `text[1]`.
+  and 12 pixels a line around the middle line's top at `text[1]`. From each of `moves`' `t`, its
+  `anchor`, `text` and `quads` instead.
 
 ### `characters/<id>/character.json`
 - `model_lift`: model units the model is drawn above the player (43 for 117, 42 for 128, 49 for 136).

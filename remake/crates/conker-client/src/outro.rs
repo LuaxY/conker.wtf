@@ -1,10 +1,14 @@
-//! War: Total War's victory outro (`../lab/research/mp-original/total-war-outro.md`): once the
-//! match is over, the winning team's cutscene ([`team_result`], as the STATS rank the teams; a DRAW
-//! plays none) from the pack's `outros.json` ([`Outro`]): its camera path, its one actor looping its
-//! clip, the fade in, the speech bubble's pages ([`crate::hud`]) and the voice line
-//! ([`crate::audio`]), with no player and no HUD; then the STATS over its last picture, the actor
-//! still looping. Frame k counts the client's ticks since it saw the match over (the server's results
-//! wait as long, `conker-server`'s `results_at`).
+//! War's victory outros (`../lab/research/mp-original/total-war-outro.md`, `colors-outro.md`): once
+//! the match is over in a War mode ([`team_mode`]), the map's cutscene for the winning team
+//! ([`team_result`], as the STATS rank the teams; a DRAW plays none) from the pack's `outros.json`
+//! ([`Outro`]): its cameras and their cuts, its actors (each at its place or along its path, turning,
+//! playing its clips), the fade in, the speech bubble's pages ([`crate::hud`]) and the voice line
+//! ([`crate::audio`]), with no player and no HUD; then the STATS over its last picture, the actors'
+//! clips still running. Frame k counts the client's ticks since it saw the match over (the server's
+//! results wait as long, `conker-server`'s `results_at`).
+//!
+//! `CONKER_OUTRO=<cutscene>` (debug, native): any match's end plays that outro of the map, whatever
+//! the mode and the winner (the server's results don't wait for it).
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
@@ -17,9 +21,9 @@ use lightyear::prelude::*;
 
 use crate::render::{Model, model_yaw};
 
-/// The map's outros (none but on `2d`).
+/// The map's outros (Total War's on `2d`, Colors' on `30`) and the one `CONKER_OUTRO` forces.
 #[derive(Resource, Clone, Debug, Default)]
-pub struct Outros(pub Vec<Outro>);
+pub struct Outros(pub Vec<Outro>, pub Option<u8>);
 
 /// The outro this match's end plays (an index of [`Outros`]) and its frame.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
@@ -37,19 +41,33 @@ impl Playing {
     }
 }
 
+/// Whether the match is a War mode (Total War, Colors), whose end plays the winning team's outro (as
+/// the server's `results_at` waits for it).
+pub fn team_mode(m: &MatchView) -> bool {
+    m.total_war || m.colors
+}
+
 /// Whether the match's results show: over, and past its outro if it has one.
 pub fn results(m: &MatchView, playing: &Playing, outros: &Outros) -> bool {
     m.phase == 2 && playing.running(outros).is_none()
 }
 
 pub fn build(app: &mut App, outros: Vec<Outro>) {
-    app.insert_resource(Outros(outros));
+    let forced = std::env::var("CONKER_OUTRO")
+        .ok()
+        .and_then(|c| c.parse().ok());
+    app.insert_resource(Outros(outros, forced));
     app.init_resource::<Playing>();
     app.add_systems(FixedUpdate, clock.run_if(not(is_in_rollback)));
 }
 
-/// Over in Total War, the winning team's outro from the tick the client sees it, a frame a tick;
-/// none otherwise.
+/// Whether the match's end plays an outro.
+fn plays(m: &MatchView, outros: &Outros) -> bool {
+    team_mode(m) || outros.1.is_some()
+}
+
+/// Over, the winning team's outro (or the forced one) from the tick the client sees it, a frame a
+/// tick; none otherwise.
 #[allow(clippy::type_complexity)]
 fn clock(
     game: Query<&MatchView>,
@@ -57,17 +75,21 @@ fn clock(
     outros: Res<Outros>,
     mut playing: ResMut<Playing>,
 ) {
-    let over = game.iter().any(|m| m.phase == 2 && m.total_war);
+    let over = game.iter().any(|m| m.phase == 2 && plays(m, &outros));
     playing.0 = match (over, playing.0) {
         (false, _) => None,
         (true, Some((i, k))) => Some((i, k + 1)),
         (true, None) => {
-            let all: Vec<_> = roster
-                .iter()
-                .map(|c| Some(crate::hud::standing(c)))
-                .collect();
-            let winner = team_result(&all);
-            let i = (outros.0.iter()).position(|o| Some(o.winner) == winner);
+            let i = match outros.1 {
+                Some(c) => (outros.0.iter()).position(|o| o.cutscene == c),
+                None => {
+                    let all: Vec<_> = (roster.iter())
+                        .map(|c| Some(crate::hud::standing(c)))
+                        .collect();
+                    let winner = team_result(&all);
+                    (outros.0.iter()).position(|o| Some(o.winner) == winner)
+                }
+            };
             if let Some(o) = i.map(|i| &outros.0[i]) {
                 info!("outro: cutscene {}, {} frames", o.cutscene, o.frames());
             }
@@ -76,14 +98,25 @@ fn clock(
     };
 }
 
-/// An outro's actor (an index of [`Outros`]), its glTF (held: the clip is looked up in it once the
-/// scene is in) and then its `AnimationPlayer` and clip's node.
+/// An outro's actor: the outro (an index of [`Outros`]) and the actor (of [`Outro::actors`]), its
+/// glTF (held: the clips are looked up in it once the scene is in) and then its `AnimationPlayer`
+/// and its clips' nodes ([`conker_assets::outro::Actor::clips`]).
 #[derive(Component)]
-pub struct Actor(usize, Handle<Gltf>, Option<(Entity, AnimationNodeIndex)>);
+pub struct Actor {
+    outro: usize,
+    n: usize,
+    gltf: Handle<Gltf>,
+    animator: Option<(Entity, Vec<AnimationNodeIndex>)>,
+}
 
-/// In Total War, every outro's actor, hidden, once the players' characters are in (one glTF load at
-/// a time, see `render::load_characters`): where it stands, drawn as a player is (the model's lift
-/// and scale).
+impl Actor {
+    fn of<'a>(&self, outros: &'a Outros) -> &'a conker_assets::outro::Actor {
+        outros.0[self.outro].actors().nth(self.n).unwrap()
+    }
+}
+
+/// In a War mode, every outro's actors, hidden, once the players' characters are in (one glTF load
+/// at a time, see `render::load_characters`), drawn as a player is (the model's lift and scale).
 pub(crate) fn add_actors(
     game: Query<&MatchView>,
     outros: Res<Outros>,
@@ -91,30 +124,41 @@ pub(crate) fn add_actors(
     mut added: Local<bool>,
     mut commands: Commands,
 ) {
-    if *added || !game.single().is_ok_and(|m| m.total_war) {
+    if *added || !game.single().is_ok_and(|m| plays(m, &outros)) {
         return;
     }
     *added = true;
-    for (i, o) in outros.0.iter().enumerate() {
-        let a = &o.actor;
-        let at = Vec3::from_array(a.at.map(f32::from)) + Vec3::Y * a.scale * f32::from(a.lift);
-        let gltf = character_gltf(&a.character);
-        let scene = format!("{gltf}#Scene0");
-        commands
-            .spawn((
-                Actor(i, assets.load(gltf), None),
-                WorldAssetRoot(assets.load(scene)),
-                Transform::from_translation(at)
-                    .with_rotation(Quat::from_rotation_y(model_yaw(a.facing)))
-                    .with_scale(Vec3::splat(a.scale)),
-                Visibility::Hidden,
-            ))
-            .observe(actor_ready);
+    for (outro, o) in outros.0.iter().enumerate() {
+        for (n, a) in o.actors().enumerate() {
+            let gltf = character_gltf(&a.character);
+            let scene = format!("{gltf}#Scene0");
+            commands
+                .spawn((
+                    Actor {
+                        outro,
+                        n,
+                        gltf: assets.load(gltf),
+                        animator: None,
+                    },
+                    WorldAssetRoot(assets.load(scene)),
+                    place(a, 0.0),
+                    Visibility::Hidden,
+                ))
+                .observe(actor_ready);
+        }
     }
 }
 
-/// The actor's scene is in: its `AnimationPlayer` gets the graph of its one clip, which loops on
-/// the clip's length (the glTF's ends a tick earlier).
+/// Where `a` stands at `t`, facing its way.
+fn place(a: &conker_assets::outro::Actor, t: f32) -> Transform {
+    let at = Vec3::from_array(a.place(t)) + Vec3::Y * a.scale * f32::from(a.lift);
+    Transform::from_translation(at)
+        .with_rotation(Quat::from_rotation_y(model_yaw(a.facing(t))))
+        .with_scale(Vec3::splat(a.scale))
+}
+
+/// The actor's scene is in: its `AnimationPlayer` gets the graph of its clips, each looping on its
+/// length (the glTF's ends a tick earlier).
 #[allow(clippy::too_many_arguments)]
 fn actor_ready(
     ready: On<WorldInstanceReady>,
@@ -130,32 +174,36 @@ fn actor_ready(
     let Ok(mut actor) = actors.get_mut(ready.entity) else {
         return;
     };
-    let a = &outros.0[actor.0].actor;
-    let clip = gltfs
-        .get(&actor.1)
-        .and_then(|g| g.named_animations.get(a.animation.as_str()));
+    let a = actor.of(&outros);
+    let gltf = gltfs.get(&actor.gltf);
+    let handles: Option<Vec<_>> = (a.clips())
+        .map(|(name, ticks)| {
+            let clip = gltf?.named_animations.get(name)?;
+            if let Some(mut c) = clips.get_mut(clip) {
+                c.set_duration(f32::from(ticks) / conker_sim::TICK_HZ as f32);
+            }
+            Some(clip.clone())
+        })
+        .collect();
     let animator = (children.iter_descendants(ready.entity)).find(|&e| animators.contains(e));
-    let (Some(clip), Some(animator)) = (clip, animator) else {
+    let (Some(handles), Some(animator)) = (handles, animator) else {
         warn!("{}: no animation {} or player", a.character, a.animation);
         return;
     };
-    if let Some(mut c) = clips.get_mut(clip) {
-        c.set_duration(f32::from(a.ticks) / conker_sim::TICK_HZ as f32);
-    }
-    let (graph, node) = AnimationGraph::from_clip(clip.clone());
+    let (graph, nodes) = AnimationGraph::from_clips(handles);
     commands
         .entity(animator)
         .insert(AnimationGraphHandle(graphs.add(graph)));
-    actor.2 = Some((animator, node));
+    actor.animator = Some((animator, nodes));
 }
 
-/// While an outro plays (through its STATS): its actor shows, posed at its clip time, and the
+/// While an outro plays (through its STATS): its actors show, placed and posed at its clock, and the
 /// players hide; the view is its camera's (unless the free debug camera flies).
 #[allow(clippy::type_complexity)]
 pub(crate) fn show(
     playing: Res<Playing>,
     outros: Res<Outros>,
-    mut actors: Query<(&Actor, &mut Visibility), Without<Model>>,
+    mut actors: Query<(&Actor, &mut Transform, &mut Visibility), Without<Model>>,
     mut animators: Query<&mut AnimationPlayer>,
     mut players: Query<&mut Visibility, With<Model>>,
     camera: Single<
@@ -167,17 +215,29 @@ pub(crate) fn show(
     >,
 ) {
     let shown = playing.of(&outros);
-    for (actor, mut visibility) in &mut actors {
-        let on = shown.filter(|_| playing.0.is_some_and(|p| p.0 == actor.0));
+    for (actor, mut transform, mut visibility) in &mut actors {
+        let on = shown.filter(|_| playing.0.is_some_and(|p| p.0 == actor.outro));
         visibility.set_if_neq(match on {
             Some(_) => Visibility::Inherited,
             None => Visibility::Hidden,
         });
-        if let (Some((o, k)), Some((animator, node))) = (on, actor.2)
-            && let Ok(mut animator) = animators.get_mut(animator)
+        let Some((o, k)) = on else {
+            continue;
+        };
+        let a = actor.of(&outros);
+        *transform = place(a, o.t(k));
+        if let Some((animator, nodes)) = &actor.animator
+            && let Ok(mut animator) = animators.get_mut(*animator)
         {
-            let time = o.clip_time(k) / conker_sim::TICK_HZ as f32;
-            animator.play(node).set_speed(0.0).set_seek_time(time);
+            let (clip, time) = a.clip(k);
+            if !animator.is_playing_animation(nodes[clip]) {
+                animator.stop_all();
+            }
+            let time = time / conker_sim::TICK_HZ as f32;
+            animator
+                .play(nodes[clip])
+                .set_speed(0.0)
+                .set_seek_time(time);
         }
     }
     for mut v in &mut players {

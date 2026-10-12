@@ -1,5 +1,64 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Colors, part 2: the victory outros (2026-10-12)
+**When War: Colors ends, the winning team's cutscene now plays before the STATS: cs1 (0x30/1, 555 frames) if the
+squirrels win, cs5 (0x30/5, 550 frames) if the Tediz win, none on a DRAW.**
+- cs1: an officer (135) walks and turns through 8 clips, with 2 squirrel soldiers (88) and 2 prisoner Tediz (90). It
+  has 4 camera cuts, 5 bubble pages in a bubble that moves 3 times, and voice 0xD0.
+- cs5: 6 Tediz (90) and 2 tanks (40) march along curved paths past 3 cameras, and 1 Tedi stands.
+
+Total War's outros run on the same general code. Their `maps/2d/outros.json` is byte-identical. Research:
+`../lab/research/mp-original/colors-outro.md`.
+
+| Part | What |
+|---|---|
+| Extract | `outro.rs` decodes `[6, 0x2D, 2/4]` and `[6, 0x30, 1/5]` with one decoder. It reads every camera (op 3 cuts) and every kind-2 actor. Actors get multi-point paths (`path_at`: Catmull-Rom by f32 arc length, as the game) and ch7 yaw. Op 2 clip sequences (`plays`) can play `once`, which holds the last tick. It also reads the s16 script start t, an optional voice and subtitles, and the bubble's `moves` (cs1: right, left, turned, right; quads and text from the DLs). Characters 135/40/88/90 carry every clip their outros play. `audio/maps/30/voice-d0.wav`. README template updated |
+| Assets | `Outro`: `cuts`, `cast`, `Actor.{once,path,along,yaw,plays}`, `Play`, `Place`, `Subtitles.moves`; `voice`/`subtitles` are `Option`. Empty fields are skipped, so TW's JSON is unchanged. `Outro::view/camera/actors/fade`, `Actor::place/facing/clip`, `Subtitles::place`. The fade is now the game's integer formula (`func_1517EF00`): 255 − e·255/d |
+| Client | `outro.rs`: `team_mode(m)` = `total_war \|\| colors` gates the outro; the winner comes from `team_result` (the score first in Colors, from the rules agent's `Combat.score`). Every actor of every outro spawns, with an `AnimationGraph` of all its clips. Each tick `show` places and turns it (`Actor::place/facing`), stops the old clip and seeks the current one. The camera follows the cuts. `hud::outro` draws the bubble wherever `Subtitles::place(t)` puts it. The voice is optional. Debug: `CONKER_OUTRO=<cutscene>` plays that outro of the map at any match's end |
+| Server | `results_at`: `team_result(&m.standings())` under `total_war \|\| colors`. The outro lengths come from the pack per map and winner, as before |
+| Screens | `../lab/screens/colors/outro.sh` (Deathmatch on 30, a 3-minute clock, `CONKER_OUTRO`). `outro-squirrels-{early,bubble,stats}.png`, `outro-tediz-{early,mid,stats}.png` |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `rom.rs` `colors_outros_follow_the_oracle` | every frame k ≥ 1 against the oracle CSVs: eye/look-at < 0.05, yaw < 1e-3°, actor place < 0.05, facing ±1, clip exact, clip time < 0.01 tick, fade exact; plus the lengths, cuts, pages, moves, voice and characters |
+| `rom.rs` `outros_follow_the_oracle` (TW) | pass. The TW fade CSV alpha column (derived, 5 rows) was recomputed with the integer formula: ±1/255 on 5 frames |
+| `hud.rs` `outro_subtitles_match_the_originals_draws` | TW pages, and cs1 DLs 461/536/636/666/756 (each bubble place), glyph rects exact |
+| Pack | the task's command to `/tmp/pack-cout`, copied into `../assets`; `diff -r` empty; `maps/2d/outros.json` byte-identical to before |
+| `bun run test`, `bun run check` | pass (exit 0), on the tree with the rules agent's Colors work in it. Deathmatch replays: this part touches no rules/sim code |
+| Screens | read: cs1's officer with page 1 on the right, page 3 in the turned bubble on camera 8, the STATS over the officer and a soldier; cs5's low shot of the marching Tediz' feet with a tank behind, the column on camera 3, the STATS over the standing Tedi |
+
+Not done: attachments (op 0x0D: helmets/guns on 88/90), the positional sounds (cs5 engines, march loop, one-shots), cs5's
+smoke, op 9, heads/talk, the page and bubble fades, clip blends, the per-camera FOV.
+
+## War: Colors, part 1: rules, server and bots (2026-10-12)
+**`--mode colors` (map 30 only) plays the original's capture the flag (scenario 10, scene 0x30). As in Total War, the
+level's AI script (0xBB, run by conker-bots) is the authority: its natives become `gas::Effect`s that the match
+applies. The engine side (touch, grab, carry, put-down, the dropped flag's fall, the held flag) is in the new
+`conker_rules::colors` and `game.rs`. `PROTOCOL_ID` 16.** The client only receives the data (the Colors client is
+next). Research: `../lab/research/mp-original/colors.md`.
+
+| Part | What |
+|---|---|
+| Rules | `colors.rs`: `FLAGS` (f 0 red: handle 0x201B, uid 0x1C, model 01:169, home (-330, 410, -3803), taken by team 0; f 1 green: 0x201A, 0x1B, 01:168, (131, 1342, 6144), taken by team 1), `Flag`, `Colors` (flags, team scores, fade, respawn bits), `Pose` (Grab 0xD5 17 frames, PutDown 0x28D 39 with release at 20, Plant 0x22D 30 with release at 19, Cheer 0x19A 49, Lose 0x2E7 60), `carry_clip` (0x1AF/0x1B0/0x1B1 = states 175/176/177). `Settings.colors`, `score` (default 20, 0 none). 6 lives, never lost. A touch (horizontal 45, I) grabs: no weapon, Z and A masked, B puts it down; untouchable until release + 51. `ends`: the clock, or a team at the score target on the capture's frame. `Standing.score`: `team_places` ranks S, then kills, then fewer shots (DRAW when all are equal) |
+| Carry speed (C + V) | `func_1504CB98`: holding an object scales the drive by 0.8 (`0x3F4CCCCD`) and the ground acceleration is 0.75 (the fine step 0.0075): top 28 = 0.8 × 35. `PlayerState.holding`; non-holding movement unchanged |
+| Effects | `Flag(f, shown)` (obj/obj2 on a flag), `LetGo` (command 7), `Settle` (0x23 on a flag), `Score` (0x62), `Pose` (0x45: 9 plant, 0xA cheer, 0xC lose), `Immune` (0x13), `Hold` (0x53), `Respawn` (0x82), `Fade` (`0x50BB` 0x12) |
+| Bots | `brain.rs`: flag handles in obj/obj2/query (0x98, 0xB2, 0xC9, 0xCA, 0xCB) and command (2, 0x7D, 0x23); the guns (uids 0x13/0x14) are stubs; player queries 0x95, 0xA8, 0xED. The script's init-time `obj` is only a lookup: the flags appear at the timed create (live + 299) |
+| Server | `--mode colors`, `--score 1-40|unlimited`. Teams by side. `MatchView.colors/score_limit/scores/flags/fade`, `Combat.flag/score`. `COLORS t=...` log lines (takes, LetGo, Score, Respawn, Fade). `bots.sh` takes `MODE=colors` and `SCORE` and counts the flags |
+| Website | `data.ts`: Colors on map 30; score 1-40 or unlimited (default 20); no kill limit, no lives. `server.ts` validates and passes `--score` |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| ROM test `colors_flags_and_captures` (conker-bots) | flags at 299; grab at once; put-down release +50; retaken at release + 51; a dropped flag is gone after 900-904 frames and back 300 later; plant release +19, cheer +30, freeze (lock ≥ 199) through +89; respawn at +90 and flags home at +390 (+150/+450 when the scorer's own flag was carried, from the script's alternating early return); the 3rd capture ends the match on its frame; no unknown natives, no faults |
+| Tests (target-net, `CONKER_ROM`, the full line) | pass (296) |
+| Deathmatch combat replays | identical to HEAD's (`--nocapture`, HEAD from `git archive`) |
+| clippy `-D warnings` (all targets; conker-client wasm32 too), `cargo fmt` of these files, web `bun run check` | clean (the outro agent's in-progress conker-extract was left out) |
+| Bots (`MODE=colors MAP=30`, 330 s each: `BOTS=7`, the idle human a Tedi, port 5970; `BOTS=6`, the human a squirrel as in the research's bots1, port 5972) | no faults, no unknown natives, no panics, and the flags show at t 555/556. **But 0 takes, 0 captures in either run** (bots1: the first take at 1719, captures at 2983 and 6449 in 9898 frames). The collectors do run at the flags (state 4, goal = query 0xCA = node 111 under the red flag, 103 under the green). The squirrels reach node 109 (~1,150 from the red flag) by the lift and 25 → 108 → 109, and by the next 30-tick sample they are in state 6 (fetching a weapon at G[0x14F4]'s node 123), with an enemy newly set: the Tediz' gunner, which camps at node 3 by the stubbed south mounted gun, or the idle human. The straight walk (script 6) never shows. The Tediz get no closer than 800 to the green flag's high ledge, as in bots1 (700-900). Query 0xCB was checked against the C (an unlimited ray, then the barrier lines only past a hit beyond the target) on every same-band node within 2,000 of each flag: the same answers. From 109 it is 0 in both, so the straight walk can only start from 110. Open: the guns, the roles drawn, what the bots see. `bots.sh`'s Deathmatch check fails for bots that camp and never die (snipers, gunners) |
+
+Open or I: the touch radius (45, between 40 picked up and 48 not); the meaning of 0x45 values besides 9/0xA/0xC; the
++0x8A command (0x3F, a no-op); the guns (stubbed); a join or a leave restarts the script, which brings the flags home
+(the scores stay); untimed with an unlimited score never ends; the end is on the capture's frame, not the original's
+later phases. The pack has no flag models (01:168, 01:169) for map 30 yet.
+
 ## Landing: real game servers from a dev web server (2026-10-12)
 **The landing's mock data is gone. A temporary, local-only dev web server (`web/app/server.ts`, `bun run serve`) now serves
 `web/` in place of `python3 -m http.server`, and starts, lists and kills game servers: the Servers screen lists them,

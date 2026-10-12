@@ -10,6 +10,7 @@ use crate::npc::{AT_GOAL, Npc};
 use crate::script::{Globals, Host};
 use conker_camera::volume::CameraHint;
 use conker_rules::Rng;
+use conker_rules::colors::{self, Pose};
 use conker_rules::damage;
 use conker_rules::gas::{self, Effect};
 use conker_sim::collision::CollisionWorld;
@@ -127,6 +128,10 @@ pub struct Body {
     pub suicides: u16,
     /// `0x800E0AC0[p]` (`func_151E565C`): the place, 1 the best; the scripts ask the humans'.
     pub place: u8,
+    /// obj+0x104 ≠ 0: hit (query 0xA8, a flag carrier's drop).
+    pub stunned: bool,
+    /// The pad's buttons (a human's: query 0xED cuts the capture's freeze short).
+    pub buttons: u16,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -159,6 +164,11 @@ pub struct World<'a> {
     /// script does to the match (`conker_rules::gas`).
     pub touched: [i32; 2],
     pub effects: &'a mut Vec<Effect>,
+    /// War: Colors' flags at the frame's start (their carriers in match slots).
+    pub flags: [colors::Flag; 2],
+    /// The script's level-start entry runs: `obj` only looks a flag up (it appears with the
+    /// script's own create, 300 frames in: I, the objects stand unchanged in RAM before, e1).
+    pub starting: bool,
 }
 
 impl Host for World<'_> {
@@ -211,6 +221,19 @@ fn index(h: i32) -> usize {
     (h & !0xF000) as usize
 }
 
+/// War: Colors' flag a handle names (`0x2000 |` its object index, [`colors::FLAGS`]).
+fn flag(h: i32) -> Option<usize> {
+    let i = (kind(h) == 2).then(|| index(h))?;
+    colors::FLAGS
+        .iter()
+        .position(|f| usize::from(f.handle) == i)
+}
+
+/// The mounted guns' object indexes (scene uids 0x13, 0x14 less one, V `query(uid, 0xB7)`).
+fn gun(h: i32) -> bool {
+    kind(h) == 2 && matches!(index(h), 0x12 | 0x13)
+}
+
 impl World<'_> {
     fn unknown(&mut self, native: i32, kind: i32, code: i32) -> i32 {
         *self.unknown.entry((native, kind, code)).or_default() += 1;
@@ -254,6 +277,27 @@ impl World<'_> {
                 self.effects.push(Effect::Gas(false));
                 0
             }
+            // Colors (0xBB): `obj(0x20uu)` creates the flag of scene uid uu and answers its handle;
+            // `obj2` destroys it. The mounted guns (uids 0x13, 0x14), destroyed and recreated after
+            // each capture, are not in the remake (I: answered as their handles were).
+            (3, 2) => match (colors::FLAGS.iter()).position(|f| usize::from(f.uid) == index(h)) {
+                Some(k) => {
+                    if !self.starting {
+                        self.effects.push(Effect::Flag(k, true));
+                    }
+                    0x2000 | i32::from(colors::FLAGS[k].handle)
+                }
+                None if matches!(index(h), 0x13 | 0x14) => h - 1,
+                None => self.unknown(native, 2, -1),
+            },
+            (4, 2) => match flag(h) {
+                Some(k) => {
+                    self.effects.push(Effect::Flag(k, false));
+                    0
+                }
+                None if gun(h) => 0,
+                None => self.unknown(native, 2, -1),
+            },
             (_, k) => self.unknown(native, k, -1),
         }
     }
@@ -274,11 +318,16 @@ impl World<'_> {
 
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        if let Some(k) = flag(h) {
+            return self.flag_query(k, code, args);
+        }
         match (kind(h), code) {
             // `func_150AE140`: a handle of type 0 answers 0 (0xBE asks 0xCA of a participant index).
             (0, _) => 0,
             // Type 1 (`func_1509C7C8`) 4: no cutscene running.
             (1, 4) => 1,
+            // `func_15083E0C`: the object index of a scene uid (Colors' guns, 0x13 and 0x14).
+            (2, 0xB7) => index(h) as i32 - 1,
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
@@ -331,6 +380,18 @@ impl World<'_> {
 
     fn command(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        // Colors' flags: 2 (touchable, which the create makes it here) and 0x7D (its radar blip,
+        // the client's: not carried) ask nothing of the match; 0x23 clears "just let go of".
+        if let Some(k) = flag(h) {
+            return match code {
+                2 | 0x7D => 1,
+                0x23 => {
+                    self.effects.push(Effect::Settle(k));
+                    1
+                }
+                c => self.unknown(6, 2, c),
+            };
+        }
         match (kind(h), code) {
             (2, _) => self.player_command(index(h), code, args),
             // Props (type 3) 0 shows a prop; 4 sets +0x7C.., +0x80 and +0x84 (0x7FFFFFFF keeps
@@ -354,6 +415,15 @@ impl World<'_> {
                 1
             }
             (5, 0xA) | (5, 0xF) | (0xA, 0) => 1,
+            // Colors: 0x10 a start record's respawn mask (the match's `spawn::COLORS_MASKS_30`
+            // already); 0x12 the screen's fade around the capture's respawn (out to black in 60
+            // VIs, back in 100: [`Effect::Fade`]); kind 6's 0 on 0x61A4 / 0x61A7 at a capture (I:
+            // unread, a team's jingle by its handles).
+            (5, 0x10) | (6, 0) => 1,
+            (5, 0x12) => {
+                self.effects.push(Effect::Fade(a(6) == 1, a(5) as u16));
+                1
+            }
             // Props 7: a display flag (+0x73 bit 4); sounds (type 0xA, `func_1509E730`) 3: a fade.
             (3, 7) | (0xA, 3) => 1,
             // Triggers 0 and 1 (`func_150A2864`): switch one on, or off (`+0x14`).
@@ -484,9 +554,16 @@ impl World<'_> {
                 .map_or(0, |t| t as i32 | 0x4000),
             // obj+0x13C, what it rides: nothing here (0 in every dump).
             0xBC => 0,
-            0x9A => match self.bodies.get(index(a(2))) {
+            // Colors: it holds the flag `a(2)` (obj+0x13C = the flag + 100); it was hit (+0x104);
+            // a human's buttons, the pad byte `0x800BE710 + 2p` (A, B, Z, start; I its byte).
+            0x95 => i32::from(
+                flag(a(2)).is_some_and(|k| self.flags[k].carrier == self.slots.get(p).copied()),
+            ),
+            0xA8 => i32::from(b.stunned),
+            0xED => i32::from(b.buttons >> 8),
+            0x9A => match self.at(a(2)) {
                 Some(o) => {
-                    let (dx, dz) = (b.pos[0] - o.pos[0], b.pos[2] - o.pos[2]);
+                    let (dx, dz) = (b.pos[0] - o[0], b.pos[2] - o[2]);
                     (dx * dx + dz * dz).sqrt() as i32
                 }
                 None => 0x7D00,
@@ -516,6 +593,43 @@ impl World<'_> {
             // obj+0, the object's type: 1, a player (every dump; the scripts look for 0x1F).
             0xEF => 1,
             0xF0 => i32::from(b.place),
+            c => self.unknown(5, 2, c),
+        }
+    }
+
+    /// Where the object `h` names stands: a participant, or a Colors flag.
+    fn at(&self, h: i32) -> Option<[f32; 3]> {
+        match flag(h) {
+            Some(k) => Some(self.flags[k].pos),
+            None => self.bodies.get(index(h)).map(|b| b.pos),
+        }
+    }
+
+    /// A query on a Colors flag (`func_15099C14` on its object): its height (0x98), "just let go
+    /// of" (0xB2, +0x2E4), its height band (0xC9) and node (0xCA), and 0xCB: the participant
+    /// `a(2)` is in sight of a point 100 above it (`func_150AC9C0`'s ray and the barrier lines),
+    /// its distance, else 0 (the collectors' straight run, 0x1D7A).
+    fn flag_query(&mut self, k: usize, code: i32, args: &[i32]) -> i32 {
+        let f = self.flags[k];
+        match code {
+            0x98 => f.pos[1] as i32,
+            0xB2 => i32::from(f.dropped),
+            0xC9 => i32::from(self.graph.band(f.pos[1])),
+            0xCA => {
+                let near = self.graph.approach(f.pos, &[], &[]);
+                self.graph.node(near).map_or(0xFF, |x| i32::from(x.id))
+            }
+            0xCB => {
+                let Some(to) = self.at(args.get(2).copied().unwrap_or(-1)) else {
+                    return 0;
+                };
+                let up = |p: [f32; 3]| [p[0], p[1] + 100.0, p[2]];
+                let d = [to[0] - f.pos[0], to[1] - f.pos[1], to[2] - f.pos[2]];
+                match sight(self.world, self.graph, up(f.pos), up(to)) {
+                    Some(true) => ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() as i32).max(1),
+                    _ => 0,
+                }
+            }
             c => self.unknown(5, 2, c),
         }
     }
@@ -578,6 +692,25 @@ impl World<'_> {
     /// A player command (`func_15097A8C`).
     fn player_command(&mut self, p: usize, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        // Colors (0xBB), carried out by the match: 0x62 on a team's record (`0x2000 | team`, its
+        // score S += n, `func_15085710(team, 10, n)`); on a player 7 lets go of the flag `a(2)`,
+        // 0x13 sets +0x125, 0x53 +0x89 (0x3F's +0x8A has no reader here: I), 0x45 a capture
+        // pose and 0x82 respawns now.
+        let slot = self.slots.get(p).copied();
+        let effect = match (code, slot) {
+            (0x62, _) => Some(Effect::Score(p as u8, a(2) as u16)),
+            (7, Some(_)) => flag(a(2)).map(Effect::LetGo),
+            (0x13, Some(s)) => Some(Effect::Immune(s, a(2) as u8)),
+            (0x53, Some(s)) => Some(Effect::Hold(s, a(2) as u8)),
+            (0x45, Some(s)) => Pose::of(a(2)).map(|pose| Effect::Pose(s, pose)),
+            (0x82, Some(s)) => Some(Effect::Respawn(s)),
+            (0x3F, _) => return 0,
+            _ => None,
+        };
+        if let Some(e) = effect {
+            self.effects.push(e);
+            return 0;
+        }
         if p >= self.npcs.len() {
             return 0;
         }
@@ -1378,6 +1511,8 @@ mod tests {
             slots: &[0, 1],
             touched: [0; 2],
             effects: &mut Vec::new(),
+            flags: Default::default(),
+            starting: false,
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1434,6 +1569,8 @@ mod tests {
             slots: &[0, 1],
             touched: [0; 2],
             effects: &mut Vec::new(),
+            flags: Default::default(),
+            starting: false,
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);

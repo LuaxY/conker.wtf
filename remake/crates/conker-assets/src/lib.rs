@@ -939,11 +939,19 @@ mod tests {
             cutscene: 4,
             length: 800,
             camera: Camera {
-                path: [[-2849, -481, 6019], [-2848, -481, 5907]],
+                path: vec![[-2849, -481, 6019], [-2848, -481, 5907]],
                 along: vec![key(0, 0.0, false), key(800, 100.0, false)],
                 yaw: vec![key(0, 64.0, true), key(800, 108.0, true)],
                 pitch: vec![key(1, 12.0, false)],
+                from: 0,
             },
+            cuts: vec![Camera {
+                path: vec![[-331, -190, 3569]],
+                along: vec![],
+                yaw: vec![key(800, 243.0, false)],
+                pitch: vec![],
+                from: 800,
+            }],
             actor: Actor {
                 character: "90".into(),
                 animation: "pair_0045_anim_0056".into(),
@@ -953,17 +961,43 @@ mod tests {
                 facing: 182,
                 lift: 0,
                 scale: 0.5,
+                once: false,
+                path: vec![],
+                along: vec![],
+                yaw: vec![],
+                plays: vec![],
             },
+            cast: vec![Actor {
+                character: "40".into(),
+                animation: "pair_0002_anim_0004".into(),
+                ticks: 26,
+                rate: 1.04,
+                at: [-140, -420, 2895],
+                facing: 16384,
+                lift: 0,
+                scale: 0.5,
+                once: true,
+                path: vec![[-140, -420, 2895], [-166, -395, 3148]],
+                along: vec![key(0, 0.0, true), key(1100, 100.0, true)],
+                yaw: vec![key(0, 0.0, false)],
+                plays: vec![Play {
+                    t: 50,
+                    animation: "pair_0001_anim_0002".into(),
+                    ticks: 30,
+                    rate: 0.5,
+                    once: false,
+                }],
+            }],
             fade: Fade {
                 rgb: [0; 3],
                 duration: 25,
             },
-            voice: Voice {
+            voice: Some(Voice {
                 t: 30,
                 entry: 0xB3,
                 file: "maps/2d/voice-b3.wav".into(),
-            },
-            subtitles: Subtitles {
+            }),
+            subtitles: Some(Subtitles {
                 pages: vec![Page {
                     t: 16,
                     lines: vec!["are victorious !".into(), " ".into()],
@@ -977,7 +1011,13 @@ mod tests {
                     uv: [63.0, 0.21875, -0.359375, 62.75],
                     colour: [255; 4],
                 }],
-            },
+                moves: vec![Place {
+                    t: 100,
+                    anchor: hud::Anchor(hud::Horizontal::Left, hud::Vertical::Top),
+                    text: [100, 25],
+                    quads: vec![],
+                }],
+            }),
         }
     }
 

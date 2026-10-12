@@ -175,6 +175,26 @@ pub enum Effect {
     /// `obj(0xE013, p)` (`func_151D26C0`, 0xBA at countdown 29 for each player outside trigger 0,
     /// masked or not): the player's gassed screen starts (its own view only; the client draws it).
     Haze(usize),
+    /// War: Colors ([`crate::colors`], script 0xBB): `obj(0x20uu)` creates flag f at home,
+    /// touchable (the script's command 2 follows at once); `obj2` on its handle destroys it, its
+    /// carrier's hand emptied.
+    Flag(usize, bool),
+    /// Command 7 (`command(carrier, 7, flag)`): the carrier lets go of flag f, which falls.
+    LetGo(usize),
+    /// Command 0x23 on flag f: its "just let go of" (+0x2E4) clears.
+    Settle(usize),
+    /// Command 0x62 on a team's record (`0x2000 | team`): its score goes up by n.
+    Score(u8, u16),
+    /// Command 0x45: the capture's poses ([`crate::colors::Pose::of`]).
+    Pose(usize, crate::colors::Pose),
+    /// Commands 0x13 (+0x125: immune frames) and 0x53 (+0x89: the hold, which counts down below
+    /// 0xFA) on a player.
+    Immune(usize, u8),
+    Hold(usize, u8),
+    /// Command 0x82: the player respawns now, at its base, with full health.
+    Respawn(usize),
+    /// `command(0x50BB, 0x12, 0, 0, 0, n, out)`: the screen fades out (to black) or in, over n VIs.
+    Fade(bool, u16),
 }
 
 #[cfg(test)]

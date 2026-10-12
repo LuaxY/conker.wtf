@@ -1066,6 +1066,8 @@ pub fn match_settings(m: &MatchView) -> Settings {
         kills: m.kill_limit,
         radar: m.radar,
         total_war: m.total_war,
+        colors: m.colors,
+        score: m.score_limit,
         ..Settings::default()
     }
 }

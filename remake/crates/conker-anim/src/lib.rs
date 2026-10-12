@@ -165,6 +165,18 @@ pub mod combat {
     pub const DOORWAY_DEAD: u16 = 0xF6;
     pub const CARRY_MOVE: u16 = 0xD7;
     pub const CARRY_IDLE: u16 = 0xD8;
+    /// War: Colors' flag: the grab (17 frames), the carry's stand, walk (speed up to 14) and run
+    /// (`func_15064B94`'s 0x1B0/0x1B1, C), the put-down on B (39), the plant in the capture zone
+    /// (30), the scorer's cheer (49) and the other team's pose through the freeze (V: obj+0x84 in
+    /// e0, e1, b1; conker-rules' `colors::Pose`).
+    pub const FLAG_GRAB: u16 = 0xD5;
+    pub const FLAG_IDLE: u16 = 0x1AF;
+    pub const FLAG_WALK: u16 = 0x1B0;
+    pub const FLAG_RUN: u16 = 0x1B1;
+    pub const FLAG_PUT_DOWN: u16 = 0x28D;
+    pub const FLAG_PLANT: u16 = 0x22D;
+    pub const CHEER: u16 = 0x19A;
+    pub const LOSE: u16 = 0x2E7;
     /// Total War's gas mask put on (state 81) and taken off (state 78), at 3 ticks a frame (V e2:
     /// anim speed 3, clock 3 … 57 over the 19 frames the rules hold them).
     pub const MASK_ON: u16 = 0x151;

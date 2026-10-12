@@ -479,10 +479,14 @@ fn pack_audio_reads_back() {
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
-    // War: Total War's outro voices (`maps/2d/outros.json`).
-    let outros: Vec<conker_assets::outro::Outro> =
-        serde_json::from_slice(files["maps/2d/outros.json"]).unwrap();
-    listed.extend(outros.iter().map(|o| format!("audio/{}", o.voice.file)));
+    // The War outros' voices (`maps/<map>/outros.json`: Total War's on 2d, Colors' on 30).
+    for map in ["2d", "30"] {
+        let file = format!("maps/{map}/outros.json");
+        let outros: Vec<conker_assets::outro::Outro> =
+            serde_json::from_slice(files[file.as_str()]).unwrap();
+        let voices = outros.iter().filter_map(|o| o.voice.as_ref());
+        listed.extend(voices.map(|v| format!("audio/{}", v.file)));
+    }
     // Scene 0x30's own surface kind 0x11, 0x34's 6 and 0xE and 0x3F's 7 have footsteps; 0x2D's
     // bubbles are the only emitters; 0x34's and 0x3F's backgrounds are other sequences.
     for kind in [0x11, 6, 0xE, 7] {
