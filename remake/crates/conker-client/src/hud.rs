@@ -1,12 +1,12 @@
 //! The HUD the original draws over a Deathmatch player's view, from the pack's `hud/` ([`Hud`]:
 //! pictures, layout and rules found in the oracle, `lab/hud`): health as chocolate, the held
 //! weapon's icon, grenades while one is in the hand, kills and rank, the clock, the radar, the aim
-//! reticle, the scope and the death iris; untimed, the lives left; out of lives, a skull; and once
-//! the match is over, the results (`hud/end.json`, [`End`]). War: Total War draws its team strip in
-//! place of the kills and rank, the radar's blips by team, its results' header, and a gassed
-//! player's haze under the HUD ([`haze`]); War: Colors its strip with the team scores, the carried
-//! flags' blinking icons ([`flag_icons`]), the flags on the radar and the capture's fade
-//! ([`capture_fade`]).
+//! reticle, the scope, a mounted gun's sight ([`Sight`]) and the death iris; untimed, the lives
+//! left; out of lives, a skull; and once the match is over, the results (`hud/end.json`, [`End`]).
+//! War: Total War draws its team strip in place of the kills and rank, the radar's blips by team,
+//! its results' header, and a gassed player's haze under the HUD ([`haze`]); War: Colors its strip
+//! with the team scores, the carried flags' blinking icons ([`flag_icons`]), the flags on the radar
+//! and the capture's fade ([`capture_fade`]).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -26,7 +26,8 @@ use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
-    Align, Anchor, End, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Text, Vertical,
+    Align, Anchor, End, Flash, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Text,
+    Vertical,
 };
 use conker_assets::outro::Outro;
 use conker_rules::game::{Standing, places, team_places, team_result};
@@ -83,6 +84,8 @@ pub struct Shown {
     pub reticle: bool,
     /// Looking through a scope: its zoom, 0 opened to 1 at the weapon's closest.
     pub scope: Option<f32>,
+    /// On a mounted gun: its sight, in place of the scope's.
+    pub gun: Option<Sight>,
     /// Dead: frames to the respawn.
     pub respawn_in: Option<u16>,
     /// Untimed: the lives left.
@@ -112,6 +115,53 @@ pub struct Shown {
 /// A results row ([`rows`]): its colour, an index of `results.colours`, and its five columns.
 pub type Row = (usize, [u32; 5]);
 
+/// A mounted gun's sight ([`Hud::gun`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sight {
+    /// The view's heading (obj+0x40: the atan2(x, z) of its direction) and its elevation above
+    /// the horizontal, in degrees.
+    pub heading: f32,
+    pub elevation: f32,
+    /// The zoom, 0 opened to 1 at the gun's closest.
+    pub zoom: f32,
+    /// This frame's muzzle flash ([`gun_fire`]): the barrel that fired, its size and alpha.
+    pub flash: Option<(u8, [f32; 2], u8)>,
+    /// Each handle's kick, [0] the left and [1] the right: how far it drops, and its lit
+    /// picture's alpha (the handle's is 255 less).
+    pub kick: [(f32, u8); 2],
+}
+
+/// The kick of the handle on a shot's side, from the frame after its flash: how far the handle
+/// drops and its lit picture's alpha (V one-view DLs 221, 223, 225; I: the fire's overlapping kicks
+/// are not modelled, V 240 drops a handle 18.75 with lit 3).
+pub const KICK: [(f32, u8); 3] = [(10.0, 0x53), (20.75, 0x09), (12.0, 0x01)];
+
+/// The sight's flash and handle kicks at `tick`, from each barrel's last shot (the tick this
+/// client saw it, the gun's shot count then). A shot flashes its frame (`func_150FB8C0`, C: barrel
+/// 0's at the flash's centre, on the right, barrel 1's mirrored) and kicks its side's handle from
+/// the next ([`KICK`]); the flash's size and alpha are dice in their ranges (seeded by the count).
+/// I: the flash's fade (V: 0xF9, then 0 a frame later in 223/225; 0x55 in 221).
+pub fn gun_fire(f: &Flash, last: [Option<(u32, u16)>; 2], tick: u32) -> Sight {
+    let mut sight = Sight::default();
+    for (b, shot) in last.iter().enumerate() {
+        let Some((t, n)) = *shot else {
+            continue;
+        };
+        let k = tick.saturating_sub(t) as usize;
+        if let Some(&kick) = k.checked_sub(1).and_then(|k| KICK.get(k)) {
+            sight.kick[1 - b] = kick;
+        }
+        if k == 0 {
+            let mut rng = conker_rules::Rng::new(u64::from(n) << 32 | 0x8128_0784);
+            let mut dice = |[lo, hi]: [f32; 2]| lo + rng.next_f32() * (hi - lo);
+            let size = [dice(f.width), dice(f.height)];
+            let [lo, hi] = f.alpha.map(f32::from);
+            sight.flash = Some((b as u8, size, dice([lo, hi + 0.99]) as u8));
+        }
+    }
+    sight
+}
+
 /// Total War's results header (`func_151E43DC`): DRAW (both teams 1st); with one human, YOU WIN or
 /// YOU LOSE (whether its team won); with more, the winning team's name (0 the squirrels, 1 the
 /// Tediz) and WIN.
@@ -125,6 +175,28 @@ pub enum Header {
 fn image(p: &Picture) -> (Tex, [f32; 4]) {
     let [x, y, w, h] = p.rect.map(f32::from);
     (Tex::Texture(p.texture.clone()), [x, y, x + w, y + h])
+}
+
+/// `p` at `rect`, mirrored across x and/or y (`flip`).
+fn flipped(
+    p: &Picture,
+    flip: [bool; 2],
+    rect: [f32; 4],
+    anchor: Anchor,
+    colour: Rgba,
+    z: f32,
+) -> Sprite {
+    let (tex, [x0, y0, x1, y1]) = image(p);
+    let (x0, x1) = if flip[0] { (x1, x0) } else { (x0, x1) };
+    let (y0, y1) = if flip[1] { (y1, y0) } else { (y0, y1) };
+    Sprite {
+        tex,
+        uv: [x0, y0, x1, y1],
+        rect,
+        anchor,
+        colour,
+        z,
+    }
 }
 
 /// A line of text: (the glyph index, a rank suffix, or a space) per character.
@@ -683,6 +755,76 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             ));
         }
     }
+    // On a mounted gun (`func_151CC840`, `func_151CC524`, `func_151CB5FC`, `func_151C9F38`): the
+    // handles, each over its lit picture, and the flash under the rest of the HUD; the zoom bar,
+    // the sight and its tapes over it.
+    if let Some(g) = &s.gun {
+        let n = &hud.gun;
+        let a = n.anchor;
+        for (h, (drop, lit)) in n.handles.iter().zip(g.kick) {
+            let [x, y, w, hh] = h.rect;
+            let rect = [x, y + drop, w, hh];
+            out.push(flipped(&n.lit, h.flip, rect, a, [255, 255, 255, lit], 0.2));
+            out.push(flipped(
+                &h.image,
+                h.flip,
+                rect,
+                a,
+                [255, 255, 255, 255 - lit],
+                0.3,
+            ));
+        }
+        if let Some((barrel, [w, h], alpha)) = g.flash {
+            let f = &n.flash;
+            let [x, y] = f.centre;
+            let x = if barrel == 0 {
+                x
+            } else {
+                f32::from(hud.frame[0]) - x
+            };
+            let rect = [x - w / 2.0, y - h / 2.0, w, h];
+            let flip = [barrel != 0, false];
+            out.push(flipped(
+                &f.image,
+                flip,
+                rect,
+                a,
+                [255, 255, 255, alpha],
+                0.4,
+            ));
+        }
+        out.push(solid(n.back, a, n.back_colour, 6.0));
+        let (cy, half) = (
+            f32::from(hud.frame[1]) / 2.0,
+            n.bar_half[0] + n.bar_half[1] * g.zoom.clamp(0.0, 1.0),
+        );
+        let bar = [n.bar_x, cy - half, n.bar_width, 2.0 * half];
+        out.push(solid(bar, a, n.bar_colour, 6.5));
+        for p in &n.sight {
+            out.push(flipped(&p.image, p.flip, p.rect, a, n.colour, 6.5));
+        }
+        // Each tape `repeats` pictures long, `per_degree` × its angle texels in (in 1/32 texels, as
+        // the RDP's S10.5, and within a picture: it repeats).
+        for (t, angle) in n.tapes.iter().zip([g.heading, g.elevation]) {
+            let (tex, [x0, y0, x1, y1]) = image(&t.image);
+            let along = t.rect[2] > t.rect[3];
+            let period = if along { x1 - x0 } else { y1 - y0 };
+            let off = ((t.per_degree * angle * 32.0).round() / 32.0).rem_euclid(period);
+            let long = period * t.repeats;
+            let uv = match along {
+                true => [x0 + off, y0, x0 + off + long, y1],
+                false => [x0, y0 + off, x1, y0 + off + long],
+            };
+            out.push(Sprite {
+                tex,
+                uv,
+                rect: t.rect,
+                anchor: a,
+                colour: n.tape_colour,
+                z: 6.5,
+            });
+        }
+    }
     // Dead: black but for a circle (absent past the iris's list), over everything.
     let i = &hud.iris;
     if let Some(&radius) = s.respawn_in.and_then(|n| i.radius.get(usize::from(n))) {
@@ -745,7 +887,8 @@ pub fn build(app: &mut App, hud: Hud) {
         move |assets: Res<AssetServer>,
               mut meshes: ResMut<Assets<Mesh>>,
               mut commands: Commands| {
-            // The haze's texture wraps (G_TX_WRAP, mask 6); the others clamp.
+            // The haze's and the gun's tapes' textures wrap (G_TX_WRAP, mask 6; cm 0); the others
+            // clamp.
             let load = |file: &str, smooth: bool, wrap: bool| -> Handle<Image> {
                 let mut sampler = if smooth {
                     ImageSamplerDescriptor::linear()
@@ -766,7 +909,8 @@ pub fn build(app: &mut App, hud: Hud) {
             let end = hud.end.iter().flat_map(|e| &e.textures);
             let textures = (hud.textures.iter().chain(end))
                 .map(|(name, t)| {
-                    let wrap = *name == hud.haze.image.texture;
+                    let mut tapes = hud.gun.tapes.iter().map(|t| &t.image.texture);
+                    let wrap = *name == hud.haze.image.texture || tapes.any(|t| t == name);
                     (name.clone(), (load(&t.file, t.smooth, wrap), t.size))
                 })
                 .collect();
@@ -890,6 +1034,14 @@ fn shown(
     let lying = m.flags.iter().filter(|f| f.shown && f.carrier.is_none());
     blips.extend((lying.filter(|_| m.colors)).map(|f| blip(f.pos, r.flag_colour)));
     let scope = camera.follow.cam.scope;
+    // On a mounted gun its scope is the gun's sight; the weapon is the gun's (no icon: V one-view
+    // DLs).
+    let gun = (scope.on && scope.weapon == conker_camera::GUN).then(|| Sight {
+        heading: scope.yaw + 90.0,
+        elevation: -scope.pitch,
+        zoom: scope.zoom[0] / conker_camera::zoom_limit(conker_camera::GUN),
+        ..Sight::default()
+    });
     // The place among everyone, this player first; Total War's strip: each team's kills, untimed
     // its lives left (`func_151E9D18`).
     let others = (everyone.iter()).filter(|o| !o.2).map(|o| o.1);
@@ -907,17 +1059,21 @@ fn shown(
     }
     Shown {
         health: c.health,
-        weapon: c.weapon,
+        weapon: if gun.is_some() {
+            conker_camera::GUN
+        } else {
+            c.weapon
+        },
         grenades: in_hand.then_some(c.grenades),
         kills: c.kills,
         rank: usize::from(places(&all, m.kill_limit)[0]),
         secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
         radar: m.radar,
         blips,
-        reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon),
-        scope: scope
-            .on
+        reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
+        scope: (scope.on && gun.is_none())
             .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
+        gun,
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
         lives: (m.time == 0 && !m.colors).then_some(c.lives_left),
         out: c.out > 0,
@@ -949,6 +1105,7 @@ fn draw(
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
     timeline: Res<LocalTimeline>,
     mut fading: Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
+    mut fired: Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: Local<HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>>,
@@ -991,6 +1148,22 @@ fn draw(
                 }
                 _ => None,
             };
+            // The own gun's shots, by barrel, from the tick this client sees each (the count only
+            // falls when Colors recreates the gun).
+            let manned = (m.guns.iter().enumerate()).find(|g| g.1.gunner == Some(own.1.slot));
+            match (manned, fired.0) {
+                (Some((k, v)), Some((last, n))) if k == last && v.shots >= n => {
+                    if v.shots > n {
+                        fired.1[usize::from(v.barrel.min(1))] = Some((tick, v.shots));
+                    }
+                }
+                _ => fired.1 = [None; 2],
+            }
+            fired.0 = manned.map(|(k, v)| (k, v.shots));
+            if let Some(g) = &mut shown.gun {
+                let Sight { flash, kick, .. } = gun_fire(&a.hud.gun.flash, fired.1, tick);
+                (g.flash, g.kick) = (flash, kick);
+            }
             if m.phase == 2 {
                 let all: Vec<_> = (roster.iter())
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
@@ -1635,6 +1808,162 @@ mod tests {
             [0, 25, 50].map(|k| capture_fade(false, 100, k)),
             [255, 128, 0]
         );
+    }
+
+    /// A mounted gun's sight against the original's one view (`lab/research/mp-original/
+    /// mounted-gun-scratch/one-view`: P1 on gun B, yaw 15872): every gun draw of each DL is one of
+    /// ours, its rect within a quarter pixel, its colour (the handles' and flash's alpha), its
+    /// mirroring and its tapes' texels (modulo a picture). 125: at rest, heading 108°, level. 221:
+    /// barrel 0's flash (the right, its size the DL's), the right handle a frame into its kick; 223:
+    /// barrel 1's (mirrored), the right handle 2 frames in; 225: the left a frame in, the right 3,
+    /// heading 177.19° at 40° up (221 and 223 turn up: their tapes are not compared).
+    #[test]
+    fn gun_matches_the_originals_draws() {
+        let Some(hud) = pack_hud() else {
+            return;
+        };
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../lab/research/mp-original/mounted-gun-scratch/one-view"
+        );
+        let names = [
+            ("802287a8", "gun_handle_lit"),
+            ("802297b8", "gun_handle"),
+            ("80231940", "gun_flash"),
+            ("80207448", "gun_corner"),
+            ("8020aaf0", "gun_tick_end"),
+            ("8021cab8", "gun_tick_side"),
+            ("8022a7c8", "reticle"),
+            ("802262e0", "gun_tape_elevation"),
+            ("8022abd8", "gun_tape_heading"),
+        ];
+        let rest = [(0.0, 0); 2];
+        let sight = |heading, elevation, flash, kick| Sight {
+            heading,
+            elevation,
+            zoom: 0.0,
+            flash,
+            kick,
+        };
+        let cases = [
+            ("hud125", sight(108.0, 0.0, None, rest), true),
+            (
+                "hud221",
+                sight(
+                    177.19,
+                    0.0,
+                    Some((0, [102.25, 181.75], 0x55)),
+                    [rest[0], KICK[0]],
+                ),
+                false,
+            ),
+            (
+                "hud223",
+                sight(
+                    177.19,
+                    0.0,
+                    Some((1, [95.25, 196.75], 0xF9)),
+                    [rest[0], KICK[1]],
+                ),
+                false,
+            ),
+            (
+                "hud225",
+                sight(177.19, 40.0, None, [KICK[0], KICK[2]]),
+                true,
+            ),
+        ];
+        for (dump, gun, tapes) in cases {
+            let flash = usize::from(gun.flash.is_some());
+            let Ok(json) = std::fs::read(format!("{dir}/{dump}/draws.json")) else {
+                eprintln!("no {dump}: skipping");
+                return;
+            };
+            let draws: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
+            let ours = sprites(
+                &hud,
+                &Shown {
+                    gun: Some(gun),
+                    ..state()
+                },
+            );
+            let mut seen = 0;
+            for d in &draws {
+                let texture = d["texture"].as_str().unwrap();
+                let env = u32::from_str_radix(d["env"].as_str().unwrap(), 16).unwrap();
+                let env = env.to_be_bytes();
+                let solid = d["combine"][0].as_str().unwrap().starts_with("(0-0)*0+ENV");
+                let tex = match names.iter().find(|n| texture.starts_with(n.0)) {
+                    _ if solid && [[255, 0, 0, 65], [255, 255, 0, 90]].contains(&env) => Tex::Solid,
+                    Some((_, name)) => Tex::Texture((*name).into()),
+                    None => continue,
+                };
+                let name = match &tex {
+                    Tex::Texture(n) => n.as_str(),
+                    _ => "",
+                };
+                if (name.starts_with("gun_tape") && !tapes) || (name == "gun_flash" && env[3] == 0)
+                {
+                    continue;
+                }
+                let colour = match name {
+                    "gun_handle" | "gun_handle_lit" | "gun_flash" => [255, 255, 255, env[3]],
+                    _ => env,
+                };
+                let r: [f32; 4] = serde_json::from_value(d["rect"].clone()).unwrap();
+                let rect = [r[0], r[1], r[2] - r[0], r[3] - r[1]];
+                let st: [f32; 2] = serde_json::from_value(d["st"].clone()).unwrap();
+                let step: [f32; 2] = serde_json::from_value(d["step"].clone()).unwrap();
+                let near = |a: f32, b: f32| {
+                    let d = (a - b).rem_euclid(16.0);
+                    d.min(16.0 - d) < 0.05
+                };
+                let texels = |q: &Sprite| match name {
+                    "gun_tape_heading" => near(q.uv[0], st[0]),
+                    "gun_tape_elevation" => near(q.uv[1], st[1]),
+                    "" => true,
+                    _ => [0, 1]
+                        .iter()
+                        .all(|&i| (step[i] < 0.0) == (q.uv[i + 2] < q.uv[i])),
+                };
+                let found = ours.iter().any(|q| {
+                    q.tex == tex
+                        && q.colour == colour
+                        && (0..4).all(|i| (q.rect[i] - rect[i]).abs() <= 0.25)
+                        && texels(q)
+                });
+                assert!(
+                    found,
+                    "{dump}: {name} {r:?} {env:?} st {st:?} step {step:?}"
+                );
+                seen += 1;
+            }
+            // 4 handle pictures, 2 bars and 9 sight pictures, the tapes and a flash.
+            assert_eq!(seen, 15 + 2 * usize::from(tapes) + flash, "{dump}");
+        }
+    }
+
+    /// A shot flashes its frame and kicks its side's handle from the next: barrel 0 the right.
+    #[test]
+    fn gun_shots_flash_and_kick_their_side() {
+        let Some(hud) = pack_hud() else {
+            return;
+        };
+        let f = &hud.gun.flash;
+        let shot = gun_fire(f, [Some((100, 7)), None], 100);
+        let (barrel, [w, h], alpha) = shot.flash.unwrap();
+        assert_eq!(barrel, 0);
+        assert!((80.0..=120.0).contains(&w) && (160.0..=200.0).contains(&h) && alpha >= 200);
+        assert_eq!(shot.kick, [(0.0, 0); 2]);
+        let kicks = [101, 102, 103, 104].map(|t| gun_fire(f, [Some((100, 7)), None], t));
+        assert!(kicks.iter().all(|s| s.flash.is_none()));
+        assert_eq!(kicks[0].kick[0], (0.0, 0));
+        assert_eq!(
+            kicks.map(|s| s.kick[1]),
+            [KICK[0], KICK[1], KICK[2], (0.0, 0)]
+        );
+        let left = gun_fire(f, [None, Some((100, 8))], 101);
+        assert_eq!(left.kick, [KICK[0], (0.0, 0)]);
     }
 
     /// The outros' pages against the original's draws (one capture's I8 glyph rects): every glyph

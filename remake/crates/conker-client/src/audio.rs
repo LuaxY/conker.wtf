@@ -11,7 +11,9 @@
 //!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
 //!   (its player's [`Combat::carrying`] going on), War: Colors' flag taken ([`Combat::flag`]); the grenades in flight (the local fighter
 //!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
-//!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I).
+//!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I); a mounted
+//!   gun's state changing and its trigger let go ([`MatchView::guns`]), the local gunner's zoom and
+//!   aim moving.
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
 //!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
@@ -38,12 +40,12 @@ use conker_assets::audio::{
     Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
 };
 use conker_assets::{Held, Manifest, PACK_CHARACTERS, Pickup};
-use conker_rules::Rng;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::weapon;
+use conker_rules::{Rng, gun};
 use conker_sim::movement::Side;
-use conker_sim::net::{Combat, MatchView, Player, PlayerId};
+use conker_sim::net::{Combat, GunView, MatchView, Player, PlayerId};
 use core::f32::consts::FRAC_PI_2;
 use core::time::Duration;
 use lightyear::core::timeline::is_in_rollback;
@@ -145,12 +147,14 @@ pub fn build(
 }
 
 /// Whose a sound is: a player's (channels a and b are per player, by [`Combat::slot`]), a grenade's
-/// (birth tick, thrower), one of weapon 0x14's shots in flight (its index), or nobody's.
+/// (birth tick, thrower), one of weapon 0x14's shots in flight (its index), a mounted gun's (its
+/// index), or nobody's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owner {
     Player(u16),
     Grenade(u32, usize),
     Shot(usize),
+    Gun(usize),
     World,
 }
 
@@ -351,6 +355,17 @@ struct Sounds {
     /// This tick's players (last tick's, this tick's), reused.
     players: Vec<(Seen, Seen)>,
     muted: bool,
+    /// The mounted guns last tick, and the local gunner's zoom and aim ([`Self::gunner`]).
+    guns: Vec<GunView>,
+    turning: Option<Turning>,
+}
+
+/// The local gunner's zoom and aim (the scope's yaw target times its pitch target) last tick, and
+/// how many ticks in a row each has moved.
+#[derive(Clone, Copy)]
+struct Turning {
+    last: [f32; 2],
+    moved: [u32; 2],
 }
 
 /// What a tick's rules read besides the sound state.
@@ -805,6 +820,111 @@ impl Sounds {
         self.grenades.extend_from_slice(now);
     }
 
+    /// The mounted guns' sounds (`On::Gun`, at the gun on its own channels: a state change stops
+    /// its loops and plays its change's cues; C `func_1507BC14`) and the release (`On::GunStop`, at
+    /// the gunner as the trigger falls; C `func_15065A5C`).
+    fn guns(&mut self, cx: &Cx, guns: &[GunView], players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let old = std::mem::replace(&mut self.guns, guns.to_vec());
+        for (k, (was, is)) in old.iter().zip(guns).enumerate() {
+            let owner = Owner::Gun(k);
+            if was.state != is.state {
+                self.stop(|v| v.owner == owner && v.looped);
+                let on = On::Gun {
+                    from: was.state,
+                    to: is.state,
+                };
+                let at = Src {
+                    owner,
+                    ..Src::at(is.pos)
+                };
+                for cue in cues.iter().filter(|c| c.on == on) {
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, at);
+                }
+            }
+            if was.trigger && !is.trigger {
+                let gunner = (was.gunner).and_then(|s| players.iter().find(|p| p.1.slot == s));
+                let src = gunner.map_or(Src::at(is.pos), |p| Src::player(&p.1));
+                for cue in cues.iter().filter(|c| c.on == On::GunStop) {
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+                }
+            }
+        }
+    }
+
+    /// The local gunner's zoom and aim (`scope`: its zoom and aim this tick; `None` off a gun; C
+    /// `func_15126378`, `func_15127520`, `func_151277B0`), heard by the gunner only: the zoom's loop
+    /// while it moves, its stop's sound as it stops and, 16 ticks on, the last one's, which decays
+    /// in 0.1 s (its loop is held at full in the pack: stopped here); the aim's loop from the 5th
+    /// tick (10th VI) it keeps changing, its stop's sound as it stops. Leaving the gun stops them.
+    fn gunner(&mut self, cx: &Cx, scope: Option<[f32; 2]>) {
+        let cues = &cx.pack.audio.events.cues;
+        let cue = |on: On| cues.iter().position(|c| c.on == on);
+        let zoom = [0, 1, 2].map(|step| cue(On::GunZoom { step }));
+        let aim = [0, 1].map(|step| cue(On::GunAim { step }));
+        let looping = [zoom[0], aim[0]];
+        let src = Src {
+            owner: Owner::Player(cx.ear.slot),
+            follows: Some(cx.ear.slot),
+            ..Src::at(cx.ear.pos)
+        };
+        let Some(now) = scope else {
+            if self.turning.take().is_some() {
+                self.stop(|v| v.tag.is_some() && looping.contains(&v.tag));
+            }
+            return;
+        };
+        let t = self.turning.get_or_insert(Turning {
+            last: now,
+            moved: [0; 2],
+        });
+        let before = t.moved;
+        t.moved = [0, 1].map(|i| {
+            if now[i] != t.last[i] {
+                t.moved[i] + 1
+            } else {
+                0
+            }
+        });
+        t.last = now;
+        let after = t.moved;
+        let play = |s: &mut Self, i: Option<usize>| {
+            if let Some(i) = i {
+                let tagged = Src {
+                    tag: Some(i),
+                    ..src
+                };
+                s.start(cx, &cues[i].play, &cues[i].play.sounds, 1.0, tagged);
+            }
+        };
+        for (k, (steps, from)) in [(&zoom[..], 1), (&aim[..], 5)].into_iter().enumerate() {
+            if after[k] == from {
+                play(self, steps[0]);
+            } else if after[k] == 0 && before[k] >= from {
+                self.stop(|v| v.tag.is_some() && v.tag == steps[0]);
+                play(self, steps[1]);
+                if let Some(&Some(last)) = steps.get(2) {
+                    let src = Src {
+                        tag: Some(last),
+                        ..src
+                    };
+                    let (tick, end) = (cx.tick + 16, false);
+                    (self.later).push(Later {
+                        tick,
+                        cue: last,
+                        src,
+                        end,
+                    });
+                }
+            }
+        }
+        for v in &mut self.voices {
+            if v.tag.is_some() && v.tag == zoom[2] && v.started == cx.tick {
+                v.until = Some(cx.tick + 3);
+            }
+        }
+    }
+
     /// Plays every cue `matches` picks at `pos`, nobody's.
     fn world(&mut self, cx: &Cx, pos: [f32; 3], matches: impl Fn(&On) -> bool) {
         for cue in (cx.pack.audio.events.cues.iter()).filter(|c| matches(&c.on)) {
@@ -997,8 +1117,15 @@ fn hear(
     let mut all = std::mem::take(&mut s.players);
     all.clear();
     let mut grenades: &[(u32, Grenade)] = &[];
+    let guns = game.single().map_or(&[][..], |m| &m.guns[..]);
     for (entity, p, c, anim, fighting, predicted, heard, id) in &mut players {
+        // On a mounted gun the weapon is the gun's (its gunner's battle cry, `On::Firing`).
+        let seated = match fighting {
+            Some(f) if predicted => f.state.seated(),
+            _ => (guns.iter()).any(|g| g.gunner == Some(c.slot) && g.state != gun::LAUNCH),
+        };
         let (weapon, drawn) = match fighting {
+            _ if seated => (conker_camera::GUN, true),
             Some(f) if predicted => (f.state.weapon.unwrap_or(0), f.state.drawn),
             _ => (c.weapon, c.drawn),
         };
@@ -1050,6 +1177,7 @@ fn hear(
         s.primed = true;
         (s.rockets, s.shots, s.taken) = (m.rockets.clone(), m.shots.clone(), m.taken);
         s.grenades = grenades.to_vec();
+        s.guns.clone_from(&m.guns);
     }
     let old = std::mem::take(&mut s.rockets);
     for pos in gone(&old, &m.rockets, 2.0 * ROCKET_SPEED) {
@@ -1064,6 +1192,13 @@ fn hear(
     }
     s.grenades(&cx, grenades);
     s.match_sounds(&cx, m, &all);
+    s.guns(&cx, &m.guns, &all);
+    let scope = camera.follow.cam.scope;
+    let gunner = scope.on && scope.weapon == conker_camera::GUN;
+    s.gunner(
+        &cx,
+        gunner.then_some([scope.zoom[0], scope.yaw_target * scope.pitch_target]),
+    );
     if let Some((i, _)) =
         (playing.0).filter(|&(i, k)| outros.0.get(i).is_some_and(|o| Some(k) == o.voice_frame()))
     {

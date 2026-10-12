@@ -135,7 +135,7 @@ shotgun (0x37). Leftovers:
    - pause (CONT./RESTART/QUIT): not online (it would freeze everyone);
    - bot caps by human count;
    - real lobby wiring.
-2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), ~~0x34 Bunker~~ (done, with the crossbow and shotgun; its mounted machine gun is left out), ~~0x3F Temple~~
+2. Deathmatch's other maps, cheapest first: ~~0x30 (no new weapons)~~ (done), ~~0x34 Bunker~~ (done, with the crossbow, shotgun and mounted machine gun), ~~0x3F Temple~~
    (done, with the caveman and item 0x40), 0x1A Vault (+Wise Guy, tommy gun, item 0x19, moving pickups). Per-map character sets and
    cheat characters. The bots' navigation on those maps is unchecked.
 3. Team modes:
@@ -161,7 +161,8 @@ shotgun (0x37). Leftovers:
      score and end from the level's AI script 0xBB; the victory outros (cs1/cs5); the flags drawn at home, dropped and
      carried, with their cloth clips; the HUD strip's captures, the blinking carried-flag icons, the radar's flag
      blips, the capture fade and the take sounds; the bots take and capture (pickup reach from the script's 0x7B).
-     Next: the mounted machine guns (0x30 ×2, 0x34 ×1). Left: the capture jingles, the touch radius (45, I), the
+     The mounted machine guns (0x30 ×2, 0x34 ×1) are done too (mount, the gun sight, fire, overheat, dismount,
+     bots on them, Colors recreating them; drawn with the gunner's HUD). Left: the capture jingles, the touch radius (45, I), the
      end-phase fade, a join or leave restarting the script, untimed + unlimited never ending.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.

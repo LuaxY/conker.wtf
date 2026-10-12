@@ -1,5 +1,36 @@
 # Status after wave 6 (2026-10-10)
 
+## Mounted guns: the client (2026-10-12)
+**The client now draws the mounted machine guns on maps 30 and 34: the gun turned and pitched as the match has it,
+its fire loop with the belt of rounds scrolling (no flash on the model, as in the original). The gunner sits on the seat
+(the jump on plays at 1.3). The gunner's own first-person view has the gun's sight, its heading and elevation tapes,
+the zoom bar, the two handles that kick and light up on the side that fired, and the muzzle flash. The guns' sounds
+play. No rules, server, bot or pack change.** Research: `../lab/research/mp-original/mounted-gun.md` §3, §4.4, §5.3,
+and the oracle's one-view DLs, now kept in `mounted-gun-scratch/one-view/` (DLs 125, 221, 223, 225 and 240).
+
+| Part | What |
+|---|---|
+| `guns.rs` (new) | One model 138 per `MatchView.guns`, at scale 0.5, turned `model_yaw(yaw)`. After the clips, `joint_04` gets `R_x(pitch)` (positive down). In state 4, `pair_0000_anim_0001` loops (12 ticks: the glTF's last key + 1 tick). In any other state the joints go back to their rest poses. On map 30, while firing, the belt's own copy of material 15 scrolls V by −2.5/16 a frame. `func_15062FC0` moves T, not S as the pack's handoff said: it moves the belt's 12 vertices' T by −40/32 texel a VI, and the belt's sampler repeats along T (C). No flash on the model (the original draws none: C, only the gunner's overlay; V, no flash triangles in DLs 221-225); a placeholder sphere was tried and removed. The local gunner's gun turns with its predicted facing and `scope_pitch` and uses its own `Mount.state`. It is hidden while its sight is up (free camera off) |
+| `lib.rs` | `tick_anims`: `JUMP` plays at 1.3 while the player's mount is in `gun::LAUNCH` (the local player from `Fighting`; the others from the `GunView` they man) |
+| `hud.rs` | `Shown.gun: Option<Sight>` replaces the scope and the reticle while the scope is the gun's (`scope.weapon == GUN`). The weapon icon goes, because 0x1B has none (V: no icon in the one-view DLs). The handles draw over their lit pictures (`lit` at z 0.2, the handle at 255 − `lit` at z 0.3), dropped by the kick. Then the flash (z 0.4), and the zoom bar centred on y 108. The sight and its tapes go over the rest. The tapes start `per_degree` × the heading (`scope.yaw` + 90, obj+0x40) and the elevation (−`scope.pitch`) in, in 1/32 texels and wrapped within one picture. Their textures now repeat. `gun_fire`: each barrel's last shot is the tick this client saw the count rise. It flashes that frame, with size and alpha diced from the count, and kicks its side's handle over the next 3 frames (`KICK`: 10/0x53, 20.75/0x09, 12/0x01) |
+| `audio.rs` | New `Owner::Gun(k)`. A `GunView.state` change stops that gun's loops and plays the `On::Gun { from, to }` cues at the gun. `trigger` falling plays `GunStop` at the gunner. A seated player's `Seen.weapon` is `GUN`, so `On::Firing { 0x1B }` (the squirrel's battle cry) holds on 0x1A4. This also stops the held weapon's scope sound from playing when the gun's scope opens. For the local gunner: the zoom loops while it moves, plays step 1 when it stops, then step 2 16 ticks later; step 2's loop is cut after 3 ticks, as its 0.1 s envelope would. The aim (yaw target × pitch target, as the pack's note) loops from its 5th moving tick and plays step 1 when it stops. Leaving the gun stops these loops |
+| Lab | `../lab/screens/guns/guns.sh mount\|heat\|map34\|flash N` (port 5986, or `PORT`), with `gunner.txt` |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `hud.rs` `gun_matches_the_originals_draws` | Every gun draw of one-view DLs 125, 221, 223 and 225 is one of ours: rect within 0.25 px, colour (handles and flash: alpha), mirroring, and tape texels modulo a picture (heading 108° → −48; 177.19° → −78.72; 40° up → −17.75). The draws are the 4 handle pictures, 2 bars, 9 sight pictures, the tapes, barrel 0's flash (right) and barrel 1's (mirrored, left). The handles: rest, and the kick table on the right then the left |
+| `hud.rs` `gun_shots_flash_and_kick_their_side` | A shot flashes only its own frame (size and alpha in range). Its side's handle kicks the 3 frames after (barrel 0 the right, barrel 1 the left), then rests |
+| `guns.rs` `the_barrels_pose_as_the_rules_shoot` | For the glTF's `joint_04`/`05`/`07` turned, scaled, and pitched at −60..50 at 4 yaws, each barrel's (±13, 0, 200) equals `gun::muzzle` to 0.05. Barrel 0 is `joint_05`: the model's +x, the gun's −side (the gunner's left). A positive pitch looks down |
+| Screens (read) | `own-idle` (gun A, read 90: the sight, tapes, handles at rest, zoom bar at 0, no weapon icon). `own-firing`/`-b` (the zoom bar longer after C-up; bullets out; a handle down and lit on the side that fired: the right for barrel 0, the left for barrel 1). `own-overheated` (460, state 0xB: handles at rest). `mounted` (free camera: the squirrel on the seat in 0x1A4, the barrels pitched up). `dismount` (527: the leap off). `idle-a`, `idle-b` (640, after the dismount: rest pose, belt, level barrels, each on its pad). `idle-34`. `own-flash` (`flash` mode, read 168: barrel 1's flash mirrored on the left over the handles). |
+| `bun run test`, `bun run check`, wasm32 clippy of conker-client | All pass. The Deathmatch, Total War and Colors client tests are unchanged |
+
+**Not done or I:**
+- **Barrel sides (C/V):** barrel 0 = `joint_05` shoots from the gunner's left (V e1: barrel 1's bullets come from +side). The original's HUD draws barrel 0's flash on the right and kicks the right handle (C `func_150FB8C0`: +59 for barrel 0; V: the flipped flash in DL 223). Both are kept as the original has them.
+- **HUD:** the flash shows only on its shot's frame. The original fades it (V: alpha 0x55 a frame after a shot in 221, but 0 in 225; its life is 5-8 VIs, C), and that curve is not read. The kick table is the 3 V frames. Overlapping kicks are not modelled (V 240: a drop of 18.75 with lit 3). The original's zoom bar changes colour as it zooms (V z1: ff2b00e2); the pack has one colour. The flash texture's faint glow (alpha 1-25) is cut at the quad's edge, and Bevy's alpha blend shows it as a pale box (`own-flash`). Shots reach the local gunner a round trip late (server-only fire).
+- **Model:** the belt scroll on 0x34 (tile scrolls 0x253/0x255/0x257) is not done. The rest pose at rest is I. The pack's handoff says the belt scrolls S; the code scrolls T (C, above). The local gunner's gun is hidden in its own view (I: the original's 3-D gun in that view is not read).
+- **Sound:** an MG hit (reaction 0x19C) still plays 0x23's hit sound (`hit_weapon`). The aim sound keys on yaw target × pitch target, so a level turn makes no sound (C, per the pack's note; not V). `gun_stop`'s replay 15 frames later is not played.
+- **Render:** the view's field of view does not follow the zoom (as with the other scopes).
+
 ## Mounted guns: the gameplay (2026-10-12)
 **The mounted machine guns now work on the server: two on map 30 (Deathmatch and War: Colors) and one on 34. A player
 who touches a free gun jumps onto its seat and turns the gun with the gun's own scope. Z fires the two barrels and

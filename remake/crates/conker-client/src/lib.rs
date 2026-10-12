@@ -16,6 +16,7 @@
 pub mod audio;
 pub mod connection;
 pub mod flags;
+pub mod guns;
 pub mod held;
 pub mod hud;
 pub mod lights;
@@ -64,6 +65,7 @@ use conker_anim::{AnimPlayer, NONE, request_at};
 use conker_assets::audio::Audio;
 use conker_assets::hud::Hud;
 use conker_assets::{ClipInfo, Slice, SpawnPoint};
+use conker_rules::gun;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::Grenade;
 use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Settings, Spawn};
@@ -1231,10 +1233,12 @@ fn predict_again(
 
 /// Each player's clock advances one frame with its animation's request: the local player's
 /// predicted rules animation, the others' [`shown_anim`]. The armed walks' rates count the speed
-/// percentage before the tick, 65 on a strafing tick (`request_at`). The first frame is a cut.
+/// percentage before the tick, 65 on a strafing tick (`request_at`). The first frame is a cut. The
+/// jump onto a mounted gun plays at 1.3 (the gun's launch, `gun::LAUNCH`).
 #[allow(clippy::type_complexity)]
 fn tick_anims(
     clips: Res<SideClips>,
+    game: Query<&MatchView>,
     mut players: Query<(
         &Player,
         Option<&Combat>,
@@ -1256,6 +1260,15 @@ fn tick_anims(
         let mut req = request_at(id, p.xz_speed, p.target_speed, percent);
         if anim.0.id == NONE {
             req.blend = 0.0;
+        }
+        let launching = match fighting {
+            Some(f) if predicted => f.state.gun.is_some_and(|g| g.state == gun::LAUNCH),
+            _ => (game.iter().flat_map(|m| &m.guns)).any(|g| {
+                g.state == gun::LAUNCH && combat.is_some_and(|c| g.gunner == Some(c.slot))
+            }),
+        };
+        if launching && id == conker_anim::id::JUMP {
+            req.rate = 1.3;
         }
         let side = combat.map_or(Side::default(), |c| c.side);
         anim.0.tick(req, clips.of(side).duration(id));
