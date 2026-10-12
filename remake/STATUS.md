@@ -1,5 +1,53 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Beach's presentation in the pack (2026-10-13)
+**`conker-extract pack --map 2b` now also packs what War: Beach shows and plays: the villagers' 14 looks, Beach's two
+outros, the escape countdown, the Beach strip and its STATS header, the radio, detonation and strike sounds, Beach's
+lights, the explosion sprites, and a corrected music loop. Only `conker-extract`, `conker-assets`, `extract-character`'s
+glTF writer, `../assets` and `../lab/audio/map2b/` changed; no rules, server or client code.** Research:
+`../lab/research/mp-original/beach-presentation.md` (§ below), scratch `beach-presentation-scratch/`.
+
+| Part | What |
+|---|---|
+| Looks (§5) | `villager_look(class)` (`conker-extract`, the game's `func_15083384`): classes 0x11-0x1C → model 156, mask `0x3E & !(4 << (v >> 2)) & ![0, 2, 0x20, 0x22][v & 3]` (v = class − 0x11); 0x1D-0x20 → 157, mask 0x0A (< 0x1F) or 0x14. A set bit *i* hides display list *i* (bit 0 is never set: the body always shows). Packed as `Character.looks` (class → mask) in `characters/156/character.json` (12 classes) and `157/` (4). The pack's other characters have none |
+| glTF (all characters) | `extract-character` now writes one primitive per (display list, material), not per material, with `extras: {"list": n}` on each. Counts: 156 14 → 16 primitives, 157 17 → 19, 40 19 → 22, 88 16 → 18, 90 9 → 14; the others are unchanged apart from the extras. Material indices did not change (the gun belt is still material 15) |
+| Outros (§4) | `OUTROS` gains `(0x2B, [(0, 4), (1, 3)])`: `maps/2b/outros.json`, team 0 (villagers) cs4 650 VIs, voice 0x163 at 200; team 1 (Tediz) cs3 1150 VIs, voice 0x161 at 40; characters 156, 157, 90; WAVs `audio/maps/2b/voice-161.wav`, `voice-163.wav` |
+| HUD (§1, §3) | `hud.json` `beach`: `strip` = Total War's with texture `beach_teams` (0xD12, 16×32; team 0 the villager head `[0,16,16,16]`, team 1 the Tedi `[0,0,16,16]`), `escape` = the countdown's text (white, no shadow, centred at x 146, top 6; the text is the seconds left, 90 → 0, villagers only). `end.json` `teams.beach_won` = [FRENCHYS WIN (new `frenchys.png`, 0x855), TEDIZ WIN] |
+| Sounds (§6) | `events.json` cues `plunger_ready`, `plunger` (per villager model: 156 1705/1707, 157 1701/1703, delay 10), `radio_click {end}` (0x5B0 / 0x5B1 on the voice slot), `detonation` ×3 (0x2B7, 0x2B8, 0x2B6 at their own `at`, delays 0/23/45 ticks), `debris` (0x1B9-0x1C1), `strike_call` (0x69E; and per villager its pain voice 1715-1726 on its voice slot), `strike_blast` (0x69D). `Cue` gained `at` and `delay`. `maps.2b.lines.escape` = `audio/maps/2b/voice-1a8.wav` (the escape's radio MP3, with the music-duck numbers in its note). The lamps' buzz is 2b's two packed emitters (1099-1108) |
+| Music | The groundwork's 93.29 s period was wrong: song 0x4D repeats every **85.290 s** (1,878,088 samples at 22,020 Hz, by cross-correlating the 331 s south recording). `background_loop.wav` is now one period from 45.5 s of `../lab/audio/map2b/background_south.wav` (kept, with its `.log`), with a 0.5 s crossfade (seam difference 0), 7.5 MB |
+| Lights, effects (§7) | `maps/2b/lights.json`: ambient (0x70, 0x8D, 0xD5), the two white lamps (size 50) and the two red exit lights (87 + 43·sin φ, φ += 0.1021 a frame), all `calm`. HUD textures for the effects: `explosion.png` (0x78A, RGBA32 32×32), `smoke.png` (0xE4A), `fire.png` (0x71F, I8), `shell.png` (0x1042, IA16 16×16); the strike's flash is `iris.png` |
+
+**Handoff (client agent).** Types are in `conker-assets`. `looks`, `lines`, `at` and `delay` default when absent;
+`Hud.beach` and `Teams.beach_won` are required, so an older pack no longer loads (re-export with `bun run pack`). The
+split primitives share their material: the client's by-name lookups (`guns.rs`'s belt) already walk every primitive.
+- Looks: `Character.looks: BTreeMap<u8, u8>`; on a villager's mesh, hide every primitive whose `GltfExtras` `list` bit is set in `looks[class]` (Bevy puts the primitive's extras on the primitive entity). Masks: 0x11 0x3A, 0x12 0x38, 0x13 0x1A, 0x14 0x18, 0x15 0x36, 0x16 0x34, 0x17 0x16, 0x18 0x14, 0x19 0x2E, 0x1A 0x2C, 0x1B 0x0E, 0x1C 0x0C, 0x1D/0x1E 0x0A, 0x1F/0x20 0x14.
+- HUD: `Hud.beach.strip` (draw as `Hud.strip`), `Hud.beach.escape` (a `Text`: format the seconds, team 0's views only). `End.teams.beach_won[team]` in place of `team_won` on 2b.
+- Sounds: `On::{PlungerReady, Plunger, RadioClick { end }, Detonation, Debris, StrikeCall, StrikeBlast}`; play at `Cue::at` when set and `Cue::delay` ticks late. `MapSounds.lines["escape"]` (`Line { file, volume, note }`) for a human villager's escape, unpositioned; duck the music as its note says (0x4650 → 0x1E0A at −0x233 a frame, back at +0x1000).
+- Escape (§2): the escapee's alpha −16 a frame, then hidden; a fade to black of alpha 0x11 on its view for the last 30 ticks; on respawn, the new look and a fade in from black over 100 VIs (255 − e·255/100, e +2 a frame).
+- Detonation (§7): camera cut to level camera 0x9002 for 60 frames with one viewport and player 0 a villager (`det1_camera.csv`); a shake of 8 for 100 VIs on every view (`func_151D8868 {1, 100, 8, 0xF, −1}`); explosions of size 4r+12 at the three records.
+- Strike (§7): red light kind 0x600 at the target, size 86 → 9 → 38 → 25 over the 40 frames to the blast; flash = `iris.png` tinted 0xFF0000, alpha 0xF8 → 0xC2, centred at (146, 83), then black (ev3 DL 1046-1060); ground decal 0x3103 not in the pack.
+- Water: node `04-2b-05@1` of `maps/2b/level.gltf`, material 50 (`m50-tex0530`): scroll its texture's T by +0.25 texel a frame.
+
+| Check (2026-10-13) | Result |
+|---|---|
+| `conker-extract` `rom.rs` | `beach_outros_follow_the_oracle` (the old scratch check, now a test: lengths, cameras, actors, voices, every frame vs the oracle CSVs in `beach-presentation-scratch`); `villager_looks_hide_their_lists` (masks, primitives and triangles per list, lists drawn per class) |
+| `conker-extract` `pack.rs` | looks read back (12 + 4 classes, none elsewhere); Beach cues, lines and outro voices; HUD sizes, the strip's heads vs det1 DL 318, the countdown's digits "81" (det1) and "89" (e1 DL 99) laid out as the DLs, the STATS header tiles vs cs4/cs3 |
+| Textures vs the oracle's RAM | `beach_teams`, `explosion`, `smoke`: every pixel equal to the RAM bytes after undoing the odd-row interleave; `fire`, `shell`: equal to the RAM PNGs |
+| Fresh export (`--out /tmp/pack-beach`, `package.json`'s flags) vs `../assets` | new: 6 HUD PNGs, `audio/characters/156/{1705,1707}`, `157/{1701,1703}`, `audio/common/{0696,1456,1457,1693,1694}`, `audio/maps/2b/voice-{161,163,1a8}.wav`; changed: `README.md`, `events.json`, `sounds.json`, `hud.json`, `end.json` (additions only), `maps/2b/{background.wav,lights.json,outros.json}`, `characters/{156,157}/character.json` (looks), all 12 `character.gltf` (extras) and `character.bin` of 156, 157, 40, 88, 90 (split primitives). Copied in: `diff -r` empty |
+| `bun run test`, `bun run check` | pass (the whole workspace, with the Beach gameplay agent's work in progress) |
+
+Gaps:
+- Outros: song 0x8A (cs4 t 1), cs3's near plane 30, the actors' part masks (op 5 0x3C), props 0xFC/0xFD, the Tediz'
+  attachment set 0x70, head turns (op 0x11) are not decoded.
+- Not packed: the escape's positional loop 0x4A7 at (−1536, −1434, −3769); the bots' radio record (`func_15103AA0`);
+  song 0x4D's channels 13/14, which follow a source at (0, −377, 8227) (4000/3000) and are not in the south recording;
+  the strike's decal 0x3103; the explosions' sizes over time and the particle emitter; the sweeping ground lights.
+- The lamps' flicker (behaviour 4) is not modelled (steady). The groundwork's emitters start at 1099, the research
+  says 1100-1108: left as packed.
+- The new background loop, radio and outro voices were not listened to.
+- The research doc still points at `/tmp/beachp` (deleted) and the scratch `beach_outro_check.rs`, which
+  `beach_outros_follow_the_oracle` replaces.
+
 ## Map 0x2B, the Beach, and the villagers 156/157: the pack and Deathmatch on it (2026-10-13)
 **The groundwork for War: Beach (scenario 8): `conker-extract pack --map 2b` packs scene 0x2B and the villagers
 (models 156 and 157), and `conker-server --map 2b` plays Deathmatch on it with the original's start records and its two

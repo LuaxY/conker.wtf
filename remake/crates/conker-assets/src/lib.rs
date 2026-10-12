@@ -267,6 +267,10 @@ pub struct Character {
     pub clips: Vec<ClipInfo>,
     #[serde(rename = "root_motion")]
     pub root_clips: Vec<RootClip>,
+    /// War: Beach's villager looks drawn with this model: class → the display lists it hides (bit
+    /// k: the glTF primitives whose `extras.list` is k). Empty (absent) for the other characters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub looks: std::collections::BTreeMap<u8, u8>,
 }
 
 /// What a match on one map, with its characters and one weapon set, reads from the pack: the
@@ -900,6 +904,7 @@ mod tests {
                     model_lift: 42,
                     clips: vec![],
                     root_clips: vec![],
+                    looks: [(0x11, 0x3A), (0x1C, 0x0C)].into(),
                 },
                 Character {
                     model_lift: 43,
@@ -916,6 +921,7 @@ mod tests {
                         z: vec![0, -32, 4577],
                         end: -9,
                     }],
+                    looks: Default::default(),
                 },
             ],
             held: vec![Held {

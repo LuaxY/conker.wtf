@@ -514,6 +514,232 @@ fn colors_outros_follow_the_oracle() {
     }
 }
 
+/// War: Beach's outros (scene 0x2B's cutscenes 4 and 3, `beach-presentation.md` §4) against the
+/// oracle's frames (`../lab/research/mp-original/beach-presentation-scratch/outro_cs{3,4}_{camera,
+/// actors}.csv`, `fade_cs{3,4}.csv`, runs cs4/cs3: read 298 (cs4) or 147 (cs3) is the outro's frame
+/// 0), every frame from 1 through the STATS, as Colors' are checked; the lengths, cameras, actors,
+/// characters (156 and 157 play clips the pack's villagers carry: the Tedi's), voices (cs4 0x163 at
+/// t 200, cs3 0x161 at 40), no subtitles. Left out by the decoder (not in the CSVs): song 0x8A (op
+/// 8), cs3's near plane 30 (op 5 b=0x25), the actors' part masks (op 5 b=0x3C), the kind-3 props
+/// 0xFC/0xFD, the Tediz' attachment set 0x70 (op 0x0D), the head turn (op 0x11).
+#[test]
+fn beach_outros_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let outros = conker_extract::outro::outros(&rom, 0x2B).unwrap();
+    let characters = conker_extract::outro::characters(&rom, &outros).unwrap();
+    let [cs4, cs3] = &outros[..] else {
+        panic!("two outros")
+    };
+    assert_eq!((cs4.winner, cs4.cutscene, cs4.length), (0, 4, 650));
+    assert_eq!((cs3.winner, cs3.cutscene, cs3.length), (1, 3, 1150));
+    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
+    assert_eq!(entries, [156, 157, 90]);
+    let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
+        std::iter::once(&o.camera)
+            .chain(&o.cuts)
+            .map(|c| c.from)
+            .collect()
+    };
+    assert_eq!((from(cs4), from(cs3)), (vec![0, 400, 550], vec![0]));
+    assert_eq!((cs4.actors().count(), cs3.actors().count()), (4, 8));
+    assert!(cs4.subtitles.is_none() && cs3.subtitles.is_none());
+    let voice = |o: &conker_assets::outro::Outro| {
+        let v = o.voice.as_ref().unwrap();
+        (v.t, v.entry, v.file.clone())
+    };
+    assert_eq!(voice(cs4), (200, 0x163, "maps/2b/voice-163.wav".into()));
+    assert_eq!(voice(cs3), (40, 0x161, "maps/2b/voice-161.wav".into()));
+    // The pack draws 156 and 157 with the Tedi's clips (the same bank-02 entry): every clip these
+    // outros play is there under its name.
+    let tedi = extract_character::Character::load(&rom, 117).unwrap();
+    let names: BTreeSet<String> = (tedi.playable_clips())
+        .map(|c| {
+            conker_assets::ClipInfo {
+                pair: c.pair,
+                logical: c.logical.clone(),
+                frames: c.frames.len(),
+                duration_ticks: c.duration,
+            }
+            .animation()
+        })
+        .collect();
+    for a in outros.iter().flat_map(|o| o.actors()) {
+        if a.character != "90" {
+            assert!(a.clips().all(|c| names.contains(c.0)), "{}", a.character);
+        }
+    }
+
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/beach-presentation-scratch"
+    );
+    let rows = |file: &str| -> Option<Vec<Vec<String>>> {
+        let text = std::fs::read_to_string(format!("{dir}/{file}")).ok()?;
+        Some(
+            text.lines()
+                .skip(1)
+                .map(|l| l.split(',').map(String::from).collect())
+                .collect(),
+        )
+    };
+    let Some(..) = rows("outro_cs4_camera.csv") else {
+        eprintln!("{dir}: no oracle CSVs, skipping the frames");
+        return;
+    };
+    for (o, n, first) in [(cs4, 4, 298), (cs3, 3, 147)] {
+        let camera = rows(&format!("outro_cs{n}_camera.csv")).unwrap();
+        for row in &camera {
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 {
+                continue;
+            }
+            let t = o.t(k);
+            assert_eq!(t, f(1), "cs{n} read {read}");
+            let (eye, at) = o.camera(t);
+            for i in 0..3 {
+                assert!(
+                    (eye[i] - f(4 + i)).abs() < 0.05,
+                    "cs{n} read {read}: eye {eye:?}"
+                );
+                assert!(
+                    (at[i] - f(7 + i)).abs() < 0.05,
+                    "cs{n} read {read}: at {at:?}"
+                );
+            }
+            let yaw = conker_assets::outro::value(&o.view(t).yaw, t) + 90.0;
+            assert!(
+                ((yaw - f(10) + 180.0).rem_euclid(360.0) - 180.0).abs() < 1e-3,
+                "cs{n} read {read}: yaw {yaw}"
+            );
+        }
+        let actors: Vec<_> = o.actors().collect();
+        let mut objects: Vec<u32> = Vec::new();
+        let rows_actors = rows(&format!("outro_cs{n}_actors.csv")).unwrap();
+        for row in &rows_actors {
+            let obj: u32 = row[2].parse().unwrap();
+            if !objects.contains(&obj) {
+                objects.push(obj);
+            }
+            let a = actors[objects.iter().position(|&x| x == obj).unwrap()];
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 {
+                continue;
+            }
+            let t = o.t(k);
+            let place = a.place(t);
+            for i in 0..3 {
+                assert!(
+                    (place[i] - f(6 + i)).abs() < 0.05,
+                    "cs{n} read {read} object {obj}: place {place:?}"
+                );
+            }
+            let facing: u16 = row[9].parse().unwrap();
+            assert!(
+                a.facing(t).abs_diff(facing) <= 1,
+                "cs{n} read {read} object {obj}: facing {}",
+                a.facing(t)
+            );
+            let (clip, time) = a.clip(k);
+            let (name, ticks) = a.clips().nth(clip).unwrap();
+            let logical: u16 = row[10].parse().unwrap();
+            assert!(
+                name.ends_with(&format!("_anim_{logical:04}"))
+                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                        && c.clips.iter().any(|x| x.logical.contains(&logical)
+                            && name.starts_with(&format!("pair_{:04}", x.pair)))),
+                "cs{n} read {read} object {obj}: clip {name}, want {logical}"
+            );
+            let off = (time - f(12)).abs();
+            assert!(
+                off.min(f32::from(ticks) - off) < 0.01,
+                "cs{n} read {read} object {obj}: clip time {time}, want {}",
+                f(12)
+            );
+        }
+        assert_eq!(objects.len(), actors.len());
+        // V: 325 + 575 camera rows, 1300 + 4600 actor rows.
+        let frames = [(4, 325), (3, 575)].iter().find(|r| r.0 == n).unwrap().1;
+        assert_eq!(
+            (camera.len(), rows_actors.len()),
+            (frames + 1, (frames + 1) * actors.len()),
+            "cs{n} rows"
+        );
+        for row in rows(&format!("fade_cs{n}.csv")).unwrap() {
+            let read: u32 = row[0].parse().unwrap();
+            if read > first {
+                let want: u8 = row[6].parse().unwrap();
+                assert_eq!(o.fade(o.t(read - first)), want, "cs{n} read {read}");
+            }
+        }
+    }
+}
+
+/// War: Beach's villagers (`beach-presentation.md` §5): classes 0x11-0x20 give 12 looks of model
+/// 156 and 2 of 157, each hiding display lists by its mask; the glTF keeps each list in its own
+/// primitives (`extras.list`), so a look draws what the original's mask leaves (V: e1 DL 270, 156
+/// with mask 0x0E, calls lists 0, 4 and 5; e1 DL 99, 157 with 0x0A, lists 0, 2 and 4).
+#[test]
+fn villager_looks_hide_their_lists() {
+    use conker_extract::villager_look;
+    let masks: Vec<_> = (0x11..=0x20).map(|c| villager_look(c).unwrap()).collect();
+    let male = [
+        0x3A, 0x38, 0x1A, 0x18, 0x36, 0x34, 0x16, 0x14, 0x2E, 0x2C, 0x0E, 0x0C,
+    ];
+    let want: Vec<_> = (male.iter().map(|&m| (156, m)))
+        .chain([0x0A, 0x0A, 0x14, 0x14].map(|m| (157, m)))
+        .collect();
+    assert_eq!(masks, want);
+    assert_eq!((villager_look(0x10), villager_look(0x21)), (None, None));
+    let Some(rom) = rom() else { return };
+    let textures = rom.textures().unwrap();
+    let tedi = extract_character::Character::load(&rom, 117).unwrap();
+    let mut drawn = Vec::new();
+    for (model, per_list) in [(156, &[11, 1, 1, 1, 1, 1][..]), (157, &[15, 1, 1, 1, 1])] {
+        let c = conker_extract::on_tedi_rig(&rom, model, &tedi).unwrap();
+        assert_eq!(c.model.lists.len(), per_list.len());
+        let g = c.gltf(&textures, false).unwrap();
+        let prims = g.json["meshes"][0]["primitives"].as_array().unwrap();
+        let lists: Vec<u64> = (prims.iter())
+            .map(|p| p["extras"]["list"].as_u64().unwrap())
+            .collect();
+        let counts: Vec<usize> = (0..per_list.len() as u64)
+            .map(|k| lists.iter().filter(|&&l| l == k).count())
+            .collect();
+        assert_eq!(counts, per_list, "{model}");
+        // Each list's triangles are all in its primitives.
+        for (k, ir) in c.model.lists.iter().enumerate() {
+            let triangles: usize = ir.draws.iter().map(|d| d.triangles.len()).sum();
+            let indices: u64 = (prims.iter().filter(|p| p["extras"]["list"] == k))
+                .map(|p| {
+                    g.json["accessors"][p["indices"].as_u64().unwrap() as usize]["count"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .sum();
+            assert_eq!(indices, 3 * triangles as u64, "{model} list {k}");
+        }
+        for &(_, mask) in masks.iter().filter(|l| l.0 == model) {
+            drawn.push(lists.iter().filter(|&&l| mask >> l & 1 == 0).count());
+        }
+    }
+    // The primitives each class draws.
+    assert_eq!(
+        drawn,
+        [
+            12, 13, 13, 14, 12, 13, 13, 14, 12, 13, 13, 14, 17, 17, 17, 17
+        ]
+    );
+    let shown = |mask: u8, n: u8| (0..n).filter(|k| mask >> k & 1 == 0).collect::<Vec<_>>();
+    assert_eq!(
+        (shown(0x0E, 6), shown(0x0A, 5)),
+        (vec![0, 4, 5], vec![0, 2, 4])
+    );
+}
+
 /// The mounted gun, bank 01 #138 (`mounted-gun.md` §5.2): its seat, pivot and barrels, and its
 /// one clip, the fire loop.
 #[test]

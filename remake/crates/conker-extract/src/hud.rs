@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
-    Align, Anchor, Button, End, Flash, Glyph, Grenades, Gun, Haze, HazeLayer, Health,
+    Align, Anchor, Beach, Button, End, Flash, Glyph, Grenades, Gun, Haze, HazeLayer, Health,
     Horizontal as H, Hud, Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle, Scope, Sprite,
     Strip, Tape, Teams, Text, Texture, Tv, Vertical as V, Weapon,
 };
@@ -26,8 +26,12 @@ const GLYPHS: usize = 95;
 /// `../lab/research/mp-original/total-war-effects.md` §2); its outros' speech bubble and its tail
 /// (V: equal to the RAM's at 0x8025F250 and 0x8022E320 that the outro's DLs draw, `lab/hud/texfind`);
 /// a mounted gun's gunner view's (V: the RAM's that a 1-view gunner's DLs draw, found by `texfind`;
-/// its centre is the `reticle`).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 24] = [
+/// its centre is the `reticle`); War: Beach's strip heads, and the explosions' sprites its
+/// detonation and strike draw (screen-space texrects, not yet used by the remake: V the RAM's at
+/// 0x801CE678, 0x801F7540, 0x801F6120, 0x801F7130 and 0x801E4910 that `../lab/research/mp-original/
+/// beach-presentation-scratch`'s det1 DL 318 and ev3 DL 1044 draw, byte for byte the blob's; the
+/// strike's red flash, 0x80202220, is `iris`).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 29] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -52,6 +56,11 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 24] = [
     ("gun_tick_end", 0x1197, Format::I4, 16, 16, true),
     ("gun_tape_heading", 0xFF3, Format::I8, 16, 8, true),
     ("gun_tape_elevation", 0xFF4, Format::I8, 8, 16, true),
+    ("beach_teams", 0xD12, Format::Rgba32, 16, 32, false),
+    ("explosion", 0x78A, Format::Rgba32, 32, 32, true),
+    ("smoke", 0xE4A, Format::Rgba32, 32, 32, true),
+    ("fire", 0x71F, Format::I8, 32, 32, true),
+    ("shell", 0x1042, Format::Ia16, 16, 16, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):
@@ -307,6 +316,7 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             ],
         },
         gun: gun(),
+        beach: beach(),
         end: None,
     }
 }
@@ -413,6 +423,30 @@ fn strip() -> Strip {
     }
 }
 
+/// War: Beach's HUD (`../lab/research/mp-original/beach-presentation.md` §1; V det1 DL 318, e1 DL
+/// 99, cs4/cs3 DL 700/800): Total War's strip (`func_151E9D18`) with texture 0xD12's heads, the
+/// villagers' (0, 16) at x 198 and the Tediz' (0, 0) at 66, the team scores as the numbers; the
+/// escape countdown (`func_1508A6FC`: `"%d"` of the timer / 60, white, centred on the view's
+/// centre x, its top 6 below the view's).
+fn beach() -> Beach {
+    let mut strip = strip();
+    let heads = [
+        image("beach_teams", [0, 16, 16, 16]),
+        image("beach_teams", [0, 0, 16, 16]),
+    ];
+    (strip.kills, strip.lives) = (heads.clone(), heads);
+    Beach {
+        strip,
+        escape: Text {
+            anchor: Anchor(H::Centre, V::Top),
+            at: [146, 6],
+            align: Align::Centre,
+            colour: [255, 255, 255, 255],
+            shadow: None,
+        },
+    }
+}
+
 /// `hud/`'s files: `hud.json`, a PNG per texture and one per glyph (`font/<n>.png`, in the game's
 /// order: its character list names two glyphs `ê` and two `ô`, the first of each is the one drawn).
 pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
@@ -455,7 +489,7 @@ pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
 /// tiles stored for a LOADBLOCK without dxt (odd rows' texels at x ^ 2); a sprite of several tiles
 /// (`.game` data's sprite records at 0x800859E0: tiles across, the first id) is one PNG. The stick
 /// is 0x7E8, the tile drawn (its record names 0x7E7). V: `lab/research/mp-original` (STATS screen).
-const END_TEXTURES: [(&str, usize, usize, bool); 17] = [
+const END_TEXTURES: [(&str, usize, usize, bool); 18] = [
     ("lives", 0xD14, 1, false),
     ("skull", 0xD0F, 1, true),
     ("stats", 0x816, 2, false),
@@ -475,6 +509,8 @@ const END_TEXTURES: [(&str, usize, usize, bool); 17] = [
     ("win", 0x86D, 2, false),
     ("lose", 0x85B, 2, false),
     ("draw", 0x853, 2, false),
+    // War: Beach's: sprite 0x55 FRENCHYS (its team 0's name, id 9: 0x4C + 9).
+    ("frenchys", 0x855, 3, false),
 ];
 
 /// `end.json`'s layout, the original's draws (V, the oracle's display lists: `lab/research/
@@ -550,6 +586,17 @@ fn end_layout(textures: std::collections::BTreeMap<String, Texture>) -> End {
                 [
                     placed([77, 34, 96, 32], "squirrels", [0, 0, 96, 32]),
                     placed([172, 34, 64, 32], "win", [0, 0, 64, 32]),
+                ],
+                [
+                    placed([81, 34, 64, 32], "tediz", [0, 0, 64, 32]),
+                    placed([151, 34, 64, 32], "win", [0, 0, 64, 32]),
+                ],
+            ],
+            // V cs4 DL 700 (FRENCHYS's tiles at 65, 97, 129), cs3 DL 800: no shift like SQUIRRELS'.
+            beach_won: [
+                [
+                    placed([65, 34, 96, 32], "frenchys", [0, 0, 96, 32]),
+                    placed([151, 34, 64, 32], "win", [0, 0, 64, 32]),
                 ],
                 [
                     placed([81, 34, 64, 32], "tediz", [0, 0, 64, 32]),

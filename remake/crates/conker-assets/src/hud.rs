@@ -296,6 +296,16 @@ pub struct Gun {
     pub flash: Flash,
 }
 
+/// War: Beach's HUD (scenario 8, map 0x2B), the rest as usual: Total War's strip with the heads of
+/// texture 0xD12 (team [0] the villagers, [1] the Tediz; the numbers are the team scores, in
+/// `kills` and `lives` alike), and a villager's `escape` countdown: the seconds left to reach an
+/// exit (90 down to 0), white, at its view's top centre; none for a Tedi.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Beach {
+    pub strip: Strip,
+    pub escape: Text,
+}
+
 /// `hud/hud.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hud {
@@ -321,6 +331,7 @@ pub struct Hud {
     pub countdown: Text,
     pub haze: Haze,
     pub gun: Gun,
+    pub beach: Beach,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,
@@ -340,8 +351,12 @@ impl Hud {
             ("haze.image".into(), &self.haze.image),
         ];
         all.extend((self.weapon.icons.iter()).map(|(id, i)| (format!("weapon.icons.{id}"), i)));
-        for (name, icons) in [("kills", &self.strip.kills), ("lives", &self.strip.lives)] {
-            all.extend((icons.iter().enumerate()).map(|(n, i)| (format!("strip.{name}[{n}]"), i)));
+        let strips = [("strip", &self.strip), ("beach.strip", &self.beach.strip)];
+        for (strip, s) in strips {
+            for (name, icons) in [("kills", &s.kills), ("lives", &s.lives)] {
+                let icons = icons.iter().enumerate();
+                all.extend(icons.map(|(n, i)| (format!("{strip}.{name}[{n}]"), i)));
+            }
         }
         all.extend((self.flags.iter().enumerate()).map(|(n, f)| (format!("flags[{n}]"), &f.image)));
         let gun = &self.gun;
@@ -476,7 +491,8 @@ pub struct Results {
 /// [`Results`] puts them, each row in its team's colour (`results.colours[team]`), the team strip
 /// ([`Strip`]) under them, and a header: `draw` when both teams are 1st; with one human, `won` or
 /// `lost` (YOU WIN, YOU LOSE: its team's place); with more, `team_won[team]` (the winning team's
-/// name and WIN; [0] the squirrels, [1] the Tediz).
+/// name and WIN; [0] the squirrels, [1] the Tediz). War: Beach's the same with `beach_won` ([0]
+/// the villagers' FRENCHYS WIN, [1] the Tediz') instead of `team_won`, and rows for its Tediz only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Teams {
     pub down: i16,
@@ -484,6 +500,7 @@ pub struct Teams {
     pub won: [Placed; 2],
     pub lost: [Placed; 2],
     pub team_won: [[Placed; 2]; 2],
+    pub beach_won: [[Placed; 2]; 2],
 }
 
 /// `hud/end.json`: what the end of a match draws, in [`Hud::frame`] like the HUD: the lives left
@@ -522,7 +539,8 @@ impl End {
         let header = [("draw", &t.draw)].into_iter().chain(
             (t.won.iter().map(|p| ("won", p)))
                 .chain(t.lost.iter().map(|p| ("lost", p)))
-                .chain(t.team_won.iter().flatten().map(|p| ("team_won", p))),
+                .chain(t.team_won.iter().flatten().map(|p| ("team_won", p)))
+                .chain(t.beach_won.iter().flatten().map(|p| ("beach_won", p))),
         );
         all.extend(header.map(|(name, p)| (format!("teams.{name}.image"), &p.image)));
         all

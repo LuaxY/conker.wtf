@@ -142,20 +142,27 @@ impl Character {
         let pivots = bind_pivots(joints)?;
         let mut buf = Buffer::default();
 
-        // Geometry: one primitive per distinct draw state, in first-use order.
+        // Geometry: one primitive per display list and distinct draw state, in first-use order
+        // (the game hides lists by a mask, obj+0x94: the villagers' looks); materials deduplicated.
         let mut materials: Vec<Material> = Vec::new();
-        let mut prims: Vec<Primitive> = Vec::new();
+        let mut prims: Vec<(usize, usize, Primitive)> = Vec::new();
         for (li, ir) in self.model.lists.iter().enumerate() {
             for draw in &ir.draws {
-                let p = match materials.iter().position(|m| *m == draw.material) {
-                    Some(p) => p,
+                let m = match materials.iter().position(|m| *m == draw.material) {
+                    Some(m) => m,
                     None => {
                         materials.push(draw.material);
-                        prims.push(Primitive::default());
+                        materials.len() - 1
+                    }
+                };
+                let p = match prims.iter().position(|p| (p.0, p.1) == (li, m)) {
+                    Some(p) => p,
+                    None => {
+                        prims.push((li, m, Primitive::default()));
                         prims.len() - 1
                     }
                 };
-                let prim = &mut prims[p];
+                let prim = &mut prims[p].2;
                 let texture = draw.material.texture;
                 for tri in &draw.triangles {
                     let mut pos = [[0f64; 3]; 3];
@@ -237,7 +244,7 @@ impl Character {
         }
 
         let mut primitives = Vec::new();
-        for (i, p) in prims.iter().enumerate() {
+        for (list, material, p) in &prims {
             let mut attributes = json!({
                 "POSITION": buf.floats(&p.positions, true),
                 "NORMAL": buf.floats(&p.normals, false),
@@ -252,7 +259,8 @@ impl Character {
             primitives.push(json!({
                 "attributes": attributes,
                 "indices": buf.accessor(&indices, UNSIGNED_INT, "SCALAR", p.indices.len(), Value::Null),
-                "material": i,
+                "material": material,
+                "extras": {"list": list},
             }));
         }
 

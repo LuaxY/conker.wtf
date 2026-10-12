@@ -601,11 +601,12 @@ fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Res
         let mut p = play(sounds, 28000, Some(24000), 500, 2500, Channel::B);
         (p.chance, p.if_idle) = (chance, if_idle);
         cues.push(Cue {
-            on,
             character: Some(character.into()),
-            play: p,
-            then: vec![],
-            note: format!("the victim's voice: reaction {reaction:#x}'s word {word:#x} (C func_1505E874, ROM tables)"),
+            ..cue(
+                on,
+                p,
+                &format!("the victim's voice: reaction {reaction:#x}'s word {word:#x} (C func_1505E874, ROM tables)"),
+            )
         });
     }
     Ok(cues)
@@ -625,6 +626,8 @@ fn cue(on: On, play: Play, note: &str) -> Cue {
         character: None,
         play,
         then: vec![],
+        at: None,
+        delay: 0,
         note: note.into(),
     }
 }
@@ -1076,6 +1079,96 @@ fn gun_cues() -> Vec<Cue> {
     ]
 }
 
+/// War: Beach's sounds (`../lab/research/mp-original/beach-presentation.md` §6; V: the oracle's sound
+/// calls, `beach-presentation-scratch/snd_ev_calls.txt`, a record's args being volume, far, near).
+/// Its two flickering lamps' buzz is the map's two emitters (`map_sounds`).
+fn beach_cues() -> Vec<Cue> {
+    // A radio voice (`func_15103C14`): a record at the speaker heard everywhere (30000, far
+    // 0x7FFF, near 0x7FFE), its callback `func_15103910` clicking on the speaker's channel B first.
+    let radio = |on: On, character: &str, id, note: &str| Cue {
+        character: Some(character.into()),
+        delay: 10,
+        ..cue(on, record([id], 30000, 0x7FFE, 0x7FFF), note)
+    };
+    let detonation = |id, at, delay| Cue {
+        at: Some(at),
+        delay,
+        ..cue(
+            On::Detonation,
+            record([id], 28000, 7000, 9000),
+            "one of the detonation's three records (C func_150FCA30; V ev2: at the call, 0x2B7 at once, \
+             0x2B8 45 VIs later, 0x2B6 90 VIs later, heard in frames 617, 640, 662)",
+        )
+    };
+    let mut cues = vec![
+        radio(
+            On::PlungerReady,
+            "156",
+            0x6A9,
+            "a male villager in trigger 0x25 while the plunger is ready (C func_1509EFF0; V ev2 read 413, 20 VIs after the click)",
+        ),
+        radio(
+            On::PlungerReady,
+            "157",
+            0x6A5,
+            "a female villager in trigger 0x25 while the plunger is ready (C func_1509EFF0)",
+        ),
+        radio(
+            On::Plunger,
+            "156",
+            0x6AB,
+            "a male villager on the plunger (C; not heard in ev3: the 600-VI cooldown per player, 0x800D9AB0)",
+        ),
+        radio(
+            On::Plunger,
+            "157",
+            0x6A7,
+            "a female villager on the plunger (C)",
+        ),
+        cue(
+            On::RadioClick { end: false },
+            play([0x5B0], 25000, Some(25000), 100, 120, Channel::B),
+            "the radio's click on, at the call (C func_15103910; V ev2 read 402). A player without a camera: no \
+             click, the record at 0x7FBC (C func_15103AA0, not exported)",
+        ),
+        cue(
+            On::RadioClick { end: true },
+            play([0x5B1], 30000, Some(30000), 0x7FFE, 0x7FFF, Channel::B),
+            "the radio's click off, when the voice has played (C func_15103910; V ev2 read 511)",
+        ),
+        detonation(0x2B7, [-319, -273, -3419], 0),
+        detonation(0x2B8, [-2038, 1560, -2631], 23),
+        detonation(0x2B6, [1519, 947, -2633], 45),
+        cue(
+            On::Debris,
+            play(range(0x1B9, 9), 24000, None, 500, 1000, Channel::Free),
+            "each piece of debris landing (C func_15133D20; V ev2 655-694 after the detonation, ev3 1082-1109 after the strike)",
+        ),
+        cue(
+            On::StrikeCall,
+            record([0x69E], 32000, 500, 3000),
+            "the strike's call, a record at the villager (C func_150FCFD4; V ev3 read 1004)",
+        ),
+        cue(
+            On::StrikeBlast,
+            play([0x69D], 32000, None, 500, 3000, Channel::Free),
+            "the strike's blast, 40 frames after the call, at its spot (C func_150FD514; V ev3 read 1044)",
+        ),
+    ];
+    for character in ["156", "157"] {
+        cues.push(Cue {
+            character: Some(character.into()),
+            ..cue(
+                On::StrikeCall,
+                play(range(1715, 12), 28000, Some(24000), 500, 2500, Channel::B),
+                "the villager's voice at the call: its pain voice, as its hit voices (C func_1505E874 from \
+                 func_1505D024, damage 0x39; V ev3 read 1004: 1725 at 24000, its own)",
+            )
+        });
+    }
+    cues
+}
+
 /// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.
 /// 0x2D: two bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
 /// capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
@@ -1134,7 +1227,28 @@ pub fn pack_audio(
         let mut map = MapSounds {
             background: vec![],
             emitters,
+            lines: BTreeMap::new(),
         };
+        // War: Beach's escape: MP3 0x1A8 for a human escapee (`func_1001263C(0x1A8, 0x7FFF, 0x40)`).
+        if name == "2b" {
+            cues.extend(beach_cues());
+            let file = format!("maps/{name}/voice-1a8.wav");
+            files.push((
+                format!("audio/{file}"),
+                mp3_wav(&rom.asset(&[0x16, 0x1A8])?)?,
+            ));
+            let note = "a human villager's escape: the radio, centred, while the music's volume ducks from 0x4650 \
+                        to 0x1E0A (−0x233 a frame) and comes back at +0x1000 a frame once it ends; not when an \
+                        MP3 already plays (C func_1509E640; V e1 read 101, snd ev 103-121, 308-312)";
+            map.lines.insert(
+                "escape".into(),
+                pack::Line {
+                    file,
+                    volume: 32767,
+                    note: note.into(),
+                },
+            );
+        }
         if let Some(wav) = background {
             let file = format!("maps/{name}/background.wav");
             map.background.push(Background {

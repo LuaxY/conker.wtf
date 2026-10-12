@@ -204,6 +204,24 @@ pub enum On {
     /// A gunner's aim (the yaw target times the pitch target), heard by the gunner: `step` 0
     /// while it keeps changing (from its 10th VI of change, a loop), 1 when it stops.
     GunAim { step: u8 },
+    /// War: Beach: a villager walking into the plunger's voice trigger (0x25) while the plunger is
+    /// ready: its radio voice, [`Cue::delay`] after [`On::RadioClick`]'s click on.
+    PlungerReady,
+    /// War: Beach: a villager setting the plunger off: its radio voice, as [`On::PlungerReady`].
+    Plunger,
+    /// War: Beach: a radio voice's click on its speaker's voice slot: when the voice is called
+    /// (`end` false), and when it has played (`end` true).
+    RadioClick { end: bool },
+    /// War: Beach: the plunger's detonation, three blasts, each at its [`Cue::at`] after its
+    /// [`Cue::delay`].
+    Detonation,
+    /// A piece of debris landing (the detonation's and the strike's), at it.
+    Debris,
+    /// War: Beach: the artillery strike called on a villager whose escape countdown reached 0, at
+    /// the villager.
+    StrikeCall,
+    /// War: Beach: the strike's shell landing, 40 frames after the call, at the same spot.
+    StrikeBlast,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,6 +232,12 @@ pub struct Cue {
     pub play: Play,
     /// Played when a [`On::Firing`] loop ends, from where it was, at its last volume.
     pub then: Vec<Play>,
+    /// Plays at this world point instead of at the event's (absent: the event's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[i16; 3]>,
+    /// Ticks after the event (absent: 0).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delay: u16,
     /// Where it comes from in the game and how sure it is (V seen on the oracle, C read in the
     /// code, I inferred).
     pub note: String,
@@ -234,6 +258,21 @@ pub struct Events {
 pub struct MapSounds {
     pub background: Vec<Background>,
     pub emitters: Vec<Emitter>,
+    /// The voice lines the map's mode plays (the game's MP3s), by what plays them (absent: none).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lines: BTreeMap<String, Line>,
+}
+
+/// A voice line: `file` (relative to `audio/`) played unpositioned at `volume` (out of 32767).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Line {
+    pub file: String,
+    pub volume: u16,
+    pub note: String,
+}
+
+fn is_zero(v: &u16) -> bool {
+    *v == 0
 }
 
 /// `audio/sounds.json` and `audio/events.json`; the WAV files are loaded by path (Bevy's asset
@@ -303,11 +342,13 @@ impl Audio {
             }
         }
         for (map, m) in &events.maps {
-            if let Some(b) = m.background.iter().find(|b| !safe(&b.file)) {
+            let files =
+                (m.background.iter().map(|b| &b.file)).chain(m.lines.values().map(|l| &l.file));
+            if let Some(file) = files.into_iter().find(|f| !safe(f)) {
                 return Err(invalid(
                     EVENTS,
                     format!("maps.{map}"),
-                    format!("{:?}: a path inside audio/", b.file),
+                    format!("{file:?}: a path inside audio/"),
                 ));
             }
         }
@@ -390,6 +431,14 @@ mod tests {
                             play: play(vec![577]),
                             start_chance: 0.005,
                         }],
+                        lines: BTreeMap::from([(
+                            "escape".into(),
+                            Line {
+                                file: "maps/2b/voice-1a8.wav".into(),
+                                volume: 32767,
+                                note: "V".into(),
+                            },
+                        )]),
                     },
                 )]),
                 characters: BTreeMap::from([(
@@ -424,6 +473,8 @@ mod tests {
                     character: Some("128".into()),
                     play: play(vec![577]),
                     then: vec![play(vec![1254])],
+                    at: Some([-319, -273, -3419]),
+                    delay: 23,
                     note: "V".into(),
                 }],
             },
@@ -474,6 +525,13 @@ mod tests {
         assert_eq!(
             e,
             "audio/sounds.json: sounds.577.file: a path inside audio/"
+        );
+        let mut audio = sample();
+        let lines = &mut audio.events.maps.get_mut("2d").unwrap().lines;
+        lines.get_mut("escape").unwrap().file = "/x.wav".into();
+        assert_eq!(
+            load(&files(&audio)).unwrap_err().to_string(),
+            r#"audio/events.json: maps.2d: "/x.wav": a path inside audio/"#
         );
         let mut f = files(&sample());
         f.remove(SOUNDS);

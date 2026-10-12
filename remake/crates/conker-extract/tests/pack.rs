@@ -199,6 +199,19 @@ fn pack_reads_back_as_the_rom_path() {
             (&tedi.clips, &tedi.root_clips)
         );
     }
+    // Their looks (War: Beach's classes 0x11-0x20, `villager_look`): 12 on 156, 4 classes on 157.
+    for (k, model) in [(3, 156), (4, 157)] {
+        let looks: BTreeMap<u8, u8> = (0x11..=0x20)
+            .filter_map(|c| {
+                conker_extract::villager_look(c)
+                    .filter(|l| l.0 == model)
+                    .map(|l| (c, l.1))
+            })
+            .collect();
+        assert_eq!(beach.characters[k].looks, looks);
+        assert_eq!(looks.len(), [12, 4][k - 3]);
+    }
+    assert!(beach.characters[..3].iter().all(|c| c.looks.is_empty()));
     // The client finds each clip's animation by name.
     for name in names {
         let character: Value =
@@ -508,8 +521,11 @@ fn pack_audio_reads_back() {
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
-    // The War outros' voices (`maps/<map>/outros.json`: Total War's on 2d, Colors' on 30).
-    for map in ["2d", "30"] {
+    // The War outros' voices (`maps/<map>/outros.json`: Total War's on 2d, Colors' on 30, Beach's
+    // on 2b) and the maps' voice lines (Beach's escape).
+    let lines = audio.events.maps.values().flat_map(|m| m.lines.values());
+    listed.extend(lines.map(|l| format!("audio/{}", l.file)));
+    for map in ["2d", "30", "2b"] {
         let file = format!("maps/{map}/outros.json");
         let outros: Vec<conker_assets::outro::Outro> =
             serde_json::from_slice(files[file.as_str()]).unwrap();
@@ -643,6 +659,47 @@ fn pack_audio_reads_back() {
     assert_eq!(cue(&On::Gun { from: 3, to: 4 }, None), Some(vec![0x616]));
     assert_eq!(cue(&On::GunStop, None), Some(vec![0x618, 0x619, 0x61A]));
     assert_eq!(cue(&On::GunZoom { step: 2 }, None), Some(vec![0x622]));
+    // War: Beach (`beach-presentation.md` §6; V the oracle's sound calls): the escape's radio (MP3
+    // 0x1A8), the radio voices and their clicks, the detonation's three records, the strike.
+    let line = &audio.events.maps["2b"].lines["escape"];
+    assert_eq!(
+        (line.file.as_str(), line.volume),
+        ("maps/2b/voice-1a8.wav", 32767)
+    );
+    let (rate, radio) = read_wav(files["audio/maps/2b/voice-1a8.wav"]).unwrap();
+    let length = radio.len() as f32 / rate as f32;
+    assert!(
+        rate == 22050 && (4.0..8.0).contains(&length),
+        "{rate} Hz {length} s"
+    );
+    for (on, male, female) in [
+        (On::PlungerReady, 0x6A9, 0x6A5),
+        (On::Plunger, 0x6AB, 0x6A7),
+    ] {
+        assert_eq!(cue(&on, Some("156")), Some(vec![male]));
+        assert_eq!(cue(&on, Some("157")), Some(vec![female]));
+    }
+    assert_eq!(cue(&On::RadioClick { end: false }, None), Some(vec![0x5B0]));
+    assert_eq!(cue(&On::RadioClick { end: true }, None), Some(vec![0x5B1]));
+    let blasts: Vec<_> = (audio.events.cues.iter())
+        .filter(|c| c.on == On::Detonation)
+        .map(|c| (c.play.sounds[0], c.at, c.delay, c.play.near, c.play.far))
+        .collect();
+    assert_eq!(
+        blasts,
+        [
+            (0x2B7, Some([-319, -273, -3419]), 0, 7000, 9000),
+            (0x2B8, Some([-2038, 1560, -2631]), 23, 7000, 9000),
+            (0x2B6, Some([1519, 947, -2633]), 45, 7000, 9000)
+        ]
+    );
+    assert_eq!(cue(&On::StrikeCall, None), Some(vec![0x69E]));
+    assert_eq!(
+        cue(&On::StrikeCall, Some("157")),
+        Some((1715..=1726).collect())
+    );
+    assert_eq!(cue(&On::StrikeBlast, None), Some(vec![0x69D]));
+    assert_eq!(cue(&On::Debris, None), Some((0x1B9..=0x1C1).collect()));
 }
 
 /// The pack's HUD (`hud/`): `Hud::load` reads `hud.json` back and writes it out the same, as
@@ -730,4 +787,118 @@ fn pack_hud_reads_back() {
     );
     assert_eq!(hud.gun.handles.each_ref().map(|h| h.rect[0]), [9.0, 185.0]);
     assert_eq!(hud.gun.flash.centre, [205.0, 176.0]);
+
+    // War: Beach (`beach-presentation.md` §1, §3): the strip's heads, the escape countdown and the
+    // STATS header, against the oracle's draws (`beach-presentation-scratch/hw/<run>_dl_<n>/
+    // draws.json`: det1 DL 318 one view, e1 DL 99 P1's view at the top of a split, cs4 DL 700
+    // FRENCHYS WIN, cs3 DL 800 TEDIZ WIN).
+    assert_eq!(
+        (size("beach_teams"), end.textures["frenchys"].size),
+        ([16, 32], [96, 32])
+    );
+    for name in ["explosion", "smoke", "fire"] {
+        assert_eq!(size(name), [32, 32], "{name}");
+    }
+    assert_eq!(size("shell"), [16, 16]);
+    let beach = &hud.beach;
+    // A line's glyph rects as the client lays text out: centred on `at[0]` by its glyphs' widths
+    // less 1 each, or from it; each glyph at the pen plus its offset.
+    let layout = |t: &conker_assets::hud::Text, line: &str, down: i16| -> Vec<[i16; 4]> {
+        use conker_assets::hud::Align;
+        let glyphs: Vec<_> = line.chars().map(|c| hud.glyph(c).unwrap()).collect();
+        let width: i16 = glyphs.iter().map(|g| i16::from(g.size[0]) - 1).sum();
+        let mut pen = match t.align {
+            Align::Left => t.at[0],
+            Align::Centre => t.at[0] - width / 2,
+        };
+        (glyphs.iter())
+            .map(|g| {
+                let [w, h] = g.size.map(i16::from);
+                let [dx, dy] = g.offset.map(i16::from);
+                let rect = [pen + dx, t.at[1] + down + dy, w, h];
+                pen += dx + w - 1;
+                rect
+            })
+            .collect()
+    };
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/beach-presentation-scratch/hw"
+    );
+    let draws = |run: &str| -> Option<Vec<Value>> {
+        let text = std::fs::read_to_string(format!("{dir}/{run}/draws.json")).ok()?;
+        serde_json::from_str(&text).ok()
+    };
+    let Some(det1) = draws("det1_dl_318") else {
+        eprintln!("{dir}: no oracle draws, skipping them");
+        return;
+    };
+    // (rect as [x, y, width, height], texture, s, t, prim) of each draw.
+    let of = |d: &Value| {
+        let r: Vec<i16> = (d["rect"].as_array().unwrap().iter())
+            .map(|v| v.as_f64().unwrap() as i16)
+            .collect();
+        let st = |k: usize| d["st"][k].as_f64().unwrap() as u16;
+        (
+            [r[0], r[1], r[2] - r[0], r[3] - r[1]],
+            d["texture"].as_str().unwrap().to_string(),
+            [st(0), st(1)],
+            d["prim"].as_str().unwrap().to_string(),
+        )
+    };
+    let det1: Vec<_> = det1.iter().map(of).collect();
+    // The heads: villagers at 198 from (0, 16), Tediz at 66 from (0, 0).
+    let heads: Vec<_> = (det1.iter())
+        .filter(|d| d.1.ends_with("RGBA32_16x32"))
+        .map(|d| (d.0, d.2))
+        .collect();
+    let ours: Vec<_> = (0..2)
+        .rev()
+        .map(|k| {
+            let i = &beach.strip.lives[k].rect;
+            (beach.strip.rects[k], [i[0], i[1]])
+        })
+        .collect();
+    assert_eq!(heads, ours);
+    assert_eq!(beach.strip.kills, beach.strip.lives);
+    type Draw = ([i16; 4], String, [u16; 2], String);
+    let glyphs = |draws: &[Draw], prim: &str, y: std::ops::Range<i16>| {
+        (draws.iter())
+            .filter(|d| d.1.contains("_I8_") && d.3 == prim && y.contains(&d.0[1]))
+            .map(|d| d.0)
+            .collect::<Vec<[i16; 4]>>()
+    };
+    // The scores: the Tediz' 0 at 83, the villagers' 1 at 215 (grey over a black shadow).
+    let numbers = [&beach.strip.numbers[1], &beach.strip.numbers[0]];
+    let want: Vec<_> = [(numbers[0], "0"), (numbers[1], "1")]
+        .iter()
+        .flat_map(|(t, line)| layout(t, line, 0))
+        .collect();
+    assert_eq!(glyphs(&det1, "c0c0c0ff", 190..216), want);
+    // The countdown: "81" in one view (top 6), "89" in P1's view of a split (its top 1, + 6).
+    assert_eq!(
+        glyphs(&det1, "ffffffff", 0..30),
+        layout(&beach.escape, "81", 0)
+    );
+    let e1: Vec<_> = draws("e1_dl_99").unwrap().iter().map(of).collect();
+    assert_eq!(
+        glyphs(&e1, "ffffffff", 0..30),
+        layout(&beach.escape, "89", 1)
+    );
+    // The STATS headers' 32-pixel tiles: FRENCHYS WIN (cs4), TEDIZ WIN (cs3).
+    for (run, team) in [("cs4_dl_700", 0), ("cs3_dl_800", 1)] {
+        let tiles: Vec<i16> = (draws(run).unwrap().iter().map(of))
+            .filter(|d| d.3 == "ffff00ff" && d.0[1] == 34)
+            .map(|d| d.0[0])
+            .collect();
+        let ours: Vec<i16> = (end.teams.beach_won[team].iter())
+            .flat_map(|p| (0..p.rect[2] / 32).map(|k| p.rect[0] + 32 * k))
+            .collect();
+        assert_eq!(tiles, ours, "{run}");
+        assert!(
+            end.teams.beach_won[team]
+                .iter()
+                .all(|p| p.rect[1] == 34 && p.rect[3] == 32)
+        );
+    }
 }

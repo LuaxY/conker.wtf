@@ -25,16 +25,16 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/triggers.json` | The scene's trigger records: camera volumes and hints, bot zones, lifts |
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
-| `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, none on the others |
-| `maps/<map>/outros.json` | The War victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), none on the others |
+| `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, War: Beach's night lights on 0x2B, none on the others |
+| `maps/<map>/outros.json` | The War victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), none on the others |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
-| `characters/156/`, `characters/157/` `character.gltf`, `.bin`, `textures/*.png` | Characters 156 and 157, the Beach's villagers (War: Beach's team 0; class 0x14 the male 156, 0x1D and 0x1E the female 157), packed with map 2b. The same skeleton and animations, with a `character.json` |
+| `characters/156/`, `characters/157/` `character.gltf`, `.bin`, `textures/*.png` | Characters 156 and 157, the Beach's villagers (War: Beach's team 0; classes 0x11-0x1C the male 156, 0x1D-0x20 the female 157), packed with map 2b. The same skeleton and animations, with a `character.json` that has their `looks` |
 | `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier) and 90 (a stitched Tedi): the outros' actors, each with the clips they play (`outros.json` says which); no `character.json` |
 | `characters/169/`, `characters/168/` `character.gltf`, `.bin`, `textures/*.png` | War: Colors' red flag (169) and green flag (168), packed with map 30: 9 joints, the cloth's 4 clips (glTF animation n is pair n: 3 standing, at home or let go of; 0 carried; 1 the carrier walking; 2 running), drawn at half their model units like the players; carried, in the carrier's right hand (`joint_09`); no `character.json` |
 | `characters/138/` `character.gltf`, `.bin`, `textures/*.png` | The mounted machine gun, packed with maps 30, 34 and 2b: 12 joints, drawn at half its model units like the players, turned to the gun's yaw. `joint_03` the seat (the gunner sits there); `joint_04` the barrels' and the camera's pivot, which takes the pitch (the gunner's eye is `joint_04` × (0, 116, 130)); `joint_05` and `joint_07` the barrels, their muzzles at (13, 0, 200) and (−13, 0, 200) from them; `joint_06`, `joint_08` the barrel tips; `joint_09`-`joint_11` a side part. One glTF animation, `pair_0000_anim_0001` (logical clip 1): the 12-frame fire loop, played while the gun fires. `textures/character-15.png` (material 15) is the ammunition belt, which scrolls along its S while the fire loop plays: −40 × the frame's VIs per frame on map 30, in the game's texture-scroll units (I: 1/32 texel); map 34's belt scroll is not exported. No `character.json` |
-| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
+| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, and the villagers' looks |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
 | `game/acos.json` | The game's arc-cosine table |
@@ -44,12 +44,12 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/events.json` | Which game event plays which sound, at what volume, from where |
 | `audio/common/*.wav` | Sounds anyone makes: weapons, footsteps, hits, pickups, explosions (16-bit mono PCM, the game's own rates) |
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
-| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots (0x2B's two play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0) |
+| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png` |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
-| `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
+| `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `frenchys.png` (War: Beach's villagers), `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
 
 ## Units and conventions
 
@@ -146,18 +146,21 @@ The original's renderer lights some of the level (on 0x2D its tunnels, towers an
 under the middle; the client draws the rest as the vertex colours say): a lit point's colour is its
 vertex colour times `ambient` plus, per light, the light's `rgb` times min(1, size × 2048 / d²), d
 units away. The level's own light table is not exported; this file holds the lights War: Total
-War's gas switches, which the client draws:
+War's gas switches, which the client draws, and on 0x2B War: Beach's (its night's ambient, two
+white lamps that flicker in the game (not kept here; the map's two emitters are their buzz) and
+the exits' two red lights pulsing):
 - `at`: where it is (unused for `carried`), `rgb` its colour;
 - `size`, `swing`, `step`: its size is `size + swing × sin φ`, φ stepping `step` (radians) a
   frame; the light reaches `362 × √size` units;
-- `when`: `calm` (outside the gas countdown: the shelter's lamps), `countdown` (during it: the
-  shelter's red alarm), `{"shown": N}` (while the prop on placement N is shown: a gas canister at
-  home), `carried` (on each player carrying a canister).
+- `when`: `calm` (outside the gas countdown: the shelter's lamps; on 0x2B, which has none, the
+  whole match), `countdown` (during it: the shelter's red alarm), `{"shown": N}` (while the prop on
+  placement N is shown: a gas canister at home), `carried` (on each player carrying a canister).
 
 ### `maps/<map>/outros.json`
-The War victory outros, one per winning team (`winner`: 0 the squirrels, 1 the Tediz; a DRAW plays
-none), from the original's cutscene `cutscene` of the map's scene (Total War's 2 and 4 on 0x2D,
-Colors' 1 and 5 on 0x30). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
+The War victory outros, one per winning team (`winner`: 0 the squirrels (on 0x2B the villagers), 1
+the Tediz; a DRAW plays none), from the original's cutscene `cutscene` of the map's scene (Total
+War's 2 and 4 on 0x2D, Colors' 1 and 5 on 0x30, Beach's 4 and 3 on 0x2B; Beach's song 0x8A, near
+plane, actors' part masks and props are not exported). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
 outro shows t = min(2k, `length`), a command at t from the first tick with t ≤ 2k (tick 1 at the
 earliest); the results come up after it, over its last picture. Fields an outro doesn't use are left
 out (Total War's are the simplest case).
@@ -194,6 +197,12 @@ out (Total War's are the simplest case).
   - `z`: the root's z per stored frame, 32 per model unit;
   - `end`: its value at the loop point;
   - `step`: ticks between stored frames.
+- `looks` (156 and 157 only): War: Beach's villager classes drawn with this model (class in
+  decimal, 17-32, re-drawn at each spawn) → the display lists the class hides: bit k set hides the
+  glTF primitives whose `extras.list` is k. 156 has lists 0-5 (0 the body), 157 lists 0-4.
+
+`character.gltf` keeps each display list of the model in its own primitives (`extras.list`: its
+index; one per list and material), so a look can hide some.
 
 The characters play the same animations, as in the game (Conker's clips), so their `clips` and
 `root_motion` are the same. Every player moves by 117's `root_motion` (the others' are for reference); each
@@ -262,7 +271,17 @@ Sections:
   heard by the gunner only: `step` 0 while it moves, a loop; 1 when it stops; 2 once step 1's sound
   has ended), `gun_aim` (the gunner's aim: `step` 0 while it keeps changing, from its 10th VI of
   change, a loop; 1 when it stops); and character 128's `firing` with weapon 27 (0x1B, the mounted
-  gun), the squirrel gunner's battle cry. There is no sound per shot.
+  gun), the squirrel gunner's battle cry. There is no sound per shot. War: Beach's (map 0x2B):
+  `plunger_ready` (a villager walking into the plunger's voice trigger while it is ready) and
+  `plunger` (one setting it off), each its radio voice per character, `delay` after `radio_click`
+  with `end` false (on its voice slot) and followed by `radio_click` with `end` true once it has
+  played; `detonation` (three records, each at its `at`, `delay` after the blast); `debris` (each
+  piece landing); `strike_call` (the artillery strike called on a villager whose escape countdown
+  ran out, and the villager's voice) and `strike_blast` (40 frames later, at the same spot).
+- A cue's `at` (if present) is where it plays instead of the event's place, and `delay` (if
+  present) the ticks it waits after the event.
+- `maps.<map>.lines` (if present): voice lines the map's mode plays, unpositioned: on 0x2B
+  `escape`, the radio a human villager hears when it escapes (`note` says how the music ducks).
 
 ### `hud/hud.json`
 Positions are in the original's frame, `frame`: 292 × 216 pixels, the picture the game draws
@@ -340,6 +359,10 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
     the frame's centre for barrel 1, its size random in `width` × `height`, its alpha random in
     `alpha`, for a random `life` VIs (2 a frame, from its own): over its last 2 VIs its alpha is at
     most 0x55 a VI left (V: alpha 0xF9 on its shot's frame, 0 two frames later).
+- `beach`: War: Beach's (map 0x2B), the rest as usual: its `strip`, as `strip` above with the
+  villagers' head first and the Tediz' second (the same picture in `kills` and `lives`; the numbers
+  are the teams' scores), and a villager's `escape` countdown (text as above: the seconds left to
+  reach an exit, 90 down to 0; none for a Tedi).
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.
@@ -358,7 +381,9 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
   each row in its team's colour (`results.colours`: the first the squirrels', the second the
   Tediz'), `hud.json`'s `strip` under them, and a header: `draw` when both teams are first; with
   one human player, `won` or `lost` (YOU WIN, YOU LOSE); with more, the winning team's
-  `team_won` entry (the first the squirrels', the second the Tediz': its name and WIN).
+  `team_won` entry (the first the squirrels', the second the Tediz': its name and WIN). War: Beach's
+  the same with `beach_won` (the first the villagers', FRENCHYS WIN; the second the Tediz') and
+  `hud.json`'s `beach.strip`, and rows for its Tedi players only.
 
 ## Editing
 

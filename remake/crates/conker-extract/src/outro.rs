@@ -1,11 +1,13 @@
 //! The War victory outros ([`conker_assets::outro`]): War: Total War's on scene 0x2D (cutscene 2 if
-//! the squirrels win, 4 if the Tediz win) and War: Colors' on 0x30 (1 and 5), decoded from
-//! `[6, scene, n]` (loader `func_1501D348`; the format in `../lab/research/mp-original/
-//! total-war-outro.md` §3, the Colors ones in `colors-outro.md`) for what those four use, with their
+//! the squirrels win, 4 if the Tediz win), War: Colors' on 0x30 (1 and 5) and War: Beach's on 0x2B
+//! (4 if the villagers win, 3 if the Tediz win), decoded from `[6, scene, n]` (loader
+//! `func_1501D348`; the format in `../lab/research/mp-original/total-war-outro.md` §3, the Colors
+//! ones in `colors-outro.md`, Beach's in `beach-presentation.md` §4) for what those six use, with their
 //! actors' characters (each with the clips it plays) and their voice lines (bank 0x16's MP3s,
 //! decoded to WAV). No generic cutscene interpreter: anything else they hold is left out (the head
 //! channels 0-2, talk, attachment sets (op 0x0D), sounds (ops 6, 0x0A), effects (op 5 b=0x0A),
-//! op 9, the clips' blends).
+//! op 9, the clips' blends; Beach's song 0x8A (op 8), near plane (op 5 b=0x25), actors' part masks
+//! (op 5 b=0x3C), kind-3 props and head turn (op 0x11)).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,7 +23,11 @@ use crate::{GAME_DATA, map_name, model_lift};
 
 /// Each scene's (winning team, cutscene): `func_1501D348(scene, n)`, the first n if team 0 ranks
 /// 1st, else the second (table 0x800AB7BC, V).
-const OUTROS: [(usize, [(u8, u8); 2]); 2] = [(0x2D, [(0, 2), (1, 4)]), (0x30, [(0, 1), (1, 5)])];
+const OUTROS: [(usize, [(u8, u8); 2]); 3] = [
+    (0x2D, [(0, 2), (1, 4)]),
+    (0x30, [(0, 1), (1, 5)]),
+    (0x2B, [(0, 4), (1, 3)]),
+];
 /// Op 5 b=1's colour table (`func_15029BB8`: 3 bytes per entry, indexed by the record's d).
 const COLOURS: usize = 0x8008_4110 - GAME_DATA;
 /// The scene's character records (bank 0x0E entry `scene`, 0x30 bytes each): model at +4, uid at
@@ -219,7 +225,7 @@ pub fn has_outros(scene: usize) -> bool {
     OUTROS.iter().any(|o| o.0 == scene)
 }
 
-/// Scene `scene`'s outros (none but on 0x2D and 0x30), each actor's clips named as in its
+/// Scene `scene`'s outros (none but on 0x2D, 0x30 and 0x2B), each actor's clips named as in its
 /// character's glTF ([`characters`]).
 pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
     let Some((_, which)) = OUTROS.iter().find(|o| o.0 == scene) else {

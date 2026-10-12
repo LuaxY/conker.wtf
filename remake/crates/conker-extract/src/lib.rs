@@ -55,6 +55,23 @@ pub const BEACH: usize = 0x2B;
 /// The Beach's villagers (its team 0): class 0x14 is model 156 (male), 0x1D and 0x1E 157 (female)
 /// (V oracle, `../lab/research/mp-original/modes-and-maps.md`); the Tedi's rig and clips.
 pub const VILLAGERS: [usize; 2] = [156, 157];
+
+/// War: Beach's villager class (0x11-0x20, re-rolled at every spawn, `func_151E2834`) → its model
+/// and the display lists it hides (obj+0x94, bit k = list k; `func_15083384`, C; V b1, e1, use:
+/// `../lab/research/mp-original/beach-presentation.md` §5). 0x11-0x1C, model 156: 0x3E less list
+/// 2, 3 or 4 by (class − 0x11) >> 2, less lists 1, 5 or both by its low 2 bits (12 looks);
+/// 0x1D-0x20, model 157: 0x0A or 0x14 (2 looks).
+pub fn villager_look(class: u8) -> Option<(usize, u8)> {
+    match class {
+        0x11..=0x1C => {
+            let v = class - 0x11;
+            let mask = 0x3E & !(4 << (v >> 2)) & ![0, 2, 0x20, 0x22][usize::from(v & 3)];
+            Some((156, mask))
+        }
+        0x1D..=0x20 => Some((157, if class < 0x1F { 0x0A } else { 0x14 })),
+        _ => None,
+    }
+}
 /// How far below a floor plane a spawn point may sit and still stand on it (spawns on slopes sit
 /// up to ~1.3 units under the plane; the extract-scene example uses the same value).
 const FLOOR_TOLERANCE: f32 = 2.0;
@@ -492,11 +509,11 @@ pub fn map_name(scene: usize) -> String {
 /// The asset pack (`conker-extract pack`): the data files ([`conker_assets::Slice`]) of each map
 /// (the first one also writes the shared files), their levels, the characters
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
-/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D or 0x30,
-/// War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and voice
-/// lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B, the
-/// mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
-/// [`PACK_CHARACTERS`] (with their `character.json`).
+/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D, 0x30 or
+/// 0x2B, War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and
+/// voice lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B,
+/// the mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
+/// [`PACK_CHARACTERS`] (with their `character.json` and its looks, [`villager_look`]).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -517,7 +534,9 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         .map(|m| outro::outros(rom, m.scene))
         .collect::<Result<_>>()?;
     let baked: Vec<_> = outros.concat();
+    // Beach's outros' villagers (156, 157) are packed with every clip already.
     let mut outro_characters = outro::characters(rom, &baked)?;
+    outro_characters.retain(|c| !entries.contains(&c.entry));
     // War: Colors' flags on 0x30 (bank 01 #169 red, #168 green: 9 joints, the cloth's 4 clips).
     if maps.iter().any(|m| m.scene == 0x30) {
         for f in conker_rules::colors::FLAGS {
@@ -707,19 +726,20 @@ pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
     Ok((level, scenes))
 }
 
-/// A map's lights (`maps/<map>/lights.json`): on 0x2D War: Total War's, else none. The level's own
+/// A map's lights (`maps/<map>/lights.json`): on 0x2D War: Total War's, on 0x2B War: Beach's, else
+/// none. The level's own
 /// light table is not located, so these are constants (V: `../lab/research/mp-original/
 /// total-war-effects.md` §1, §3, the oracle's light objects and RSP lights): the viewports' ambient
 /// light; the shelter's two white lamps (kind 0x23: on but during the countdown, 0xBA's `obj` and
 /// `obj2` 0xE016; size 55, their flicker not kept), its red alarm light (kind 0x24, behaviour 1:
 /// the countdown only, 85 + 55 sin φ, φ += 0.1021 a frame); a green light on each canister at home
 /// (`obj(0xE017)`, behaviour 17: 60 + 30 sin φ, φ += 0.2021, at the prop) and one on its carrier
-/// (kind 0x10, size 30).
+/// (kind 0x10, size 30). On 0x2B War: Beach's night (V the oracle's light objects and RSP lights,
+/// `../lab/research/mp-original/beach-presentation.md` §7; `calm`: all match): the bluish ambient;
+/// two white lamps (behaviour 4, kind 0xE1A, size 50: they flicker, not kept; the map's two emitters
+/// are their buzz); the exits' two red lights (behaviour 1, kind 0x503: 87 + 43 sin φ, φ += 0.1021).
 fn map_lights(scene: usize) -> assets::Lights {
     use assets::{Light, When};
-    if scene != SLICE_SCENE {
-        return assets::Lights::default();
-    }
     let light = |at, rgb, (size, swing, step), when| Light {
         at,
         rgb,
@@ -728,6 +748,22 @@ fn map_lights(scene: usize) -> assets::Lights {
         step,
         when,
     };
+    if scene == BEACH {
+        let lamp = |at| light(at, [255; 3], (50.0, 0.0, 0.0), When::Calm);
+        let exit = |at| light(at, [255, 0, 0], (87.0, 43.0, 0.1021), When::Calm);
+        return assets::Lights {
+            ambient: [0x70, 0x8D, 0xD5],
+            lights: vec![
+                lamp([2616.0, -236.0, 8004.0]),
+                lamp([-3032.0, -327.0, 8306.0]),
+                exit([727.0, -952.0, -3710.0]),
+                exit([-1431.0, -952.0, -3643.0]),
+            ],
+        };
+    }
+    if scene != SLICE_SCENE {
+        return assets::Lights::default();
+    }
     let (white, red, green) = ([255; 3], [255, 0, 0], [0, 255, 0]);
     let canister = (60.0, 30.0, 0.2021);
     let mut lights = vec![
@@ -844,6 +880,9 @@ fn pack_data(
                     model_lift: model_lift(rom, c.entry)?,
                     clips,
                     root_clips,
+                    looks: (0x11..=0x20)
+                        .filter_map(|k| villager_look(k).filter(|l| l.0 == c.entry).map(|l| (k, l.1)))
+                        .collect(),
                 })
             })
             .collect::<Result<_>>()?,
