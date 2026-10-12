@@ -112,6 +112,20 @@ pub const SHOTGUN_EDGE: DamageType = ty(0x21, 0x01, 0.0, 0.0, 3.4, 1, 0x80 | 5, 
 pub const AREA_STAGGER: u8 = 0x80 | 0x21;
 pub const ROCKET_OUTER_R: f32 = 300.0;
 
+/// Total War's gas (`gas` module): the kill's type 0x1F and the doorways' 1 a frame, 0x3B (the
+/// script's player commands 0x2B and 0x2A; entries V from the RAM, d1).
+pub const GAS: DamageType = ty(0x2D, 0x07, 34.0, 0.0, 4.0, 30, 0x80 | 40, 0);
+pub const DOORWAY: DamageType = ty(0x0E, 0x41, 0.0, -50.0, 7.0, 1, 0, 0);
+
+/// The damage type the script's player commands 0x2A and 0x2B name.
+pub fn script_type(id: i32) -> Option<DamageType> {
+    match id {
+        0x1F => Some(GAS),
+        0x3B => Some(DOORWAY),
+        _ => None,
+    }
+}
+
 /// Explosion radii (`0.5 · 4 · entry+0xE`): the outer and inner grenade blasts.
 pub const GRENADE_OUTER_R: f32 = 500.0;
 pub const GRENADE_INNER_R: f32 = 360.0;
@@ -211,6 +225,15 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
             (anim::DEATH_FALL, 52),
             (anim::DEAD, 81),
         ],
+        // The gas's kill and the doorway's hits (V d2: 1363-1556, 1274-1424; a doorway hit that
+        // does not kill as its lethal first state, I: the next hit comes a frame later).
+        (0x2D, _) => &[
+            (anim::GASSED, 86),
+            (anim::DEATH_SHOT_FALL, 52),
+            (anim::DEAD, 55),
+        ],
+        (0x0E, false) => &[(anim::DOORWAY_HIT, 59)],
+        (0x0E, true) => &[(anim::DOORWAY_HIT, 59), (anim::DOORWAY_DEAD, 87)],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,
     }

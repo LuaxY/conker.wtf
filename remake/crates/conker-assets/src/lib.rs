@@ -5,7 +5,8 @@
 //! Layout, relative to the pack root (the pack's own `README.md` documents every file):
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
-//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`;
+//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`; on `2d`, `props.gltf`
+//!   (+ `props.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
@@ -101,6 +102,12 @@ pub fn level_gltf(map: &str) -> String {
     format!("maps/{map}/level.gltf")
 }
 
+/// War: Total War's props on its map (`2d` only): glTF scene 0 the props its Deathmatch hides, named
+/// as the level's nodes; scenes 1 and 2 the canister's and the gas mask's models at the origin.
+pub fn props_gltf(map: &str) -> String {
+    format!("maps/{map}/props.gltf")
+}
+
 pub fn character_gltf(character: &str) -> String {
     format!("characters/{character}/character.gltf")
 }
@@ -151,6 +158,8 @@ pub enum Gives {
     Weapon(u8),
     /// +3 grenades.
     Grenades,
+    /// A gas mask (War: Total War).
+    Mask,
 }
 
 /// A pickup on the map: its placement, what it gives and where it is (conker-rules'

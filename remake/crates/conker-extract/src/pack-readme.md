@@ -18,9 +18,10 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 |---|---|
 | `pack.json` | `format` (the pack format; a server reads only its own), `source_rom_sha1` (for reference), the folders under `maps/`, `characters/` and `weapons/`, `audio`: the folders under `audio/` that hold sound (absent in a pack without sound), and `hud`: whether the pack has `hud/` |
 | `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map) |
+| `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister and scene 2 the gas mask at the origin (in a carrier's hands, on a wearer's head). Textures in `textures/` with the level's |
 | `maps/<map>/collision.json` | What players stand on and run into, in the game's build order |
 | `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30, 12 on 0x34, 16 on 0x3F) |
-| `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D, 17 on 0x30, 16 on 0x34, 10 on 0x3F) |
+| `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D and War: Total War's 6 gas masks, 17 on 0x30, 16 on 0x34, 10 on 0x3F) |
 | `maps/<map>/triggers.json` | The scene's trigger records: camera volumes and hints, bot zones, lifts |
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
@@ -91,7 +92,9 @@ One record per spawn point, in record order (the match rules pick them by index)
 The pickups in the game's weapon-manager order:
 - `placement`: the placed model that draws it: the level glTF's node named `…@N` (its
   `extras.placement` is N too). The client hides that node while the pickup is taken.
-- `gives`: `{"weapon": id}` (the weapon id in decimal: 9 is 0x09, the twin guns) or `"grenades"` (+3).
+- `gives`: `{"weapon": id}` (the weapon id in decimal: 9 is 0x09, the twin guns), `"grenades"` (+3) or
+  `"mask"` (a gas mask: War: Total War only, Deathmatch leaves them out; their placements 21-26 are
+  hidden props, not in the level).
 - `position`: where a player touches it, within 100 units horizontally.
 
 Move a pickup by changing its `position` and the matching level node together. On 0x30 the game
@@ -197,7 +200,8 @@ Sections:
 - `cues`: what the game's code plays besides the clips: `on` names the game event (a shot, a hit,
   an explosion, a pickup, a weapon in hand…) with its weapon id in decimal, `character` limits it to
   one character, `then` plays when a firing loop ends; `note` says where it comes from. Every cue
-  whose `on` (and `character`) matches plays: a head shot plays two.
+  whose `on` (and `character`) matches plays: a head shot plays two. War: Total War's: `gas` (a loop
+  while the gas is out) and `carry` (a gas canister taken: `canister` 0 or 1, `bot` a bot's).
 
 ### `hud/hud.json`
 Positions are in the original's frame, `frame`: 292 × 216 pixels, the picture the game draws
@@ -243,6 +247,7 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   per team (the first entry of each list the squirrels', the second the Tediz') its icon over
   `rects`, from `kills` in a match on the clock or `lives` in one without, and its number as
   `numbers` (text as above): its players' kills, or without a clock their lives left.
+- `countdown`: War: Total War's gas countdown (text as above): the seconds left until the gas kills.
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.
@@ -268,11 +273,11 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
 - **JSON:** any text editor. Keep the field names; numbers are plain decimals.
 - **PNG textures:** any image editor. Keep the file name and the size, and keep the alpha channel
   where there is one.
-- **glTF models** (`level.gltf`, `character.gltf`, `held.gltf`): in Blender, *File > Import >
+- **glTF models** (`level.gltf`, `props.gltf`, `character.gltf`, `held.gltf`): in Blender, *File > Import >
   glTF 2.0*. Export with *Format: glTF Separate (.gltf + .bin + textures)*, *Include > Custom
   Properties* on, to the same file name and folder. Keep:
-  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbow's `01-6e-…`), and the level's `…@N` nodes (the client
-    hides node `…@N` while the pickup on placement N is taken);
+  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbow's `01-6e-…`), and the level's and props' `…@N` nodes (the client
+    hides node `…@N` while the pickup on placement N is taken, and War: Total War's props as its match says);
   - the character's animations' names (`pair_NNNN_anim_IIII`): the client finds each clip by its
     name, so their order may change;
   - one scene per held model, in `held.json`'s order.

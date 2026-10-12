@@ -77,6 +77,7 @@ fn main() {
     let mut arena = Arena {
         spawns,
         pickups: (picks.iter().enumerate())
+            .filter(|(_, p)| p.gives != conker_rules::weapon::Gives::Mask)
             .map(|(k, p)| {
                 let at = spots.get(k).copied();
                 let at = at.unwrap_or(placements[usize::from(p.placement)].position);
@@ -223,6 +224,7 @@ fn main() {
                     stats[player].pickups.push(match gives {
                         conker_rules::weapon::Gives::Weapon(w) => w,
                         conker_rules::weapon::Gives::Grenades => 0xAA,
+                        conker_rules::weapon::Gives::Mask => conker_rules::gas::MASK,
                     });
                 }
                 _ => {}

@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 /// carries it (conker-rules' `Fighter::start`, back after each respawn) and the club's combo window.
 /// 13: War: Total War on scene 0x2D: [`MatchView::total_war`] (and in the settings the fighter's
 /// rules run with); [`Combat::team`] is then the player's side.
-pub const PROTOCOL_ID: u64 = 13;
+/// 14: Total War's gas: [`MatchView`]'s `countdown`, `gas` and `props`, [`Combat`]'s `carrying` and
+/// `masked` (and the fighter's: the carrier's speed and lock-out are predicted).
+pub const PROTOCOL_ID: u64 = 14;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -107,6 +109,10 @@ pub struct Combat {
     /// Hits landed and those on the head (the results' accuracy and headshots).
     pub hits: u16,
     pub headshots: u16,
+    /// Total War: carrying a gas canister (item 0x25; animations 0xD7 moving, 0xD8 standing in
+    /// `anim`), wearing a gas mask (item 0x20).
+    pub carrying: bool,
+    pub masked: bool,
 }
 
 /// The match, on one replicated entity.
@@ -137,8 +143,18 @@ pub struct MatchView {
     /// Weapon 0x16's rockets and weapon 0x14's aimed shots in flight.
     pub rockets: Vec<[f32; 3]>,
     pub shots: Vec<[f32; 3]>,
-    /// Bit n: the pickup on placement n is taken (back after 120 frames).
+    /// Bit n: the pickup on placement n is taken (back after 120 frames). Total War's gas masks
+    /// are pickups on placements 21-26, touched only while `countdown` runs.
     pub taken: u64,
+    /// Total War's gas (conker-rules' `gas`): frames until it kills (300 from the delivery; 0 none;
+    /// the HUD's seconds are `countdown / 60 + 1`, the game's `(t + 59) / 60` of t = countdown + 1,
+    /// from the frame after the delivery to the kill's), its sound looping (from 29 frames before
+    /// the kill to 89 after), and bit n: the prop on placement n shown, for 0 and 1 (the shelter's
+    /// doors: from the delivery to 50 frames after the gas), 2-7 (the covers by the masks: gone
+    /// from 12 frames after the delivery to the gas's end) and 27, 28 (the canisters, at home).
+    pub countdown: i32,
+    pub gas: bool,
+    pub props: u32,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

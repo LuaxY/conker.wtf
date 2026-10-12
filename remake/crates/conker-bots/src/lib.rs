@@ -14,8 +14,9 @@
 //! player before each step.
 //!
 //! Per frame: [`lift::Lifts::ride`] (and [`Bots::lifted`] for every slot it moved), [`Bots::tick`]
-//! (fills the bot slots' inputs), [`Bots::scopes`] (the snipers' aim into the match), `Match::step`,
-//! then [`Bots::observe`] with the step's events. Notes, oracle numbers and the approximations:
+//! (fills the bot slots' inputs and returns what the script did to the match, for `Match::apply`),
+//! [`Bots::scopes`] (the snipers' aim into the match), `Match::step`, then [`Bots::observe`] with
+//! the step's events. Total War runs the script with no bot too: it holds the gas. Notes, oracle numbers and the approximations:
 //! `lab/oracle/bot_README.md` (outside this tree).
 
 pub mod brain;
@@ -28,6 +29,7 @@ use brain::{Body, Unknown, World, g};
 use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::Rng;
 use conker_rules::game::{Arena, BUTTON_R, Event, Match};
+use conker_rules::gas::{self, Effect};
 use conker_rules::weapon::Gives;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{Input, atan2_u16, deadzone, stick_angle};
@@ -269,11 +271,25 @@ impl Bots {
     }
 
     /// One frame, before [`Match::step`]: the AI script and helpers on the match as it stands, then
-    /// every bot's behaviour script and steering; writes each bot slot's input into `inputs`.
-    pub fn tick(&mut self, m: &Match, arena: &Arena, world: &CollisionWorld, inputs: &mut [Input]) {
+    /// every bot's behaviour script and steering; writes each bot slot's input into `inputs` and
+    /// returns the script's effects on the match (`Match::apply` them before the step).
+    pub fn tick(
+        &mut self,
+        m: &Match,
+        arena: &Arena,
+        world: &CollisionWorld,
+        inputs: &mut [Input],
+    ) -> Vec<Effect> {
         let bodies = self.bodies(m);
         self.mirror(m, arena);
         let mut unknown = std::mem::take(&mut self.unknown);
+        let mut effects = Vec::new();
+        // A canister's toucher, a match slot, as the participant the script indexes by.
+        let touched = [0, 1].map(|c| {
+            (m.gas.toucher(c))
+                .and_then(|s| self.by_slot(s))
+                .map_or(0, |k| k as i32 + 1)
+        });
         {
             let mut host = World {
                 bodies: &bodies,
@@ -287,6 +303,9 @@ impl Bots {
                 unknown: &mut unknown,
                 ffa: !m.settings.total_war,
                 forgiven: &mut self.forgiven,
+                slots: &self.slots,
+                touched,
+                effects: &mut effects,
             };
             if !self.started {
                 self.started = true;
@@ -308,6 +327,20 @@ impl Bots {
         }
         self.unknown = unknown;
         self.hit_by.fill(0);
+        // The gas is Total War's (the other scripts' props and globals are their own): its
+        // countdown, and the forced item G+0xFF0 as the canister carried (ponytail: from the frame
+        // the script writes it, a frame before the game's item shows it, V d1 1040 → 1041; its
+        // weapon manager reads it in the next frame's).
+        effects.push(Effect::Countdown(self.g.i32(g::COUNTDOWN)));
+        for (k, &slot) in self.slots.iter().enumerate() {
+            let carries = self.g.get(g::OVERRIDE, k) == i32::from(gas::CANISTER);
+            if m.players.get(slot).is_some_and(|f| f.carrying != carries) {
+                effects.push(Effect::Carry(slot, carries));
+            }
+        }
+        if !m.settings.total_war {
+            effects.clear();
+        }
         let players: Vec<[f32; 3]> = bodies.iter().map(|b| b.pos).collect();
         let bots = self
             .slots
@@ -361,6 +394,7 @@ impl Bots {
                 *i = input;
             }
         }
+        effects
     }
 
     /// The participants as the AI reads them.
@@ -386,7 +420,11 @@ impl Bots {
                     facing: f.body.facing,
                     health: f.health,
                     item,
-                    drawn: if f.drawn { f.weapon.unwrap_or(0) } else { 0 },
+                    drawn: match f.drawn {
+                        _ if f.carrying => gas::CANISTER,
+                        true => f.weapon.unwrap_or(0),
+                        false => 0,
+                    },
                     grenades: f.grenades,
                     hit_by: self.hit_by[k],
                     is_bot: k >= self.humans,
@@ -409,6 +447,7 @@ impl Bots {
             let gives = match p.gives {
                 Gives::Weapon(w) => i32::from(w),
                 Gives::Grenades => 2222,
+                Gives::Mask => i32::from(gas::MASK),
             };
             g.set(g::GIVES, k, gives);
             g.set(g::PICKUP_FLAGS, k, 6);
@@ -424,16 +463,20 @@ impl Bots {
             g.set(g::PICKUP_TIMER, k, t);
         }
         for (k, &s) in self.slots.iter().enumerate() {
-            if m.players.get(s).is_none_or(|f| f.weapon.is_none()) {
-                self.held[k] = -1;
-            } else if self.held[k] < 0
-                && let Some(w) = m.players[s].weapon
-            {
-                self.held[k] = arena
-                    .pickups
-                    .iter()
-                    .position(|(p, _)| p.gives == Gives::Weapon(w))
-                    .map_or(-1, |i| i as i32);
+            // A mask worn keeps its pickup's index: the gas spares whoever's G+0x1174[G+0xEB0] is
+            // 0x20 (C, the script at 0x3E7A).
+            let gives = |f: &conker_rules::Fighter| match f.weapon {
+                Some(w) => Some(Gives::Weapon(w)),
+                None => f.masked.then_some(Gives::Mask),
+            };
+            match m.players.get(s).and_then(gives) {
+                None => self.held[k] = -1,
+                Some(want) if self.held[k] < 0 => {
+                    self.held[k] = (arena.pickups.iter())
+                        .position(|(p, _)| p.gives == want)
+                        .map_or(-1, |i| i as i32);
+                }
+                Some(_) => {}
             }
             g.set(g::HELD, k, self.held[k]);
         }

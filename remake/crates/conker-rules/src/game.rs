@@ -33,6 +33,7 @@ use crate::Rng;
 use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
 use crate::flame::{self, Burn};
+use crate::gas::{self, Effect, Gas};
 use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
@@ -94,10 +95,11 @@ pub struct Arena {
 }
 
 impl Arena {
-    /// Scene 0x2D Deathmatch; `placement(n)` is placement n's position (extract-scene).
+    /// Scene 0x2D Deathmatch (no gas masks); `placement(n)` is placement n's position
+    /// (extract-scene).
     pub fn deathmatch(spawns: Vec<Spawn>, placement: impl Fn(u16) -> [f32; 3]) -> Self {
-        let pickups = weapon::PICKUPS_2D
-            .iter()
+        let pickups = (weapon::PICKUPS_2D.iter())
+            .filter(|p| p.gives != Gives::Mask)
             .map(|p| (*p, placement(p.placement)))
             .collect();
         Self { spawns, pickups }
@@ -278,6 +280,13 @@ pub struct Fighter {
     /// The last frame the club's second swing may start: [`weapon::COMBO_WINDOW`] after this
     /// player's last landed swing (obj+0x107).
     pub combo: u32,
+    /// Total War: carrying a gas canister (the script's forced item G+0xFF0 = 0x25, `gas::Effect::
+    /// Carry`): no weapon drawn or used, no grenade, 80 % of the speed (`func_15064B94`'s 0x25, C;
+    /// V d1: the drive fits 79.4-81.1 %), until delivered or dead.
+    pub carrying: bool,
+    /// Total War: wearing a gas mask (its pickup holds the slot a weapon's would, MP+0xEB0), which
+    /// the gas spares; lost on death, on another pickup, or when the script takes it off.
+    pub masked: bool,
     /// s126+0x170: the scope's pitch in degrees (`conker_camera::Scope::pitch`, positive looks
     /// down). Set with `body.scope_yaw` after each camera step; the sniper's ray and weapon 0x14's
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
@@ -327,6 +336,8 @@ impl Fighter {
             ready: 0,
             start: None,
             combo: 0,
+            carrying: false,
+            masked: false,
             scope_pitch: 0.0,
         }
     }
@@ -352,12 +363,15 @@ impl Fighter {
     }
 
     /// s126+0x75: 0x80 | the current item (0x26, the grenade, from the pull to 15 frames into the
-    /// throw), 0 with nothing; `tick` is the next frame to run (the trace row).
+    /// throw; the canister carried, the mask worn), 0 with nothing; `tick` is the next frame to run
+    /// (the trace row).
     pub fn item(&self, tick: u32) -> u8 {
         match self.action {
+            _ if self.carrying => 0x80 | gas::CANISTER,
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0xA6,
             Action::GrenadeThrow { .. } if tick <= self.since + RELEASE + 1 => 0xA6,
             _ if self.dropped.is_some_and(|d| tick <= d + 1) => 0xA6,
+            _ if self.masked => 0x80 | gas::MASK,
             _ => self.weapon.map_or(0, |w| 0x80 | w),
         }
     }
@@ -436,6 +450,7 @@ impl Fighter {
 
     fn idle_anim(&self) -> u16 {
         match self.weapon() {
+            _ if self.carrying => anim::CARRY_IDLE,
             Some(w) if self.drawn => w.idle,
             _ => u16::from(self.body.state),
         }
@@ -611,6 +626,8 @@ pub struct Match {
     /// Slots whose player left, kept for the next to join ([`Self::join`]): a [`Fighter::vacant`]
     /// that the frame skips. The other players keep their slots.
     pub free: BTreeSet<usize>,
+    /// Total War's gas: the props the AI script drives and its countdown ([`Self::apply`]).
+    pub gas: Gas,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -683,6 +700,7 @@ impl Match {
             settings: Settings::default(),
             rng,
             free: BTreeSet::new(),
+            gas: Gas::default(),
         }
     }
 
@@ -694,11 +712,13 @@ impl Match {
         }
     }
 
-    /// Hands player `p` weapon `id`, holstered, as collecting its pickup does (MP+0xEB0).
+    /// Hands player `p` weapon `id`, holstered, as collecting its pickup does (MP+0xEB0, so a
+    /// mask worn goes).
     pub fn give(&mut self, p: usize, id: u8) {
         let f = &mut self.players[p];
         f.weapon = Some(id);
         f.drawn = false;
+        f.masked = false;
         if !matches!(f.action, Action::Hurt { .. } | Action::Free) {
             let anim = f.idle_anim();
             f.set(Action::Free, anim, self.tick);
@@ -794,6 +814,7 @@ impl Match {
             return ev;
         }
         self.pickups(arena, &mut ev);
+        self.gas.step(self.tick);
         let mut late = Vec::new();
         for i in 0..self.players.len() {
             if self.free.contains(&i) {
@@ -906,6 +927,13 @@ impl Match {
                         p.taken = None;
                         self.give(who, id);
                     }
+                    // The mask takes the weapon's place (V d2: MP+0xEB0 13 → 19, s126+0x75 0xA1 →
+                    // 0xA0, as a weapon's two frames after the touch).
+                    Gives::Mask if t == at + 2 => {
+                        p.taken = None;
+                        let f = &mut self.players[who];
+                        (f.weapon, f.drawn, f.masked) = (None, false, true);
+                    }
                     _ => {}
                 }
             }
@@ -914,10 +942,14 @@ impl Match {
             if p.timer > 0 {
                 continue;
             }
+            // A mask is touched only while the gas counts down (`func_1511DF6C` skips model 0x54 on
+            // scene 0x2D while G+0x1FE4 ≤ 0, C), and not by a player wearing one (I).
+            let countdown = self.gas.countdown;
+            let may = |f: &Fighter| def.gives != Gives::Mask || (countdown > 0 && !f.masked);
             let toucher = self
                 .players
                 .iter()
-                .position(|f| f.health > 0 && weapon::touches(*pos, f.body.pos));
+                .position(|f| f.health > 0 && may(f) && weapon::touches(*pos, f.body.pos));
             if let Some(i) = toucher {
                 *p = PickupState {
                     timer: weapon::PICKUP_RESPAWN,
@@ -928,6 +960,89 @@ impl Match {
                     pickup: k,
                 });
             }
+        }
+        // A canister shown is touched as a pickup is, by a player its gate admits: its +0x80 takes
+        // the toucher (slot + 1) for the script, and it shrinks away (ponytail: hidden at once; the
+        // game's shrink takes 3 frames, V d2 1039 → 1042, which nobody touches it in).
+        for (placement, pos) in gas::CANISTERS {
+            let Some(&prop) = self.gas.prop(placement).filter(|p| p.shown) else {
+                continue;
+            };
+            let toucher = self.players.iter().position(|f| {
+                f.health > 0 && gas::admits(prop.gate, f.team) && weapon::touches(pos, f.body.pos)
+            });
+            if let (Some(i), Some(p)) = (toucher, self.gas.prop_mut(placement)) {
+                (p.flag, p.since, p.shown) = (i as i32 + 1, t, false);
+            }
+        }
+    }
+
+    /// Carries out what the AI script did this frame ([`gas::Effect`]), before [`Self::step`];
+    /// returns the hits' events.
+    pub fn apply(&mut self, effects: &[Effect]) -> Vec<Event> {
+        let t = self.tick;
+        let mut ev = Vec::new();
+        for &e in effects {
+            match e {
+                Effect::Show(n) => {
+                    if let Some(p) = self.gas.prop_mut(n) {
+                        p.shown = true;
+                    }
+                }
+                Effect::Set {
+                    placement,
+                    flag,
+                    gate,
+                } => {
+                    if let Some(p) = self.gas.prop_mut(placement) {
+                        if let Some(v) = flag.filter(|&v| v != p.flag) {
+                            (p.flag, p.since) = (v, t);
+                        }
+                        p.gate = gate.unwrap_or(p.gate);
+                    }
+                }
+                Effect::Countdown(n) => self.gas.countdown = n,
+                Effect::Gas(on) => self.gas.gas = on,
+                Effect::Hit {
+                    slot,
+                    kind,
+                    attacker,
+                } if slot < self.players.len() => {
+                    let attacker = attacker.filter(|&a| a < self.players.len());
+                    self.hurt(slot, &kind, false, false, 0, attacker, &mut ev);
+                }
+                Effect::Release(i) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.masked = false;
+                    }
+                }
+                // The canister in hand: holstered, and whatever the player was doing ends (I).
+                Effect::Carry(i, true) if self.players.get(i).is_some_and(|f| f.health > 0) => {
+                    let f = &mut self.players[i];
+                    f.drawn = false;
+                    f.carrying = true;
+                    if !matches!(f.action, Action::Hurt { .. }) {
+                        let anim = f.idle_anim();
+                        f.set(Action::Free, anim, t);
+                    }
+                }
+                Effect::Carry(i, false) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.carrying = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        ev
+    }
+
+    /// The gas as at the match start, for a script started afresh: no canister carried, no mask
+    /// worn.
+    pub fn restart_gas(&mut self) {
+        self.gas = Gas::default();
+        for f in &mut self.players {
+            (f.carrying, f.masked) = (false, false);
         }
     }
 
@@ -1069,7 +1184,7 @@ impl Match {
         {
             f.action = Action::Free;
         }
-        if f.action == Action::Free && !aiming {
+        if f.action == Action::Free && !aiming && !f.carrying {
             if late_pressed(C_DOWN) && f.grenades > 0 && armed.is_none_or(|w| w.c_button.is_none())
             {
                 f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
@@ -1385,6 +1500,7 @@ impl Match {
             f.body.lock = 0xFF;
         }
         f.body.armed = match (f.action, w) {
+            _ if f.carrying => gas::CANISTER,
             (Action::Draw, Some(w)) => w.id,
             (Action::Holster, _) => 0,
             (_, Some(w)) if f.drawn => w.id,
@@ -1428,6 +1544,10 @@ impl Match {
             use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
             f.anim = match (w.filter(|_| f.drawn), f.body.state) {
                 _ if still => f.idle_anim(),
+                // The canister's run and stand (V d1: 215 from the frame after the carry, 216
+                // standing; I: the jumps' plain states).
+                (_, state @ (JUMP | RUN_JUMP | FALL | LAND)) if f.carrying => u16::from(state),
+                (_, state) if f.carrying && state != movement::state::IDLE => anim::CARRY_MOVE,
                 // A's jump shows the plain jump states (V ctlw_k1, k3, k4), melee 0x21 its own landing.
                 // 0x19D is 14 frames, a frame shorter than the landing's hold (V ctlw_k1 151-165).
                 (Some(w), LAND) if w.id == 0x21 && f.body.timer > 1 => anim::MELEE_LAND,
@@ -1567,7 +1687,7 @@ impl Match {
                         } else {
                             me.facing
                         };
-                        self.hurt(v, &kind, true, j > 0, angle, i, ev);
+                        self.hurt(v, &kind, true, j > 0, angle, Some(i), ev);
                     }
                 }
             }
@@ -1587,7 +1707,7 @@ impl Match {
                             continue;
                         }
                         let away = away_from(world, centre, p);
-                        if self.hurt(v, &kind, true, false, away, i, ev) {
+                        if self.hurt(v, &kind, true, false, away, Some(i), ev) {
                             self.players[v].burn = Some(Burn::new(i));
                         }
                     }
@@ -1601,7 +1721,7 @@ impl Match {
                     let (p, h) = (self.seen_pos(seen, i, v), Hitbox::of(self.players[v].side));
                     if self.players[v].immune == 0
                         && in_reach(centre, r, p, h)
-                        && self.hurt(v, &kind, true, false, me.move_angle, i, ev)
+                        && self.hurt(v, &kind, true, false, me.move_angle, Some(i), ev)
                     {
                         self.players[i].combo = t + weapon::COMBO_WINDOW;
                     }
@@ -1652,7 +1772,9 @@ impl Match {
             // `func_15081E78` skips an immune or stunned living victim (C). The angle: V 0x6300 for
             // the facing 25345 on e_w24; the game's varies by up to 21 for the same aim
             // (combat4_w24 0x6302, combat4_pitch24 0x6313 and 0x6315; I: the rifle's pose).
-            if self.hurt(v, &kind, false, true, me.facing & !1, i, ev) && head && self.enemies(i, v)
+            if self.hurt(v, &kind, false, true, me.facing & !1, Some(i), ev)
+                && head
+                && self.enemies(i, v)
             {
                 self.players[i].headshots = self.players[i].headshots.saturating_add(1);
             }
@@ -1810,7 +1932,7 @@ impl Match {
         let f = &mut self.players[v];
         (f.burn, f.heat) = ((b.life > 0).then_some(b), flame::AFTERBURN);
         if hit {
-            self.hurt(v, &flame::BURN, false, true, 0, b.attacker, ev);
+            self.hurt(v, &flame::BURN, false, true, 0, Some(b.attacker), ev);
         }
     }
 
@@ -1843,7 +1965,7 @@ impl Match {
                 // The knock-back angle is the shot's direction (V combat4_w14: 0x6B13 for
                 // (−0.871, 0, −0.491)).
                 let a = dir_angle(world, s.dir);
-                if self.hurt(v, &kind, false, true, a, s.owner, ev) {
+                if self.hurt(v, &kind, false, true, a, Some(s.owner), ev) {
                     let head = head && self.enemies(s.owner, v);
                     let o = &mut self.players[s.owner];
                     o.headshots = o.headshots.saturating_add(u16::from(head));
@@ -1877,7 +1999,7 @@ impl Match {
         area: bool,
         guarded: bool,
         angle: u16,
-        attacker: usize,
+        attacker: Option<usize>,
         ev: &mut Vec<Event>,
     ) -> bool {
         let t = self.tick;
@@ -1919,25 +2041,31 @@ impl Match {
             t,
         );
         // The scorer (`func_151E5FF4`, V on Total War's friendly fire) credits hits and kills on
-        // other teams only; a death on the attacker's own team, its own included, counts in +0x70.
-        let enemy = self.enemies(attacker, v);
-        let a = &mut self.players[attacker];
-        if enemy {
-            a.hits = a.hits.saturating_add(1);
-        }
-        if lethal && enemy {
-            a.kills = (a.kills + 1).min(9999);
-        } else if lethal {
-            a.suicides += 1;
+        // other teams only; a death on the attacker's own team, its own included, counts in +0x70,
+        // but not the gas's (reaction 0x2D: V d1, d3, its deliverer's +0x70 stays). A hit with no
+        // attacker (the doorways') scores nothing.
+        if let Some(attacker) = attacker {
+            let enemy = self.enemies(attacker, v);
+            let a = &mut self.players[attacker];
+            if enemy {
+                a.hits = a.hits.saturating_add(1);
+            }
+            if lethal && enemy {
+                a.kills = (a.kills + 1).min(9999);
+            } else if lethal && reaction != 0x2D {
+                a.suicides += 1;
+            }
         }
         let f = &mut self.players[v];
         if lethal {
             (f.weapon, f.drawn) = (None, false);
+            (f.carrying, f.masked) = (false, false);
             f.deaths = f.deaths.saturating_add(1);
         }
+        // An unowned hit names its victim as the attacker, as a player's own grenade does.
         ev.push(Event::Hit {
             victim: v,
-            attacker,
+            attacker: attacker.unwrap_or(v),
             damage,
             lethal,
         });
@@ -2055,7 +2183,7 @@ impl Match {
         for (born, mut b) in std::mem::take(&mut self.bullets) {
             // A body stops the bullet even when the hit is refused (dead, stunned or immune).
             if let Some(v) = self.first_body(b.owner, b.pos, b.dir, b.reach(), seen) {
-                self.hurt(v, &b.kind, false, true, b.angle, b.owner, ev);
+                self.hurt(v, &b.kind, false, true, b.angle, Some(b.owner), ev);
             } else if b.advance() {
                 self.bullets.push((born, b));
             }
@@ -2106,7 +2234,7 @@ impl Match {
                     continue;
                 }
                 let away = away_from(world, pos, p);
-                self.hurt(v, &kind, true, false, away, owner, ev);
+                self.hurt(v, &kind, true, false, away, Some(owner), ev);
             }
         }
     }
@@ -3272,5 +3400,107 @@ mod tests {
         });
         assert_eq!((m.players[1].out, m.ended_at), (3, None));
         assert_eq!(m.places(), [1, 2, 2], "team 0 has the kill");
+    }
+
+    /// Total War's gas on the match: the carrier's speed and lock-out, the masks' gate, the
+    /// canister's team gate, and the script's hits' scoring (V d1, d2, d3).
+    #[test]
+    fn gas_canister_masks_and_hits() {
+        let (_, mut m, w) = duel();
+        // Player 0 stands on mask k19, player 1 on canister 0 (only team 0 may touch it).
+        let arena = Arena {
+            spawns: vec![rec([2000, 0, 0], 0)],
+            pickups: vec![(weapon::PICKUPS_2D[19], [0.0, 0.0, 0.0])],
+        };
+        m.pickups = vec![PickupState::default()];
+        let (canister, at) = gas::CANISTERS[0];
+        m.players[1].body.pos = at;
+        m.apply(&[
+            Effect::Show(canister),
+            Effect::Set {
+                placement: canister,
+                flag: None,
+                gate: Some(1),
+            },
+        ]);
+        let idle = [Input::default(); 2];
+        for _ in 0..5 {
+            m.step(&arena, &idle, &w);
+        }
+        assert_eq!((m.players[0].masked, m.gas.toucher(0)), (false, None));
+        m.players[1].team = 0;
+        m.apply(&[Effect::Countdown(300)]);
+        for _ in 0..3 {
+            m.step(&arena, &idle, &w);
+        }
+        assert!(m.players[0].masked && m.players[0].item(m.tick) == 0xA0);
+        assert_eq!(m.gas.toucher(0), Some(1));
+        assert_eq!(m.gas.shown() & 1 << canister, 0);
+        m.apply(&[Effect::Release(0)]);
+        assert!(!m.players[0].masked);
+
+        // The carrier: holstered, no draw, no crouch, 80 % of the run's 35 (d1: +1 a frame to within
+        // 1 of 28, then +0.01; 35 without the canister).
+        m.give(1, 0x39);
+        m.apply(&[Effect::Carry(1, true)]);
+        let run = Input {
+            stick_y: 82,
+            buttons: BUTTON_B | BUTTON_Z,
+            ..Input::default()
+        };
+        let mut speeds = Vec::new();
+        for _ in 0..40 {
+            m.step(&arena, &[Input::default(), run], &w);
+            speeds.push(m.players[1].body.xz_speed);
+        }
+        let f = m.players[1];
+        assert_eq!(
+            (f.action, f.drawn, f.item(m.tick)),
+            (Action::Free, false, 0xA5)
+        );
+        assert_eq!(
+            (f.body.state, f.anim),
+            (movement::state::RUN, anim::CARRY_MOVE)
+        );
+        let top = speeds.iter().copied().fold(0.0, f32::max);
+        assert!(top > 27.0 && top <= 28.0, "{speeds:?}");
+        assert!((speeds[39] - speeds[38] - 0.01).abs() < 1e-4, "{speeds:?}");
+        m.apply(&[Effect::Carry(1, false)]);
+        let run = Input { buttons: 0, ..run };
+        for _ in 0..12 {
+            m.step(&arena, &[Input::default(), run], &w);
+        }
+        assert!(m.players[1].body.xz_speed > 34.0);
+
+        // The gas kills whoever it reaches, credits its deliverer (dead or alive) with the enemies
+        // only and costs nobody +0x70; the doorway's 1 a frame credits nobody.
+        let far = Placement {
+            index: 0,
+            pos: [-3000.0, 0.0, 0.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        m.players.push(Fighter::new(&far, 1, m.tick));
+        m.players[0].health = 0;
+        let hit = |slot, kind, attacker| Effect::Hit {
+            slot,
+            kind,
+            attacker,
+        };
+        let ev = m.apply(&[
+            hit(2, damage::DOORWAY, None),
+            hit(1, damage::GAS, Some(0)),
+            hit(2, damage::GAS, Some(0)),
+        ]);
+        assert_eq!(ev.len(), 3);
+        assert_eq!(m.players[2].anim, anim::GASSED);
+        assert!(
+            m.players[1..]
+                .iter()
+                .all(|f| f.health == 0 && f.deaths == 1)
+        );
+        let d = m.players[0];
+        assert_eq!((d.kills, d.hits, d.suicides), (1, 1, 0));
+        assert_eq!((m.players[2].hits, m.players[2].suicides), (0, 0));
     }
 }

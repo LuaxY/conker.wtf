@@ -72,7 +72,10 @@ four maps, from the oracle).
 full friendly fire (a team kill credits nothing, +1 on +0x70), the clock or, untimed, a team out of lives ends it; the
 team with more kills wins, then fewer shots, else DRAW (`func_151E565C`). The bots run the script's team branch (query
 0xD5 = 0). The client draws the team strip, team radar colours and the team STATS header (YOU WIN/LOSE, SQUIRRELS/TEDIZ
-WIN, DRAW). Research: `lab/research/mp-original/total-war-{teams,gas}.md`. The gas canisters, gas and masks are next.
+WIN, DRAW). Research: `lab/research/mp-original/total-war-{teams,gas}.md`. Part 2 (protocol 14): the gas, driven by
+the level's AI script as in the game (its natives became effects the server applies): two canisters to steal, the
+10 s countdown after a delivery, the gas kill of everyone unmasked outside the shelter, the 6 masks, doors and covers,
+drawn and heard in the client.
 
 **Asset pack** (2026-10-10, two sub-agents, no workflow). `conker-extract pack` exports once what multiplayer needs
 into `assets/` (205 files, 14.2 MB, 3.4 MB brotli; glTF + PNG + JSON, two raw script tables), read back bit-exact by

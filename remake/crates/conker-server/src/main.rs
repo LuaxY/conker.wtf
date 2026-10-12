@@ -61,7 +61,7 @@
 //!
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
-//!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS]
+//!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
 //!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
@@ -87,6 +87,8 @@
 //!   human joined, every slot back on its spawn; `--first-read R`: that tick is oracle read R
 //!   (default 23, the match going live).
 //! - `--give SLOT:READ:ID` hands a weapon as its pickup does at that read (the oracle's MP+0xEB0 poke).
+//! - `--warp SLOT:READ:X,Y,Z` (test only, as the gas research's position pokes): puts that slot there at
+//!   that read, e.g. a Total War canister carrier into the shelter (a delivery).
 //! - `--cavemen`: scene 0x3F's Deathmatch on any map: caveman bots, every player holding item 0x40.
 //! - `--mode total-war`: the original's War: Total War (scenario 9), on map 2d only and without
 //!   `--cavemen`: teams are the sides, friendly fire scores no kill, the match ends on the clock or
@@ -109,6 +111,7 @@ use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
 use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE};
+use conker_rules::gas::Effect;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
@@ -153,6 +156,7 @@ const SKILLS: [&str; 5] = ["inbred", "crap", "normal", "bastard", "einstein"];
 struct Setup {
     spawns: Vec<([f32; 3], Option<u16>)>,
     gives: Vec<(usize, u32, u8)>,
+    warps: Vec<(usize, u32, [f32; 3])>,
     wait: usize,
     margin: u32,
     first_read: u32,
@@ -228,6 +232,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
                     slot.parse().map_err(|_| bad(&v))?,
                     read.parse().map_err(|_| bad(&v))?,
                     u8::from_str_radix(id, 16).map_err(|_| bad(&v))?,
+                ));
+            }
+            "--warp" => {
+                let v = value()?;
+                let w: Vec<&str> = v.split(':').collect();
+                let [slot, read, at] = w[..] else {
+                    return Err(bad(&v));
+                };
+                let at: Vec<f32> = (at.split(',').map(str::parse))
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| bad(&v))?;
+                setup.warps.push((
+                    slot.parse().map_err(|_| bad(&v))?,
+                    read.parse().map_err(|_| bad(&v))?,
+                    at.try_into().map_err(|_| bad(&v))?,
                 ));
             }
             "--wait" => setup.wait = value()?.parse().map_err(|_| bad("wait"))?,
@@ -306,7 +325,7 @@ fn main() {
             "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
-             [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--wait N] [--margin TICKS] \
+             [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
              [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
@@ -326,7 +345,8 @@ fn main() {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    let (world, arena) = (scene_world(&pack, scene), arena(&pack));
+    let total_war = setup.settings.total_war;
+    let (world, arena) = (scene_world(&pack, scene), arena(&pack, total_war));
 
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
@@ -482,8 +502,8 @@ fn main() {
 }
 
 /// The match's static data from the pack: the spawn records, and the pickups (what each gives, and
-/// where a player touches it).
-fn arena(pack: &Slice) -> Arena {
+/// where a player touches it; the gas masks only in Total War).
+fn arena(pack: &Slice, total_war: bool) -> Arena {
     let spawns = (pack.spawns.iter())
         .map(|s| Spawn {
             pos: s.position,
@@ -495,10 +515,12 @@ fn arena(pack: &Slice) -> Arena {
         })
         .collect();
     let pickups = (pack.pickups.iter())
+        .filter(|p| total_war || p.gives != conker_assets::Gives::Mask)
         .map(|p| {
             let gives = match p.gives {
                 conker_assets::Gives::Weapon(id) => Gives::Weapon(id),
                 conker_assets::Gives::Grenades => Gives::Grenades,
+                conker_assets::Gives::Mask => Gives::Mask,
             };
             let pickup = Pickup {
                 placement: p.placement,
@@ -545,10 +567,11 @@ impl Ai {
         })
     }
 
-    /// A fresh AI for `players` participants, the first `bots` of them bots, at `skill`.
-    fn restart(&mut self, players: usize, bots: usize, skill: u8, rng: Rng) {
+    /// A fresh AI for `players` participants, the first `bots` of them bots, at `skill`; with no
+    /// bot only in Total War (`script`), whose AI script holds the gas.
+    fn restart(&mut self, players: usize, bots: usize, skill: u8, rng: Rng, script: bool) {
         let slots: Vec<usize> = (0..bots).collect();
-        self.bots = (bots > 0)
+        self.bots = (bots > 0 || script)
             .then(|| Bots::new(self.assets()?, players, &slots, skill, rng))
             .flatten();
     }
@@ -622,10 +645,13 @@ impl Game {
     }
 
     /// The bots' AI over the roster as it now stands.
+    /// The gas starts over with it (ponytail: a join or leave mid-gas ends the gas, as the script
+    /// restarts; keep the script's globals across rosters if that matters).
     fn restart_bots(&mut self) {
         let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
-        self.ai
-            .restart(players, bots, self.setup.settings.skill, rng);
+        let s = self.setup.settings;
+        self.ai.restart(players, bots, s.skill, rng, s.total_war);
+        self.m.restart_gas();
     }
 
     /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz
@@ -1101,6 +1127,8 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         },
         hits: f.hits,
         headshots: f.headshots,
+        carrying: f.carrying,
+        masked: f.masked,
     }
 }
 
@@ -1200,6 +1228,12 @@ fn simulate(
                 info!("gave slot {slot} weapon {id:#x} at read {read}");
             }
         }
+        for &(slot, at, pos) in &game.setup.warps {
+            if at == read && slot < game.m.players.len() {
+                game.m.players[slot].body.pos = pos;
+                info!("warped slot {slot} to {pos:?} at read {read}");
+            }
+        }
     }
     let n = game.m.players.len();
     let mut inputs = vec![Input::default(); n];
@@ -1234,11 +1268,25 @@ fn simulate(
     for &(p, place) in &rides {
         info!("t={t} slot {p} takes the lift to record {}", place.index);
     }
+    // The AI script's effects (Total War's gas) go in before the step, its hits' events first.
+    let mut events = Vec::new();
     if let Some(bots) = &mut game.ai.bots {
         for &(p, _) in &rides {
             bots.lifted(p);
         }
-        bots.tick(&game.m, &game.arena, &world, &mut inputs);
+        let effects = bots.tick(&game.m, &game.arena, &world, &mut inputs);
+        let countdown = game.m.gas.countdown;
+        for e in &effects {
+            match e {
+                Effect::Countdown(300) if countdown != 300 => info!("GAS t={t} delivered"),
+                Effect::Show(n @ (27 | 28)) if !game.m.gas.prop(*n).is_some_and(|p| p.shown) => {
+                    info!("GAS t={t} canister on placement {n} back")
+                }
+                Effect::Carry(..) | Effect::Gas(_) | Effect::Release(_) => info!("GAS t={t} {e:?}"),
+                _ => {}
+            }
+        }
+        events = game.m.apply(&effects);
         bots.scopes(&mut game.m);
     }
     // ponytail: a waiting player is restored after the step, so it can't be hurt or moved meanwhile;
@@ -1252,11 +1300,11 @@ fn simulate(
         history.at(v, view.tick, view.overstep)
     };
     let pre = game.m.clone();
-    let events = if game.setup.lagcomp {
+    events.extend(if game.setup.lagcomp {
         game.m.step_seen(&game.arena, &inputs, &world, &seen)
     } else {
         game.m.step(&game.arena, &inputs, &world)
-    };
+    });
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
     for (i, f) in held {
         game.m.players[i] = f;
@@ -1447,6 +1495,9 @@ fn publish(
         rockets: m.rockets.iter().map(|r| r.1.pos).collect(),
         shots: m.shots.iter().map(|s| s.1.pos).collect(),
         taken,
+        countdown: m.gas.countdown,
+        gas: m.gas.gas,
+        props: m.gas.shown(),
     });
 }
 
@@ -1541,6 +1592,8 @@ mod tests {
             "1,2,3",
             "--give",
             "0:745:0x09",
+            "--warp",
+            "0:1000:-163,-1448,-33",
             "--wait",
             "2",
             "--first-read",
@@ -1555,12 +1608,14 @@ mod tests {
         assert_eq!(setup.spawns[0], ([-123.5, -293.75, 112.25], Some(25345)));
         assert_eq!(setup.spawns[1], ([1.0, 2.0, 3.0], None));
         assert_eq!(setup.gives, vec![(0, 745, 0x09)]);
+        assert_eq!(setup.warps, vec![(0, 1000, [-163.0, -1448.0, -33.0])]);
         assert_eq!(
             (setup.wait, setup.first_read, setup.lagcomp, net.port),
             (2, 745, true, 6000)
         );
         assert!(parse_args(args(&["--spawn", "1,2"])).is_err());
         assert!(parse_args(args(&["--give", "0:745"])).is_err());
+        assert!(parse_args(args(&["--warp", "0:745:1,2"])).is_err());
         assert!(!parse_args(args(&["--no-lagcomp"])).unwrap().0.lagcomp);
     }
 

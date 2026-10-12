@@ -250,6 +250,16 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             radius: IRIS.into(),
         },
         strip: strip(),
+        // Command F 1 (`func_1509DFC4`, C): `func_15042D94(150, 86, 1, "%d", (t + 59) / 60)` in white,
+        // flags 1: centred, no shadow (0x80), off the viewport's scale (0x40 clear: 1 in one view;
+        // `func_15043384`).
+        countdown: Text {
+            anchor: Anchor(H::Centre, V::Middle),
+            at: [150, 86],
+            align: Align::Centre,
+            colour: white,
+            shadow: None,
+        },
         end: None,
     }
 }

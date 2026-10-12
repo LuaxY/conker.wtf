@@ -158,6 +158,13 @@ pub mod combat {
     /// The one-shot gun's kill (35), then 103.
     pub const DEATH_BLAST: u16 = 0x19C;
     pub const DEATH_BLAST_FALL: u16 = 0x13;
+    /// Total War's gas kill (86, then [`DEATH_SHOT_FALL`]), the doorway's hit (59) and death (87),
+    /// and the carried canister's run and stand (V d1, d2).
+    pub const GASSED: u16 = 0x16E;
+    pub const DOORWAY_HIT: u16 = 0xF1;
+    pub const DOORWAY_DEAD: u16 = 0xF6;
+    pub const CARRY_MOVE: u16 = 0xD7;
+    pub const CARRY_IDLE: u16 = 0xD8;
     /// Flame hit (5), then the burning run while the fire lasts, and its bump off a wall (11).
     pub const FLAME_HIT: u16 = 0x69;
     pub const BURNING: u16 = 0x4C;

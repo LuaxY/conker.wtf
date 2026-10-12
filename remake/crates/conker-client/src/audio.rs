@@ -8,7 +8,8 @@
 //!   its clip, weapon and model in hand starting or ending a cue's condition (firing, holding,
 //!   burning); its fire clip starting (a shot) or its scope coming up; its health dropping (a hit:
 //!   [`hit_weapon`] reads the weapon from the victim's first reaction); the match ([`MatchView`]: a
-//!   pickup taken, a rocket gone, weapon 0x14's shots); the grenades in flight (the local fighter
+//!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
+//!   (its player's [`Combat::carrying`] going on); the grenades in flight (the local fighter
 //!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots.
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
@@ -41,7 +42,7 @@ use conker_rules::net::Fighting;
 use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::weapon;
 use conker_sim::movement::Side;
-use conker_sim::net::{Combat, MatchView, Player};
+use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use core::f32::consts::FRAC_PI_2;
 use core::time::Duration;
 use lightyear::core::timeline::is_in_rollback;
@@ -197,6 +198,8 @@ struct Seen {
     /// The floor's surface kind (bits 0-4 of its word) and the horizontal speed: footsteps.
     floor: Option<u8>,
     speed: f32,
+    /// Total War: carrying its team's gas canister, and whether it is a bot ([`On::Carry`]).
+    carry: Option<(u8, bool)>,
 }
 
 /// A player as the last tick saw it.
@@ -333,6 +336,8 @@ struct Sounds {
     rockets: Vec<[f32; 3]>,
     shots: Vec<[f32; 3]>,
     taken: u64,
+    /// Total War's gas out last tick ([`On::Gas`]).
+    gas: bool,
     primed: bool,
     /// The tick a rocket last went off (a blast's hit is a rocket's if one did just before).
     rocket_at: Option<u32>,
@@ -585,6 +590,9 @@ impl Sounds {
                 ClipAction::Stop(c) => self.stop(|v| v.owner == me.owner && v.channel == *c),
             }
         }
+        if let (Some((canister, bot)), None) = (is.carry, was.carry) {
+            self.cues(cx, is, me, |on| *on == On::Carry { canister, bot });
+        }
         let fire =
             |w: u8, p: &Seen| p.weapon == w && weapon(w).is_some_and(|w| w.fire.0 == p.clock.id);
         for (i, cue) in cx.pack.audio.events.cues.iter().enumerate() {
@@ -796,10 +804,27 @@ impl Sounds {
     }
 
     /// The match's sounds: weapon 0x14's shots (one sound a tick in flight, the wall's when one is
-    /// gone without hurting anyone near it), pickups taken (by the nearest player), the background
-    /// (from the first tick of play to the match's end) and the map's bubbling spots.
+    /// gone without hurting anyone near it), pickups taken (by the nearest player), Total War's gas
+    /// (at the listener while it is out), the background (from the first tick of play to the match's
+    /// end) and the map's bubbling spots.
     fn match_sounds(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
         let cues = &cx.pack.audio.events.cues;
+        for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Gas) {
+            let tagged = |v: &Voice| v.tag == Some(i);
+            match (self.gas, m.gas) {
+                (false, true) => {
+                    let src = Src {
+                        follows: Some(cx.ear.slot),
+                        tag: Some(i),
+                        ..Src::at(cx.ear.pos)
+                    };
+                    self.start(cx, &cues[i].play, &cues[i].play.sounds, 1.0, src);
+                }
+                (true, false) => self.stop(tagged),
+                _ => {}
+            }
+        }
+        self.gas = m.gas;
         let old = std::mem::take(&mut self.shots);
         for (k, &pos) in m.shots.iter().enumerate() {
             for cue in cues
@@ -952,6 +977,7 @@ fn hear(
         Option<&Fighting>,
         Has<Predicted>,
         Option<&mut Heard>,
+        Option<&PlayerId>,
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     mut commands: Commands,
@@ -961,7 +987,7 @@ fn hear(
     let mut all = std::mem::take(&mut s.players);
     all.clear();
     let mut grenades: &[(u32, Grenade)] = &[];
-    for (entity, p, c, anim, fighting, predicted, heard) in &mut players {
+    for (entity, p, c, anim, fighting, predicted, heard, id) in &mut players {
         let (weapon, drawn) = match fighting {
             Some(f) if predicted => (f.state.weapon.unwrap_or(0), f.state.drawn),
             _ => (c.weapon, c.drawn),
@@ -982,6 +1008,8 @@ fn hear(
             local: predicted,
             floor: p.floor.map(|f| (f.surface & 0x1F) as u8),
             speed: p.xz_speed,
+            carry: (c.carrying)
+                .then(|| (c.team, id.is_some_and(|i| matches!(i.0, PeerId::Local(_))))),
         };
         match heard {
             Some(mut h) => {
@@ -1507,6 +1535,7 @@ mod tests {
             local: false,
             floor: None,
             speed: 0.0,
+            carry: None,
         };
         let victim = Seen {
             reaction: conker_anim::combat::HIT,

@@ -10,6 +10,8 @@ use crate::npc::{AT_GOAL, Npc};
 use crate::script::{Globals, Host};
 use conker_camera::volume::CameraHint;
 use conker_rules::Rng;
+use conker_rules::damage;
+use conker_rules::gas::{self, Effect};
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
 
@@ -74,6 +76,8 @@ pub mod g {
     pub const AIM_Y: i32 = 0x17E8;
     pub const AIM_Z: i32 = 0x1828;
     pub const AIM_RATE: i32 = 0x1868;
+    /// Total War's gas (`[0x14, 0xBA]` at 0x3DC6): frames until the gas kills (`conker_rules::gas`).
+    pub const COUNTDOWN: i32 = 0x1FE4;
     /// Bytes of the struct plus the scripts' own globals: 0xBB's reach 0x26A8 (its pickup choice
     /// at 0x2658-0x2694); in s5's RAM the next block starts at G+0x26B0.
     pub const SIZE: usize = 0x26B0;
@@ -149,6 +153,12 @@ pub struct World<'a> {
     /// Per participant, its +0x70 ([`Body::suicides`]) when the AI last zeroed it (command 0x17,
     /// `func_1508B1D4`): the match keeps the count, the AI counts on from there.
     pub forgiven: &'a mut [u16],
+    /// The match slot of each participant.
+    pub slots: &'a [usize],
+    /// Each gas canister's +0x80 at the frame's start, in participants (+ 1; 0 none), and what the
+    /// script does to the match (`conker_rules::gas`).
+    pub touched: [i32; 2],
+    pub effects: &'a mut Vec<Effect>,
 }
 
 impl Host for World<'_> {
@@ -219,13 +229,40 @@ impl World<'_> {
         }
     }
 
-    /// Natives 3 and 4 (handle tables `0x80088420` / `0x8008845C`): only the level-start fade calls
-    /// (type 0xE) reach them in Deathmatch; they set screen fades.
+    /// Natives 3 and 4 (handle tables `0x80088420` / `0x8008845C`): start and stop. In Deathmatch
+    /// only the level-start fades (type 0xE) reach them. Total War's gas starts effects (0xE013 the
+    /// gassed screen, 0xE016 the gas, 0xE017 a canister's return) and sounds (type 7: 0x74CF the
+    /// gas's loop, which it keeps the handle of and stops; 0x7599 and 0x7640 a canister taken):
+    /// the client's to show from the match's state, but the gas's sound, whose span is the
+    /// script's ([`Effect::Gas`]).
     fn object(&mut self, native: i32, h: i32, _args: &[i32]) -> i32 {
-        match kind(h) {
-            0xE => 0,
-            k => self.unknown(native, k, -1),
+        match (native, kind(h)) {
+            (_, 0xE) => 0,
+            (3, 7) if h == 0x74CF => {
+                self.effects.push(Effect::Gas(true));
+                h
+            }
+            (3, 7) => 0,
+            (4, 7) => {
+                self.effects.push(Effect::Gas(false));
+                0
+            }
+            (_, k) => self.unknown(native, k, -1),
         }
+    }
+
+    /// The placement of the prop the script names `h` (`0x30nn`, nn its id), if the gas drives it.
+    fn prop(h: i32) -> Option<u16> {
+        (gas::PROPS.iter())
+            .find(|p| i32::from(p.1) == h & 0xFFF)
+            .map(|p| p.0)
+    }
+
+    /// The match slot of participant `p`.
+    fn slot(&self, p: i32) -> Option<usize> {
+        usize::try_from(p)
+            .ok()
+            .and_then(|p| self.slots.get(p).copied())
     }
 
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
@@ -238,9 +275,13 @@ impl World<'_> {
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
             (3, 1) => 0,
-            // ponytail: 0x21, the gas canister's (props 27/28) carrier + 1: none, as the remake has
-            // no canister yet (the next batch's, with the gas and the masks).
-            (3, 0x21) => 0,
+            // 0x21: +0x80, a gas canister's toucher + 1 (0 for the other props here).
+            (3, 0x21) => match Self::prop(h) {
+                Some(n) => (gas::CANISTERS.iter())
+                    .position(|c| c.0 == n)
+                    .map_or(0, |c| self.touched[c]),
+                None => 0,
+            },
             // Type 4, the triggers (`func_150A04D8`): 6, the player `a(2)` is inside; 16, someone is.
             // ponytail: a camera handle (6) and 16's camera test (`func_150A2D84`, the humans' view
             // eyes) read outside; the views are the clients'.
@@ -285,9 +326,27 @@ impl World<'_> {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
         match (kind(h), code) {
             (2, _) => self.player_command(index(h), code, args),
-            // Props (type 3) 4: camera/zone setup at level start; the level (5) 0xA, 0xF: HUD and
-            // music; (0xA, 0) a timer display.
-            (3, 4) | (5, 0xA) | (5, 0xF) | (0xA, 0) | (3, 0) => 1,
+            // Props (type 3) 0 shows a prop; 4 sets +0x7C.., +0x80 and +0x84 (0x7FFFFFFF keeps
+            // one): camera/zone setup at level start, and the gas's props ([`Effect`]). The level
+            // (5) 0xA, 0xF: HUD and music; (0xA, 0) a timer display.
+            (3, 0) => {
+                if let Some(n) = Self::prop(h) {
+                    self.effects.push(Effect::Show(n));
+                }
+                1
+            }
+            (3, 4) => {
+                if let Some(placement) = Self::prop(h) {
+                    let keep = |v: i32| (v != 0x7FFF_FFFF).then_some(v);
+                    self.effects.push(Effect::Set {
+                        placement,
+                        flag: keep(a(3)),
+                        gate: keep(a(4)),
+                    });
+                }
+                1
+            }
+            (5, 0xA) | (5, 0xF) | (0xA, 0) => 1,
             // Props 7: a display flag (+0x73 bit 4); sounds (type 0xA, `func_1509E730`) 3: a fade.
             (3, 7) | (0xA, 3) => 1,
             // Triggers 0 and 1 (`func_150A2864`): switch one on, or off (`+0x14`).
@@ -310,7 +369,13 @@ impl World<'_> {
                 0
             }
             (0xF, 0xB) => 0, // the weapon manager: mirrored from the match ([`crate::Bots`])
-            (0xF, 0xC) => 0, // release a weapon: the match drops it
+            // `func_1508DAEC`: release the pickup held (0xBA calls it in the gas only: the masks).
+            (0xF, 0xC) => {
+                if let Some(slot) = self.slot(a(2)) {
+                    self.effects.push(Effect::Release(slot));
+                }
+                0
+            }
             (0xF, 0xD) => {
                 self.threats(g);
                 0
@@ -544,6 +609,19 @@ impl World<'_> {
                 }
             }
             0x7B => n.pickup = a(2) as u8,
+            // `func_1505D024` on the player: the gas's doorway hit (0x2A, no attacker) and kill
+            // (0x2B, the deliverer's).
+            0x2A | 0x2B => match (damage::script_type(a(2)), self.slots.get(p)) {
+                (Some(kind), Some(&slot)) => {
+                    let attacker = (code == 0x2B).then(|| self.slot(a(4))).flatten();
+                    self.effects.push(Effect::Hit {
+                        slot,
+                        kind,
+                        attacker,
+                    });
+                }
+                _ => return self.unknown(6, 2, code),
+            },
             c => return self.unknown(6, 2, c),
         }
         0
@@ -1290,6 +1368,9 @@ mod tests {
             unknown: &mut unknown,
             ffa: true,
             forgiven: &mut [],
+            slots: &[0, 1],
+            touched: [0; 2],
+            effects: &mut Vec::new(),
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1343,6 +1424,9 @@ mod tests {
             unknown: &mut unknown,
             ffa: true,
             forgiven: &mut [],
+            slots: &[0, 1],
+            touched: [0; 2],
+            effects: &mut Vec::new(),
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);

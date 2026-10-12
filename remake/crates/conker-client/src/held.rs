@@ -5,17 +5,20 @@
 //! Its own animation events show and hide it: the draw clip's event puts it in the hand, the
 //! holster clip's takes it away. The item is the grenade while its clips play, else the player's
 //! weapon; with no event fired yet, a drawn weapon and the held grenade show.
+//! In War: Total War a carrier holds the gas canister and a wearer has the gas mask on
+//! ([`GAS_JOINTS`]).
 
-use crate::Anim;
+use crate::render::MODEL_SCALE;
+use crate::{Anim, Config};
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use conker_anim::AnimPlayer;
 use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
-use conker_assets::{Held, PACK_WEAPONS, held_gltf};
+use conker_assets::{Held, PACK_WEAPONS, held_gltf, props_gltf};
 use conker_rules::net::Fighting;
 use conker_rules::weapon::weapon;
-use conker_sim::net::Combat;
+use conker_sim::net::{Combat, MatchView};
 use lightyear::prelude::Predicted;
 
 #[derive(Resource)]
@@ -25,10 +28,21 @@ struct HeldModels(Vec<Held>);
 #[derive(Component)]
 struct Hands(Vec<(usize, Entity)>);
 
+/// A player's gas canister and gas mask (War: Total War), under their joints.
+#[derive(Component)]
+struct GasHands([Entity; 2]);
+
+/// Where the canister (`props.gltf`'s scene 1) and the mask (scene 2) hang: the root joint
+/// (`joint_00`), upright with its middle between the hands of the carry clips (0xD8's first frame:
+/// hands at x ±31, 43 up, 26 forward), and the head (`joint_12`); offsets in the joint's frame
+/// (model units). I: no clip creates them (no create event in any route table's 0xD7, 0xD8, 0x4E,
+/// 0x51), the game's weapon manager draws item 0x25 by a path not read; joints and offsets fitted.
+pub const GAS_JOINTS: [(u8, [f32; 3]); 2] = [(0, [0.0, -30.0, 24.0]), (12, [0.0, 0.0, 0.0])];
+
 /// The systems that hang the held models on every player's joints and show them.
 pub fn build(app: &mut App, held: Vec<Held>) {
     app.insert_resource(HeldModels(held));
-    app.add_systems(Update, (hang, show).chain());
+    app.add_systems(Update, (hang, show, hang_gas, show_gas).chain());
 }
 
 /// Whether held model `h` is in the hand of a player holding `weapon` (0: none), `drawn` or not,
@@ -102,6 +116,69 @@ fn hang(
             })
             .collect();
         commands.entity(player).insert(Hands(hands));
+    }
+}
+
+/// In War: Total War, once a player's held models hang, its canister and mask go under their joints
+/// ([`GAS_JOINTS`]), hidden, at the world's size (the props are not drawn at the players' half).
+#[allow(clippy::too_many_arguments)]
+fn hang_gas(
+    players: Query<Entity, (With<Hands>, Without<GasHands>)>,
+    game: Query<&MatchView>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    cfg: Res<Config>,
+    assets: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut gltf: Local<Option<Handle<Gltf>>>,
+    mut commands: Commands,
+) {
+    if players.is_empty() || !game.single().is_ok_and(|m| m.total_war) {
+        return;
+    }
+    let handle = gltf.get_or_insert_with(|| assets.load(props_gltf(&cfg.map)));
+    let Some(g) = gltfs
+        .get(&*handle)
+        .filter(|_| assets.is_loaded_with_dependencies(&*handle))
+    else {
+        return;
+    };
+    for player in &players {
+        let joint = |j: u8| {
+            let name = format!("joint_{j:02}");
+            (children.iter_descendants(player))
+                .find(|&e| names.get(e).is_ok_and(|n| n.as_str() == name))
+        };
+        let [Some(root), Some(head)] = GAS_JOINTS.map(|(j, _)| joint(j)) else {
+            continue;
+        };
+        let joints = [root, head];
+        let hands = std::array::from_fn(|k| {
+            let at = Transform::from_translation(Vec3::from(GAS_JOINTS[k].1));
+            let part = commands.spawn((
+                WorldAssetRoot(g.scenes[k + 1].clone()),
+                at.with_scale(Vec3::splat(MODEL_SCALE.recip())),
+                Visibility::Hidden,
+                ChildOf(joints[k]),
+            ));
+            part.id()
+        });
+        commands.entity(player).insert(GasHands(hands));
+    }
+}
+
+/// Shows the canister while its player carries it, the mask while it wears one (the server's
+/// [`Combat`]: neither is predicted).
+fn show_gas(players: Query<(&Combat, &GasHands)>, mut visibility: Query<&mut Visibility>) {
+    for (c, hands) in &players {
+        for (shown, &part) in [c.carrying, c.masked].iter().zip(&hands.0) {
+            if let Ok(mut v) = visibility.get_mut(part) {
+                v.set_if_neq(match shown {
+                    true => Visibility::Inherited,
+                    false => Visibility::Hidden,
+                });
+            }
+        }
     }
 }
 

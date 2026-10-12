@@ -91,7 +91,7 @@ bots camped with the sniper rifle in the last `bots.sh` runs (known bot weakness
   the own model while scoped); the rank on ties (the original's rule is unknown); the death iris timing for
   grenade deaths and its centre; weapon 0x16's R tint; the scope dots' turn; the page's `#net` line and sound
   hint overlap the clock and weapon icon in narrow windows. Deploy `deploy/pack.sh` before a new `web/dist`
-  (the client needs `hud/hud.json`). `lab/hud/` holds 1.3 GB of RAM dumps that can be deleted.
+  (the client needs `hud/hud.json`).
 
 ## Missing compared with the original's multiplayer (checked 2026-10-11)
 Evidence: `lab/research/mp-original/` (menus-and-flow.md, modes-and-maps.md). Our map 0x2D is the **Total War** map:
@@ -120,7 +120,7 @@ shotgun (0x37). Leftovers:
 - the pack: the map exports, the weapons' port and the fixes rewrote `pack.json`, `audio/events.json`,
   `audio/sounds.json`, `hud/hud.json` (additions only), `weapons/deathmatch/held.{bin,gltf,json}` (14 models, new
   order), `maps/*/collision.json` and `maps/{2d,30}/level.gltf`, so pack edits in those files would need re-applying.
-  `assets/` equals a fresh four-map export (922 files) plus the old `game/ai.bin`, which nothing reads any more.
+  `assets/` equals a fresh four-map export (929 files).
 - caveman and club (done, `--cavemen` or 0x3F): the club is drawn 21% of the time by the bots (the game's 52%); the
   caveman's own grenade clips (the Tedi's play); the club's HUD icon one pixel left; a lethal first swing untraced;
   nobody listened to the club and caveman sounds;
@@ -143,14 +143,18 @@ shotgun (0x37). Leftovers:
    - in order: Total War (gas masks, canister, gas; same map), Colors (flags, score 1-40), Beach (Frenchys vs Tediz,
      turret, escape), Heist (4 teams, money bag, vault), Raptor (raptor rig, eggs, baby);
    - the win rules aren't in the code found yet: trace them in the oracle first.
-   - **Total War part 1 done (2026-10-12, `--mode total-war`):** teams, friendly fire, team end and winner, the bots'
-     team branch, team HUD strip, radar colours, team STATS. Left (`lab/research/mp-original/total-war-gas.md`): the
-     two canisters (each team steals its own from the enemy base, item 0x25, ~0.8x speed, back home on death), trigger
-     5's 10 s countdown and HUD digit, the doorways' damage, the gas kill (credited to the deliverer, no team check),
-     the 6 masks (pickable only during the countdown, item 0x20) and the props they show/hide; the masks and canisters
-     must show in Total War on the scene Deathmatch hides them on. Also: the outro cutscenes (2/4), the team screen and
+   - **Total War done (2026-10-12, `--mode total-war`):** teams, friendly fire, team end and winner, the bots'
+     team branch, team HUD strip, radar colours, team STATS (part 1); the gas (part 2): the AI script drives it as in
+     the game (its natives became effects the server applies), the two canisters (carried at the 0x25 speed, 80%),
+     trigger 5's 10 s countdown and HUD digit, the doorways' damage, the gas kill credited to the deliverer, the 6
+     masks, the doors and covers, the gas loop and pickup sounds. Left: the outro cutscenes (2/4), the team screen and
      BALANCE, a human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, both teams out on
-     one frame. The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
+     one frame; the gas effects 0xE013/0xE016/0xE017 (unknown); the mask put-on/take-off clips 81/78; the canister's
+     3-frame shrink; the prop collision (covers solid, doors not, as in Deathmatch); the kill frame's "1" and the
+     delivery sound; the pickup sound's busy table; the canister and mask fitted by eye (the Tedi's hands unchecked);
+     a carrier can jump; a join or leave mid-match restarts the script (cancels the gas); the bots never carry a
+     canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z` makes a delivery without walking.
+     The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.
 5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.

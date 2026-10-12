@@ -9,6 +9,7 @@ pub mod damage;
 pub mod fidget;
 pub mod flame;
 pub mod game;
+pub mod gas;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod projectile;

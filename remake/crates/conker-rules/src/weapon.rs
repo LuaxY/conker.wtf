@@ -407,6 +407,9 @@ pub enum Gives {
     Weapon(u8),
     /// +3 grenades, at most 6.
     Grenades,
+    /// War: Total War's gas mask (item 0x20, `gas::MASK`): it takes the pickup slot (MP+0xEB0) a
+    /// weapon would, and while worn the gas spares its wearer.
+    Mask,
 }
 
 /// A pickup: the scene placement it sits on and what it gives.
@@ -427,10 +430,12 @@ const fn pick(placement: u16, id: u8) -> Pickup {
     }
 }
 
-/// Scene 0x2D's 19 pickups in the MP weapon manager's order (k = MP+0xEB0 values; V from the
-/// RAM, `func_1508DC24`). k ≥ 12 mirror k − 12 on the other base. Placements 21-28 and 37 start
-/// hidden and are unused in Deathmatch.
-pub const PICKUPS_2D: [Pickup; 19] = [
+/// Scene 0x2D's pickups in the MP weapon manager's order (k = MP+0xEB0 values; V from the RAM,
+/// `func_1508DC24`). k ≥ 12 mirror k − 12 on the other base. Total War adds the six gas masks
+/// k19-k24 (placements 21-26, the props with ids k + 1; MP+0xEA4 = 25, V d2), which Deathmatch
+/// leaves out (its 19: the count less 6, C). Placements 27 and 28 are the gas canisters
+/// (`gas::CANISTERS`); 37 starts hidden and is unused.
+pub const PICKUPS_2D: [Pickup; 25] = [
     pick(12, 0x09),
     pick(31, 0x21),
     pick(33, 0),
@@ -450,7 +455,20 @@ pub const PICKUPS_2D: [Pickup; 19] = [
     pick(15, 0x14),
     pick(39, 0x39),
     pick(20, 0x23),
+    mask(21),
+    mask(22),
+    mask(23),
+    mask(24),
+    mask(25),
+    mask(26),
 ];
+
+const fn mask(placement: u16) -> Pickup {
+    Pickup {
+        placement,
+        gives: Gives::Mask,
+    }
+}
 
 /// Scene 0x30's 17 pickups (Deathmatch and Colors alike), in the manager's order (V from the RAM,
 /// `../lab/oracle/map30`: pickup k is the prop whose id is k + 1).

@@ -235,6 +235,8 @@ pub struct Hud {
     pub scope: Scope,
     pub iris: Iris,
     pub strip: Strip,
+    /// War: Total War's gas countdown: the seconds left until the gas kills.
+    pub countdown: Text,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,

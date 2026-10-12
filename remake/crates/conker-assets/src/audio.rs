@@ -183,6 +183,11 @@ pub enum On {
     Pickup { gives: crate::Gives },
     /// The weapon's scope going on (R held), heard by its holder only.
     Scope { weapon: u8 },
+    /// War: Total War's gas: a loop while it is out (`MatchView::gas`), at the listener.
+    Gas,
+    /// War: Total War: a player taking gas canister `canister` (its team's), at it; `bot`: a player
+    /// without a camera.
+    Carry { canister: u8, bot: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

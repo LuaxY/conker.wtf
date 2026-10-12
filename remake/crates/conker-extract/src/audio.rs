@@ -920,6 +920,24 @@ fn code_cues() -> Vec<Cue> {
             )
         });
     }
+    // War: Total War's gas, the AI script 0xBA's sound objects (`obj(0x7nnn, mode, ..)`: native 3's
+    // type 7, `func_1509EFF0`, sound id 0xnnn). Mode 1: `func_10010F30`, unpositioned for everyone.
+    cues.push(cue(
+        On::Gas,
+        play([0x4CF], 0x6590, Some(0x6590), 0, 0, Channel::Free),
+        "the gas, from 29 frames before the kill until the masks come off (C script 0xBA 0x402C: obj(0x74CF, 1, 0x6590); V its handle)",
+    ));
+    // Mode 4: `func_15103C14`, a record at the carrier heard everywhere; a player without a camera
+    // (a bot) plays the next id, louder.
+    for (canister, id) in [(0, 0x599), (1, 0x640)] {
+        for (bot, id, volume) in [(false, id, 30000), (true, id + 1, 32700)] {
+            cues.push(cue(
+                On::Carry { canister, bot },
+                record([id], volume, 32766, 32767),
+                "a canister taken (C script 0xBA 0x4606/0x462E: obj(0x7599 / 0x7640, 4, 0, carrier, canister, 1))",
+            ));
+        }
+    }
     cues
 }
 

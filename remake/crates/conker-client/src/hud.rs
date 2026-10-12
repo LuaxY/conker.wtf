@@ -88,6 +88,8 @@ pub struct Shown {
     /// War: Total War: the team strip's numbers, [0] the squirrels', [1] the Tediz': their kills,
     /// untimed (`lives` shown) their lives left; in place of the own kills and rank.
     pub strip: Option<[u32; 2]>,
+    /// Total War: the gas countdown's seconds ([`countdown`]).
+    pub countdown: Option<u32>,
     /// The match is over: the results' rows ([`rows`]: each with its colour) and the menu's choice
     /// (0 RESTART, 1 QUIT).
     pub results: Option<(Vec<Row>, usize)>,
@@ -506,6 +508,9 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
         out.extend(text(hud, &clock, None, &hud.clock, 5.0));
     }
+    if let Some(n) = s.countdown {
+        out.extend(text(hud, &n.to_string(), None, &hud.countdown, 5.0));
+    }
     // Aiming: the reticle; through a scope: the ring, its dots and the zoom bar.
     let t = &hud.reticle;
     if s.reticle {
@@ -661,6 +666,17 @@ pub fn camera(commands: &mut Commands, target: Option<Handle<Image>>) {
     }
 }
 
+/// Total War's gas countdown as the game prints it, from [`MatchView::countdown`] (G+0x1FE4 after the
+/// frame): the AI script prints `(t + 59) / 60` of the countdown `t` before its frame's decrement
+/// (0xBA 0x3DFE `command(0xF000, 1, G+0x1FE4)`, then `timer10` at 0x3E06; `func_1509DFC4` case 1),
+/// so `t` is `countdown + 1`, on the frames after the delivery's (300). The kill's frame prints 1 and
+/// leaves 0, which is no countdown here (I: a frame short).
+pub fn countdown(countdown: i32) -> Option<u32> {
+    (1..300)
+        .contains(&countdown)
+        .then(|| (countdown + 1 + 59) as u32 / 60)
+}
+
 /// What ranks a player (conker-rules' [`places`]).
 pub fn standing(c: &Combat) -> Standing {
     Standing {
@@ -736,6 +752,7 @@ fn shown(
         lives: (m.time == 0).then_some(c.lives_left),
         out: c.out > 0,
         strip: m.total_war.then_some(strip),
+        countdown: countdown(m.countdown),
         results: None,
         header: None,
     }
@@ -1174,6 +1191,40 @@ mod tests {
         // P1's "1st 9% 2 0 1" in red: 7 quads (the suffix one), each over a black shadow.
         let red = (sprites(&hud, &over).into_iter()).filter(|q| q.colour == [255, 0, 0, 255]);
         assert_eq!(red.count(), 7);
+    }
+
+    /// Total War's gas countdown: `(t + 59) / 60` of t = countdown + 1 (5 from 299 down to 240, 1
+    /// from 59), none on the delivery's frame (300) or without one; the digit white, centred on x
+    /// 150, its line's top at 86.
+    #[test]
+    fn gas_countdown_prints_as_the_game() {
+        assert_eq!(
+            [300, 299, 240, 239, 60, 59, 1, 0].map(countdown),
+            [
+                None,
+                Some(5),
+                Some(5),
+                Some(4),
+                Some(2),
+                Some(1),
+                Some(1),
+                None
+            ]
+        );
+        let Some(hud) = pack_hud() else {
+            return;
+        };
+        let s = Shown {
+            strip: Some([0, 0]),
+            secs: None,
+            countdown: Some(5),
+            ..state()
+        };
+        let g = hud.font.iter().find(|g| g.ch == '5').unwrap();
+        let [w, h] = g.size.map(f32::from);
+        let [dx, dy] = g.offset.map(f32::from);
+        let x = 150.0 - ((w - 1.0) / 2.0).floor() + dx;
+        assert_eq!(glyphs(&hud, &s), [[x, 86.0 + dy, x + w, 86.0 + dy + h]]);
     }
 
     /// Total War's strip where the original drew it (the gas run's DL 3000: timed, Tediz 4,

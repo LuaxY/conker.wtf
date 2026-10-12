@@ -1,5 +1,98 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Total War, part 4: the gas on the client (2026-10-12)
+**The client draws part 3's state: in Total War the doors, covers, masks and canisters show by `MatchView.props` /
+`taken`, a carrier holds the canister, a masked player wears the mask, the countdown digit prints mid-screen, the gas
+loops while it is out and a canister taken plays its line. Deathmatch draws as before (screens byte-identical).**
+`PROTOCOL_ID` unchanged (14); no rules or bots change.
+
+| Part | What |
+|---|---|
+| Pack | `maps/2d/props.gltf` + `props.bin` (`conker_extract::props_level`): scene 0 the 10 placements the level cuts (0, 1, 21-28) named `model@placement` as the level's nodes, scene 1 the canister 3/85, scene 2 the mask 3/84, at the origin; textures are the level's PNGs (the image loop skips a path already added). `hud.json` `countdown` (150, 86, centred, white, no shadow). `audio/events.json` `gas` (0x74CF → 1231, looped) and 4 `carry` (0x7599/0x759A → 1433/1434, 0x7640/0x7641 → 1600/1601) + `sounds.json` + those 5 WAVs; `README.md`. `conker_assets::props_gltf`, `Hud::countdown`, `On::Gas`, `On::Carry { canister, bot }`. `../assets`: the 2 props files and 5 WAVs added; `events.json`, `sounds.json`, `hud.json`, `README.md` rewritten (additive) |
+| Client render | `add_props`: in Total War, `props.gltf#Scene0` spawned once (Deathmatch never loads it); `show_pickups` also hides a `gas::PROPS` placement whose `props` bit is clear (Total War only); the masks follow `taken` like the pickups |
+| Client held | `hang_gas` / `show_gas`: scene 1 under `joint_00` at (0, −30, 24), scene 2 under `joint_12` at its origin, both at the world's size, shown by `Combat.carrying` / `.masked`. The weapon is already hidden while carrying (the pickup holsters: `drawn` false, no event in 0xD7/0xD8; the prediction too: `Fighting.state` is the whole `Fighter`, a draw needs `!carrying`) |
+| Client HUD | `Shown::countdown` = `hud::countdown(m.countdown)`: `(countdown + 1 + 59) / 60` while 1-299, as text |
+| Client audio | `Sounds::gas`: the `gas` cue at the listener, unpositioned, from `MatchView.gas`'s rise to its fall (stopped by tag); `Seen::carry`: a carry starting plays `carry { canister: team, bot }` at the carrier (bot: `PeerId::Local`) |
+| Server (test only) | `--warp SLOT:READ:X,Y,Z` moves a player at a read (as the research's position pokes) to deliver without walking; `replay_flags_parse` covers it |
+| Lab | `../lab/screens/total-war/gas.sh`: `gas` (port 5980, 3 squirrels, no bot) and `dm [DIR]` (port 5982) |
+
+Findings: the countdown's two forms agree: script 0xBA prints at 0x3DFE (`command(0xF000, 1, G+0x1FE4)`) before
+`timer10` decrements at 0x3E06, and `MatchView.countdown` is after the frame, so the printed `(t + 59) / 60` with
+`t = countdown + 1` is `countdown / 60 + 1`. F 1 (`func_1509DFC4`) draws `func_15042D94(150, 86, 1, "%d", ..)` (format
+at 0x8009F300) in white; `func_15043384`'s flags: 1 centred, 0x80 no shadow, 0x40 clear (off the viewport's scale).
+The script's objects of kind 7 (`(h >> 12) & 0xF`) are sounds, `h & 0xFFF` the sound: 0x74CF mode 1 is a loop with
+volume 0x6590 at the listener; 0x7599 / 0x7640 mode 4 (`func_15103C14`) a record at the carrier heard everywhere,
+volume 30000, and a carrier without a camera (a bot) plays the next id at 32700. 1231 loops (0-22756); 1433/1600 are
+the voice lines at 15956 Hz, 1434/1601 the same at 7978 Hz.
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line) | pass (exit 0): conker-client 43 (new `gas_countdown_prints_as_the_game`: 300→none, 299/240→5, 239→4, 60→2, 59/1→1, 0→none; the 5 centred at x 150, top 86, white), -server 16 (`replay_flags_parse` + `--warp`), -extract (`pack.rs`: the props nodes `04-2d-04@0` … `03-55@28`, `03-55`, `03-54`, and `props.gltf` read back), -rules 67, -bots, -sim, -anim, -assets, extract-scene |
+| `cargo fmt --check`; clippy (assets, extract, client, server; all targets; conker-client wasm32) | clean (`-D warnings`; clippy over rules, sim, bots, anim too) |
+| Fresh export (the task's command, `/tmp/pack-gas2`) vs `../assets` | `diff -r` empty after the copy (no extractor change since); `maps/2d/level.gltf`/`.bin` unchanged |
+| `gas.sh gas` (P1 on canister 0 at read 960, warped into the shelter at 1000) | `../lab/screens/total-war/canister.png` canister 1 on its spot; `carrying.png` P1's own view from behind, the canister in front; `carrier.png` P1 side-on hugging the upright canister; `countdown.png` the digit 4 mid-screen (P1 in the shelter); `masked.png` P2 in the mask on its spot (21); `doors.png` door 1 shown across the corridor during the gas, digit 1 |
+| `gas.sh dm` vs the same run before the change (`--wait 2`) | `dm-cover.png` (the shelter, no mask), `dm-door.png` (no door): byte-identical |
+
+I or skipped: the canister's and the mask's joints, offsets and size (the world's) are fitted (the game draws item
+0x25 / 0xA0 by a weapon-manager path not read; the canister sits between 0xD8's hands: the squirrel's ±31 apart, the
+Tedi's (117) ±40 at 39 up, so 12 short of each, not screenshotted); the mask's put-on/take-off clips (route 0x51 / 0x4E) are not played (the rules own the clip); 0xE013 (the gassed screen), 0xE016 (the gas) and
+0xE017 (a canister back) are skipped, no cheap placeholder; 0x75A3 / 0x7642 (the carrier's) are not reached (part 3);
+`func_15103C14`'s per-team 600-tick busy table is not kept (every carry plays); the kill's frame shows no digit (the
+game prints 1 then); the delivery's command (0xA032, 0) sound is not played.
+
+## War: Total War, part 3: the gas canisters, the gas and the masks (2026-10-12)
+**Server, rules and protocol (no drawing yet): 0xBA's script holds the gas (canister timers, carriers, the
+countdown, the deliverer, the masks' removal) and runs in Total War with or without bots; its natives turn into
+`gas::Effect`s that the server applies to the match before each step. The match keeps the engine's side: the props
+the script drives (shown, +0x80, +0x84), the canisters' touch, the masks as pickups, the carrier and the hits.**
+`PROTOCOL_ID` 14. Research: `../lab/research/mp-original/total-war-gas.md` (runs d1-d3).
+
+| Part | What |
+|---|---|
+| Rules | new `gas` module: `PROPS` (placements 0-7, 27, 28 with their ids 0xFF-0xF8, 0x1A, 0x1B), `CANISTERS`, `Gas` (`props`, `countdown`, `gas`; doors hide 50 frames, covers 12, after +0x80 goes to 1), `admits` (+0x84), `Effect`; `Match::gas`, `Match::apply(&[Effect]) -> Vec<Event>`, `Match::restart_gas`; a canister shown is touched as a pickup (gate +0x84, slot + 1 into +0x80, hidden at once); `Gives::Mask` (k19-k24 = placements 21-26 in `PICKUPS_2D`, now 25; `Arena::deathmatch` leaves them out), touched only while `countdown > 0` and not by a masked player, delivered at touch + 2 in the weapon's slot; `Fighter::carrying` (armed 0x25: 80 % speed, all C strafe, no crouch, no skid; no draw/fire/grenade/reload; holstered; item 0xA5; anims 0xD7 moving / 0xD8 standing) and `Fighter::masked` (item 0xA0); both go at a lethal hit; `hurt`'s attacker is an `Option` (none: no score; reaction 0x2D: no +0x70); `damage::GAS` (type 0x1F), `DOORWAY` (0x3B), `script_type`, their sequences |
+| Bots | `Bots::tick` returns the effects (only in Total War); natives: object 3/4 kind 7 (0x74CF → `Gas(true)`, its handle stopped → `Gas(false)`, other sounds 0), kind 0xE effects ignored; prop query 0x21 (a canister's +0x80, as participant + 1); prop commands 0 → `Show`, 4 → `Set` (0x7FFFFFFF keeps); F 0xC → `Release`; player commands 0x2A / 0x2B → `Hit`; after the script: `Countdown(G+0x1FE4)` and `Carry` for G+0xFF0 = 0x25 changes; the mirror lists masks (gift 0x20) and keeps G+0xEB0 on a mask pickup while one is worn; `Body::drawn` 0x25 while carrying; `g::COUNTDOWN` |
+| Net | `PROTOCOL_ID` 14: `MatchView.countdown`, `.gas`, `.props` (bit n: placement n shown, n in 0-7, 27, 28), masks in `.taken` (21-26); `Combat.carrying`, `.masked`; the fighter's two flags |
+| Server | `arena(pack, total_war)` drops the masks in Deathmatch; `Ai::restart` makes the AI with no bot in Total War; `restart_bots` also restarts the gas; `simulate` applies the effects before the step (their hit events first); `GAS` info lines (delivered, canister back, carry, gas sound, mask off) |
+| Pack | `maps/2d/pickups.json` + 6 `"mask"` entries; `README.md` (pickups count, `"mask"`). `../assets`: those two files rewritten |
+| Client | compiles (pass-through); `/info` doc protocol 14 |
+
+Effects (`conker_rules::gas::Effect`): `Show(placement)`, `Set { placement, flag, gate }`, `Countdown(i32)`, `Gas(bool)`,
+`Hit { slot, kind, attacker: Option<slot> }`, `Release(slot)`, `Carry(slot, bool)`. Sound/visual-only calls are left to
+the client from the state: 0xE016 (the gas, at the delivery and per victim), 0xE013 (a player's gassed screen, from
+countdown 29 outside the shelter), 0xE017 (a canister back), 0x7599 / 0x7640 (a canister taken), command (0xA032, 0) (a
+delivery sound); 0x75A3 / 0x7642 (the carrier's) are not reached (level query 0x25 answers 0, as before).
+
+Findings: the carrier's 80 % is `func_15064B94`'s 0x25 (C; conker-sim's `armed_walk` had it), V d1: the drive fits
+79.4-81.1 % on both stick settings (+1 a frame to within 1 of the target, then +0.01). The script ticks one canister's
+timer a frame by turns (G+0x1FE0) and returns before the touches and the delivery test while that timer runs (0x4338),
+so a touch becomes a carry 1 or 2 frames later and a delivery is seen within 2. The gas (0x2D) and doorway (0x0E) hits
+are `func_1505D024` without guard flags (immune players are hit too); the deliverer gets hits and kills for enemy
+victims only, nobody's +0x70 moves (d1, d3). Death clips: gas 0x16E 86, 0x16F 52, 0x59 55; doorway 0xF1 59, 0xF6 87
+(V d2). The shelter's floor is at y −1448 by trigger 5 (d1).
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line) | pass (exit 0): conker-rules 67 (new `gas_canister_masks_and_hits`; gas.rs `doors_and_covers_hide_after_their_flag`) + combat 3 + ROM; conker-bots 15 + oracle 3 + ROM 6 (new `gas_props_of_0x2d`: ids, canister places, masks k + 1; `total_war_gas`, no bot, 5 humans placed as d1/d2: canister 0 at 757 (window 600-902), carried 1-2 frames after the touch, the doorway 1 a frame at delivery + 211..216, the gas on + 300 for the two outside and unmasked (enemy and team-mate), the deliverer 1 kill 1 hit 0 suicides, mask off at + 389, sound 271-389, doors/covers as d2, canister back 600-902 after, 0 unknown natives); -server 16, -client 42, -sim, -anim, -assets, -extract (`pack.rs` reads the masks), extract-scene |
+| Deathmatch combat replays | output identical to HEAD's (110 lines, `--nocapture`) |
+| Fresh export (the task's command) vs `../assets` | `diff -r` empty after copying `README.md` and `maps/2d/pickups.json` (929 files) |
+| `cargo fmt`, clippy (rules, bots, server, sim, assets, extract, anim, client; all targets; conker-client wasm32) | clean |
+| `MODE=total-war HUMANS=1 BOTS=5 bots.sh 300` (port 5970) | canister 1 back 714 frames into the match, canister 0 879 (`GAS` lines); no bot touched or carried one, so no countdown and no mask taken (the original's bots carried none in 620 s either, run1); 51 hits, 12 kills, 5 lift rides; 0 panics, warnings, unknown natives or faults. 15/16: bot 4 never died (a sniper on its tower spot, as in part 1) |
+
+Stubs left for the client batch: draw the props by `MatchView.props` (Total War only; Deathmatch leaves it at 0xFF and
+the level has no 0, 1) and the masks by `taken`; placements 0, 1 and 21-28 are cut from the level glTF
+(`conker_extract::hidden_placements(0x2D)`), so their models must be exported (and hidden in Deathmatch); the countdown
+digit (`countdown / 60 + 1` while > 0, F 1's text at (0x96, 0x56)); the gas's loop and the visual effects above; the
+carrier's canister model in hand (item 0x25) and the mask on the head (item 0x20); `Combat.carrying`/`masked` for the
+other players.
+
+Gaps (I unless tagged): the props' collision stays Deathmatch's (covers 2-7 solid, doors 0-1 not; the game's follows
++0x6E); the mask's put-on (0x151, 19 frames, V d2 1104) and take-off (0x14E, 19, V d2 1452) clips are not played; a
+canister hides at once (the game shrinks it for 3 frames); the carrier's jumps are allowed and its camera weapon stays
+0 (V: s126+0x78 = 0x25); a non-lethal doorway hit's length (59, as the lethal one's first state); the doors hide 50
+frames after the match start's flag (the game 51); a join or leave mid-match restarts the script and so the gas; the
+carrier keeps its weapon, holstered, through the carry and after it (d1's carrier had none); the mirror gives the masks
+the weapons' pickup flags 6 (the game's for them unread).
+
 ## War: Total War, part 2: the HUD and the team STATS (2026-10-12)
 **In Total War the client draws the team strip in place of its own kills and rank, the radar's blips by team (squirrels
 green, Tediz red; Deathmatch stays red), and after the end fade the team STATS: DRAW, YOU WIN / YOU LOSE (one human) or

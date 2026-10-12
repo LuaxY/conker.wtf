@@ -5,7 +5,8 @@
 //! animation clock ([`crate::Anim`]) with its own clips, the view of the
 //! follow camera ([`crate::FollowCamera`]) and a free debug camera. Combat adds the match's bullets,
 //! aimed shots, grenades and rockets (placeholder spheres: the pack has no models for them), hides the level's pickup
-//! models while taken (they are the level glTF's placement nodes). The HUD is [`crate::hud`]'s;
+//! models while taken (they are the level glTF's placement nodes); War: Total War adds its props
+//! ([`props_scene`]), shown as the match says. The HUD is [`crate::hud`]'s;
 //! [`TEXT_HUD_KEY`] shows the old text readout too ([`crate::hud_text`]; in the browser, the page's
 //! `#hud` element).
 //!
@@ -28,7 +29,8 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_dis
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use conker_anim::id;
-use conker_assets::{PACK_CHARACTERS, Slice, character_gltf, level_gltf};
+use conker_assets::{PACK_CHARACTERS, Slice, character_gltf, level_gltf, props_gltf};
+use conker_rules::gas;
 use conker_sim::movement::Side;
 use conker_sim::net::{Combat, MatchView, Player};
 use core::f32::consts::{FRAC_PI_2, TAU};
@@ -36,6 +38,11 @@ use core::f32::consts::{FRAC_PI_2, TAU};
 /// The level's scene and a side's character glTF (asset paths in the pack).
 pub fn level_scene(map: &str) -> String {
     format!("{}#Scene0", level_gltf(map))
+}
+
+/// War: Total War's props (its map's `props.gltf`): the shelter's doors, the gas masks and canisters.
+pub fn props_scene(map: &str) -> String {
+    format!("{}#Scene0", props_gltf(map))
 }
 
 pub fn character(side: Side) -> String {
@@ -238,6 +245,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             pose_players.run_if(ready),
             follow_camera,
             draw_projectiles,
+            add_props.run_if(ready),
             show_pickups,
             toggle_text_hud,
             update_hud,
@@ -633,27 +641,42 @@ fn draw_projectiles(
     }
 }
 
-/// The level glTF draws every placement, pickups included, as a node named `model@placement`: a
-/// taken pickup's node hides until it is back.
+/// In War: Total War, its props, once the characters are in (one glTF load at a time, see
+/// [`load_characters`]).
+fn add_props(
+    game: Query<&MatchView>,
+    assets: Res<AssetServer>,
+    cfg: Res<Config>,
+    mut added: Local<bool>,
+    mut commands: Commands,
+) {
+    if !*added && game.single().is_ok_and(|m| m.total_war) {
+        *added = true;
+        commands.spawn(WorldAssetRoot(assets.load(props_scene(&cfg.map))));
+    }
+}
+
+/// The level glTF draws every placement, pickups included, as a node named `model@placement`, and
+/// so do War: Total War's props: a taken pickup's node hides until it is back; in Total War, a prop
+/// the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`] says so.
 fn show_pickups(
     game: Query<&MatchView>,
-    names: Query<(Entity, &Name)>,
+    names: Query<(Entity, &Name), Added<Name>>,
     mut nodes: Local<Vec<(u32, Entity)>>,
     mut visibility: Query<&mut Visibility>,
 ) {
+    nodes.extend(
+        (names.iter()).filter_map(|(e, name)| Some((name.rsplit_once('@')?.1.parse().ok()?, e))),
+    );
     let Ok(m) = game.single() else {
         return;
     };
-    if nodes.is_empty() {
-        *nodes = names
-            .iter()
-            .filter_map(|(e, name)| Some((name.rsplit_once('@')?.1.parse().ok()?, e)))
-            .collect();
-    }
     for &(placement, entity) in nodes.iter() {
         let taken = placement < 64 && m.taken >> placement & 1 != 0;
+        let driven = m.total_war && gas::PROPS.iter().any(|p| u32::from(p.0) == placement);
+        let gone = driven && m.props >> placement & 1 == 0;
         if let Ok(mut v) = visibility.get_mut(entity) {
-            v.set_if_neq(if taken {
+            v.set_if_neq(if taken || gone {
                 Visibility::Hidden
             } else {
                 Visibility::Inherited

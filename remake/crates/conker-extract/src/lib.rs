@@ -508,6 +508,12 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             level.bin,
             level.images,
         ));
+        if map.scene == SLICE_SCENE {
+            let (props, scenes) = props_level(rom)?;
+            let props = held_gltf(&props, scenes, &textures, "props.bin")?;
+            let json = parse(&props.json)?;
+            gltfs.push((assets::props_gltf(&name), json, props.bin, props.images));
+        }
         // Footsteps for the surface kinds of the maps' terrain (bits 0-4 of the surface words).
         surfaces.extend((d.collision.iter().filter_map(|t| t.surface)).map(|w| (w & 0x1F) as u8));
         summary.push(format!(
@@ -542,9 +548,13 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             .to_string();
         out.add(path.replace(".gltf", ".bin"), bin);
         out.add(path, assets::to_json(&json, 2));
-        pngs += images.len();
         for (image, png) in images {
-            out.add(format!("{dir}/{image}"), png);
+            // 0x2D's props share the level's folder, and some of its textures.
+            let path = format!("{dir}/{image}");
+            if !out.files.iter().any(|f| f.0 == path) {
+                pngs += 1;
+                out.add(path, png);
+            }
         }
     }
     let backgrounds: Vec<_> = (maps.iter())
@@ -602,6 +612,47 @@ pub fn hidden_placements(scene: usize) -> &'static [usize] {
         0x3F => &[0, 1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 22],
         _ => &[],
     }
+}
+
+/// 0x2D's War: Total War props among its [`hidden_placements`]: the shelter's doors (0, 1), the gas
+/// masks (21-26) and the canisters (27, 28), which the client shows by the match.
+pub const TOTAL_WAR_PROPS: [usize; 10] = [0, 1, 21, 22, 23, 24, 25, 26, 27, 28];
+
+/// 0x2D's Total War props (`maps/2d/props.gltf`): glTF scene 0 [`TOTAL_WAR_PROPS`] in place (named
+/// `model@placement` as the level's nodes), scenes 1 and 2 the canister's model (3/85) and the gas
+/// mask's (3/84) at the origin, for a carrier's hands and a wearer's head.
+pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
+    let scene = scene_level(rom, SLICE_SCENE)?;
+    let mut level = Level::default();
+    let mut add = |mesh: &Mesh, placement, matrix| {
+        let mesh = match level.meshes.iter().position(|m| m.path == mesh.path) {
+            Some(i) => i,
+            None => {
+                level.meshes.push(mesh.clone());
+                level.meshes.len() - 1
+            }
+        };
+        level.instances.push(Instance {
+            mesh,
+            placement,
+            matrix,
+        });
+    };
+    let placed = (scene.instances.iter())
+        .filter(|i| i.placement.is_some_and(|p| TOTAL_WAR_PROPS.contains(&p)));
+    for i in placed {
+        add(&scene.meshes[i.mesh], i.placement, i.matrix);
+    }
+    for model in [0x55, 0x54] {
+        let mesh = (scene.meshes.iter())
+            .find(|m| m.path == [0x03, model])
+            .context("0x2D: no canister or gas mask model")?;
+        add(mesh, None, IDENTITY);
+    }
+    let n = level.instances.len() - 2;
+    let scenes =
+        json!([{ "nodes": (0..n).collect::<Vec<_>>() }, { "nodes": [n] }, { "nodes": [n + 1] }]);
+    Ok((level, scenes))
 }
 
 /// A map's level: the scene's ([`scene_level`]) without its [`hidden_placements`], its pickups'
@@ -664,13 +715,14 @@ fn pack_data(
                 byte_15: s.byte_15,
             })
             .collect(),
-        // On 0x2D as the server's `Arena::deathmatch` places them.
+        // On 0x2D as the server's `Arena::deathmatch` places them (and Total War's gas masks).
         pickups: (pickups.iter().enumerate())
             .map(|(k, p)| assets::Pickup {
                 placement: p.placement,
                 gives: match p.gives {
                     Gives::Weapon(id) => assets::Gives::Weapon(id),
                     Gives::Grenades => assets::Gives::Grenades,
+                    Gives::Mask => assets::Gives::Mask,
                 },
                 position: (spots.get(k).copied())
                     .unwrap_or(placements[usize::from(p.placement)].position)

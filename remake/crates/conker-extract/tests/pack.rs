@@ -224,10 +224,12 @@ fn pack_reads_back_as_the_rom_path() {
         placements[usize::from(n)].position.map(f32::from)
     });
     let pickups: Vec<(Pickup, [u32; 3])> = (pack.pickups.iter())
+        .filter(|p| p.gives != Gives::Mask)
         .map(|p| {
             let gives = match p.gives {
                 Gives::Weapon(id) => weapon::Gives::Weapon(id),
                 Gives::Grenades => weapon::Gives::Grenades,
+                Gives::Mask => weapon::Gives::Mask,
             };
             let pickup = Pickup {
                 placement: p.placement,
@@ -281,6 +283,19 @@ fn pack_reads_back_as_the_rom_path() {
     ] {
         check_gltf(&dir, &path, glb);
     }
+    // 0x2D's Total War props: its doors, masks and canisters in place, then the canister and the
+    // mask at the origin, a glTF scene each.
+    let (props, scenes) = conker_extract::props_level(&rom).unwrap();
+    let mut gltf = extract_level::to_gltf(&props, &textures, "").unwrap();
+    let mut json: Value = serde_json::from_str(&gltf.json).unwrap();
+    let names: Vec<_> = (json["nodes"].as_array().unwrap().iter())
+        .map(|n| n["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names[..3], ["04-2d-04@0", "04-2d-05@1", "03-54@21"]);
+    assert_eq!(names[9..], ["03-55@28", "03-55", "03-54"]);
+    json["scenes"] = scenes;
+    gltf.json = json.to_string();
+    check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
     assert_eq!(manifest.maps, ["2d", "30", "34", "3f"]);
