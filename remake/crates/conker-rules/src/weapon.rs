@@ -553,6 +553,16 @@ pub const PICKUPS_3F: [Pickup; 10] = [
     pick(24, 0),
 ];
 
+/// Scene 0x2B's 2 pickups (War: Beach, scenario 8): the vitamin bottles (model 3/91, the props
+/// with ids 1 and 2, placements 6 and 7), each giving item 0x3E, the villagers' start item (V from
+/// the RAM at DL 100-1500, `../lab/oracle/map2b`). The game respawns them after 60 VIs
+/// (MP+0xEAC), not [`PICKUP_RESPAWN`]'s 240; 0x3E is not a weapon of the rules yet.
+pub const PICKUPS_2B: [Pickup; 2] = [pick(6, 0x3E), pick(7, 0x3E)];
+
+/// Where scene 0x2B's pickups stand: the props' positions in the RAM (V, the same at DL 100-1500),
+/// 68 and 71 units off their placements (60-65 up), as on 0x30.
+pub const SPOTS_2B: [[i16; 3]; 2] = [[2650, -694, -800], [-1797, -503, -265]];
+
 /// A scene's pickups, and their spots when the game moves them off their placements (empty: on
 /// the placements), if known.
 pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
@@ -561,6 +571,7 @@ pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
         0x30 => Some((&PICKUPS_30, &SPOTS_30)),
         0x34 => Some((&PICKUPS_34, &[])),
         0x3F => Some((&PICKUPS_3F, &[])),
+        0x2B => Some((&PICKUPS_2B, &SPOTS_2B)),
         _ => None,
     }
 }

@@ -158,7 +158,7 @@ pub struct Config {
     /// `side=squirrels|tediz|cavemen`: the side to play on (its model), sent when joining; default
     /// the server's pick, the side with fewer players (the Tediz against caveman bots).
     pub side: Option<Side>,
-    /// `map=2d|30|34|3f`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
+    /// `map=2d|30|34|3f|2b`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
     pub map: String,
 }

@@ -1,6 +1,49 @@
 # Status after wave 6 (2026-10-10)
 
-## Mounted guns: the client (2026-10-12)
+## Map 0x2B, the Beach, and the villagers 156/157: the pack and Deathmatch on it (2026-10-13)
+**The groundwork for War: Beach (scenario 8): `conker-extract pack --map 2b` packs scene 0x2B and the villagers
+(models 156 and 157), and `conker-server --map 2b` plays Deathmatch on it with the original's start records and its two
+vitamin pickups; the clients load and draw it through `/info` as the other maps. The mode itself (teams of villagers
+and Tediz, the escape, the gun) is not here.** Oracle runs and tools: `../lab/oracle/map2b/` (private copy
+`ConkerRecomp.pack2b`, re-signed with `get-task-allow` for lldb; scenario 8 needs `CONKER_MP_OPTS=-48=2,-24=9,-23=5`:
+team row 2 = 2 teams, names 9 and 5).
+
+| Part | What |
+|---|---|
+| Oracle (V) | `s8_h1b15` (1 human + 15 bots, 60 s, RAM at DL 100-1500), `s8_h2b3` (2 + 3, 8 s), `spawn_lldb`. Start by slot `[1,10,2,3,11,10,0,3,1,10,2,3,11,10,0,3]`: team 0 (villagers) cycles 1, 2, 11, 0 (the north beach), team 1 (Tediz) 10, 3 (the bunker, z ≈ −4,260); with 2 humans team 0 started one place on (2, 11, 0: untraced). Masks all ones. Respawns go straight to a record the level script names (a1 = 10/3/0-2, `func_1507D1D8`), and 28 picks of record 5 by `func_15172E7C` are the lifts. Classes: Tediz 3 (117); villagers 0x12, 0x14, 0x1B, 0x1D, 0x1E, 0x1F, each drawn 156 or 157, re-drawn on respawn (p2: 0x14 → 157 at DL 1500); villagers hold 0xBE (item 0x3E). Props: 2, 3 hidden all match (+0x6E), 0, 1, 5 layer 2 (1's +0x4F is 0x51), 6, 7 the pickups (0x21); 0, 4, 5 move (y 392 → 348 by DL 1500). Pickups: 2, item 0x3E, respawn 60 VIs (MP+0xEAC), at the props' RAM positions. The mounted gun: object 16, model 138, at (−337, −387.1, −3561), +0x7A 0xBF00. AI script 0xB9 (G+0x16BC). Sound (`../lab/audio/map2b`, 2 idle humans 25 s): song 77, mute 0xFC00 (channels 0-9), volume 18000; two bubbling spots (`func_151618BC`, 0x2D's) at (2616, −236, 8004) and (−3032, −327, 8306) |
+| Rules (outside this task's lanes, one match arm each, as 0x30/0x34/0x3F were added) | `spawn::DEATHMATCH_START_2B`, `BEACH_START_2B`, `starts(0x2B)` (masks all ones; the squirrels take the villagers' records); `weapon::PICKUPS_2B` (placements 6, 7 → item 0x3E), `SPOTS_2B`, `pickups(0x2B)`; `extract_scene::deathmatch_solid(0x2B)` = 0, 1, 5; `conker_bots::script(0x2B)` = 0xB9 |
+| Pack | `conker-extract pack … --map 2b --background 2b=../lab/audio/map2b/background_loop.wav` (`package.json`'s `pack`). `hidden_placements(0x2B)` = 2, 3. With 2b: `VILLAGERS` 156 and 157 after `PACK_CHARACTERS` (the Tedi's rig and 764 clips, `character.json` with lifts 41 and 40; `PACK_CHARACTERS`, the `Side` order, is unchanged), the mounted gun 138 (as with 30/34). `pack_audio` takes the character entries: the villagers' clip sounds and hit voices. `map_sounds("2b")`; a sound several maps' emitters play stays in the first map's folder (0x2D's bubbles stay in `maps/2d`). README updated |
+| Server, client | `--map 2b` (messages, docs); nothing else: lifts (6 kind-8 triggers to records 4-9) work as on 0x30, `gun::spawn(0x2B)` is empty (the gun is the mode's) |
+| Lab | `../lab/oracle/map2b/tools/` (`map2b-run.sh`, `spawns.sh`, `map2b-audio.sh`, `audio.sh`); `../lab/screens/map2b/shots.sh` (port 5980) |
+
+**Villager voices (ROM, `[0x12, 156/157]`):** both share the pain voices 1715-1726 (bullets, blades) and 1726-1731
+(0x23, 0x21, the gun's bullet), the flame's 468-471 as everyone; each has a cry on clips 2 and 0x28E at 26 (156:
+1709-1711, 157: 1712-1714). **No death voice**: the Tedi's 0x13/0x58 entries are empty in their tables.
+
+**Background loop** (`../lab/audio/map2b/background_long.wav`, 900 s, 2 idle humans, P1 moved at read 24 to record 6
+so neither hears the bubbles; the match runs to 601.8 s, then the end's music): song 77 never repeats sample for sample
+(no 64-frame window recurs within ±2 s of the period), has no silent spot (quietest 0.05 s blocks: mean |x| ≈ 284),
+and its loud bursts come every 93.29 s (93, 186, 279, 373, 466, 559 s; envelope correlation 0.26 at 93.29 s, 0.39 at
+3 periods). `background_loop.wav` is one period from 67.5 s with a 0.5 s crossfade at its start from what follows the
+cut (`tools/xfade.py`): the loop's end runs into its start as the recording does (seam difference 0), 8.2 MB.
+
+| Check (2026-10-13) | Result |
+|---|---|
+| `conker-extract` `pack.rs` (ROM) | 0x2B reads back (collision less hidden 2, 3 with only 0, 1, 5 solid = "collision flags, not hidden, not a pickup", 12 spawns, the 2 pickups on `SPOTS_2B`, nav, triggers, AI 0xB9, glTF); the villagers: lifts 41/40, the Tedi's clips, glTF animations by name, `pack.json` characters; audio: 2b's two emitters = 0x2D's, 1099 stays `maps/2d/1099.wav`, sequence 77 note, the villagers' pain voices and cry, no death voice |
+| Fresh export (`bun run pack --out /tmp/pack-2b`) vs `../assets` | additions only: `maps/2b/` (11 files + textures), `characters/156`, `157`, `audio/characters/156`, `157` (3 WAVs each), `audio/common/1715-1731.wav`, `audio/maps/2b/background.wav`; `events.json`, `sounds.json` gained entries only, `pack.json` lists grew, `README.md` the new template. Copied in: `diff -r` empty |
+| `MAP=2b smoke.sh wt ws ws` (ports 5982, 5984; one on `/tmp/pack-try`, two on `../assets`) | 16/16 each. One client per run took a lift (t=373 to record 4, t=488 to record 5): its prediction error at that tick is the server's placement (2,350 / 2,544, 1 rollback), 0 for the others |
+| Bots (screens run, 3 bots 90 s) | 0 faults; script 0xB9 calls natives the remake lacks: `(5, 2, 170)`, `(5, 3, 30)`, `(5, 15, 6)`, `(6, 2, 39)` (Beach's) |
+| Screens (`../lab/screens/map2b/shots.sh`, read) | `own` (a squirrel at record 11 on the west boardwalk, cliff and sea), `beach` (the north beach from the sea: the two boardwalks, the sand, the hills, villager-side bots), `overview` (the island from the south: the Tediz' bunkers in front, the beach behind), `mg` (the bunker with the gun's slit and Tediz inside; no gun drawn), `rec3` (the respawn camera of record 3: three Tediz in the bunker, the red hatch, the path north), `rec5`, `rec4` (the empty pillboxes on the cliffs, the lifts' targets). The oracle draws nothing (null renderer): no frame to compare |
+| `bun run test`, `bun run check` | pass |
+
+Gaps:
+- **The mode** (War: Beach: teams, the escape, the respawns onto named records, the MG on 0x2B, the villagers as a side,
+  item 0x3E's rules, its 60-VI pickup respawn, the natives above) is the next agents'. Until then a pickup of 0x3E
+  holds an id the rules don't know (no fire, no panic, as 0x37 was), and Deathmatch on 2b has no weapon pickups.
+- The client draws no villager (no `Side` uses 156/157); they are only in the pack.
+- Placements 0, 4, 5 (at (−1468, 392, 2348)) sink 44 in the game during the match; static here. Placement 1's
+  `+0x4F` 0x51 is the first 0x40 prop: whether the line query treats it differently is unread.
+- The villager voice cries (clip 2, 0x28E) and the background loop were not listened to.
 **The client now draws the mounted machine guns on maps 30 and 34: the gun turned and pitched as the match has it,
 its fire loop with the belt of rounds scrolling (no flash on the model, as in the original). The gunner sits on the seat
 (the jump on plays at 1.3). The gunner's own first-person view has the gun's sight, its heading and elevation tapes,

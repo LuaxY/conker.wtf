@@ -1081,20 +1081,25 @@ fn gun_cues() -> Vec<Cue> {
 /// capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
 /// emitter (V: no positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask
 /// 0xFFC0, V). 0x34: no emitter, sequence 36, channels 0-5 (V, as 0x30). 0x3F: no emitter, sequence
-/// 84, no channel muted, volume 24000 (`func_1000E40C`, set again every frame; V).
+/// 84, no channel muted, volume 24000 (`func_1000E40C`, set again every frame; V). 0x2B (War: Beach's
+/// scenario 8, 2 idle humans 25 s): two bubbling spots as 0x2D's by the villagers' starts (V: bursts of
+/// 1100-1108 from `func_151618BC` at both), sequence 77, channels 0-9 (mute mask 0xFC00), volume 18000.
 fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
-    let emitters = match map {
-        "2d" => [[-1101, -1201, -229], [650, -1191, 486]]
-            .map(|at| Emitter {
-                at,
-                play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
-                start_chance: 0.005,
-            })
-            .into(),
-        _ => vec![],
+    let spots = match map {
+        "2d" => &[[-1101, -1201, -229], [650, -1191, 486]][..],
+        "2b" => &[[2616, -236, 8004], [-3032, -327, 8306]],
+        _ => &[],
     };
+    let emitters = (spots.iter())
+        .map(|&at| Emitter {
+            at,
+            play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
+            start_chance: 0.005,
+        })
+        .collect();
     let (sequence, channels, volume) = match map {
         "2d" => (19, "0-3", 32000),
+        "2b" => (77, "0-9", 18000),
         "34" => (36, "0-5", 32000),
         "3f" => (84, "0-15", 24000),
         _ => (19, "0-5", 32000),
@@ -1104,19 +1109,23 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
 
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
 /// under `audio/` that hold them. `surfaces`: the maps' terrain surface kinds (footsteps); `maps`:
-/// each map's folder name and a recording of its background (`../lab/audio`'s), or None.
+/// each map's folder name and a recording of its background (`../lab/audio`'s), or None;
+/// `characters`: the bank-01 entries whose clip sounds and hit voices play (each its own folder).
 pub fn pack_audio(
     rom: &Rom,
     surfaces: &BTreeSet<u8>,
     maps: &[(String, Option<&[u8]>)],
+    characters: &[usize],
 ) -> Result<(Files, Vec<String>)> {
     use conker_assets::audio::{self as pack, Audio, Events, MapSounds};
     let game_data = rom.game_data()?;
+    let entries = characters;
     let mut characters = BTreeMap::new();
     let mut cues = code_cues();
-    for (folder, class) in [("128", 128), ("117", 117), ("136", 136)] {
-        characters.insert(folder.to_string(), clip_sounds(rom, &game_data, class)?);
-        cues.extend(hit_voices(rom, &game_data, class, folder)?);
+    for &class in entries {
+        let folder = class.to_string();
+        characters.insert(folder.clone(), clip_sounds(rom, &game_data, class)?);
+        cues.extend(hit_voices(rom, &game_data, class, &folder)?);
     }
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
@@ -1162,9 +1171,17 @@ pub fn pack_audio(
             }
         }
     }
-    for (name, map) in &events.maps {
-        for e in &map.emitters {
-            add(&mut e.play.sounds.iter().copied(), format!("maps/{name}"));
+    // A sound several maps' emitters play (0x2D's and 0x2B's bubbles) stays in the first map's folder.
+    let mut first: BTreeMap<u16, &str> = BTreeMap::new();
+    for (name, _) in maps {
+        for &id in events.maps[name]
+            .emitters
+            .iter()
+            .flat_map(|e| &e.play.sounds)
+        {
+            if *first.entry(id).or_insert(name) == name {
+                add(&mut std::iter::once(id), format!("maps/{name}"));
+            }
         }
     }
     for c in &events.cues {

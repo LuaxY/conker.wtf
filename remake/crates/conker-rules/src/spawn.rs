@@ -115,6 +115,15 @@ pub const RAPTOR_START_3F: [[u8; 8]; 2] =
     [[8, 9, 10, 11, 12, 13, 14, 15], [0, 1, 2, 3, 4, 5, 6, 7]];
 pub const RAPTOR_MASKS_3F: [u32; 2] = [0xFFFF_FF00, 0xFFFF_00FF];
 
+/// Scene 0x2B War: Beach (scenario 8; the original has no Deathmatch there): the record of each
+/// participant slot at match start, teams alternating by slot (V on the oracle for slots 0-15, 1
+/// human + 15 bots, `../lab/oracle/map2b`; with 2 humans + 3 bots team 0 started one place on,
+/// `[2, 10, 11, 3, 0]`, untraced). Team 0, the villagers, cycle 1, 2, 11, 0 (west and east of
+/// the north beach, z ≈ 8,000); team 1, the Tediz, 10, 3 (z ≈ −4,260). Masks all ones (V); the
+/// game's Beach respawns are the level script's (onto given records, not ported).
+pub const DEATHMATCH_START_2B: [u8; 16] = [1, 10, 2, 3, 11, 10, 0, 3, 1, 10, 2, 3, 11, 10, 0, 3];
+pub const BEACH_START_2B: [[u8; 8]; 2] = [[1, 2, 11, 0, 1, 2, 11, 0], [10, 3, 10, 3, 10, 3, 10, 3]];
+
 /// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
 /// record, and the side's respawn mask), from the War mode played on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +134,8 @@ pub struct Starts {
 }
 
 /// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
-/// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels), if known.
+/// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels; 0x2B: Beach's, the villagers
+/// as the squirrels), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -147,6 +157,11 @@ pub const fn starts(scene: u16) -> Option<Starts> {
             deathmatch: DEATHMATCH_START_3F,
             sides: RAPTOR_START_3F,
             side_masks: RAPTOR_MASKS_3F,
+        }),
+        0x2B => Some(Starts {
+            deathmatch: DEATHMATCH_START_2B,
+            sides: BEACH_START_2B,
+            side_masks: DEATHMATCH_MASKS,
         }),
         _ => None,
     }

@@ -48,8 +48,13 @@ pub const HELD_CLIPS: [u16; 15] = [
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;
-/// The mounted gun (class 0x8A): two on 0x30, one on 0x34 (`../lab/research/mp-original/mounted-gun.md`).
+/// The mounted gun (class 0x8A): two on 0x30, one on 0x34 and 0x2B (`../lab/research/mp-original/mounted-gun.md`).
 pub const MOUNTED_GUN: usize = 138;
+/// Scene 0x2B, the Beach (War: Beach, scenario 8).
+pub const BEACH: usize = 0x2B;
+/// The Beach's villagers (its team 0): class 0x14 is model 156 (male), 0x1D and 0x1E 157 (female)
+/// (V oracle, `../lab/research/mp-original/modes-and-maps.md`); the Tedi's rig and clips.
+pub const VILLAGERS: [usize; 2] = [156, 157];
 /// How far below a floor plane a spawn point may sit and still stand on it (spawns on slopes sit
 /// up to ~1.3 units under the plane; the extract-scene example uses the same value).
 const FLOOR_TOLERANCE: f32 = 2.0;
@@ -489,13 +494,24 @@ pub fn map_name(scene: usize) -> String {
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
 /// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D or 0x30,
 /// War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and voice
-/// lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30 or 0x34, the
-/// mounted gun ([`MOUNTED_GUN`]) as a character (its clip).
+/// lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B, the
+/// mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
+/// [`PACK_CHARACTERS`] (with their `character.json`).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
+    let mut characters = vec![on_tedi_rig(rom, SQUIRREL_SOLDIER, &tedi)?];
     let caveman = on_tedi_rig(rom, CAVEMAN, &tedi)?;
-    let characters = [on_tedi_rig(rom, SQUIRREL_SOLDIER, &tedi)?, tedi, caveman];
+    let villagers = maps.iter().any(|m| m.scene == BEACH).then_some(VILLAGERS);
+    let villagers: Vec<_> = (villagers.into_iter().flatten())
+        .map(|v| on_tedi_rig(rom, v, &tedi))
+        .collect::<Result<_>>()?;
+    characters.extend([tedi, caveman].into_iter().chain(villagers));
+    // `PACK_CHARACTERS`, then the villagers: each folder is its bank-01 entry.
+    let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
+    let names: Vec<String> = entries.iter().map(usize::to_string).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    debug_assert_eq!(names[..PACK_CHARACTERS.len()], PACK_CHARACTERS);
     let (held, models, scenes) = held_level(rom)?;
     let outros: Vec<Vec<_>> = (maps.iter())
         .map(|m| outro::outros(rom, m.scene))
@@ -508,8 +524,8 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             outro_characters.push(Character::load(rom, usize::from(f.model))?);
         }
     }
-    // The mounted guns on 0x30 and 0x34 (bank 01 #138: 12 joints, clip 1 the fire loop).
-    if maps.iter().any(|m| matches!(m.scene, 0x30 | 0x34)) {
+    // The mounted guns on 0x30, 0x34 and 0x2B (bank 01 #138: 12 joints, clip 1 the fire loop).
+    if maps.iter().any(|m| matches!(m.scene, 0x30 | 0x34 | BEACH)) {
         outro_characters.push(Character::load(rom, MOUNTED_GUN)?);
     }
     let parse = |text: &str| serde_json::from_str::<Value>(text);
@@ -519,7 +535,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     for (i, map) in maps.iter().enumerate() {
         let name = map_name(map.scene);
         let d = pack_data(rom, map.scene, &characters, &held, &outros[i])?;
-        for (path, bytes) in d.write(&name, &PACK_CHARACTERS, PACK_WEAPONS)? {
+        for (path, bytes) in d.write(&name, &names, PACK_WEAPONS)? {
             if i == 0 || path.starts_with("maps/") {
                 out.add(path, bytes);
             }
@@ -550,7 +566,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     }
     let data = data.context("pack: no map")?;
     let held_models = held_gltf(&models, scenes, &textures, "held.bin")?;
-    for (name, c) in PACK_CHARACTERS.iter().zip(&characters) {
+    for (name, c) in names.iter().zip(&characters) {
         let g = c.gltf(&textures, true)?;
         let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
         gltfs.push((assets::character_gltf(name), json, bin, images));
@@ -593,7 +609,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let backgrounds: Vec<_> = (maps.iter())
         .map(|m| (map_name(m.scene), m.background))
         .collect();
-    let (sound_files, audio) = audio::pack_audio(rom, &surfaces, &backgrounds)?;
+    let (sound_files, audio) = audio::pack_audio(rom, &surfaces, &backgrounds, &entries)?;
     let wavs = sound_files.iter().filter(|f| f.0.ends_with(".wav")).count();
     out.files.extend(sound_files);
     let (hud_files, hud) = hud::pack_hud(rom)?;
@@ -605,7 +621,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         format: FORMAT,
         source_rom_sha1: US_SHA1.into(),
         maps: maps.iter().map(|m| map_name(m.scene)).collect(),
-        characters: (PACK_CHARACTERS.map(String::from).into_iter())
+        characters: (names.iter().map(|n| n.to_string()))
             .chain(outro_characters)
             .collect(),
         weapons: vec![PACK_WEAPONS.into()],
@@ -614,7 +630,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     };
     out.add(MANIFEST.into(), manifest.to_json());
     out.add("README.md".into(), PACK_README);
-    let characters: Vec<String> = (PACK_CHARACTERS.iter().zip(&data.characters))
+    let characters: Vec<String> = (names.iter().zip(&data.characters))
         .map(|(name, c)| {
             format!(
                 "{name} ({} clips, {} with root motion, model lift {})",
@@ -640,13 +656,15 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
 /// oracle's RAM and under lldb, `lab/oracle/walls_README.md`): 0x2D's Total War props (21-28, 37)
 /// and four scene objects (0, 1, 8, 9); 0x30's Colors flags (18, 19) and its placement 0; 0x3F's
 /// props of its Raptor mode, the bone weapons on the weapon spots (15-22), three at the west nest
-/// (4-6) and four scene objects at (6026, 156, 2188) (0-3); none on 0x34. The pack leaves them out
+/// (4-6) and four scene objects at (6026, 156, 2188) (0-3); none on 0x34; 0x2B's segments 6 and 7
+/// (placements 2, 3; War: Beach, scenario 8). The pack leaves them out
 /// of the level; the collision keeps only [`deathmatch_solid`] (never hidden ones).
 pub fn hidden_placements(scene: usize) -> &'static [usize] {
     match scene {
         0x2D => &[0, 1, 8, 9, 21, 22, 23, 24, 25, 26, 27, 28, 37],
         0x30 => &[0, 18, 19],
         0x3F => &[0, 1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 22],
+        BEACH => &[2, 3],
         _ => &[],
     }
 }

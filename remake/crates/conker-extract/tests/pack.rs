@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30, 0x34, 0x3F].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B].map(|scene| PackMap {
         scene,
         background: None,
     });
@@ -186,8 +186,21 @@ fn pack_reads_back_as_the_rom_path() {
         (&squirrel.clips, &squirrel.root_clips),
         (&tedi.clips, &tedi.root_clips)
     );
+    // The Beach's villagers (packed with 0x2B) play them too, with their own model lifts (V: the
+    // bank-0x11 records, as the others').
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.extend(["156", "157"]);
+    let beach = conker_assets::Slice::load("2b", &names, PACK_WEAPONS, read).unwrap();
+    let lifts: Vec<i16> = beach.characters.iter().map(|c| c.model_lift).collect();
+    assert_eq!(lifts, [42, 43, 49, 41, 40]);
+    for villager in &beach.characters[3..] {
+        assert_eq!(
+            (&villager.clips, &villager.root_clips),
+            (&tedi.clips, &tedi.root_clips)
+        );
+    }
     // The client finds each clip's animation by name.
-    for name in PACK_CHARACTERS {
+    for name in names {
         let character: Value =
             serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
         let names: Vec<&str> = (character["animations"].as_array().unwrap().iter())
@@ -298,11 +311,15 @@ fn pack_reads_back_as_the_rom_path() {
     check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30", "34", "3f"]);
+    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b"]);
+    assert_eq!(
+        manifest.characters[..5],
+        ["128", "117", "136", "156", "157"]
+    );
 
     // Each map's solid placements (the oracle's RAM) are those with collision flags less its
     // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data.
-    for scene in [0x2D, 0x30, 0x34, 0x3F] {
+    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B] {
         let (pickups, _) = weapon::pickups(scene as u16).unwrap();
         let hidden = conker_extract::hidden_placements(scene);
         let placements = extract_scene::scene_placements(&rom, scene).unwrap();
@@ -318,10 +335,16 @@ fn pack_reads_back_as_the_rom_path() {
         );
     }
 
-    // Maps 0x30, 0x34 and 0x3F against the ROM path: the same reads (only their solid
-    // placements), their pickups on the oracle's spots (0x30's, their models moved there in the
-    // level) or on their placements (0x34's, 0x3F's).
-    for (name, scene, records) in [("30", 0x30, 25), ("34", 0x34, 12), ("3f", 0x3F, 16)] {
+    // Maps 0x30, 0x34, 0x3F and 0x2B against the ROM path: the same reads (only their solid
+    // placements), their pickups on the oracle's spots (0x30's and 0x2B's, their models moved there
+    // in the level) or on their placements (0x34's, 0x3F's).
+    let maps = [
+        ("30", 0x30, 25),
+        ("34", 0x34, 12),
+        ("3f", 0x3F, 16),
+        ("2b", 0x2B, 12),
+    ];
+    for (name, scene, records) in maps {
         let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
         assert!(names.iter().all(|n| files.contains_key(n.as_str())));
         let map = conker_assets::Slice::load(name, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
@@ -412,11 +435,13 @@ fn pack_audio_reads_back() {
     let other = wav(&[3, 4], 22020);
     let third = wav(&[5], 22020);
     let fourth = wav(&[6, 7], 22020);
+    let fifth = wav(&[8], 22020);
     let maps = [
         (0x2D, &background),
         (0x30, &other),
         (0x34, &third),
         (0x3F, &fourth),
+        (0x2B, &fifth),
     ]
     .map(|(scene, wav)| PackMap {
         scene,
@@ -435,7 +460,10 @@ fn pack_audio_reads_back() {
             "characters/117",
             "characters/128",
             "characters/136",
+            "characters/156",
+            "characters/157",
             "common",
+            "maps/2b",
             "maps/2d",
             "maps/30",
             "maps/34",
@@ -474,6 +502,7 @@ fn pack_audio_reads_back() {
         ("30", &other),
         ("34", &third),
         ("3f", &fourth),
+        ("2b", &fifth),
     ] {
         let file = format!("audio/{}", audio.events.maps[name].background[0].file);
         assert_eq!(files[file.as_str()], &wav[..]);
@@ -496,6 +525,16 @@ fn pack_audio_reads_back() {
         );
     }
     assert_eq!(audio.events.maps["2d"].emitters.len(), 2);
+    // 0x2B's two bubbling spots play 0x2D's sounds, which stay in 0x2D's folder.
+    let bubbles = &audio.events.maps["2b"].emitters;
+    assert_eq!(bubbles.len(), 2);
+    assert_eq!(bubbles[0].play, audio.events.maps["2d"].emitters[0].play);
+    assert_eq!(audio.sounds.sounds[&1099].file, "maps/2d/1099.wav");
+    assert!(
+        audio.events.maps["2b"].background[0]
+            .note
+            .contains("sequence 77, channels 0-9, at volume 18000")
+    );
     assert!(
         ["30", "34", "3f"]
             .iter()
@@ -527,8 +566,10 @@ fn pack_audio_reads_back() {
     );
 
     // Every event is on a Deathmatch clip the character has (character.json's logical ids).
-    let pack = conker_assets::Slice::load(PACK_MAP, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
-    for (name, character) in PACK_CHARACTERS.iter().zip(&pack.characters) {
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.extend(["156", "157"]);
+    let pack = conker_assets::Slice::load("2b", &names, PACK_WEAPONS, read).unwrap();
+    for (name, character) in names.iter().zip(&pack.characters) {
         for e in &audio.events.characters[*name] {
             assert!(MATCH_CLIPS.contains(&e.clip), "{name} {:#x}", e.clip);
             assert!(
@@ -584,6 +625,15 @@ fn pack_audio_reads_back() {
     };
     assert_eq!(cue(&hit, Some("128")), Some((882..=887).collect()));
     assert_eq!(cue(&hit, Some("117")), None);
+    // The villagers' voice tables: the same pain voices for both, a cry of their own on clip 2, no
+    // death voice (the Tedi's 0x58 entry is empty for them).
+    assert_eq!(cue(&hit, Some("156")), Some((1715..=1726).collect()));
+    assert_eq!(cue(&hit, Some("157")), cue(&hit, Some("156")));
+    let Some(ClipAction::Play(cry)) = play_at("156", 2, 26.0) else {
+        panic!("the male villager's cry")
+    };
+    assert_eq!(cry.sounds, [1709, 1710, 1711]);
+    assert_eq!(play_at("157", 0x58, 21.0), None);
     let firing = On::Firing {
         weapon: 0x09,
         clips: vec![0x7C, 0x20D],

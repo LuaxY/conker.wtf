@@ -6,7 +6,7 @@
     "build:native": "CARGO_TARGET_DIR=target-net cargo build --release -p conker-server -p conker-client",
     "build:web": "CARGO_TARGET_DIR=target-net WASM_OPT=\"${WASM_OPT:-$(ls ../lab/tools/emsdk/upstream/bin/wasm-opt 2>/dev/null)}\" sh web/build.sh web",
     "build:landing": "cd web/app && bun install && bun run build",
-    "pack": "rom=\"$PWD/../Conker's Bad Fur Day (USA).z64\" && CONKER_ROM=\"${CONKER_ROM:-$rom}\" CARGO_TARGET_DIR=target-net cargo run --release -p conker-extract -- pack --map 2d --map 30 --map 34 --map 3f --background 2d=../lab/audio/captures/background_loop.wav --background 30=../lab/audio/map30/background_loop.wav --background 34=../lab/audio/map34/background_loop.wav --background 3f=../lab/audio/map3f/background_loop.wav",
+    "pack": "rom=\"$PWD/../Conker's Bad Fur Day (USA).z64\" && CONKER_ROM=\"${CONKER_ROM:-$rom}\" CARGO_TARGET_DIR=target-net cargo run --release -p conker-extract -- pack --map 2d --map 30 --map 34 --map 3f --map 2b --background 2d=../lab/audio/captures/background_loop.wav --background 30=../lab/audio/map30/background_loop.wav --background 34=../lab/audio/map34/background_loop.wav --background 3f=../lab/audio/map3f/background_loop.wav --background 2b=../lab/audio/map2b/background_loop.wav",
     "start": "bun run build && bun run serve",
     "serve": "cd web/app && bun run serve",
     "server": "target-net/release/conker-server --digest-file web/dist/digest.txt",

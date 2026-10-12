@@ -70,7 +70,7 @@ impl Assets<'_> {
     }
 }
 
-/// The scene's multiplayer AI script, `[0x14, id]` (V: G+0x16BC in the oracle's RAM). Each holds its
+/// The scene's multiplayer AI script, `[0x14, id]` (V: G+0x16BC in the oracle's RAM; 0x2B's in War: Beach's). Each holds its
 /// scene's tables (the pickups' gifts and nodes, the pickup nodes an unarmed bot heads for), so
 /// another scene's script sends bots to nodes that mean nothing there.
 pub fn script(scene: usize) -> usize {
@@ -78,6 +78,7 @@ pub fn script(scene: usize) -> usize {
         0x30 => 0xBB,
         0x34 => 0xBD,
         0x3F => 0xBE,
+        0x2B => 0xB9,
         _ => 0xBA,
     }
 }

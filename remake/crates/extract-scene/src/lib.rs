@@ -355,11 +355,13 @@ pub struct SceneCollision {
 /// `lab/oracle/walls_README.md`): the game's layer 2, the props with `(+0x4F & 0x60) != 0x20` and `+0x6E`
 /// clear (`func_150A6568` and the line query's copy of it), which the floor query, the wall routine and the
 /// line query all search. Fewer than [`Placement::has_collision`]: the match sets `+0x4F |= 0x20` on its
-/// pickups and hides the other modes' props. Other scenes: none.
+/// pickups and hides the other modes' props. 0x2B: War: Beach's (scenario 8, the RAM's `+0x4F`/`+0x6E`;
+/// 1's `+0x4F` is 0x51, the first 0x40 prop seen: I, the same set). Other scenes: none.
 pub fn deathmatch_solid(scene: usize) -> &'static [usize] {
     match scene {
         0x2D => &[2, 3, 4, 5, 6, 7, 10, 11, 40, 41, 42, 43, 44, 45],
         0x34 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 29, 30, 31, 32],
+        0x2B => &[0, 1, 5],
         _ => &[],
     }
 }
