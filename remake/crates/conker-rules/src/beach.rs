@@ -25,6 +25,11 @@ pub const BOTTLE_RESPAWN: u16 = 30;
 /// 52.5 at the top; a crouch-walk's 40 % is the movement's own, conker-sim's `CROUCH_PERCENT`).
 pub const SLOW: u8 = 75;
 pub const FAST: u8 = 150;
+/// Weapon 0x16's fire clip on scene 0x2B in MP: 0x207, not 0x77 (`func_15065A5C` case 0x16, C; V
+/// bots1: the bazooka Tedi plays it and stays within 25 of its spot), which has no root motion, so
+/// the shooter is not pushed back (the pack: 0x77's moves it 91.6 over the clip). I: Deathmatch on
+/// 0x2B too; the match only knows Beach.
+pub const ROCKET_FIRE: u16 = 0x207;
 
 /// The model a class shows: 156 below 0x1D, else 157 (`func_1507D1D8`, C); the Tediz' 117.
 pub fn model(class: u8) -> u16 {

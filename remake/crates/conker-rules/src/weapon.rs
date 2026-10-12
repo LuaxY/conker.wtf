@@ -29,7 +29,8 @@ pub enum Attack {
     /// The flamethrower's stream ([`crate::flame`]): area hits of `kind`, `delay` frames after Z.
     Flame { kind: DamageType, delay: u32 },
     /// A rocket ([`crate::projectile::Rocket`]) from `muzzle` on the Z press, then nothing until
-    /// `cooldown` frames have passed (s126+0x19E = 120, C). V combat4_ctlw_k7, combat4_w16.
+    /// `cooldown` frames have passed (s126+0x19E = 120 VIs, C; V beach-gunner r1: 120 → 0 at 2 a
+    /// frame, a bot's rockets 62 frames apart). V combat4_ctlw_k7, combat4_w16.
     Rocket { muzzle: [f32; 3], cooldown: u32 },
     /// An aimed shot ([`crate::projectile::Shot`]): only with R held, Z plays `anim` and fires from
     /// `muzzle`; a head hit kills (type 0x20), a body hit is `kind`; then nothing for `cooldown`
@@ -292,7 +293,7 @@ pub const W16: Weapon = Weapon {
     fire: (anim::W16_FIRE, 28),
     attack: Attack::Rocket {
         muzzle: [3.658, 11.912, 64.408],
-        cooldown: 120,
+        cooldown: 60,
     },
     ..W14
 };

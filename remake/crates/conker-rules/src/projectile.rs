@@ -274,11 +274,12 @@ impl Bullet {
 }
 
 /// Weapon 0x16's rocket (the pool `func_151C1180` updates; V combat4_ctlw_k7, combat4_w16): it
-/// leaves the muzzle along the shooter's facing at 200 a frame, flying from its first frame, with a
-/// life of (distance to the wall ahead) / 200 like the bullets. A body within the frame's reach,
-/// or the wall at the end of its life, sets it off ([`crate::damage::ROCKET_INNER`], `_OUTER`): k7's
-/// rockets went off 6 frames after Z on the wall 1,229.6 ahead (life 6.148), w16's on player 2 in
-/// the frame of the shot.
+/// leaves the muzzle along the shooter's aim (s126+0x16C yaw, +0x170 pitch: its facing, level,
+/// without a scope; V beach-gunner r1: a bot's 31 rockets left along its aim to 0.3°, up to 37°
+/// down) at 200 a frame, flying from its first frame, with a life of (distance to the wall ahead) /
+/// 200 like the bullets. A body within the frame's reach, or the wall at the end of its life, sets
+/// it off ([`crate::damage::ROCKET_INNER`], `_OUTER`): k7's rockets went off 6 frames after Z on the
+/// wall 1,229.6 ahead (life 6.148), w16's on player 2 in the frame of the shot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rocket {
     pub pos: [f32; 3],
@@ -292,9 +293,7 @@ pub const ROCKET_SPEED: f32 = 200.0;
 pub const FLIGHT_RANGE: f32 = 20_000.0;
 
 impl Rocket {
-    pub fn fire(world: &CollisionWorld, owner: usize, muzzle: [f32; 3], angle: u16) -> Self {
-        let (c, s) = cos_sin(angle);
-        let dir = [c, 0.0, -s];
+    pub fn fire(world: &CollisionWorld, owner: usize, muzzle: [f32; 3], dir: [f32; 3]) -> Self {
         Self {
             pos: muzzle,
             dir,
@@ -615,7 +614,7 @@ mod tests {
     #[test]
     fn rocket_flies_to_the_wall() {
         let w = flat();
-        let mut r = Rocket::fire(&w, 0, [0.0, 50.0, 0.0], 0);
+        let mut r = Rocket::fire(&w, 0, [0.0, 50.0, 0.0], [1.0, 0.0, 0.0]);
         assert_eq!(r.life, 5.0);
         let frames = (0..10).take_while(|_| r.advance()).count();
         assert_eq!((frames, r.at(r.reach())), (4, [1000.0, 50.0, 0.0]));

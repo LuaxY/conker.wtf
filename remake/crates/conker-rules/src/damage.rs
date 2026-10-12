@@ -103,6 +103,8 @@ pub const SHOT_BODY: DamageType = ty(0x20, 0x01, 20.0, 0.0, 6.0, 1, 0x80 | 10, 0
 pub const ROCKET_INNER: DamageType = ty(0x2C, 0x07, 0.0, 0.0, 0.0, 0, 0x80 | 30, 0x3010);
 pub const ROCKET_OUTER: DamageType = ty(0x2B, 0x02, 20.0, 70.0, 3.4, 1, 0x80 | 30, 0x3010);
 pub const ROCKET_INNER_R: f32 = 40.0;
+/// Scene 0x2B's outer blast, type 0x26: 0x15's with 3 damage and 10 frames' immunity (RAM table, V).
+pub const ROCKET_OUTER_2B: DamageType = ty(0x2B, 0x03, 20.0, 70.0, 3.4, 1, 0x80 | 10, 0x3010);
 /// The shotgun's four spheres (`func_150FF840`, C; V combat5_sg_e1-e3): type 0x3A at the muzzle,
 /// then 0x32 (kills), 0x30 (3 damage, blown up) and 0x31 (1) further along the facing.
 pub const SHOTGUN_MUZZLE: DamageType = ty(0x21, 0x01, 34.0, 0.0, 4.0, 30, 0, 0x0400);

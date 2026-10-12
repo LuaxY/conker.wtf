@@ -1580,7 +1580,12 @@ impl Match {
             f.set(Action::Pose(Pose::PutDown), clip, t);
         }
         if f.action == Action::Free && !aiming && !f.carrying && f.flag.is_none() {
-            if late_pressed(C_DOWN) && f.grenades > 0 && armed.is_none_or(|w| w.c_button.is_none())
+            // A villager's item 0x3E throws no grenade (V beach-gunner gren: C-down held 60-100, the
+            // pull never starts, 3 kept; I: where the game refuses it).
+            if late_pressed(C_DOWN)
+                && f.grenades > 0
+                && armed.is_none_or(|w| w.c_button.is_none())
+                && f.weapon != Some(beach::ITEM)
             {
                 f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
                 f.cook = projectile::COOK;
@@ -1610,6 +1615,7 @@ impl Match {
                         _ if swing && w.id == 0x21 => anim::MELEE_SWING_A,
                         Attack::Shot { anim, .. } if late_held(BUTTON_R) => anim.0,
                         Attack::Spread { alt: a, .. } if alt => a.0,
+                        Attack::Rocket { .. } if self.settings.beach => beach::ROCKET_FIRE,
                         _ => w.fire.0,
                     };
                     f.set(
@@ -1708,7 +1714,7 @@ impl Match {
                         f.ready = t + cooldown;
                         f.shots = f.shots.saturating_add(1);
                         let at = local_to_world(pos, facing, muzzle);
-                        strikes.push(Strike::Rocket(Rocket::fire(world, i, at, facing)));
+                        strikes.push(Strike::Rocket(Rocket::fire(world, i, at, aim(f).0)));
                     }
                     Attack::Shot {
                         kind,
@@ -2364,13 +2370,22 @@ impl Match {
     /// Rockets fly after the players (those fired this frame included): a body in this frame's
     /// reach or the wall at the end of their life sets them off.
     fn fly_rockets(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
+        // Scene 0x2B's rockets (kind 3, `func_15070144`, C; V beach-gunner r3: 0x26 took a villager
+        // 6 → 3) blow up with type 0x26 instead of 0x15 (`func_151C1654`).
+        let blasts = match self.settings.beach {
+            true => [
+                ROCKET_BLASTS[0],
+                (damage::ROCKET_OUTER_2B, damage::ROCKET_OUTER_R),
+            ],
+            false => ROCKET_BLASTS,
+        };
         for (born, mut r) in std::mem::take(&mut self.rockets) {
             if let Some((_, d)) = self.first_ellipsoid(r.owner, r.pos, r.dir, r.reach(), seen) {
-                self.blast(r.at(d), r.owner, ROCKET_BLASTS, world, ev);
+                self.blast(r.at(d), r.owner, blasts, world, ev);
             } else if r.advance() {
                 self.rockets.push((born, r));
             } else {
-                self.blast(r.at(r.reach()), r.owner, ROCKET_BLASTS, world, ev);
+                self.blast(r.at(r.reach()), r.owner, blasts, world, ev);
             }
         }
     }
@@ -3569,6 +3584,53 @@ mod tests {
         assert_eq!(m.players[0].body.move_angle, atan2_u16(40.0, 50.0));
     }
 
+    /// War: Beach's bazooka Tedi (V beach-gunner r1, a bots1 replay): its rocket leaves along its aim
+    /// (aim 255.086°, 6.921° down → (−0.255493, −0.120507, 0.959271) at read 411), not level along
+    /// its facing, so it reaches the villagers 3,000 away and 1,000 below the east top; pressing Z
+    /// it fires every 60 frames (s126+0x19E = 120 VIs; r1 349, 411, 473), playing 0x207, and its
+    /// outer blast takes 3.
+    #[test]
+    fn a_bots_rocket_follows_its_aim() {
+        let (arena, mut m, w) = duel();
+        m.settings.beach = true;
+        m.give(0, 0x16);
+        let mut born = Vec::new();
+        for t in 0..200 {
+            (m.players[0].body.scope_yaw, m.players[0].scope_pitch) = (Some(255.08606), 6.921_387);
+            let buttons = match t {
+                0 => BUTTON_B,
+                50.. if t % 2 == 0 => BUTTON_Z,
+                _ => 0,
+            };
+            let inputs = [
+                Input {
+                    buttons,
+                    ..Input::default()
+                },
+                Input::default(),
+            ];
+            m.step(&arena, &inputs, &w);
+            born.extend(m.rockets.iter().filter(|r| r.0 == t).map(|r| (t, r.1.dir)));
+            if born.last().is_some_and(|b| b.0 == t) {
+                assert_eq!(m.players[0].anim, beach::ROCKET_FIRE);
+            }
+        }
+        let at: Vec<u32> = born.iter().map(|b| b.0).collect();
+        assert_eq!(at, [50, 110, 170]);
+        let want = [-0.255_492_75, -0.120_507_4, 0.959_271_3];
+        assert!(
+            born.iter()
+                .all(|b| b.1.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4))
+        );
+        // On 0x2B its outer blast is type 0x26, 3 damage (V beach-gunner r3: a villager 6 → 3).
+        m.rockets = vec![(
+            m.tick,
+            Rocket::fire(&w, 0, [146.5, 10.0, 150.0], [0.0, -1.0, 0.0]),
+        )];
+        m.step(&arena, &[Input::default(); 2], &w);
+        assert_eq!(m.players[1].health, 3);
+    }
+
     /// `remove_player`: nobody changes slot; the leaver's projectiles, pickups and fires go, its
     /// slot stays free (the frame skips it) until the next player joins.
     #[test]
@@ -3580,8 +3642,8 @@ mod tests {
             .map(|o| (0, Bullet::fire(&w, o, [0.0; 3], 0, damage::TWIN_BULLET)))
             .collect();
         m.rockets = vec![
-            (0, Rocket::fire(&w, 2, [0.0; 3], 0)),
-            (0, Rocket::fire(&w, 1, [0.0; 3], 0)),
+            (0, Rocket::fire(&w, 2, [0.0; 3], [1.0, 0.0, 0.0])),
+            (0, Rocket::fire(&w, 1, [0.0; 3], [1.0, 0.0, 0.0])),
         ];
         m.pickups[0].taken = Some((2, 5));
         m.pickups[1].taken = Some((1, 5));
@@ -4448,6 +4510,9 @@ mod tests {
         assert_eq!(b.state, movement::state::CROUCH_WALK);
         assert!((b.xz_speed - 14.0).abs() < 0.01, "{}", b.xz_speed);
         assert_eq!(m.players[0].shots, 0);
+        // C-down throws no grenade (V beach-gunner gren).
+        run(&mut m, &arena, &w, 40, |t| u16::from(t % 2 == 0) * C_DOWN);
+        assert_eq!((m.players[0].grenades, m.players[0].shots), (3, 0));
         // The bottle: on it, the boost 2 frames on; back 30 frames after the touch.
         m.players[0].body.pos = [0.0, 0.0, 3000.0];
         let t = m.tick;

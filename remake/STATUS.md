@@ -36,17 +36,46 @@ the pack section below.
 | DM, TW, Colors vs HEAD (`d3c51bf` built in `target-net/head`; same pack, 7 bots, 150 s, ports 5970-5976) | Colors: event lists identical. TW: run-to-run timing splits it into the same two event lists in both builds (a HEAD run equals a new run through read 1500). DM: not checkable by read (the two new-build runs differ from each other); the unknown native `(6, 3, 1)` ×6 on 2d Deathmatch with 7 bots is HEAD's too |
 | `bun run test`, `bun run check` | pass |
 
+**Fixed (2026-10-13, later): the Tediz' kills.** The gunner was not the cause: it hit as often as bots1's (~30 MG hits).
+The bazooka Tedi was. Its rockets flew level along its facing, so from the east top (y ≈ 724) they burst at y ≈ 788
+and never reached villagers about 1,000 below. HEAD: 9-15 blasts, 0 kills. bots1: 16 blast hits, 8 kills. Traces are
+in `../lab/research/mp-original/beach-gunner-scratch/`; notes in `beach.md` §7.4.
+- **The aim (V r1):** a rocket leaves along the shooter's aim. 31 rockets matched s126+0x16C/0x170 to within 0.3°, up to 37° down. `Rocket::fire` takes `aim(f)`'s direction, and bots write the aim for 0x16 too (`Bots::scopes`).
+- **The rate:** one rocket every 60 frames, not 120 (s126+0x19E = 120 VIs, C; V r1 62 frames apart).
+- **The clip:** Beach's fire clip is 0x207 (`func_15065A5C`, C), which has no root motion. 0x77's root motion pushed the bot back 370 over 9 shots.
+- **The blast:** Beach's outer blast is type 0x26, 3 damage (`func_151C1654`, C; V r3: a villager 6 → 3).
+- **Grenades:** villagers' item 0x3E throws none (V gren: C-down held, the pull never starts, 3 kept).
+- **Tests:** `a_bots_rocket_follows_its_aim` (the aim, 50/110/170, 0x207, 6 → 3); `beach_items` adds the grenade check.
+- **Runs:** `MODE=beach MAP=2b BOTS=7`, 300 s, 1 idle human; deaths/escapes counted to read 8125. bots1: Tediz 20-7, 20/5.
+
+  | Build | Start ticks | Result | Deaths / escapes |
+  |---|---|---|---|
+  | New | 59, 118 (the same events) | Tediz won 20-4 at read 7355 | 20 / 2 |
+  | New | 178, 233 (the same events) | [11, 16] when the run stopped (read ~8970), no end | 14 / 9 |
+  | HEAD | 59, 179, 237, 315 | [13, 14], [16, 15], [16, 15], [18, 10] | 13/13, 13/10, 13/10, 8/15 |
+
+  There are 0 faults, 0 unknown natives and 0 panics.
+- **vs HEAD (7 bots, 300 s; Colors 6 bots, 330 s; same start tick):**
+  - DM 0x34: identical event lists. No bot drew 0x16, and HEAD also has the `(6, 3, 1)` native and bot 0's stall.
+  - DM 0x30: identical to read 1383, then bot 5's rocket diverges (aimed, it hits bot 1).
+  - Colors: identical to read 1257, then bot 4's rocket diverges (aimed, 60 frames apart).
+  - Bots stuck in state 122 at y −2484 occur in both builds.
+- **Checks:** `bun run test` passes. In `bun run check`, fmt, clippy (`-D warnings`) and web pass everywhere except `conker-client`, the client agent's work in progress (`cargo fmt` diffs in 5 files; clippy `type_complexity` at `beach.rs:340`).
+- **The wire:** no protocol change (rockets are positions on the wire).
+- **Client handoff:** `audio.rs`'s `fire` closure checks `w.fire.0` (0x77), so it misses Beach's 0x207. Rockets now fly pitched.
+
 Gaps (V seen, C code, I inferred):
-- **Bots:** the Tediz' gunner kills about a third as often as bots1's (V). Villagers escape about 3× as often.
+- **Bots:** two of the four new runs end like bots1 (Tediz 20-4); the other two stand at [11, 16] (9 escapes vs bots1's 5) (V).
+- **I:** 0x207 and type 0x26 apply in Beach mode only, not in Deathmatch on 0x2B.
 - **I:** the escape's teleport and the Tedi ejection are where the C points but not read. The ejection spot is by the gun's seat.
 - **I:** the plunger's collision is static, so the presser stays at y 508 while it sinks (V: 448).
 - **I:** `pick_target`'s start score is −1 (the real one is in compressed data).
-- **I:** the strike's blast hurts no one else.
+- **I:** the strike's blast hurts no one else (beach-gunner r3: no one was within 2,500 at the strikes).
 - **I:** the jingle query always answers 0, so a human's freeze is always 150.
 - **I:** 0x3E's handler is skipped while crouched.
 - **I:** classes at the start go by villager order (V x1 shows 1e 14 1d 1f).
 - **C:** the villager cap (8, BALANCE) is not enforced.
-- **V:** villagers keep their 3 grenades; **I:** whether they can throw them.
+- **I:** where the game refuses a villager's grenade (V: it does); the remake checks item 0x3E.
 
 ## War: Beach's presentation in the pack (2026-10-13)
 **`conker-extract pack --map 2b` now also packs what War: Beach shows and plays: the villagers' 14 looks, Beach's two
