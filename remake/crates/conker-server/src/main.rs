@@ -35,8 +35,10 @@
 //! Bots (`--bots N`, conker-bots): the original's multiplayer AI plays slots 0..N, each in its side's
 //! base, from the server's start. Humans take the slots after them (a joining
 //! human never replaces a bot; a leaving one frees its own slot, so bots keep theirs). Clients see
-//! a bot as any other player (`PlayerId(PeerId::Local(slot))`, interpolated). Every roster change
-//! (a join, a leave, the match start) restarts the bots' AI memory, as a new match does in the game.
+//! a bot as any other player (`PlayerId(PeerId::Local(slot))`, interpolated). The match start
+//! starts the bots' AI afresh, as a new match does in the game; a join or leave mid-match keeps the
+//! level script's state (the gas, the flags, Beach's timers), only the slot's own AI memory starts
+//! over (conker-bots' `Bots::join`, `Bots::leave`).
 //! Each tick: the lifts, `Bots::lifted` for the slots they moved, `Bots::tick` (the bots' inputs),
 //! `Bots::scopes` (a bot aiming 0x14 or 0x24 looks through its scope), the step, `Bots::observe`.
 //!
@@ -135,7 +137,7 @@ use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side};
 use conker_sim::net::{
     Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID, Player,
-    PlayerId, ProtocolPlugin, Restart, Saw, map_scene, scene_world,
+    PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -157,9 +159,6 @@ const START_MARGIN: u32 = 150;
 const LIVE_READ: u32 = 23;
 /// Ticks of position history: 2 s, more than any view lag a playable connection has.
 const HISTORY: usize = 60;
-/// Ticks the results show before the next match starts anyway (the original's STATS screen quits
-/// on its own after about 40 s).
-const RESULTS: u32 = 40 * 30;
 /// The bot skills' names (`--skill`), as the SET-UP screen shows them.
 const SKILLS: [&str; 5] = ["inbred", "crap", "normal", "bastard", "einstein"];
 
@@ -314,6 +313,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     // Beach is scenario 8, scene 0x2B's.
     if setup.settings.beach && (net.map != "2b" || setup.cavemen) {
         return Err("--mode beach: map 2b only, without --cavemen".into());
+    }
+    if setup.settings.beach && setup.bots > beach::MAX_VILLAGERS + beach::MAX_TEDIZ {
+        return Err("--mode beach: at most 10 bots (8 villagers, 2 Tediz)".into());
     }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
@@ -587,7 +589,7 @@ impl Ai {
         };
         // Parse once up front, so a bad pack fails at start and not at the first join.
         ai.assets()
-            .map(|a| Bots::new(a, 1, &[0], DEFAULT_SKILL, Rng::default()))??;
+            .map(|a| Bots::new(a, &[], &[0], DEFAULT_SKILL, Rng::default()))??;
         Some(ai)
     }
 
@@ -601,12 +603,11 @@ impl Ai {
         })
     }
 
-    /// A fresh AI for `players` participants, the first `bots` of them bots, at `skill`; with no
-    /// bot only in the War modes (`script`), whose AI script referees them.
-    fn restart(&mut self, players: usize, bots: usize, skill: u8, rng: Rng, script: bool) {
-        let slots: Vec<usize> = (0..bots).collect();
-        self.bots = (bots > 0 || script)
-            .then(|| Bots::new(self.assets()?, players, &slots, skill, rng))
+    /// A fresh AI over the slots of `humans` and `bots`, at `skill`; with no bot only in the War
+    /// modes (`script`), whose AI script referees them.
+    fn restart(&mut self, humans: &[usize], bots: &[usize], skill: u8, rng: Rng, script: bool) {
+        self.bots = (!bots.is_empty() || script)
+            .then(|| Bots::new(self.assets()?, humans, bots, skill, rng))
             .flatten();
     }
 }
@@ -631,6 +632,9 @@ struct Game {
     votes: BTreeSet<usize>,
     /// War: each winning team's outro on the map, in ticks (the pack's `outros.json`; 0 none).
     outros: [u32; 2],
+    /// Over, the winner as it stood on the first tick over ([`Game::winner`]), so a leaver changes
+    /// neither the outro nor the STATS' header.
+    won: Option<Option<u8>>,
     /// Scene 0x3F's Deathmatch (scenario 7, V oracle): the bots are cavemen, the humans Tediz, and
     /// every player starts holding item 0x40 ([`Fighter::start`]).
     cavemen: bool,
@@ -656,6 +660,7 @@ impl Game {
             },
             votes: BTreeSet::new(),
             outros: [0; 2],
+            won: None,
             cavemen: false,
         }
     }
@@ -677,12 +682,21 @@ impl Game {
         }
     }
 
-    /// War: Beach caps the Tediz at [`beach::MAX_TEDIZ`]: `side` past it takes the villagers'.
-    fn capped(&self, side: Side) -> Side {
-        match self.setup.settings.beach && self.members(Side::Tediz) >= beach::MAX_TEDIZ {
-            true => Side::Squirrels,
-            false => side,
+    /// War: Beach caps the Tediz at [`beach::MAX_TEDIZ`] and the villagers at
+    /// [`beach::MAX_VILLAGERS`]: `side` full, the other; both full, none.
+    fn capped(&self, side: Side) -> Option<Side> {
+        if !self.setup.settings.beach {
+            return Some(side);
         }
+        let other = match side {
+            Side::Tediz => Side::Squirrels,
+            _ => Side::Tediz,
+        };
+        let room = |s: Side| match s {
+            Side::Tediz => self.members(s) < beach::MAX_TEDIZ,
+            _ => self.members(s) < beach::MAX_VILLAGERS,
+        };
+        [side, other].into_iter().find(|&s| room(s))
     }
 
     /// Humans in the match (every taken slot after the bots).
@@ -702,21 +716,14 @@ impl Game {
         (self.joins - 1) as u8
     }
 
-    /// The bots' AI over the roster as it now stands.
-    /// The gas and Colors' flags start over with it (ponytail: a join or leave mid-gas ends the gas,
-    /// and in Colors sends the flags home, back 300 frames later, the scores kept, as the script
-    /// restarts; keep the script's globals across rosters if that matters).
+    /// The bots' AI afresh over the roster as it stands (the server's start, the match start): the
+    /// humans' slots, then the bots' (a free slot is no participant).
     fn restart_bots(&mut self) {
-        let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
+        let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
+        let (bots, humans): (Vec<usize>, Vec<usize>) = taken.partition(|&i| self.m.players[i].bot);
         let s = self.setup.settings;
-        self.ai.restart(
-            players,
-            bots,
-            s.skill,
-            rng,
-            s.total_war || s.colors || s.beach,
-        );
-        self.m.restart_gas();
+        let script = s.total_war || s.colors || s.beach;
+        self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
     /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz
@@ -724,7 +731,8 @@ impl Game {
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
         let side = match self.cavemen {
             true => Side::Cavemen,
-            false => self.capped([Side::Squirrels, Side::Tediz][slot % 2]),
+            false => (self.capped([Side::Squirrels, Side::Tediz][slot % 2]))
+                .expect("parse_args caps Beach's bots"),
         };
         let (place, spawn_mask) = self.placement(slot, side);
         let fighter = Fighter {
@@ -793,21 +801,25 @@ impl Game {
         (t >= start).then(|| self.setup.first_read + (t - start))
     }
 
-    /// The tick the results show from: the end fade's last frame, then in War (Total War, Colors)
-    /// the winning team's outro (none on a DRAW: `team_result`, as the clients' STATS rank the teams).
-    fn results_at(&self) -> Option<u32> {
+    /// War: the winning team (`team_result`; `None` a DRAW, and outside the War modes), latched
+    /// once over ([`Game::won`]).
+    fn winner(&self) -> Option<u8> {
         let m = &self.m;
-        let outro = match m.settings.total_war || m.settings.colors || m.settings.beach {
-            true => team_result(&m.standings()).map_or(0, |t| self.outros[usize::from(t)]),
-            false => 0,
-        };
-        Some(m.ended_at? + END_DELAY + FADE + 1 + outro)
+        let war = m.settings.total_war || m.settings.colors || m.settings.beach;
+        (self.won).unwrap_or_else(|| team_result(&m.standings()).filter(|_| war))
     }
 
-    /// Over: ticks before the next match starts anyway ([`RESULTS`] until the results show).
+    /// The tick the results show from: the end fade's last frame, then in War (Total War, Colors,
+    /// Beach) the winning team's outro (none on a DRAW).
+    fn results_at(&self) -> Option<u32> {
+        let outro = self.winner().map_or(0, |t| self.outros[usize::from(t)]);
+        Some(self.m.ended_at? + END_DELAY + FADE + 1 + outro)
+    }
+
+    /// Over: ticks before the next match starts anyway: [`RESULTS`] once the results show, more
+    /// through the outro before them (a client joining mid-outro starts it there).
     fn restart_in(&self, t: u32) -> u32 {
-        let left = (self.results_at()).map_or(RESULTS, |r| (r + RESULTS).saturating_sub(t));
-        left.min(RESULTS)
+        (self.results_at()).map_or(RESULTS, |r| (r + RESULTS).saturating_sub(t))
     }
 
     /// The players on `side` in the match.
@@ -831,7 +843,9 @@ impl Game {
     fn remove(&mut self, i: usize) {
         self.m.remove_player(i);
         self.votes.remove(&i);
-        self.restart_bots();
+        if let Some(bots) = &mut self.ai.bots {
+            bots.leave(i);
+        }
     }
 }
 
@@ -1012,13 +1026,18 @@ fn join_player(
     let tick = timeline.tick().0;
     let index = game.m.next_slot();
     // The War modes have two teams: a caveman asked for takes the smaller side (Beach: at most
-    // 2 Tediz).
+    // 2 Tediz and 8 villagers).
     let s = game.setup.settings;
     let two_sides = s.total_war || s.colors || s.beach;
     let side = (asked.side)
         .filter(|&s| !two_sides || s != Side::Cavemen)
         .unwrap_or_else(|| game.smaller_side());
-    let side = game.capped(side);
+    let Some(side) = game.capped(side) else {
+        // ponytail: the client stays connected with no player; a kick needs netcode's per-client
+        // disconnect, which lightyear's server doesn't expose.
+        warn!("client {:?}: War: Beach is full, no player", remote.0);
+        return;
+    };
     let (place, spawn_mask) = game.placement(index, side);
     let team = game.team(side);
     let fighter = Fighter {
@@ -1028,14 +1047,12 @@ fn join_player(
         class: game.class(side),
         ..Fighter::new(&place, team, tick)
     };
-    if index < game.m.players.len() {
-        // ponytail: the lifts keep each slot's last position, here the leaver's stand-in far away,
-        // and the joiner's first ride test runs from it; new lifts skip every ride test for one
-        // tick instead (as the match start does). A per-slot reset belongs in conker-bots' `Lifts`.
-        game.ai.lifts = Lifts::new(&game.ai.data[1], game.ai.scene);
-    }
+    // Its first ride test runs from where it stands, not from the slot's last player.
+    game.ai.lifts.reset(index);
     game.m.join(fighter);
-    game.restart_bots();
+    if let Some(bots) = &mut game.ai.bots {
+        bots.join(index, false);
+    }
     // The clock starts with the first human, or 5 s after the last `--wait` one.
     if game.start.is_none() {
         match game.setup.wait {
@@ -1319,6 +1336,7 @@ fn simulate(
         .with(game.setup.settings);
         game.ai.lifts = Lifts::new(&game.ai.data[1], game.ai.scene);
         game.restart_bots();
+        game.won = None;
         if game.m.settings.time.is_some() {
             game.m.timer -= 2 * (game.setup.first_read as i32 - (LIVE_READ as i32 - 1));
         }
@@ -1367,6 +1385,7 @@ fn simulate(
             }),
         };
     }
+    game.m.waiting = waiting.iter().map(|s| s.index).collect();
     let rides = game.ai.lifts.ride(&mut game.m, &game.arena);
     for &(p, place) in &rides {
         info!("t={t} slot {p} takes the lift to record {}", place.index);
@@ -1418,8 +1437,8 @@ fn simulate(
         events = game.m.apply(&effects);
         bots.scopes(&mut game.m);
     }
-    // ponytail: a waiting player is restored after the step, so it can't be hurt or moved meanwhile;
-    // a lethal hit on it still counts for its attacker (needs 6+ damage within its first ~0.5 s).
+    // A waiting player is restored after the step, so nothing moves it meanwhile (and nothing hurts
+    // it: `Match::waiting`).
     let held: Vec<(usize, Fighter)> = (waiting.iter())
         .map(|s| (s.index, game.m.players[s.index]))
         .collect();
@@ -1469,6 +1488,9 @@ fn simulate(
     }
     for (i, f) in held {
         game.m.players[i] = f;
+    }
+    if game.won.is_none() && game.m.phase() == Phase::Over {
+        game.won = Some(game.winner());
     }
     if let Some(bots) = &mut game.ai.bots {
         bots.observe(&events, &game.m);
@@ -1664,6 +1686,7 @@ fn publish(
         radar: s.radar,
         total_war: s.total_war,
         restart_in: game.restart_in(m.tick) as u16,
+        winner: game.winner(),
         phase: match m.phase() {
             Phase::Playing => 0,
             Phase::Fading => 1,
@@ -1900,11 +1923,16 @@ mod tests {
         assert!(b.beach && !b.colors && !b.total_war && b.score == 20);
         assert!(settings(&["--mode", "beach"]).is_err());
         assert!(settings(&["--mode", "beach", "--map", "2b", "--cavemen"]).is_err());
+        let beach = |bots| parse_args(args(&["--mode", "beach", "--map", "2b", "--bots", bots]));
+        assert!(
+            beach("10").is_ok() && beach("11").is_err(),
+            "8 villagers, 2 Tediz"
+        );
     }
 
     /// War: Beach: the bots alternate sides until the Tediz are 2, then every one is a villager (a
     /// human asking for the Tediz too), each villager with item 0x3E and the next start class,
-    /// respawning on its own record; the Tediz class 3.
+    /// respawning on its own record; the Tediz class 3. At 8 villagers, no one else joins.
     #[test]
     fn beach_caps_the_tediz() {
         let mut g = game(Setup {
@@ -1932,7 +1960,15 @@ mod tests {
         assert_eq!(classes, [0x1E, 3, 0x14, 3, 0x1D, 0x1F, 0x1E]);
         assert_eq!((f[0].start, f[1].start), (Some(beach::ITEM), None));
         assert_eq!((f[0].spawn_mask, f[1].spawn_mask), (1 << 1, 1 << 10));
-        assert_eq!(g.capped(Side::Tediz), Side::Squirrels);
+        assert_eq!(g.capped(Side::Tediz), Some(Side::Squirrels));
+        let _ = (g.join_bot(7), g.join_bot(8));
+        assert_eq!(g.capped(Side::Tediz), Some(Side::Squirrels));
+        let _ = g.join_bot(9);
+        assert_eq!(g.members(Side::Squirrels), 8);
+        assert_eq!(
+            (g.capped(Side::Tediz), g.capped(Side::Squirrels)),
+            (None, None)
+        );
     }
 
     /// Total War: every player's team is its side (the bots alternate); a Deathmatch gives each
@@ -1958,7 +1994,8 @@ mod tests {
         }
     }
 
-    /// Over, the results last `RESULTS` ticks from the end fade's last frame.
+    /// Over, the results last `RESULTS` ticks from the end fade's last frame; through a War outro
+    /// the countdown runs on from the outro's length (a client joining mid-outro starts there).
     #[test]
     fn the_results_count_down() {
         let mut g = game(Setup::default());
@@ -1982,8 +2019,13 @@ mod tests {
         assert_eq!(g.results_at(), Some(over));
         g.m.players[1].kills = 1;
         assert_eq!(g.results_at(), Some(over + 400));
-        assert_eq!(g.restart_in(over + 400 - 30), RESULTS);
+        assert_eq!(g.restart_in(over), RESULTS + 400);
+        assert_eq!(g.restart_in(over + 400 - 30), RESULTS + 30);
         assert_eq!(g.restart_in(over + 400 + 30), RESULTS - 30);
+        // Latched once over: the winners' kills going (a leaver) change neither.
+        g.won = Some(g.winner());
+        g.m.players[1].kills = 0;
+        assert_eq!((g.winner(), g.results_at()), (Some(1), Some(over + 400)));
     }
 
     /// `--public` takes the game port unless it names one; the token endpoint defaults to port + 1.

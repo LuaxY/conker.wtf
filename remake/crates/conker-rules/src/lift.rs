@@ -81,11 +81,12 @@ impl Lift {
     }
 }
 
-/// The level's lifts and every player's position before the last [`Match::step`].
+/// The level's lifts and every player's position before the last [`Match::step`] (`None`: none
+/// to test a ride from, [`Lifts::reset`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lifts {
     pub lifts: Vec<Lift>,
-    old: Vec<[f32; 3]>,
+    old: Vec<Option<[f32; 3]>>,
 }
 
 impl Lifts {
@@ -103,7 +104,7 @@ impl Lifts {
         let mut moved = Vec::new();
         for p in 0..m.players.len() {
             let f = &m.players[p];
-            let old = self.old.get(p).copied().unwrap_or(f.body.pos);
+            let old = self.old.get(p).copied().flatten().unwrap_or(f.body.pos);
             let lift = self
                 .lifts
                 .iter()
@@ -117,14 +118,70 @@ impl Lifts {
                 moved.push((p, place));
             }
         }
-        self.old = m.players.iter().map(|f| f.body.pos).collect();
+        self.old = m.players.iter().map(|f| Some(f.body.pos)).collect();
         moved
     }
 
-    /// Player `i` left the match (the ones after it move down a slot).
-    pub fn remove(&mut self, i: usize) {
-        if i < self.old.len() {
-            self.old.remove(i);
+    /// A player joined in slot `i`: its first ride test runs from where it stands, not from the
+    /// slot's last player.
+    pub fn reset(&mut self, i: usize) {
+        if let Some(old) = self.old.get_mut(i) {
+            *old = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Fighter, Rng, Spawn};
+
+    /// A slot's last player stood behind a gate and the next to join it stands past it: reset, the
+    /// joiner does not ride (its first test runs from where it stands); kept, it would.
+    #[test]
+    fn a_joiner_rides_from_its_own_place() {
+        let zone = CameraVolume {
+            center: [0; 3],
+            size: [100; 3],
+            pitch: [0.0, 1.0],
+            yaw: [0.0, 1.0],
+            shape: 2,
+            turned: false,
+            action: 0,
+        };
+        let gate = Lift {
+            zone,
+            shape: 3,
+            floor: false,
+            scene: 0,
+            record: 0,
+        };
+        let spawn = Spawn {
+            pos: [0, 0, 500],
+            b6: 0,
+            yaw: 0,
+            camera: [0.0; 3],
+            b14: 0,
+            b15: 0,
+        };
+        let arena = Arena {
+            spawns: vec![spawn],
+            pickups: Vec::new(),
+        };
+        let at = Placement {
+            index: 0,
+            pos: [0.0, 10.0, 10.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let mut m = Match::new(&arena, vec![Fighter::new(&at, 0, 0)], Rng::default(), 0);
+        let kept = Lifts {
+            lifts: vec![gate],
+            old: vec![Some([0.0, 10.0, -50.0])],
+        };
+        let mut reset = kept.clone();
+        reset.reset(0);
+        assert!(reset.ride(&mut m.clone(), &arena).is_empty());
+        assert_eq!(kept.clone().ride(&mut m, &arena).len(), 1);
     }
 }

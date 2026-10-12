@@ -145,7 +145,7 @@ fn total_war_runs_the_team_branch() {
         ..Settings::default()
     };
     let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
-    let mut bots = Bots::new(assets, 4, &[1, 2, 3], 2, Rng::default()).unwrap();
+    let mut bots = Bots::new(assets, &[0], &[1, 2, 3], 2, Rng::default()).unwrap();
     let (world, mut inputs) = (CollisionWorld::default(), vec![Input::default(); 4]);
     let mut threats = 0;
     for _ in 0..1000 {
@@ -293,7 +293,7 @@ fn total_war_gas() {
     for f in &mut m.players {
         f.immune = 0;
     }
-    let mut bots = Bots::new(assets, 5, &[], 2, Rng::default()).unwrap();
+    let mut bots = Bots::new(assets, &[0, 1, 2, 3, 4], &[], 2, Rng::default()).unwrap();
     let inputs = [Input::default(); 5];
     let (canister, home) = CANISTERS[0];
     let (mut shown, mut touched, mut carried, mut delivered) = (None, None, None, None);
@@ -500,7 +500,7 @@ fn colors_flags_and_captures() {
         ..Settings::default()
     };
     let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
-    let mut bots = Bots::new(assets, 2, &[], 2, Rng::default()).unwrap();
+    let mut bots = Bots::new(assets, &[0, 1], &[], 2, Rng::default()).unwrap();
     let held = |m: &Match, i: usize| m.players[i].flag;
     let (mut shown, mut grabbed, mut released) = (None, None, Vec::new());
     let (mut retaken, mut gone, mut back, mut carried) = (None, None, None, None);
@@ -645,6 +645,103 @@ fn colors_flags_and_captures() {
     assert_eq!(m.ended_at, Some(captures[2].at));
 }
 
+/// War: Colors through a roster change mid-match: a human leaves while the red flag is carried and
+/// another joins in its slot; the script goes on (its globals and the flags as they were: both
+/// still carried, nothing hidden for a fresh start's 300 frames), only the changing participant
+/// starts over.
+#[test]
+fn colors_keeps_its_flags_through_a_join_and_a_leave() {
+    use conker_bots::brain::g;
+    use conker_bots::{Assets, Bots};
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, Settings, Spawn};
+    use conker_sim::movement::Input;
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x30).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x30);
+    let spawns = (extract_scene::scene_spawns(&rom, 0x30).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let arena = Arena {
+        spawns,
+        pickups: Vec::new(),
+    };
+    let place = |pos| Placement {
+        index: 0,
+        pos,
+        facing: 0,
+        camera: [0.0; 3],
+    };
+    // The squirrel beside the red flag (as in `colors_flags_and_captures`), two Tediz by the green.
+    let (by_red, by_green) = ([-288.0, 410.07, -3803.0], [172.6, 1342.0, 6144.0]);
+    let mut players = vec![
+        Fighter::new(&place(by_red), 0, 0),
+        Fighter::new(&place(by_green), 1, 0),
+        Fighter::new(&place(by_green), 1, 0),
+    ];
+    for (f, mask) in players.iter_mut().zip(conker_rules::spawn::COLORS_MASKS_30) {
+        f.spawn_mask = mask;
+    }
+    let settings = Settings {
+        colors: true,
+        ..Settings::default()
+    };
+    let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
+    let mut bots = Bots::new(assets, &[0, 1, 2], &[], 2, Rng::default()).unwrap();
+    let (mut grabbed, mut green_by) = (None, None);
+    for t in 0..1200u32 {
+        if grabbed.is_some_and(|g| t == g + 40) {
+            bots.leave(2);
+        }
+        if grabbed.is_some_and(|g| t == g + 80) {
+            bots.join(2, false);
+        }
+        let effects = bots.tick(&m, &arena, &world, &mut [Input::default(); 3]);
+        let ev = m.apply(&effects);
+        let mut ev2 = m.step(&arena, &[Input::default(); 3], &world);
+        ev2.extend(ev);
+        bots.observe(&ev2, &m);
+        // Vacant, participant 2 is of no team (no human takes a bot over by it); back, a Tedi.
+        if let Some(k) = grabbed.map(|g| t - g).filter(|&k| k == 60 || k == 100) {
+            let team = bots.globals().get(g::TEAM, 2);
+            assert_eq!(team, if k == 60 { -1 } else { 1 }, "{k} after the grab");
+        }
+        let [red, green] = m.colors.flags;
+        if grabbed.is_none() && red.carrier == Some(0) {
+            grabbed = Some(t);
+        }
+        if let Some(g) = grabbed.filter(|&g| t > g + 20) {
+            assert_eq!(red.carrier, Some(0), "frame {t}, {} after the grab", t - g);
+            assert_eq!(green.carrier, green_by, "frame {t}");
+            assert!(red.shown && green.shown, "frame {t}");
+        }
+        if grabbed.is_some_and(|g| t == g + 20) {
+            green_by = green.carrier;
+        }
+    }
+    assert!(grabbed.is_some_and(|g| g < 400), "{grabbed:?}");
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?} {}",
+        bots.unknown,
+        bots.faults
+    );
+}
+
 /// War: Colors with bots, as the server runs it (7 bots, the squirrels in the even slots, and an
 /// idle human, a Tedi): a collector takes the enemy flag within 5,400 frames (here a Tedi, the
 /// green flag, at 2,398; V bots1: a squirrel, the red flag, 1,719 frames in). The collectors' way
@@ -708,7 +805,7 @@ fn colors_bots_take_a_flag() {
     };
     let mut m = Match::new(&arena, players, rng, 0).with(settings);
     let slots: Vec<usize> = (0..7).collect();
-    let mut bots = Bots::new(assets, 8, &slots, DEFAULT_SKILL, rng).unwrap();
+    let mut bots = Bots::new(assets, &[7], &slots, DEFAULT_SKILL, rng).unwrap();
     let mut lifts = Lifts::new(assets.triggers, 0x30);
     let mut taken = None;
     for t in 0..5400 {
@@ -1018,7 +1115,7 @@ fn beach_script_runs_the_match() {
         beach: true,
         ..Settings::default()
     });
-    let mut bots = Bots::new(assets, 3, &[], 2, Rng::default()).unwrap();
+    let mut bots = Bots::new(assets, &[0, 1, 2], &[], 2, Rng::default()).unwrap();
     let mut inputs = [Input::default(); 3];
     let (mut detonation, mut escape, mut strike, mut records) = (None, None, None, [0u8; 2]);
     let mut point = None;
@@ -1072,6 +1169,100 @@ fn beach_script_runs_the_match() {
     assert_eq!(strike, Some((48 + 2700, 0)));
     assert_eq!(point, Some(48 + 2700 + 40));
     assert_eq!(m.colors.scores, [2, 1]);
+    assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
+    assert_eq!(bots.faults, 0);
+}
+
+/// War: Beach through a roster change: villager 1 leaves at 1000 and a new human villager takes its
+/// slot at 1100. The script goes on: villager 0's 90 s deadline runs from the match start (its strike
+/// at 48 + 2700, as in `beach_script_runs_the_match`; a restarted script would strike at 1100 + 2748),
+/// the joiner's from its own appear (G+0x1574 = 5400 48 frames in), and the leaver's is gone.
+#[test]
+fn beach_keeps_its_deadlines_through_a_join_and_a_leave() {
+    use conker_bots::brain::g;
+    use conker_bots::{Assets, Bots};
+    use conker_rules::gas::Effect;
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, Settings, Spawn, beach};
+    use conker_sim::movement::{Input, Side};
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x2B).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x2B);
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(&rom, 0x2B).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let at = |record: usize| Placement {
+        index: record,
+        pos: spawns[record].pos.map(f32::from),
+        facing: 0,
+        camera: [0.0; 3],
+    };
+    let villager = |record, class| Fighter {
+        side: Side::Squirrels,
+        start: Some(beach::ITEM),
+        class,
+        ..Fighter::new(&at(record), 0, 0)
+    };
+    let players = vec![
+        villager(1, 0x1E),
+        villager(0, 0x14),
+        Fighter {
+            class: beach::TEDI_CLASS,
+            ..Fighter::new(&at(3), 1, 0)
+        },
+    ];
+    let arena = Arena {
+        spawns: spawns.clone(),
+        pickups: Vec::new(),
+    };
+    let mut m = Match::new(&arena, players, Rng::default(), 0).with(Settings {
+        beach: true,
+        ..Settings::default()
+    });
+    let mut bots = Bots::new(assets, &[0, 1, 2], &[], 2, Rng::default()).unwrap();
+    let mut inputs = [Input::default(); 3];
+    let (mut strikes, mut deadline) = (Vec::new(), None);
+    while m.tick < 2800 {
+        let t = m.tick;
+        match t {
+            1000 => {
+                m.remove_player(1);
+                bots.leave(1);
+            }
+            1100 => {
+                assert_eq!(m.join(villager(2, 0x1D)), 1);
+                bots.join(1, false);
+            }
+            1200 => deadline = Some(bots.globals().get(g::TIMER3, 1)),
+            _ => {}
+        }
+        let effects = bots.tick(&m, &arena, &world, &mut inputs);
+        for e in &effects {
+            if let Effect::Strike(p) = *e {
+                strikes.push((t, p));
+            }
+        }
+        m.apply(&effects);
+        let ev = m.step(&arena, &inputs, &world);
+        bots.observe(&ev, &m);
+    }
+    assert_eq!(strikes, [(48 + 2700, 0)]);
+    // Set 48 frames in (1148, as the others' at 48), 2 less a frame since.
+    assert_eq!(deadline, Some(5400 - 2 * (1200 - 1148 - 1)));
     assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
     assert_eq!(bots.faults, 0);
 }

@@ -646,7 +646,8 @@ pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
 /// (s126+0x1AA, bots' included). Both on 1st is a DRAW (V t0). ponytail: kills in both timings; untimed, the game ranks the
 /// teams in play by Σ(lives·6 + health) first (C), which nothing shows: an untimed Total War ends
 /// only once a team is out (V `elim`), and the one left is 1st whatever it scored. Two teams out:
-/// the one whose last member went out first is 2nd (I; the original checks team 0 first, C).
+/// the one whose last member went out first is 2nd (on one frame team 0's, which the game checks
+/// first: [`Match::step_seen`], C).
 pub fn team_places(all: &[Option<Standing>]) -> [u8; 2] {
     let members = |t: u8| all.iter().flatten().filter(move |s| s.team == t);
     let sum = |t, f: fn(&Standing) -> u16| members(t).map(|s| u32::from(f(s))).sum::<u32>();
@@ -697,6 +698,9 @@ pub struct Match {
     /// Slots whose player left, kept for the next to join ([`Self::join`]): a [`Fighter::vacant`]
     /// that the frame skips. The other players keep their slots.
     pub free: BTreeSet<usize>,
+    /// Slots whose player joined and has not played yet (the server's `Waiting`, kept as it
+    /// joined): nothing hurts them ([`Self::hurt`]), so no hit on them scores.
+    pub waiting: BTreeSet<usize>,
     /// Total War's gas: the props the AI script drives and its countdown ([`Self::apply`]).
     pub gas: Gas,
     /// War: Colors' flags and scores ([`Self::apply`]).
@@ -781,6 +785,7 @@ impl Match {
             settings: Settings::default(),
             rng,
             free: BTreeSet::new(),
+            waiting: BTreeSet::new(),
             gas: Gas::default(),
             colors: Colors::default(),
             reach: Vec::new(),
@@ -905,6 +910,7 @@ impl Match {
         // The scores the frame's end tests: the script's (applied before the step) latch in their
         // own frame, Beach's death points (scored in the step) in the next (V end1 212, bots1 8126).
         let scores = self.colors.scores;
+        let was_in: Vec<bool> = (0..self.players.len()).map(|i| self.in_play(i)).collect();
         // Colors: the script's respawns (command 0x82), the flags' fall, then their touch.
         for i in 0..self.players.len().min(32) {
             if self.colors.respawns & 1 << i != 0 && !self.free.contains(&i) {
@@ -963,6 +969,20 @@ impl Match {
         for f in &mut self.colors.flags {
             if let Some(c) = f.carrier.and_then(|c| self.players.get(c)) {
                 f.pos = colors::held(c.body.pos, c.body.facing);
+            }
+        }
+        // Total War, out on one frame: the game places the teams at the frame's end, team 0 first
+        // (`func_151E565C`'s loop at 0x151E5DD0, C), so of two teams out together the Tediz win
+        // whatever the slots: the frame's places go to team 0's first, the worst first.
+        if self.settings.total_war {
+            let mut fresh: Vec<usize> = (0..self.players.len())
+                .filter(|&i| was_in[i] && !self.in_play(i) && !self.free.contains(&i))
+                .collect();
+            let mut outs: Vec<u8> = fresh.iter().map(|&i| self.players[i].out).collect();
+            outs.sort_unstable_by(|a, b| b.cmp(a));
+            fresh.sort_by_key(|&i| self.players[i].team);
+            for (i, out) in fresh.into_iter().zip(outs) {
+                self.players[i].out = out;
             }
         }
         self.timer = (self.timer - 2).max(0);
@@ -1206,8 +1226,12 @@ impl Match {
     }
 
     /// Carries out what the AI script did this frame ([`gas::Effect`]), before [`Self::step`];
-    /// returns the hits' events.
+    /// returns the hits' events. Over, nothing: the game's script stops with the level (Colors'
+    /// final capture would otherwise fade and respawn everyone through the results).
     pub fn apply(&mut self, effects: &[Effect]) -> Vec<Event> {
+        if self.phase() == Phase::Over {
+            return Vec::new();
+        }
         let t = self.tick;
         let mut ev = Vec::new();
         for &e in effects {
@@ -1359,19 +1383,6 @@ impl Match {
             }
         }
         ev
-    }
-
-    /// The gas (and Colors' flags) as at the match start, for a script started afresh: no canister
-    /// or flag carried, no mask worn; Colors' scores stay.
-    pub fn restart_gas(&mut self) {
-        self.gas = Gas::default();
-        self.colors = Colors {
-            scores: self.colors.scores,
-            ..Colors::default()
-        };
-        for f in &mut self.players {
-            (f.carrying, f.masked, f.flag) = (false, false, None);
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2444,7 +2455,8 @@ impl Match {
     ) -> bool {
         let t = self.tick;
         let f = &mut self.players[v];
-        if f.health == 0 || ((guarded || area) && f.immune != 0) || (guarded && f.stun != 0) {
+        let out = f.health == 0 || self.waiting.contains(&v);
+        if out || ((guarded || area) && f.immune != 0) || (guarded && f.stun != 0) {
             return false;
         }
         let damage = kind.amount(area);
@@ -4045,6 +4057,57 @@ mod tests {
         });
         assert_eq!((m.players[1].out, m.ended_at), (3, None));
         assert_eq!(m.places(), [1, 2, 2], "team 0 has the kill");
+    }
+
+    /// Total War, both teams' last members out on one frame: team 0 goes out first (the game checks
+    /// it first), so the Tediz win though the squirrel fell in the later slot.
+    #[test]
+    fn total_war_both_out_on_one_frame() {
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            time: None,
+            lives: 1,
+            total_war: true,
+            ..Settings::default()
+        });
+        (m.players[0].team, m.players[1].team) = (1, 0);
+        for v in [0, 1] {
+            m.hurt(
+                v,
+                &damage::GUN23_BULLET,
+                false,
+                false,
+                0,
+                None,
+                &mut Vec::new(),
+            );
+        }
+        run(&mut m, &arena, &w, 200, |_| 0);
+        assert!(m.ended_at.is_some() && m.players.iter().all(|f| f.out > 0));
+        assert_eq!(team_result(&m.standings()), Some(1));
+        assert_eq!(m.places(), [1, 2]);
+    }
+
+    /// A player that joined and has not played yet (the server's `Waiting`) takes no hit, so its
+    /// attacker scores nothing.
+    #[test]
+    fn a_waiting_player_takes_no_hit() {
+        let (_, mut m, _) = duel();
+        m.waiting.insert(1);
+        let mut ev = Vec::new();
+        assert!(!m.hurt(1, &damage::GUN23_BULLET, false, false, 0, Some(0), &mut ev));
+        let (a, v) = (&m.players[0], &m.players[1]);
+        assert_eq!((a.kills, a.hits, v.deaths, ev.len()), (0, 0, 0, 0));
+    }
+
+    /// Over, the script's effects do nothing (Colors' final capture respawns no one, scores no more).
+    #[test]
+    fn nothing_applies_once_over() {
+        let (_, mut m, _) = duel();
+        m.ended_at = Some(0);
+        m.tick = END_DELAY + FADE + 1;
+        m.apply(&[Effect::Respawn(1), Effect::Score(0, 1)]);
+        assert_eq!((m.colors.respawns, m.colors.scores), (0, [0, 0]));
     }
 
     /// Colors: lives are never lost; the score target ends the match on the capture's frame, the

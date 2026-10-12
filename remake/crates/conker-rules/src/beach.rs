@@ -11,6 +11,8 @@ pub const VILLAGERS: u8 = 0;
 pub const TEDIZ: u8 = 1;
 /// Team row 2's byte +7: the Tediz are capped at 2 participants, bots included (C).
 pub const MAX_TEDIZ: usize = 2;
+/// The villagers: at most 8 (`func_151E1744`, C), so a full match is 8 villagers vs 2 Tediz.
+pub const MAX_VILLAGERS: usize = 8;
 /// The villagers' classes at the match start, the k-th villager's (V x1: `1e 14 1d 1f`; I: by the
 /// villagers' order), and the Tediz' (model 117).
 pub const CLASSES: [u8; 4] = [0x1E, 0x14, 0x1D, 0x1F];

@@ -120,7 +120,7 @@ fn main() {
         .collect();
     let mut m = Match::new(&arena, fighters, r, LIVE);
     let slots: Vec<usize> = (1..players).collect();
-    let mut ai = Bots::new(assets, players, &slots, DEFAULT_SKILL, rng).expect("bot assets");
+    let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, rng).expect("bot assets");
     let mut lifts = Lifts::new(assets.triggers, scene as u8);
     let mut rides = 0;
     let mut csv = out.map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));

@@ -21,8 +21,8 @@ Sources: `remake/STATUS.md` sections and the lines of this file named per item.
 
 | Batch | Agents (lanes) | Items | Status |
 |---|---|---|---|
-| E1 match-flow bugs | rules/server/bots; client | A join or leave mid-match restarts the level AI script (Total War part 3, Colors part 1, this file "Total War done"/"Colors"); both teams out on one frame; Colors untimed + unlimited never ends, and after the final capture it still fades and respawns in the end phase (Colors part 3); Beach's cap of 8 villagers (Beach rules gaps); a waiting player's lethal hit counts (Wave 8); bots treat a free slot as an always-dead human, per-slot `Lifts` reset, `DEV_PRIVATE_KEY` (Wave 7 item 4). Client: an outro restarts for a mid-outro joiner, and roster changes in Over flip the computed winner (Total War part 6); STATS rows overlap with more than 4 humans | |
-| E2 bots fidelity | research ×2 (DM maps; Beach + club), then conker-bots | 0x30 lift-pair riders (DM 0x30 gaps); 0x34 node 60-62 jump loop (DM 0x34); ledge climb (0x30 node 48, state 235); camping (`func_1508A6FC` mask); club drawn 21% vs 52% (caveman); Beach escapes, 9 vs 5 (Beach rules gaps); `bots.sh` "bot 1 dies" flake; a seated gunner's shots unheard | |
+| E1 match-flow bugs | rules/server/bots; client | A join or leave mid-match restarts the level AI script (Total War part 3, Colors part 1, this file "Total War done"/"Colors"); both teams out on one frame; Colors untimed + unlimited never ends, and after the final capture it still fades and respawns in the end phase (Colors part 3); Beach's cap of 8 villagers (Beach rules gaps); a waiting player's lethal hit counts (Wave 8); bots treat a free slot as an always-dead human, per-slot `Lifts` reset, `DEV_PRIVATE_KEY` (Wave 7 item 4). Client: an outro restarts for a mid-outro joiner, and roster changes in Over flip the computed winner (Total War part 6); STATS rows overlap with more than 4 humans | done 2026-10-13 (protocol 19). Left: a human joining when no slot is free is a bot to the script until the next match; a client refused by a full Beach stays connected; STATS rows past P4 have no label |
+| E2 bots fidelity | research ×2 (DM maps; Beach + club), then conker-bots | 0x30 lift-pair riders (DM 0x30 gaps); 0x34 node 60-62 jump loop (DM 0x34); ledge climb (0x30 node 48, state 235); camping (`func_1508A6FC` mask); club drawn 21% vs 52% (caveman); Beach escapes, 9 vs 5 (Beach rules gaps); `bots.sh` "bot 1 dies" flake; a seated gunner's shots unheard | research done (`bots-fidelity.md`, `bots-beach-club.md`) |
 | E3 mounted guns | rules/sim/server; client | Launch homing, the leap's first frame and brake, e1's knock angle, a hurt gunner's trigger, `Effect::Gun`'s drop spot (Mounted guns: gameplay); the fire reaching the gunner late (server-only); `gun_stop`'s replay, the flash's pale box (Mounted guns: client) | |
 | E4 held weapons | rules/sim; client | C-down with the twin guns or flamethrower; the crossbow's hip push (~5.3 a shot), the shotgun's point-blank sphere, bolts on odd ticks (crossbow/shotgun gaps); hide the weapon on the death frame; the crossbow's string clips and bolt sound; the caveman's grenade clips 0x175/0x16C, the club icon's pixel, a lethal first swing (caveman gaps) | |
 | E5 Total War + Colors leftovers | research, then rules; client | TW: a human out of lives takes over a team-mate bot; the traitor's +0x70 reset; a carrier can't jump, its camera weapon 0x25, it has no weapon; canister shrink; props' collision by +0x6E; doors at 51; the mask clips' turn and brakes, the muffled mask sound (TW parts 3/5). Colors: capture jingles, the flag sound's 3rd argument, the touch radius 45, the end-phase fade, the home flag's mirrored "S" (Colors part 3) | |
@@ -198,11 +198,12 @@ shotgun (0x37). Leftovers:
      shelter's red alarm light and the canisters' green lights, 0xE016/0xE017: the original has no gas cloud), the mask
      put-on/take-off clips (0x151/0x14E, bank-09 masks #66/#67), the victory outros (cs2 squirrel officer, cs4 stitched
      Tedi: camera, actor, fade, bubble subtitles, voice, from `[6, 0x2D, 2|4]`). Left: the team screen and BALANCE, a
-     human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, both teams out on one frame;
+     human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, ~~both teams out on one frame~~
+     (done 2026-10-13: team 0 out first, as the game checks it first);
      the shelter lighting is an approximation (the level's light table isn't found); overlays (haze, fade) blend in
      linear light, a little stronger than the N64's; the outro actors' head nods, talk flag, bubble grow and page fades,
-     cs4's attachment; the mask clips cut a turn short; a carrier can jump; a join or leave mid-match restarts the
-     script; the bots never carry a canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z`.
+     cs4's attachment; the mask clips cut a turn short; a carrier can jump; ~~a join or leave mid-match restarts the
+     script~~ (done 2026-10-13); the bots never carry a canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z`.
      The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
    - **Colors mostly done (2026-10-12, `--mode colors --score N`):** the flags, takes, drops, returns, captures,
      score and end from the level's AI script 0xBB; the victory outros (cs1/cs5); the flags drawn at home, dropped and
@@ -210,14 +211,15 @@ shotgun (0x37). Leftovers:
      blips, the capture fade and the take sounds; the bots take and capture (pickup reach from the script's 0x7B).
      The mounted machine guns (0x30 ×2, 0x34 ×1) are done too (mount, the gun sight, fire, overheat, dismount,
      bots on them, Colors recreating them; drawn with the gunner's HUD). Left: the capture jingles, the touch radius (45, I), the
-     end-phase fade, a join or leave restarting the script, untimed + unlimited never ending.
+     ~~end-phase fade~~, ~~a join or leave restarting the script~~ (both done 2026-10-13), ~~untimed + unlimited never
+     ending~~ (the original's too: its SET-UP allows it, kept).
    - **Beach playable (2026-10-13, `--map 2b --mode beach --score N`):** villagers (14 looks, item 0x3E's speed and
      the bottles) vs at most 2 Tediz (the gun, the sniper and bazooka zones); escapes, the 90 s deadline, villager
      deaths and escapes scoring, the plunger, the strike, from the level's AI script 0xB9; the HUD strip and countdown,
      the escape fade, FRENCHYS WIN, the outros (cs4/cs3), the radio, detonation and strike effects, the lamps and
      water; rockets along the aim. Left: half the bot matches still end later than the original's (more escapes,
      V one run); the lamp flicker, the sweeping ground lights, the strike's ground mark, the outros' masks and song;
-     the music's two positional channels; the cap of 8 villagers.
+     the music's two positional channels; ~~the cap of 8 villagers~~ (done 2026-10-13).
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.
 5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.
@@ -242,12 +244,12 @@ shotgun (0x37). Leftovers:
    - play a match over the internet with real latency.
 
    If there is no host yet, the rest of the wave goes ahead without this item.
-4. **Wave 6's small leftovers:**
-   - the bots treat a free slot between occupied ones as a human who is always dead. `Bots::new` takes a count, so
-     the fix is a conker-bots API change that lets the roster skip free slots;
-   - a per-slot lift reset in conker-bots' `Lifts`. Today the server rebuilds every lift when a joiner takes a free
-     slot, so nobody can take a lift for one tick; `Lifts::remove` is unused;
-   - remove the unused `DEV_PRIVATE_KEY` from conker-sim `net.rs`.
+4. **Wave 6's small leftovers (done 2026-10-13):**
+   - ~~the bots treat a free slot between occupied ones as a human who is always dead. `Bots::new` takes a count, so
+     the fix is a conker-bots API change that lets the roster skip free slots~~;
+   - ~~a per-slot lift reset in conker-bots' `Lifts`. Today the server rebuilds every lift when a joiner takes a free
+     slot, so nobody can take a lift for one tick; `Lifts::remove` is unused~~;
+   - ~~remove the unused `DEV_PRIVATE_KEY` from conker-sim `net.rs`~~.
 
 ## Wave 8
 - Background tabs (throttled tabs and the 3 s timeout) and a real gamepad with two windows.
@@ -259,7 +261,7 @@ shotgun (0x37). Leftovers:
   - Ctrl-C in a terminal skips the disconnect;
   - native WebTransport with a digest is IPv4 only (lightyear binds `InAddrAnyV4`; wave 6's `ca=` path is
     dual-stack);
-  - a waiting player's lethal hit still counts for its attacker;
+  - ~~a waiting player's lethal hit still counts for its attacker~~ (done 2026-10-13);
   - the 10 s connect watchdog is untested in a browser.
 - Held weapons: hide the weapon on the game's frame at death; C-down with the twin guns or flamethrower drawn; check
   the held knives and revolver from the front.

@@ -93,9 +93,13 @@ pub struct Bots {
     machine: Machine,
     g: Globals,
     npcs: Vec<Npc>,
-    /// The match slot of each participant, humans first (the game's order).
-    slots: Vec<usize>,
-    humans: usize,
+    /// The match slot of each participant, humans first at the start (the game's order); `None`:
+    /// its player left ([`Bots::leave`]). Indices never move within a match ([`Bots::join`]).
+    slots: Vec<Option<usize>>,
+    /// Per participant: a bot.
+    bot: Vec<bool>,
+    /// Participants joined since the last frame ([`Bots::join`]).
+    joined: Vec<usize>,
     /// Per participant: the pickup whose weapon it holds (MP+0xEB0), and who hit it last frame.
     held: Vec<i32>,
     hit_by: Vec<u8>,
@@ -120,18 +124,16 @@ pub struct Bots {
 }
 
 impl Bots {
-    /// The AI over a roster: `bots` are the match slots played by bots, every other slot of
-    /// `players` is a human.
+    /// The AI over a roster: the match slots played by `humans`, then by `bots` (a free slot is
+    /// in neither: it is no participant).
     pub fn new(
         assets: Assets,
-        players: usize,
+        humans: &[usize],
         bots: &[usize],
         skill: u8,
         rng: Rng,
     ) -> Option<Self> {
-        let mut slots: Vec<usize> = (0..players).filter(|s| !bots.contains(s)).collect();
-        let humans = slots.len();
-        slots.extend(bots.iter().copied().filter(|&s| s < players));
+        let slots: Vec<Option<usize>> = humans.iter().chain(bots).map(|&s| Some(s)).collect();
         let n = slots.len();
         Some(Self {
             script: Script::parse(assets.ai)?,
@@ -141,7 +143,8 @@ impl Bots {
             g: Globals::new(g::SIZE),
             npcs: vec![Npc::default(); n],
             slots,
-            humans,
+            bot: (0..n).map(|k| k >= humans.len()).collect(),
+            joined: Vec::new(),
             held: vec![-1; n],
             hit_by: vec![0; n],
             forgiven: vec![0; n],
@@ -172,8 +175,63 @@ impl Bots {
     }
 
     /// The slots played by bots.
-    pub fn bot_slots(&self) -> &[usize] {
-        &self.slots[self.humans..]
+    pub fn bot_slots(&self) -> Vec<usize> {
+        (self.slots.iter().zip(&self.bot))
+            .filter_map(|(&s, &bot)| s.filter(|_| bot))
+            .collect()
+    }
+
+    /// A player joined mid-match in `slot`: the script's globals and the match's state stay, only
+    /// this participant's memory starts over. It takes the lowest participant a leaver freed, else
+    /// the next (at most 16, the struct's arrays: a 17th is not seen), and its team goes into the
+    /// script's G+0xE64 on the next frame ([`Bots::tick`]; War: Beach's joiner appears then, as
+    /// every participant does on the first frame). ponytail: the script splits humans from bots by
+    /// index, counted once at the start (G+0x1EC8), so a human appended after the bots is one of
+    /// the script's bots until the next match (no 90 s deadline in Beach, no traitor check in
+    /// Total War); the natives here go by [`Body::is_bot`]. Remapping every per-participant array
+    /// and every participant-valued global of each script is what would lift it.
+    pub fn join(&mut self, slot: usize, bot: bool) {
+        let k = (self.slots.iter())
+            .position(Option::is_none)
+            .unwrap_or(self.slots.len());
+        if k >= 16 {
+            return;
+        }
+        if k == self.slots.len() {
+            self.slots.push(None);
+            self.bot.push(false);
+        }
+        (self.slots[k], self.bot[k]) = (Some(slot), bot);
+        self.forget(k);
+        self.joined.push(k);
+    }
+
+    /// The player in `slot` left mid-match: its participant stays, vacant (out of play for the
+    /// script, query 0x1D, and with no team: [`brain::World`]), for the next to join. Its team goes
+    /// at once (no human takes a bot over by it), and the frame helper sees it go out once, as a
+    /// death (War: Beach's participants were all seen out on the first frame).
+    pub fn leave(&mut self, slot: usize) {
+        if let Some(k) = self.by_slot(slot) {
+            self.slots[k] = None;
+            self.forget(k);
+            self.g.set(g::TEAM, k, -1);
+            self.g.set_i32(g::SEEN, self.g.i32(g::SEEN) & !(1 << k));
+        }
+    }
+
+    /// Participant `k`'s own memory as at the start.
+    fn forget(&mut self, k: usize) {
+        let n = self.slots.len();
+        self.npcs.resize(n, Npc::default());
+        self.held.resize(n, -1);
+        self.hit_by.resize(n, 0);
+        self.forgiven.resize(n, 0);
+        self.aims.resize(n, None);
+        self.scopes.resize(n, None);
+        self.guns.resize(n, Scope::default());
+        self.npcs[k] = Npc::default();
+        (self.held[k], self.hit_by[k], self.forgiven[k]) = (-1, 0, 0);
+        (self.aims[k], self.scopes[k], self.guns[k]) = (None, None, Scope::default());
     }
 
     /// The bots' RNG as far as it ran (the next match goes on from it).
@@ -224,15 +282,15 @@ impl Bots {
     /// every pickup it ran over (a Colors collector, the melee weapon on its way to the red flag at
     /// node 109, then turned back to fetch its preferred weapon again, and never took the flag).
     pub fn scopes(&self, m: &mut Match) {
-        for (&slot, scope) in self.slots.iter().zip(&self.scopes).skip(self.humans) {
-            if let Some(f) = m.players.get_mut(slot) {
+        for (k, scope) in self.scopes.iter().enumerate().filter(|k| self.bot[k.0]) {
+            if let Some(f) = self.slots[k].and_then(|s| m.players.get_mut(s)) {
                 f.body.scope_yaw = scope.map(|s| s.0);
                 f.scope_pitch = scope.map_or(0.0, |s| s.1);
             }
         }
         m.reach = (0..m.players.len())
             .map(|s| match self.by_slot(s) {
-                Some(k) if k >= self.humans => self.npcs[k].pickup,
+                Some(k) if self.bot[k] => self.npcs[k].pickup,
                 _ => conker_rules::weapon::REACH,
             })
             .collect();
@@ -240,12 +298,12 @@ impl Bots {
 
     /// The participant playing match slot `slot`.
     pub fn by_slot(&self, slot: usize) -> Option<usize> {
-        self.slots.iter().position(|&s| s == slot)
+        self.slots.iter().position(|&s| s == Some(slot))
     }
 
-    /// The match slot of participant `k`.
+    /// The match slot of participant `k` (`None`: none, or its player left).
     pub fn slot(&self, k: usize) -> Option<usize> {
-        self.slots.get(k).copied()
+        self.slots.get(k).copied().flatten()
     }
 
     /// A lift ([`lift::Lifts::ride`]) moved `slot`: its path restarts from where it now stands
@@ -262,7 +320,7 @@ impl Bots {
     /// hears (I: a shot is heard 900 around the shooter, an explosion 900 around it, as the game's
     /// gun and object noises are; impacts, heard 500 around, are not reported by the rules).
     pub fn observe(&mut self, events: &[Event], m: &Match) {
-        let k = |slot: usize| self.slots.iter().position(|&s| s == slot);
+        let k = |slot: usize| self.slots.iter().position(|&s| s == Some(slot));
         for e in events {
             match *e {
                 Event::Pickup { player, pickup } => {
@@ -308,6 +366,30 @@ impl Bots {
     ) -> Vec<Effect> {
         let bodies = self.bodies(m);
         self.mirror(m, arena);
+        let ffa = !m.settings.total_war && !m.settings.colors && !m.settings.beach;
+        // The joiners: their team as the script's start writes it (`team << 1` in Total War's
+        // 0xBA at 0x734, the team in Colors' and Beach's, the participant in a Deathmatch), and
+        // a fresh start in the frame helper's eyes. War: Beach's appear on this frame (0x1D leaves
+        // them out once), as every participant does on the first ([`World::appear`]).
+        let mut appear = match m.settings.beach && !self.started {
+            true => (1 << bodies.len()) - 1,
+            false => 0,
+        };
+        for k in std::mem::take(&mut self.joined) {
+            let team = i32::from(bodies[k].team);
+            let code = match () {
+                _ if ffa => k as i32,
+                _ if m.settings.total_war => team << 1,
+                _ => team,
+            };
+            self.g.set(g::TEAM, k, code);
+            self.g.set_i32(g::SEEN, self.g.i32(g::SEEN) & !(1 << k));
+            self.g.set(g::DEAD, k, 0);
+            self.g.set_i32(g::COUNT, bodies.len() as i32);
+            if m.settings.beach {
+                appear |= 1 << k;
+            }
+        }
         let mut unknown = std::mem::take(&mut self.unknown);
         let mut effects = Vec::new();
         // A canister's toucher, a match slot, as the participant the script indexes by.
@@ -323,11 +405,10 @@ impl Bots {
                 graph: &self.graph,
                 world,
                 rng: &mut self.rng,
-                humans: self.humans,
                 skill: self.skill,
                 zones: &mut self.zones,
                 unknown: &mut unknown,
-                ffa: !m.settings.total_war && !m.settings.colors && !m.settings.beach,
+                ffa,
                 forgiven: &mut self.forgiven,
                 slots: &self.slots,
                 touched,
@@ -336,7 +417,7 @@ impl Bots {
                 starting: !self.started,
                 gunners: (0..m.guns.len()).map(|k| m.gunner(k)).collect(),
                 plunger: m.plunger,
-                appear: m.settings.beach && !self.started,
+                appear,
             };
             if !self.started {
                 self.started = true;
@@ -361,8 +442,11 @@ impl Bots {
             if m.settings.beach {
                 for (k, b) in bodies.iter().enumerate() {
                     let at = (beach::EJECT.iter()).find(|e| host.inside(k, e.0));
-                    if let Some(&(_, at)) = at.filter(|_| b.team == beach::TEDIZ && b.health > 0) {
-                        host.effects.push(Effect::Place(self.slots[k], at));
+                    if let (Some(&(_, at)), Some(slot)) = (at, self.slots[k])
+                        && b.team == beach::TEDIZ
+                        && b.health > 0
+                    {
+                        host.effects.push(Effect::Place(slot, at));
                     }
                 }
             }
@@ -375,9 +459,11 @@ impl Bots {
         // weapon manager reads it in the next frame's).
         if m.settings.total_war {
             effects.push(Effect::Countdown(self.g.i32(g::COUNTDOWN)));
-            for (k, &slot) in self.slots.iter().enumerate() {
+            for (k, slot) in self.slots.iter().enumerate() {
                 let carries = self.g.get(g::OVERRIDE, k) == i32::from(gas::CANISTER);
-                if m.players.get(slot).is_some_and(|f| f.carrying != carries) {
+                if let Some(slot) = *slot
+                    && m.players.get(slot).is_some_and(|f| f.carrying != carries)
+                {
                     effects.push(Effect::Carry(slot, carries));
                 }
             }
@@ -395,18 +481,15 @@ impl Bots {
                 players[i] = f.pos;
             }
         }
-        let bots = self
-            .slots
-            .iter()
-            .zip(&bodies)
+        let bots = (self.slots.iter().zip(&self.bot).zip(&bodies))
             .zip(
                 self.npcs
                     .iter_mut()
                     .zip(&mut self.aims)
                     .zip(self.scopes.iter_mut().zip(&mut self.guns)),
             )
-            .skip(self.humans);
-        for ((&slot, &b), ((n, aimed), (scope, gun))) in bots {
+            .filter_map(|(((&slot, &bot), &b), rest)| Some((slot.filter(|_| bot)?, b, rest)));
+        for (slot, b, ((n, aimed), (scope, gun))) in bots {
             (*aimed, *scope) = (None, None);
             let view = View {
                 pos: b.pos,
@@ -460,21 +543,28 @@ impl Bots {
         effects
     }
 
-    /// The participants as the AI reads them.
+    /// The participants as the AI reads them; a vacant one far away, dead, of no team and place.
     fn bodies(&self, m: &Match) -> Vec<Body> {
         let places = m.places();
         self.slots
             .iter()
             .enumerate()
             .map(|(k, &s)| {
-                let Some(f) = m.players.get(s) else {
-                    return Body::default();
+                let Some((s, f)) = s.and_then(|s| Some((s, m.players.get(s)?))) else {
+                    return Body {
+                        pos: [1e6, -1e6, 1e6],
+                        team: u8::MAX,
+                        place: u8::MAX,
+                        ..Body::default()
+                    };
                 };
                 let item = f.item(m.tick) & 0x7F;
                 Body {
                     pos: f.body.pos,
                     old: f.body.pos,
-                    prev: self.prev.get(k).copied().unwrap_or(f.body.pos),
+                    prev: (self.prev.get(k).copied())
+                        .filter(|_| !self.joined.contains(&k))
+                        .unwrap_or(f.body.pos),
                     height: if f.body.airborne {
                         f.body.pos[1] - f.body.floor_y
                     } else {
@@ -492,7 +582,7 @@ impl Bots {
                     },
                     grenades: f.grenades,
                     hit_by: self.hit_by[k],
-                    is_bot: k >= self.humans,
+                    is_bot: self.bot[k],
                     team: f.team,
                     suicides: f.suicides,
                     place: places[s],
@@ -538,7 +628,7 @@ impl Bots {
                 Some(w) => Some(Gives::Weapon(w)),
                 None => f.masked.then_some(Gives::Mask),
             };
-            match m.players.get(s).and_then(gives) {
+            match s.and_then(|s| m.players.get(s)).and_then(gives) {
                 None => self.held[k] = -1,
                 Some(want) if self.held[k] < 0 => {
                     self.held[k] = (arena.pickups.iter())

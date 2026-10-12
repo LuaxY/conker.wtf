@@ -57,14 +57,16 @@ use serde::{Deserialize, Serialize};
 /// 18: War: Beach on scene 0x2B: [`MatchView`]'s `beach`, `holders`, `plunger` and `cooldown`,
 /// [`Combat`]'s `class`, `freeze` and `deadline`, and the fighter's class and boost (the villagers'
 /// item 0x3E speed is predicted).
-pub const PROTOCOL_ID: u64 = 18;
+/// 19: [`MatchView::winner`] (the outro and the STATS go by the server's), and over, `restart_in`
+/// counts through the outro too (a client that joins mid-outro starts it there).
+pub const PROTOCOL_ID: u64 = 19;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
 }
-/// Netcode connect-token key. ponytail: fixed dev key (manual tokens); a public server needs a
-/// secret key and a token endpoint.
-pub const DEV_PRIVATE_KEY: [u8; 32] = [0; 32];
+/// Over, the results' ticks before the next match starts anyway (the original's STATS screen
+/// quits on its own after about 40 s).
+pub const RESULTS: u32 = 40 * 30;
 /// UDP (WebTransport) and TCP (WebSocket) share this port number.
 pub const DEFAULT_PORT: u16 = 5888;
 
@@ -193,8 +195,11 @@ pub struct MatchView {
     /// the match ranks them (`team_places`, `team_result`), no kill limit.
     pub total_war: bool,
     /// Over: ticks before the next match starts anyway (every human voting [`Restart`] starts it
-    /// sooner).
+    /// sooner): [`RESULTS`] once the results show, more through a War outro before them.
     pub restart_in: u16,
+    /// War: the winning team (0 the squirrels, 1 the Tediz; conker-rules' `team_result`), fixed
+    /// once over; `None` a DRAW, or not a War mode.
+    pub winner: Option<u8>,
     /// 0 playing, 1 the end fade, 2 over (the results).
     pub phase: u8,
     /// The tick the match started at and the oracle read it stands for (scripted clients key their

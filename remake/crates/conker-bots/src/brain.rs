@@ -3,7 +3,8 @@
 //! offsets below are that struct's). Ported from the code (C) unless tagged.
 //!
 //! Participants are indexed as the game does: humans first, then bots ([`crate::Bots`] maps them to
-//! the match's slots).
+//! the match's slots); a roster change keeps the indices (a leaver's falls vacant, a joiner takes
+//! the lowest vacant or comes last).
 
 use crate::nav::{Graph, NONE};
 use crate::npc::{AT_GOAL, Npc};
@@ -154,7 +155,6 @@ pub struct World<'a> {
     pub graph: &'a Graph,
     pub world: &'a CollisionWorld,
     pub rng: &'a mut Rng,
-    pub humans: usize,
     pub skill: usize,
     /// The level's trigger records (`*0x800D3098`, the zone natives' ids), each with its switch
     /// (`+0x14` = 1: off), which type-4 commands 0 and 1 flip.
@@ -167,8 +167,9 @@ pub struct World<'a> {
     /// Per participant, its +0x70 ([`Body::suicides`]) when the AI last zeroed it (command 0x17,
     /// `func_1508B1D4`): the match keeps the count, the AI counts on from there.
     pub forgiven: &'a mut [u16],
-    /// The match slot of each participant.
-    pub slots: &'a [usize],
+    /// The match slot of each participant; `None`: vacant, its player left (it never appears, of no
+    /// team: [`World::frame`]).
+    pub slots: &'a [Option<usize>],
     /// Each gas canister's +0x80 at the frame's start, in participants (+ 1; 0 none), and what the
     /// script does to the match (`conker_rules::gas`).
     pub touched: [i32; 2],
@@ -182,10 +183,11 @@ pub struct World<'a> {
     pub gunners: Vec<Option<usize>>,
     /// War: Beach's plunger at the frame's start (its toucher a match slot).
     pub plunger: Plunger,
-    /// War: Beach's first frame: the participants appear in it (`query(0x50B9, 0x1D)` answers 0, so
-    /// the respawn handler sees them all and the deadline starts 49 frames in: V `beach.md` §2.4,
-    /// x1's strike at read 2772; I for the other modes, left as they were).
-    pub appear: bool,
+    /// War: Beach, the participants that appear this frame, a mask: all on the first, a joiner on
+    /// its own (`query(0x50B9, 0x1D)` leaves them out once, so the respawn handler sees them and
+    /// the deadline starts 49 frames in: V `beach.md` §2.4, x1's strike at read 2772; I for the
+    /// other modes, left as they were).
+    pub appear: i32,
 }
 
 impl Host for World<'_> {
@@ -350,7 +352,14 @@ impl World<'_> {
     fn slot(&self, p: i32) -> Option<usize> {
         usize::try_from(p)
             .ok()
-            .and_then(|p| self.slots.get(p).copied())
+            .and_then(|p| self.slots.get(p).copied().flatten())
+    }
+
+    /// The vacant participants, a mask.
+    fn vacant(&self) -> i32 {
+        (self.slots.iter().enumerate())
+            .filter(|s| s.1.is_none())
+            .fold(0, |m, (k, _)| m | 1 << k)
     }
 
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
@@ -369,7 +378,7 @@ impl World<'_> {
             (2, 0xBC) if gun(h).is_some() => (gun(h).and_then(|k| self.gunners.get(k)))
                 .copied()
                 .flatten()
-                .and_then(|s| self.slots.iter().position(|&x| x == s))
+                .and_then(|s| self.slots.iter().position(|&x| x == Some(s)))
                 .map_or(0, |p| p as i32 + 100),
             (2, _) => self.player_query(index(h), code, args),
             // Type 3 (props, `func_1509ED74`) 1: their state; only the team modes' flags use it.
@@ -378,7 +387,7 @@ impl World<'_> {
             // toucher | 0x2000; none: 0).
             (3, 0x1E) if h & 0xFFF == 0xFF => self.plunger.y as i32,
             (3, 0x17) if h & 0xFFF == 0xFF => (self.plunger.toucher)
-                .and_then(|s| self.slots.iter().position(|&x| x == s))
+                .and_then(|s| self.slots.iter().position(|&x| x == Some(s)))
                 .map_or(0, |p| p as i32 | 0x2000),
             // 0x21: +0x80, a gas canister's toucher + 1 (0 for the other props here).
             (3, 0x21) => match Self::prop(h) {
@@ -393,8 +402,10 @@ impl World<'_> {
             (4, 6) => i32::from(kind(a(2)) == 2 && self.inside(index(a(2)), index(h))),
             (4, 0x10) => i32::from((0..self.bodies.len()).any(|p| self.inside(p, index(h)))),
             // Type 5, the level (`func_1509FE0C`).
-            (5, 0x1D) if self.appear && !self.starting => 0,
-            (5, 0x1D) => (1 << self.bodies.len()) - 1,
+            (5, 0x1D) => {
+                let appear = if self.starting { 0 } else { self.appear };
+                ((1 << self.bodies.len()) - 1) & !self.vacant() & !appear
+            }
             (5, 0x1E) => i32::from(self.bodies.get(a(2) as usize).map_or(0, |b| b.team)),
             (5, 0x22) => {
                 let n = a(2).max(0) as usize;
@@ -410,7 +421,10 @@ impl World<'_> {
                 }
                 n as i32 - 1
             }
-            (5, 0x23) => self.humans as i32,
+            // The humans, the participants before the first bot (the script reads it at its start).
+            (5, 0x23) => (self.bodies.iter())
+                .position(|b| b.is_bot)
+                .unwrap_or(self.bodies.len()) as i32,
             (5, 0x24) => 0,
             (5, 0x25) => 0,
             (5, 0x26) => self.bodies.len() as i32,
@@ -547,9 +561,11 @@ impl World<'_> {
 
     /// Participant `p` if it is a human with a +0x70 slot here.
     fn human(&self, p: i32) -> Option<usize> {
-        usize::try_from(p)
-            .ok()
-            .filter(|&p| p < self.humans.min(self.bodies.len()).min(self.forgiven.len()))
+        usize::try_from(p).ok().filter(|&p| {
+            p < self.forgiven.len()
+                && self.slot(p as i32).is_some()
+                && self.bodies.get(p).is_some_and(|b| !b.is_bot)
+        })
     }
 
     /// `func_1508C9CC` (query 3): the next AI participant after G+0x1702, round robin.
@@ -624,9 +640,10 @@ impl World<'_> {
             0xBC => 0,
             // Colors: it holds the flag `a(2)` (obj+0x13C = the flag + 100); it was hit (+0x104);
             // a human's buttons, the pad byte `0x800BE710 + 2p` (A, B, Z, start; I its byte).
-            0x95 => i32::from(
-                flag(a(2)).is_some_and(|k| self.flags[k].carrier == self.slots.get(p).copied()),
-            ),
+            0x95 => i32::from(flag(a(2)).is_some_and(|k| {
+                self.slot(p as i32)
+                    .is_some_and(|s| self.flags[k].carrier == Some(s))
+            })),
             0xA8 => i32::from(b.stunned),
             0xED => i32::from(b.buttons >> 8),
             0x9A => match self.at(a(2)) {
@@ -764,7 +781,7 @@ impl World<'_> {
         // score S += n, `func_15085710(team, 10, n)`); on a player 7 lets go of the flag `a(2)`,
         // 0x13 sets +0x125, 0x53 +0x89 (0x3F's +0x8A has no reader here: I), 0x45 a capture
         // pose and 0x82 respawns now.
-        let slot = self.slots.get(p).copied();
+        let slot = self.slot(p as i32);
         let effect = match (code, slot) {
             (0x62, _) => Some(Effect::Score(p as u8, a(2) as u16)),
             (7, Some(_)) => flag(a(2)).map(Effect::LetGo),
@@ -778,6 +795,8 @@ impl World<'_> {
             (0x1F, Some(s)) => Some(Effect::Start(s, a(2) as u8)),
             (0x27, Some(s)) => Some(Effect::Give(s, a(2) as u8)),
             (0x3F | 0x54 | 0x8B, _) => return 0,
+            // On a vacant participant: no player to act on (the match let its flag go as it left).
+            (7 | 0x13 | 0x53 | 0x45 | 0x82 | 0x1F | 0x27, None) => return 0,
             _ => None,
         };
         if let Some(e) = effect {
@@ -824,8 +843,9 @@ impl World<'_> {
             0x7B => n.pickup = a(2) as u8,
             // `func_1505D024` on the player: the gas's doorway hit (0x2A, no attacker) and kill
             // (0x2B, the deliverer's).
-            0x2A | 0x2B => match (damage::script_type(a(2)), self.slots.get(p)) {
-                (Some(kind), Some(&slot)) => {
+            0x2A | 0x2B => match (damage::script_type(a(2)), self.slot(p as i32)) {
+                (Some(_), None) => {}
+                (Some(kind), Some(slot)) => {
                     let attacker = (code == 0x2B).then(|| self.slot(a(4))).flatten();
                     self.effects.push(Effect::Hit {
                         slot,
@@ -850,6 +870,12 @@ impl World<'_> {
         for p in 0..count {
             let bit = 1 << p;
             g.set(g::REPLAN, p, 0);
+            // Vacant: of no team, so no human takes it over (0xBA 0x4B16, 0xBB 0x511A) and no one
+            // reckons with it; its going is no loss to its team's tally.
+            let vacant = self.slot(p as i32).is_none();
+            if vacant {
+                g.set(g::TEAM, p, -1);
+            }
             let mut first = false;
             if alive & bit == 0 {
                 if seen & bit == 0 {
@@ -895,10 +921,12 @@ impl World<'_> {
                     // last attacker's if another (the team roles at 0x37F2 reassign on net losses).
                     let team = g.get(g::TEAM, p);
                     let tally = |team: i32| g::TEAM_COUNT + 4 * team;
-                    g.set_i32(tally(team), g.i32(tally(team)) - 1);
                     let killer = (hit_by & 0x7F) as usize;
-                    if killer < count && g.get(g::TEAM, killer) != team {
-                        let other = g.get(g::TEAM, killer);
+                    if !vacant {
+                        g.set_i32(tally(team), g.i32(tally(team)) - 1);
+                    }
+                    let other = (killer < count).then(|| g.get(g::TEAM, killer));
+                    if let Some(other) = other.filter(|&o| !vacant && o >= 0 && o != team) {
                         g.set_i32(tally(other), g.i32(tally(other)) + 1);
                     }
                     g.set(g::OVERRIDE, p, 0);
@@ -1018,7 +1046,7 @@ impl World<'_> {
             };
             let noise = [h(4), h(6), h(8)];
             let mut around: Option<Vec<(u8, f32)>> = None;
-            for p in self.humans..count {
+            for p in (0..count).filter(|&p| self.bodies[p].is_bot) {
                 let b = self.bodies[p];
                 let dy = b.pos[1] - noise[1];
                 if !(dy < 200.0 && dy > -100.0) {
@@ -1195,14 +1223,14 @@ impl World<'_> {
                 if (0x10000 << s) & sees != 0 {
                     // obj+0x65 is 0 for every player (V, the oracle's RAM): never left out here.
                 } else {
-                    if s >= self.humans {
+                    if self.bodies[s].is_bot {
                         d *= 2;
                     }
                     if matches!(g.get(0x15C, s), 2 | 3) {
                         d = -1;
                     }
                 }
-                if s < self.humans && d != -1 {
+                if !self.bodies[s].is_bot && d != -1 {
                     d = (d as f32 * g.f32(g::HUMAN_SCALE)) as i32;
                 }
                 if d >= 0 {
@@ -1269,14 +1297,14 @@ impl World<'_> {
     fn visibility(&mut self, g: &mut Globals, who: usize, pairs: i32) -> i32 {
         let n = self.bodies.len();
         if pairs != 0 {
-            for h in 0..self.humans.min(n) {
+            for h in (0..n).filter(|&h| !self.bodies[h].is_bot && self.slots[h].is_some()) {
                 let mut near: Vec<usize> = Vec::new();
                 let quirk = {
                     let b = self.bodies[h].pos;
                     let d = b[0] - b[2];
                     d * d
                 };
-                for q in self.humans..n {
+                for q in (0..n).filter(|&q| self.bodies[q].is_bot) {
                     if g.get(g::TEAM, h) == g.get(g::TEAM, q)
                         || g.get(g::SEES, h) & (0x10001 << q) != 0
                     {
@@ -1662,20 +1690,19 @@ mod tests {
             graph: &graph,
             world: &world,
             rng: &mut rng,
-            humans: 0,
             skill: 2,
             zones: &mut [],
             unknown: &mut unknown,
             ffa: true,
             forgiven: &mut [],
-            slots: &[0, 1],
+            slots: &[Some(0), Some(1)],
             touched: [0; 2],
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
             gunners: Vec::new(),
             plunger: Plunger::default(),
-            appear: false,
+            appear: 0,
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1723,20 +1750,19 @@ mod tests {
             graph: &graph,
             world: &world,
             rng: &mut rng,
-            humans: 0,
             skill: 2,
             zones: &mut zones,
             unknown: &mut unknown,
             ffa: true,
             forgiven: &mut [],
-            slots: &[0, 1],
+            slots: &[Some(0), Some(1)],
             touched: [0; 2],
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
             gunners: vec![None, Some(1)],
             plunger: Plunger::default(),
-            appear: false,
+            appear: 0,
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
@@ -1818,20 +1844,19 @@ mod tests {
                 graph: &graph,
                 world: &world,
                 rng: &mut rng,
-                humans: 0,
                 skill,
                 zones: &mut [],
                 unknown: &mut unknown,
                 ffa: true,
                 forgiven: &mut [],
-                slots: &[0, 1],
+                slots: &[Some(0), Some(1)],
                 touched: [0; 2],
                 effects: &mut Vec::new(),
                 flags: Default::default(),
                 starting: false,
                 gunners: Vec::new(),
                 plunger: Plunger::default(),
-                appear: false,
+                appear: 0,
             };
             let mut g = Globals::new(g::SIZE);
             g.set_f32(g::AIM_RATE, 1.0);

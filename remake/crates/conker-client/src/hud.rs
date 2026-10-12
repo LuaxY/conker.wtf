@@ -33,7 +33,7 @@ use conker_assets::hud::{
     Vertical,
 };
 use conker_assets::outro::Outro;
-use conker_rules::game::{Standing, places, team_places, team_result};
+use conker_rules::game::{Standing, places};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
@@ -430,9 +430,16 @@ fn suffix(n: usize) -> usize {
 /// (human, [`Combat`]): its colour (an index of `results.colours`: the row's; in Total War its
 /// team's, `func_151EA15C`), then place, accuracy (hits × 100 / shots, truncated, at most 9999, 0
 /// without a shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS). In Total
-/// War the place is the team's ([`team_places`], `0x800E0AC0[team]`). War: Beach lists no villager
-/// (`func_151EA15C` on scenario 8: only rows of a team other than 0; V cs4, cs3, cs4h).
-pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool, beach: bool) -> Vec<Row> {
+/// War the place is the team's (`0x800E0AC0[team]`), from the server's `winner` (`MatchView`;
+/// `None` a DRAW: both 1st). War: Beach lists no villager (`func_151EA15C` on scenario 8: only rows
+/// of a team other than 0; V cs4, cs3, cs4h).
+pub fn rows(
+    all: &[(bool, &Combat)],
+    kill_limit: u8,
+    total_war: bool,
+    winner: Option<u8>,
+    beach: bool,
+) -> Vec<Row> {
     let mut standings = vec![
         None;
         all.iter()
@@ -444,8 +451,7 @@ pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool, beach: boo
         standings[usize::from(c.slot)] = Some(standing(c));
     }
     let place = if total_war {
-        let teams = team_places(&standings);
-        let of = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
+        let of = |s: &Standing| 1 + u8::from(winner.is_some_and(|w| w != s.team));
         standings.iter().map(|s| s.as_ref().map_or(0, of)).collect()
     } else {
         places(&standings, kill_limit)
@@ -472,12 +478,12 @@ pub fn rows(all: &[(bool, &Combat)], kill_limit: u8, total_war: bool, beach: boo
         .collect()
 }
 
-/// Total War's results header from everyone's (human, [`Combat`]) and the viewer's team: the
-/// original's rule by the number of humans (`func_151E43DC`; V `to_draw`, `you_win`, `you_lose`,
-/// `sq_win`: `lab/research/mp-original/total-war-teams.md` §4, §6).
-pub fn header(all: &[(bool, &Combat)], own_team: u8) -> Header {
-    let standings: Vec<_> = all.iter().map(|p| Some(standing(p.1))).collect();
-    match team_result(&standings) {
+/// Total War's results header from everyone's (human, [`Combat`]), the viewer's team and the
+/// server's `winner` (`None` a DRAW): the original's rule by the number of humans
+/// (`func_151E43DC`; V `to_draw`, `you_win`, `you_lose`, `sq_win`:
+/// `lab/research/mp-original/total-war-teams.md` §4, §6).
+pub fn header(all: &[(bool, &Combat)], own_team: u8, winner: Option<u8>) -> Header {
+    match winner {
         None => Header::Draw,
         Some(t) if all.iter().filter(|p| p.0).count() == 1 => Header::You(t == own_team),
         Some(t) => Header::Team(t),
@@ -544,18 +550,31 @@ fn results(
         let image = if k == choice { &b.lit } else { &b.image };
         out.push(quad(image, rect(b.rect), b.anchor, white, 5.0));
     }
+    // More rows than the original's 4 humans: the 4 rows' height shared out, each row scaled down
+    // to fit (around its label's and each column's top), above the menu.
+    let s = (4.0 / rows.len() as f32).min(1.0);
+    let shrink = |sprites: Vec<Sprite>, [px, py]: [i16; 2]| {
+        let [px, py] = [px, py].map(f32::from);
+        sprites.into_iter().map(move |mut sp| {
+            let [x, y, w, h] = sp.rect;
+            sp.rect = [px + (x - px) * s, py + (y - py) * s, w * s, h * s];
+            sp
+        })
+    };
     for (n, (colour, row)) in rows.iter().enumerate() {
-        let dy = r.rows[1] * n as i16 + down;
+        let dy = (f32::from(r.rows[1]) * s * n as f32) as i16 + down;
         if let Some(label) = r.labels.get(n) {
             let [_, _, w, h] = label.rect;
             let [x, y] = r.label;
-            out.push(quad(
+            let at = [x, y + dy];
+            let q = quad(
                 label,
                 rect([x, y + dy, w as i16, h as i16]),
                 r.anchor,
                 white,
                 5.0,
-            ));
+            );
+            out.extend(shrink(vec![q], at));
         }
         let colour = r.colours.get(*colour).copied().unwrap_or(white);
         for (column, (&x, &v)) in r.columns.iter().zip(row).enumerate() {
@@ -571,7 +590,7 @@ fn results(
                 1 => (format!("{v}%"), None),
                 _ => (v.to_string(), None),
             };
-            out.extend(text(hud, &line, suffix, &t, 5.0));
+            out.extend(shrink(text(hud, &line, suffix, &t, 5.0), t.at));
         }
     }
     out
@@ -1322,9 +1341,9 @@ fn draw(
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
                 let teams = crate::outro::team_mode(m);
-                let rows = rows(&all, m.kill_limit, teams, m.beach);
+                let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach);
                 shown.results = Some((rows, menu.choice));
-                shown.header = teams.then(|| header(&all, own.1.team));
+                shown.header = teams.then(|| header(&all, own.1.team, m.winner));
             }
             sprites(&a.hud, &shown)
         }
@@ -1641,7 +1660,13 @@ mod tests {
         };
         let (bot, p1, p2) = (c(0, 3, 0, 10, 5), c(1, 2, 1, 22, 2), c(2, 0, 1, 0, 0));
         assert_eq!(
-            rows(&[(false, &bot), (true, &p2), (true, &p1)], 0, false, false),
+            rows(
+                &[(false, &bot), (true, &p2), (true, &p1)],
+                0,
+                false,
+                None,
+                false
+            ),
             [(0, [2, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])]
         );
     }
@@ -1657,22 +1682,24 @@ mod tests {
             shots,
             ..Combat::default()
         };
-        // Tediz 2 kills (the bot's), squirrels 1: the Tediz win.
+        // Tediz 2 kills (the bot's), squirrels 1: the Tediz win (the server's winner).
         let (tedi, squirrel, bot) = (c(0, 1, 0, 3), c(1, 0, 1, 1), c(2, 1, 2, 5));
         let all = [(true, &tedi), (true, &squirrel), (false, &bot)];
         assert_eq!(
-            rows(&all, 0, true, false),
+            rows(&all, 0, true, Some(1), false),
             [(1, [1, 0, 0, 0, 0]), (0, [2, 0, 1, 0, 0])]
         );
-        assert_eq!(header(&all, 0), Header::Team(1));
+        assert_eq!(header(&all, 0, Some(1)), Header::Team(1));
         let alone = [(false, &tedi), (true, &squirrel), (false, &bot)];
         assert_eq!(
-            (header(&alone, 0), header(&alone, 1)),
+            (header(&alone, 0, Some(1)), header(&alone, 1, Some(1))),
             (Header::You(false), Header::You(true))
         );
-        // Equal kills and shots: a DRAW (V `to_draw`).
+        // A DRAW (V `to_draw`): both 1st.
         let (a, b) = (c(0, 0, 0, 0), c(1, 1, 0, 0));
-        assert_eq!(header(&[(true, &a), (true, &b)], 0), Header::Draw);
+        let both = [(true, &a), (true, &b)];
+        assert_eq!(header(&both, 0, None), Header::Draw);
+        assert_eq!(rows(&both, 0, true, None, false)[1].1[0], 1);
     }
 
     /// The lives digit, the skull and the results where the oracle drew them (`lab/research/
@@ -1729,6 +1756,38 @@ mod tests {
         // P1's "1st 9% 2 0 1" in red: 7 quads (the suffix one), each over a black shadow.
         let red = (sprites(&hud, &over).into_iter()).filter(|q| q.colour == [255, 0, 0, 255]);
         assert_eq!(red.count(), 7);
+    }
+
+    /// More than the original's 4 humans: the rows share the 4 rows' height, each scaled down, so
+    /// 8 end no lower than 4 do (Total War's lower layout here) with half their height.
+    #[test]
+    fn eight_rows_fit_in_four() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            return;
+        };
+        // The text and labels' lowest bottom and tallest quad, with n rows.
+        let block = |n: usize| {
+            let over = Shown {
+                results: Some(((0..n).map(|n| (n % 2, [1, 99, 22, 0, 11])).collect(), 0)),
+                header: Some(Header::Draw),
+                ..state()
+            };
+            let text: Vec<[f32; 4]> = (sprites(&hud, &over).into_iter())
+                .filter(|q| match &q.tex {
+                    Tex::Glyph(_) => true,
+                    Tex::Texture(name) => name.starts_with("rank_") || name == "players",
+                    Tex::Solid => false,
+                })
+                .map(|q| q.rect)
+                .collect();
+            let bottom = text.iter().map(|r| r[1] + r[3]).fold(0.0, f32::max);
+            (bottom, text.iter().map(|r| r[3]).fold(0.0, f32::max))
+        };
+        let ((b4, h4), (b8, h8)) = (block(4), block(8));
+        assert!(
+            b8 <= b4 && h8 <= h4 / 2.0,
+            "4 rows {b4} {h4}, 8 rows {b8} {h8}"
+        );
     }
 
     /// Total War's gas countdown: `(t + 59) / 60` of t = countdown + 1 (5 from 299 down to 240, 1
@@ -2042,10 +2101,10 @@ mod tests {
         };
         let (frenchy, tedi, bot) = (c(0, 0, 3), c(1, 1, 1), c(2, 0, 3));
         let all = [(true, &frenchy), (true, &tedi), (false, &bot)];
-        assert_eq!(rows(&all, 0, true, true), [(1, [2, 0, 0, 0, 0])]);
-        assert_eq!(header(&all, 1), Header::Team(0));
+        assert_eq!(rows(&all, 0, true, Some(0), true), [(1, [2, 0, 0, 0, 0])]);
+        assert_eq!(header(&all, 1, Some(0)), Header::Team(0));
         let over = |header| Shown {
-            results: Some((rows(&all, 0, true, true), 0)),
+            results: Some((rows(&all, 0, true, Some(0), true), 0)),
             header: Some(header),
             ..villager.clone()
         };

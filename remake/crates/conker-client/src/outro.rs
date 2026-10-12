@@ -1,11 +1,12 @@
 //! War's victory outros (`../lab/research/mp-original/total-war-outro.md`, `colors-outro.md`): once
-//! the match is over in a War mode ([`team_mode`]), the map's cutscene for the winning team
-//! ([`team_result`], as the STATS rank the teams; a DRAW plays none) from the pack's `outros.json`
-//! ([`Outro`]): its cameras and their cuts, its actors (each at its place or along its path, turning,
-//! playing its clips), the fade in, the speech bubble's pages ([`crate::hud`]) and the voice line
-//! ([`crate::audio`]), with no player and no HUD; then the STATS over its last picture, the actors'
-//! clips still running. Frame k counts the client's ticks since it saw the match over (the server's
-//! results wait as long, `conker-server`'s `results_at`).
+//! the match is over in a War mode ([`team_mode`]), the map's cutscene for the winning team (the
+//! server's [`MatchView::winner`], as the STATS rank the teams; a DRAW plays none) from the pack's
+//! `outros.json` ([`Outro`]): its cameras and their cuts, its actors (each at its place or along its
+//! path, turning, playing its clips), the fade in, the speech bubble's pages ([`crate::hud`]) and the
+//! voice line ([`crate::audio`]), with no player and no HUD; then the STATS over its last picture,
+//! the actors' clips still running. Frame k counts the client's ticks from the outro's start, which
+//! the server's restart countdown tells ([`RESULTS`] after the outro's end, `conker-server`'s
+//! `results_at`): a client that joins mid-outro starts it there.
 //!
 //! `CONKER_OUTRO=<cutscene>` (debug, native): any match's end plays that outro of the map, whatever
 //! the mode and the winner (the server's results don't wait for it).
@@ -15,8 +16,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 use conker_assets::character_gltf;
 use conker_assets::outro::Outro;
-use conker_rules::game::team_result;
-use conker_sim::net::{Combat, MatchView};
+use conker_sim::net::{MatchView, RESULTS};
 use lightyear::prelude::*;
 
 use crate::render::{Model, model_yaw};
@@ -66,36 +66,40 @@ fn plays(m: &MatchView, outros: &Outros) -> bool {
     team_mode(m) || outros.1.is_some()
 }
 
-/// Over, the winning team's outro (or the forced one) from the tick the client sees it, a frame a
-/// tick; none otherwise.
-#[allow(clippy::type_complexity)]
-fn clock(
-    game: Query<&MatchView>,
-    roster: Query<&Combat, Or<(With<Predicted>, With<Interpolated>)>>,
-    outros: Res<Outros>,
-    mut playing: ResMut<Playing>,
-) {
-    let over = game.iter().any(|m| m.phase == 2 && plays(m, &outros));
+/// Over, the winning team's outro (or the forced one, from its start) at the server's frame of it,
+/// then a frame a tick; none otherwise.
+fn clock(game: Query<&MatchView>, outros: Res<Outros>, mut playing: ResMut<Playing>) {
+    let over = game.iter().find(|m| m.phase == 2 && plays(m, &outros));
     playing.0 = match (over, playing.0) {
-        (false, _) => None,
-        (true, Some((i, k))) => Some((i, k + 1)),
-        (true, None) => {
-            let i = match outros.1 {
-                Some(c) => (outros.0.iter()).position(|o| o.cutscene == c),
+        (None, _) => None,
+        (Some(_), Some((i, k))) => Some((i, k + 1)),
+        (Some(m), None) => {
+            let (i, k) = match outros.1 {
+                Some(c) => ((outros.0.iter()).position(|o| o.cutscene == c), 0),
                 None => {
-                    let all: Vec<_> = (roster.iter())
-                        .map(|c| Some(crate::hud::standing(c)))
-                        .collect();
-                    let winner = team_result(&all);
-                    (outros.0.iter()).position(|o| Some(o.winner) == winner)
+                    let i = (outros.0.iter()).position(|o| Some(o.winner) == m.winner);
+                    (
+                        i,
+                        start(i.map_or(0, |i| outros.0[i].frames()), m.restart_in),
+                    )
                 }
             };
             if let Some(o) = i.map(|i| &outros.0[i]) {
-                info!("outro: cutscene {}, {} frames", o.cutscene, o.frames());
+                info!(
+                    "outro: cutscene {}, {} frames, from {k}",
+                    o.cutscene,
+                    o.frames()
+                );
             }
-            i.map(|i| (i, 0))
+            i.map(|i| (i, k))
         }
     };
+}
+
+/// The frame of an outro `frames` long that the server is at, `restart_in` ticks before the next
+/// match ([`RESULTS`] of them after the outro).
+fn start(frames: u32, restart_in: u16) -> u32 {
+    frames.saturating_sub(u32::from(restart_in).saturating_sub(RESULTS))
 }
 
 /// An outro's actor: the outro (an index of [`Outros`]) and the actor (of [`Outro::actors`]), its
@@ -251,5 +255,18 @@ pub(crate) fn show(
         let (eye, at) = o.camera(o.t(k));
         *transform = Transform::from_translation(Vec3::from_array(eye))
             .looking_at(Vec3::from_array(at), Vec3::Y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Over from its first tick, a client starts the outro at 0; joining 100 ticks into it, at 100;
+    /// once past it, at its end (the STATS).
+    #[test]
+    fn a_late_client_joins_the_outro_where_the_server_is() {
+        let at = |left: u32| start(400, (left + RESULTS) as u16);
+        assert_eq!((at(400), at(300), start(400, 30)), (0, 100, 400));
     }
 }
