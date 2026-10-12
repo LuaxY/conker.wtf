@@ -123,8 +123,7 @@
   }
   .pill:hover:not(:disabled),
   .pill:focus-visible,
-  .pill[aria-current="page"],
-  .lit {
+  .pill[aria-current="page"] {
     background: #0b1a04;
     color: var(--lit);
     box-shadow:
