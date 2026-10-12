@@ -11,7 +11,7 @@
 //!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
 //!   (its player's [`Combat::carrying`] going on); the grenades in flight (the local fighter
 //!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
-//!   a Total War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I).
+//!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I).
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
 //!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
@@ -65,7 +65,7 @@ pub const MUTE_KEY: KeyCode = KeyCode::KeyM;
 const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
 /// The background's voice id (the game's sound ids start at 1).
 const BACKGROUND: u16 = 0;
-/// War: Total War's outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
+/// A War outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
 /// sound ids end at 1762).
 const VOICE: u16 = u16::MAX;
 /// Ticks a loop with `ticks` fades out over once they have run (killing bullets' 1278, C
@@ -1059,7 +1059,7 @@ fn hear(
     s.grenades(&cx, grenades);
     s.match_sounds(&cx, m, &all);
     if let Some((i, _)) =
-        (playing.0).filter(|&(i, k)| outros.0.get(i).is_some_and(|o| k == o.voice_frame()))
+        (playing.0).filter(|&(i, k)| outros.0.get(i).is_some_and(|o| Some(k) == o.voice_frame()))
     {
         let v = Voice {
             id: VOICE - i as u16,
@@ -1154,7 +1154,9 @@ fn open(
         sounds.insert(BACKGROUND, load(&b.file));
     }
     for (n, o) in outros.0.iter().enumerate() {
-        sounds.insert(VOICE - n as u16, load(&o.voice.file));
+        if let Some(v) = &o.voice {
+            sounds.insert(VOICE - n as u16, load(&v.file));
+        }
     }
     commands.insert_resource(Output { device, sounds });
 }

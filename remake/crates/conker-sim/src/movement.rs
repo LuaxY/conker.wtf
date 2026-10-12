@@ -200,6 +200,11 @@ pub struct PlayerState {
     pub armed: u8,
     /// s126+0x37: the crouch-walk is allowed (set below speed 3 with Z held, cleared above 4 without).
     pub crouch_ok: bool,
+    /// obj+0x13C ≥ 100: the player holds an object (War: Colors' flag). Set by the match rules; the
+    /// drive is 0.8 of the stick's and the ground speed gains 0.75 a frame (`func_1504CB98` at
+    /// 0x1504E3A0 and 0x1504EE64, C; V bots1: carriers top out at 28 = 0.8 · 35, gaining 0.75 then
+    /// 0.0075; e1: +0.75 a frame).
+    pub holding: bool,
     /// The animation clock and the root's advance ([`animate`], [`crate::root`]).
     pub root: Root,
     /// s126+0x12: the upper body's twist while a gun is aimed ([`twist`]), u16 angle units within
@@ -293,6 +298,7 @@ impl PlayerState {
             jumped: false,
             armed: 0,
             crouch_ok: false,
+            holding: false,
             root: Root {
                 id: u16::MAX,
                 ..Root::default()
@@ -461,14 +467,21 @@ fn facing_gap(facing: u16, to: u16) -> u8 {
     ((if d < 0 { -d - 1 } else { d }) >> 8) as u8
 }
 
-/// Speed after one frame of stick: +1 while that stays at or under the target, then +0.01 up to it (V).
-fn accelerate(speed: f32, target: f32) -> f32 {
-    // func_1505A3A8 (C): above the target brake 2.5 down to it, else +1, or +0.01 within 1 of it.
+/// Speed after one frame of stick: +`accel` (1, or 0.75 holding an object) while that stays at or under
+/// the target, then +`accel` · 0.01 up to it (V).
+fn accelerate(speed: f32, target: f32, accel: f32) -> f32 {
+    // func_1505A3A8 (C): above the target brake 2.5 down to it, else +accel, or +accel · 0.01
+    // (0x800994D0) within 1 of it.
     if target < speed {
         let s = speed - BRAKE;
         if s < target { target } else { s }
     } else {
-        let s = speed + if target - 1.0 < speed { 0.01 } else { 1.0 };
+        let s = speed
+            + if target - 1.0 < speed {
+                accel * 0.01
+            } else {
+                accel
+            };
         if target < s { target } else { s }
     }
 }
@@ -910,10 +923,15 @@ fn crouch_state(p: &mut PlayerState) {
 /// The target speed scaled by the speed percentage (obj+0xAA: the floor's, a strafe's 65, a crouch-walk's
 /// 40), the drive `func_1504CB98` hands on (C, 0x1504E358).
 fn scaled(p: &PlayerState) -> f32 {
-    if p.speed_percent == 0 {
+    let drive = if p.speed_percent == 0 {
         p.target_speed
     } else {
         p.target_speed * (f32::from(p.speed_percent) * f32::from_bits(0x3C23_D70A)) // 0.01
+    };
+    if p.holding {
+        drive * f32::from_bits(0x3F4C_CCCD) // 0.8, 0x8009922C
+    } else {
+        drive
     }
 }
 
@@ -1079,7 +1097,7 @@ fn locomotion(
             p.xz_speed
         }
     } else {
-        accelerate(p.xz_speed, drive)
+        accelerate(p.xz_speed, drive, if p.holding { 0.75 } else { 1.0 })
     };
     drive
 }
@@ -1294,7 +1312,7 @@ fn air(
 /// target.
 fn accelerate_air(speed: f32, target: f32, jumped: bool, behind: u8) -> f32 {
     if !jumped {
-        return accelerate(speed, target);
+        return accelerate(speed, target, 1.0);
     }
     let accel = if behind >= 0x2E { 0.5 } else { 1.0 };
     let target = if behind >= 0x5B { target * 0.5 } else { target };
@@ -1437,11 +1455,30 @@ mod tests {
     fn acceleration_walk_creeps_by_hundredths() {
         let mut s = 0.0;
         for _ in 0..20 {
-            s = accelerate(s, 20.4);
+            s = accelerate(s, 20.4, 1.0);
         }
         assert_eq!(s, 20.0);
-        assert!((accelerate(s, 20.4) - 20.01).abs() < 1e-6);
-        assert_eq!(accelerate(34.0, 35.0), 35.0);
+        assert!((accelerate(s, 20.4, 1.0) - 20.01).abs() < 1e-6);
+        assert_eq!(accelerate(34.0, 35.0, 1.0), 35.0);
+    }
+
+    /// Holding a flag (V bots1): the drive is 0.8 of a full stick's 35, the speed gains 0.75 a frame
+    /// up to 27.75, then 0.0075.
+    #[test]
+    fn holding_drives_at_four_fifths() {
+        let p = PlayerState {
+            target_speed: 35.0,
+            holding: true,
+            ..PlayerState::spawn([0.0; 3], 0)
+        };
+        let drive = scaled(&p);
+        assert_eq!(drive, 28.0);
+        let mut s = 0.0;
+        for _ in 0..37 {
+            s = accelerate(s, drive, 0.75);
+        }
+        assert_eq!(s, 27.75);
+        assert!((accelerate(s, drive, 0.75) - 27.7575).abs() < 1e-5);
     }
 
     #[test]

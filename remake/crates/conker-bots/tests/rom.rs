@@ -178,12 +178,12 @@ fn total_war_runs_the_team_branch() {
     assert_eq!(team(&bots, 0), 0, "forgiven at its death");
 }
 
-/// Scene 0x2D's collision as Deathmatch has it (oracle.rs' `world`).
-fn world(rom: &extract_core::Rom) -> conker_sim::collision::CollisionWorld {
+/// A scene's collision as Deathmatch has it (oracle.rs' `world`).
+fn world(rom: &extract_core::Rom, scene: usize) -> conker_sim::collision::CollisionWorld {
     use conker_sim::collision::{CollisionWorld, Layer};
-    let placements = extract_scene::scene_placements(rom, 0x2D).unwrap();
-    let collision = extract_scene::scene_collision(rom, 0x2D, &placements).unwrap();
-    let solid = extract_scene::deathmatch_solid(0x2D);
+    let placements = extract_scene::scene_placements(rom, scene).unwrap();
+    let collision = extract_scene::scene_collision(rom, scene, &placements).unwrap();
+    let solid = extract_scene::deathmatch_solid(scene);
     let triangles = (collision.triangles.iter())
         .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
     let mut w = CollisionWorld::layered(triangles.map(|t| {
@@ -245,7 +245,7 @@ fn total_war_gas() {
         ai: &data[2],
         class: &data[3],
     };
-    let world = world(&rom);
+    let world = world(&rom, 0x2D);
     let placements = extract_scene::scene_placements(&rom, 0x2D).unwrap();
     let spawns = (extract_scene::scene_spawns(&rom, 0x2D).unwrap().iter())
         .map(|s| Spawn {
@@ -421,4 +421,226 @@ fn total_war_gas() {
         (score(1), score(2), score(3)),
         ((0, 0, 0, 1), (0, 0, 0, 1), (0, 0, 0, 1))
     );
+}
+
+/// War: Colors (script 0xBB on scene 0x30, two humans, no bot; `lab/research/mp-original/
+/// colors.md`): the flags appear 300 frames after live; the squirrel beside the red flag grabs it
+/// (17 frames) and the Tedi beside the green one; B puts the red down 20 frames in, untouchable for
+/// 50; let lie, it is gone 900 frames after and home 300 later. Carried into the squirrels' zone
+/// (trigger 0xE) it scores on the capture's frame and the plant lets go 19 frames in. The first
+/// capture finds the Tedi carrying the green flag: destroyed at once, and while it waits to
+/// respawn the script's flag routine returns early on every other call, so the after-capture
+/// timer runs at half speed (respawn at +150, flags home at +450; C, the routine at 0x41D4).
+/// The second is plain (V bots1): the cheer and the freeze at +30, everyone respawned at +90, both
+/// flags home at +390. The third reaches the score target and ends the match on its frame.
+#[test]
+fn colors_flags_and_captures() {
+    use conker_bots::{Assets, Bots};
+    use conker_rules::colors::Pose;
+    use conker_rules::game::{Action, BUTTON_B, Event, Phase};
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, Settings, Spawn};
+    use conker_sim::movement::{Input, PlayerState};
+    /// A capture's timeline, in frames from its own.
+    #[derive(Debug, Default)]
+    struct Capture {
+        at: u32,
+        cancelled: Option<u32>,
+        let_go: Option<u32>,
+        cheer: Option<u32>,
+        still: Vec<u32>,
+        respawns: Vec<(u32, usize)>,
+        home: Option<u32>,
+    }
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x30).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x30);
+    let spawns = (extract_scene::scene_spawns(&rom, 0x30).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let arena = Arena {
+        spawns,
+        pickups: Vec::new(),
+    };
+    // Beside the flags as e1's P1 and P2 were teleported (42 units off), and the squirrels' zone
+    // on its floor.
+    let (by_red, by_green) = ([-288.0, 410.07, -3803.0], [172.6, 1342.0, 6144.0]);
+    let zone_y = world.floor(211.0, 9287.0, -300.0, -300.0, None).unwrap().y;
+    let zone = [211.0, zone_y, 9287.0];
+    let place = |pos| Placement {
+        index: 0,
+        pos,
+        facing: 0,
+        camera: [0.0; 3],
+    };
+    let mut players = vec![
+        Fighter::new(&place(by_red), 0, 0),
+        Fighter::new(&place(by_green), 1, 0),
+    ];
+    for (f, mask) in players.iter_mut().zip(conker_rules::spawn::COLORS_MASKS_30) {
+        f.spawn_mask = mask;
+    }
+    let settings = Settings {
+        colors: true,
+        score: 3,
+        ..Settings::default()
+    };
+    let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
+    let mut bots = Bots::new(assets, 2, &[], 2, Rng::default()).unwrap();
+    let held = |m: &Match, i: usize| m.players[i].flag;
+    let (mut shown, mut grabbed, mut released) = (None, None, Vec::new());
+    let (mut retaken, mut gone, mut back, mut carried) = (None, None, None, None);
+    let mut captures: Vec<Capture> = Vec::new();
+    for t in 0..6000u32 {
+        let effects = bots.tick(&m, &arena, &world, &mut [Input::default(); 2]);
+        let before = m.colors.scores[0];
+        let mut ev = m.apply(&effects);
+        if m.colors.scores[0] > before {
+            assert_eq!(m.players[0].action, Action::Pose(Pose::Plant));
+            captures.push(Capture {
+                at: t,
+                ..Capture::default()
+            });
+        }
+        let red = m.colors.flags[0];
+        if shown.is_none() && red.shown {
+            shown = Some(t);
+        }
+        if gone.is_some() && back.is_none() && red.home() {
+            back = Some(t);
+        }
+        // Both home: before the step, which may take the red one.
+        if let Some(c) = captures.last_mut()
+            && c.home.is_none()
+            && t > c.at + 100
+            && m.colors.flags.iter().all(|f| f.home())
+        {
+            c.home = Some(t - c.at);
+        }
+        // B 30 frames into the carry, and again once retaken; then off to the base. Once the red
+        // flag is home again, onto it and into the zone, for each capture.
+        let mut inputs = [Input::default(); 2];
+        if [grabbed, retaken]
+            .iter()
+            .any(|g| g.is_some_and(|g| t == g + 30))
+        {
+            inputs[0].buttons = BUTTON_B;
+        }
+        if released.len() == 2 && released[1] + 1 == t {
+            m.players[0].body = PlayerState::spawn([192.0, 17.0, 8300.0], 0);
+        }
+        let free = m.players[0].action == Action::Free;
+        if back.is_some() && red.home() && held(&m, 0).is_none() && free {
+            m.players[0].body = PlayerState::spawn(by_red, 0);
+        }
+        // ponytail: carried 120 frames first (a real run takes some 450): the script's
+        // after-capture timer goes on 100 frames past the flags' return (G+0x1EE0 down to -100),
+        // and a capture before that waits for it.
+        if back.is_some() && held(&m, 0).is_some() && free && carried.is_some_and(|c| t >= c + 120)
+        {
+            m.players[0].body = PlayerState::spawn(zone, 0);
+        }
+        let had = held(&m, 0);
+        ev.extend(m.step(&arena, &inputs, &world));
+        if had.is_none() && held(&m, 0).is_some() {
+            carried = Some(t);
+        }
+        let f0 = &m.players[0];
+        if grabbed.is_none() && held(&m, 0) == Some(0) {
+            grabbed = Some(t);
+            assert_eq!(
+                (f0.action, f0.anim),
+                (Action::Pose(Pose::Grab), Pose::Grab.clip().0)
+            );
+        }
+        if captures.is_empty() && held(&m, 0).is_none() && red.carrier.is_some() {
+            released.push(t);
+            assert_eq!(f0.action, Action::Pose(Pose::PutDown));
+            assert!(m.colors.flags[0].dropped && !m.colors.flags[0].touchable(t + 50));
+        }
+        if released.len() == 1 && retaken.is_none() && held(&m, 0).is_some() {
+            retaken = Some(t);
+        }
+        if released.len() == 2 && gone.is_none() && !m.colors.flags[0].shown {
+            gone = Some(t);
+        }
+        if let Some(c) = captures.last_mut() {
+            let k = t - c.at;
+            if c.cancelled.is_none() && k < 10 && held(&m, 1).is_none() && !m.colors.flags[1].shown
+            {
+                c.cancelled = Some(k);
+            }
+            if c.let_go.is_none() && m.colors.flags[0].released == Some(t) {
+                c.let_go = Some(k);
+            }
+            if c.cheer.is_none() && m.players[0].action == Action::Pose(Pose::Cheer) {
+                c.cheer = Some(k);
+                assert_eq!(m.players[1].action, Action::Pose(Pose::Lose));
+            }
+            // Held: +0x89 = 200 from the script each frame (the step counts it down one).
+            if m.players.iter().all(|f| f.body.lock >= 199) {
+                c.still.push(k);
+            }
+            for e in &ev {
+                if let Event::Respawn { player, .. } = e {
+                    c.respawns.push((k, *player));
+                }
+            }
+        }
+        bots.observe(&ev, &m);
+        if m.phase() == Phase::Over {
+            break;
+        }
+    }
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?} {}",
+        bots.unknown,
+        bots.faults
+    );
+    // Live + 300 (V e1 322/323 with live at 23), grabbed by the squirrel beside it at once.
+    let shown = shown.expect("red shown");
+    assert!((299..=301).contains(&shown), "{shown}");
+    assert_eq!(grabbed, Some(shown));
+    // The grab's 17 frames, then the carry; B 30 frames in lets go 20 frames later (V b1 350 →
+    // 370), and the flag is untouchable 50 frames: retaken on the 51st, standing on it (V b1 421).
+    let g = grabbed.unwrap();
+    assert_eq!(released.first(), Some(&(g + 30 + 20)));
+    assert_eq!(retaken, Some(released[0] + 51));
+    // Let lie: gone 900 frames on (the script's 450 ticks, from its next look), home 300 after.
+    let gone = gone.expect("gone") - released[1];
+    assert!((900..=904).contains(&gone), "{gone}");
+    assert_eq!(back.map(|b| b - released[1] - gone), Some(300));
+    // The captures.
+    assert_eq!(captures.len(), 3, "{captures:?}");
+    let (c1, c2) = (&captures[0], &captures[1]);
+    assert!(c1.cancelled.is_some_and(|c| c <= 2), "{c1:?}");
+    assert_eq!((c1.let_go, c1.cheer), (Some(19), Some(30)), "{c1:?}");
+    assert_eq!(c1.respawns, [(150, 0), (150, 1)], "{c1:?}");
+    assert_eq!(c1.home, Some(450), "{c1:?}");
+    assert_eq!(
+        (c2.cancelled, c2.let_go, c2.cheer),
+        (None, Some(19), Some(30)),
+        "{c2:?}"
+    );
+    assert_eq!(c2.still, (31..90).collect::<Vec<_>>(), "{c2:?}");
+    assert_eq!(c2.respawns, [(90, 0), (90, 1)], "{c2:?}");
+    assert_eq!(c2.home, Some(390), "{c2:?}");
+    // The target: the third capture ends the match on its frame.
+    assert_eq!(m.colors.scores, [3, 0]);
+    assert_eq!(m.ended_at, Some(captures[2].at));
 }

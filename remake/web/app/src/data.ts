@@ -4,18 +4,20 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war";
-/** `conker-server --mode`; `kills`: whether the mode has a kill limit. */
-export const MODES: Record<Mode, { name: string; kills: boolean }> = {
-  deathmatch: { name: "Deathmatch", kills: true },
-  "total-war": { name: "War: Total War", kills: false },
-};
+export type Mode = "deathmatch" | "total-war" | "colors";
+/** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target. */
+export const MODES: Record<Mode, { name: string; kills: boolean; lives: boolean; score: boolean }> =
+  {
+    deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
+    "total-war": { name: "War: Total War", kills: false, lives: true, score: false },
+    colors: { name: "War: Colors", kills: false, lives: false, score: true },
+  };
 
 export type MapId = "2d" | "30" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
-  "30": { name: "Colors 0x30", modes: ["deathmatch"] },
+  "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },
   "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
   "3f": { name: "Temple 0x3F", modes: ["deathmatch"], note: "The bots are cavemen on this map." },
 };
@@ -34,6 +36,8 @@ export interface Settings {
   lives: number;
   /** 0-10, the kill limit (0: none): only in modes that have one. */
   kills: number;
+  /** Captures to win, 1-40, or none: only in modes that have one (War: Colors). */
+  score: number | "unlimited";
   radar: boolean;
 }
 
@@ -71,8 +75,9 @@ export function settingRows({ mode, settings: s }: NewServer): [string, string][
     ["Bots", s.bots ? `${s.bots}, ${s.skill}` : "none"],
     ["Time", s.time === "unlimited" ? "unlimited" : `${s.time} min`],
   ];
-  if (s.time === "unlimited") rows.push(["Lives", String(s.lives)]);
+  if (s.time === "unlimited" && MODES[mode].lives) rows.push(["Lives", String(s.lives)]);
   if (MODES[mode].kills) rows.push(["Kill limit", s.kills ? String(s.kills) : "none"]);
+  if (MODES[mode].score) rows.push(["Score", String(s.score)]);
   rows.push(["Radar", s.radar ? "on" : "off"]);
   return rows;
 }

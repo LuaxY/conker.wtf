@@ -62,7 +62,8 @@
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] [--cert PEM --cert-key PEM]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors] [--score 1-40|unlimited]
+//!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
 //!   there): the asset pack (`conker-extract pack`), which the page's static server serves too.
@@ -93,6 +94,10 @@
 //! - `--mode total-war`: the original's War: Total War (scenario 9), on map 2d only and without
 //!   `--cavemen`: teams are the sides, friendly fire scores no kill, the match ends on the clock or
 //!   (untimed) a team's last life, and the best team wins (conker-rules' `Settings::total_war`).
+//! - `--mode colors`: the original's War: Colors (scenario 10, capture the flag), on map 30 only and
+//!   without `--cavemen`: teams are the sides, lives are never lost, the level's AI script runs the
+//!   flags (conker-rules' `colors`), and the match ends on the clock or at `--score` captures
+//!   (1-40, default 20, `unlimited`: the clock only; untimed and unlimited, never).
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -108,9 +113,10 @@ use conker_assets::{PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, Slice};
 use conker_bots::brain::g;
 use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
+use conker_rules::colors;
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
-use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, Standing, team_result};
+use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, team_result};
 use conker_rules::gas::Effect;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
@@ -122,7 +128,7 @@ use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side};
 use conker_sim::net::{
-    Collision, Combat, DEFAULT_PORT, Join, MatchView, PROTOCOL_ID, Player, PlayerId,
+    Collision, Combat, DEFAULT_PORT, FlagView, Join, MatchView, PROTOCOL_ID, Player, PlayerId,
     ProtocolPlugin, Restart, Saw, map_scene, scene_world,
 };
 use core::time::Duration;
@@ -255,14 +261,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--no-lagcomp" => setup.lagcomp = false,
             "--cavemen" => setup.cavemen = true,
             "--mode" => {
-                setup.settings.total_war = match value()?.as_str() {
-                    "deathmatch" => false,
-                    "total-war" => true,
+                let s = &mut setup.settings;
+                (s.total_war, s.colors) = match value()?.as_str() {
+                    "deathmatch" => (false, false),
+                    "total-war" => (true, false),
+                    "colors" => (false, true),
                     v => return Err(bad(v)),
                 }
             }
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
-            "--time" | "--lives" | "--kills" | "--skill" | "--radar" => {
+            "--time" | "--lives" | "--kills" | "--skill" | "--radar" | "--score" => {
                 let v = value()?;
                 let n = |lo: u8, hi: u8| v.parse().ok().filter(|n| (lo..=hi).contains(n));
                 let s = setup.settings;
@@ -279,6 +287,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
                         radar: v == "on",
                         ..s
                     }),
+                    ("--score", "unlimited") => Some(Settings { score: 0, ..s }),
+                    ("--score", _) => n(1, 40).map(|score| Settings { score, ..s }),
                     _ => None,
                 };
                 setup.settings = set.ok_or_else(|| bad(&v))?;
@@ -289,6 +299,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     // Total War is scenario 9, scene 0x2D's: its bases and the squirrels and Tediz as the teams.
     if setup.settings.total_war && (net.map != "2d" || setup.cavemen) {
         return Err("--mode total-war: map 2d only, without --cavemen".into());
+    }
+    // Colors is scenario 10, scene 0x30's.
+    if setup.settings.colors && (net.map != "30" || setup.cavemen) {
+        return Err("--mode colors: map 30 only, without --cavemen".into());
     }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
@@ -326,7 +340,7 @@ fn main() {
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors] [--score 1-40|unlimited] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -376,7 +390,7 @@ fn main() {
         .add_observer(on_disconnected)
         .add_observer(on_left)
         .add_observer(relink_evicted_session);
-    let (bots, game_mode) = (game.setup.bots, game.setup.settings.total_war);
+    let (bots, settings) = (game.setup.bots, game.setup.settings);
     app.insert_resource(game);
     app.add_systems(
         Startup,
@@ -460,7 +474,11 @@ fn main() {
             "token endpoint {token_addr}: {e} (another server's port? pick one with --token-addr)"
         ))
     });
-    let mode = ["Deathmatch", "War: Total War"][usize::from(game_mode)];
+    let mode = match (settings.total_war, settings.colors) {
+        (true, _) => "War: Total War",
+        (_, true) => "War: Colors",
+        _ => "Deathmatch",
+    };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
     let map = net.map.clone();
     token::serve(
@@ -598,7 +616,7 @@ struct Game {
     ai: Ai,
     /// Over, the slots whose human sent [`Restart`].
     votes: BTreeSet<usize>,
-    /// War: Total War: each winning team's outro, in ticks (the pack's `outros.json`; 0 none).
+    /// War: each winning team's outro on the map, in ticks (the pack's `outros.json`; 0 none).
     outros: [u32; 2],
     /// Scene 0x3F's Deathmatch (scenario 7, V oracle): the bots are cavemen, the humans Tediz, and
     /// every player starts holding item 0x40 ([`Fighter::start`]).
@@ -641,9 +659,9 @@ impl Game {
     }
 
     /// The team of the next player to join on `side`: its own in a Deathmatch, its side's in Total
-    /// War (`0x800E0C00`: 0 the squirrels, 1 the Tediz).
+    /// War and Colors (`0x800E0C00`: 0 the squirrels, 1 the Tediz).
     fn team(&mut self, side: Side) -> u8 {
-        if self.setup.settings.total_war {
+        if self.setup.settings.total_war || self.setup.settings.colors {
             return side as u8;
         }
         self.joins += 1;
@@ -651,12 +669,14 @@ impl Game {
     }
 
     /// The bots' AI over the roster as it now stands.
-    /// The gas starts over with it (ponytail: a join or leave mid-gas ends the gas, as the script
+    /// The gas and Colors' flags start over with it (ponytail: a join or leave mid-gas ends the gas,
+    /// and in Colors sends the flags home, back 300 frames later, the scores kept, as the script
     /// restarts; keep the script's globals across rosters if that matters).
     fn restart_bots(&mut self) {
         let (players, bots, rng) = (self.m.players.len(), self.setup.bots, self.m.rng);
         let s = self.setup.settings;
-        self.ai.restart(players, bots, s.skill, rng, s.total_war);
+        self.ai
+            .restart(players, bots, s.skill, rng, s.total_war || s.colors);
         self.m.restart_gas();
     }
 
@@ -727,15 +747,12 @@ impl Game {
         (t >= start).then(|| self.setup.first_read + (t - start))
     }
 
-    /// The tick the results show from: the end fade's last frame, then in War: Total War the
-    /// winning team's outro (none on a DRAW: `team_result`, as the clients' STATS rank the teams).
+    /// The tick the results show from: the end fade's last frame, then in War (Total War, Colors)
+    /// the winning team's outro (none on a DRAW: `team_result`, as the clients' STATS rank the teams).
     fn results_at(&self) -> Option<u32> {
         let m = &self.m;
-        let all: Vec<_> = (m.players.iter().enumerate())
-            .map(|(i, f)| (!m.free.contains(&i)).then(|| Standing::of(f)))
-            .collect();
-        let outro = match m.settings.total_war {
-            true => team_result(&all).map_or(0, |t| self.outros[usize::from(t)]),
+        let outro = match m.settings.total_war || m.settings.colors {
+            true => team_result(&m.standings()).map_or(0, |t| self.outros[usize::from(t)]),
             false => 0,
         };
         Some(m.ended_at? + END_DELAY + FADE + 1 + outro)
@@ -948,8 +965,8 @@ fn join_player(
 ) {
     let tick = timeline.tick().0;
     let index = game.m.next_slot();
-    // Total War has two teams: a caveman asked for takes the smaller side.
-    let two_sides = game.setup.settings.total_war;
+    // Total War and Colors have two teams: a caveman asked for takes the smaller side.
+    let two_sides = game.setup.settings.total_war || game.setup.settings.colors;
     let side = (asked.side)
         .filter(|&s| !two_sides || s != Side::Cavemen)
         .unwrap_or_else(|| game.smaller_side());
@@ -1147,6 +1164,8 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         carrying: f.carrying,
         masked: f.masked,
         haze: f.haze(tick).map_or(0, |k| k as u8),
+        flag: f.flag,
+        score: 0,
     }
 }
 
@@ -1303,6 +1322,11 @@ fn simulate(
                 Effect::Carry(..) | Effect::Gas(_) | Effect::Release(_) | Effect::Haze(_) => {
                     info!("GAS t={t} {e:?}")
                 }
+                Effect::Flag(..)
+                | Effect::LetGo(_)
+                | Effect::Score(..)
+                | Effect::Respawn(_)
+                | Effect::Fade(..) => info!("COLORS t={t} {e:?}"),
                 _ => {}
             }
         }
@@ -1326,6 +1350,17 @@ fn simulate(
         game.m.step(&game.arena, &inputs, &world)
     });
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
+    for (k, (was, f)) in pre
+        .colors
+        .flags
+        .iter()
+        .zip(&game.m.colors.flags)
+        .enumerate()
+    {
+        if let (None, Some(c)) = (was.carrier, f.carrier) {
+            info!("COLORS t={t} flag {k} taken by slot {c}");
+        }
+    }
     for (i, f) in held {
         game.m.players[i] = f;
     }
@@ -1471,6 +1506,7 @@ fn publish(
     mut view: Single<&mut MatchView>,
 ) {
     let m = &game.m;
+    let standings = m.standings();
     for (slot, mut player, mut fighting, mut combat_state) in &mut players {
         let Some(f) = m.players.get(slot.index) else {
             continue;
@@ -1483,7 +1519,17 @@ fn publish(
         let lives = combat_state.lives + u16::from(respawned) + u16::from(rode);
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
-        combat_state.set_if_neq(combat(f, slot.index, m.tick, lives, m.settings.lives()));
+        let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
+        if m.settings.colors {
+            // Colors: no life is lost; the team's score ranks the player.
+            c.lives_left = colors::LIVES;
+            c.score = standings
+                .get(slot.index)
+                .copied()
+                .flatten()
+                .map_or(0, |s| s.score);
+        }
+        combat_state.set_if_neq(c);
     }
     let taken = game
         .arena
@@ -1518,6 +1564,17 @@ fn publish(
         countdown: m.gas.countdown,
         gas: m.gas.gas,
         props: m.gas.shown(),
+        colors: s.colors,
+        score_limit: s.score,
+        scores: m.colors.scores,
+        flags: m.colors.flags.map(|f| FlagView {
+            shown: f.shown,
+            carrier: f.carrier.map(|c| c as u16),
+            home: f.home(),
+            touchable: f.touchable(m.tick),
+            pos: f.pos,
+        }),
+        fade: m.colors.fade,
     });
 }
 
@@ -1665,6 +1722,7 @@ mod tests {
             skill: 4,
             radar: false,
             total_war: true,
+            ..Settings::default()
         };
         assert_eq!(s, Ok(want));
         assert_eq!(
@@ -1681,6 +1739,8 @@ mod tests {
             ["--skill", "genius"],
             ["--radar", "yes"],
             ["--mode", "ffa"],
+            ["--score", "0"],
+            ["--score", "41"],
         ] {
             assert!(settings(&bad).is_err(), "{bad:?}");
         }
@@ -1688,16 +1748,32 @@ mod tests {
         assert!(settings(&["--mode", "total-war", "--map", "30"]).is_err());
         assert!(settings(&["--cavemen", "--mode", "total-war"]).is_err());
         assert!(!settings(&["--mode", "deathmatch"]).unwrap().total_war);
+        // Colors is scene 0x30's: map 30 only; the score target 1-40 or unlimited (0).
+        let c = settings(&["--mode", "colors", "--map", "30", "--score", "unlimited"]).unwrap();
+        assert!(c.colors && !c.total_war && c.score == 0);
+        assert_eq!(
+            settings(&["--mode", "colors", "--map", "30"])
+                .unwrap()
+                .score,
+            20
+        );
+        assert!(settings(&["--mode", "colors"]).is_err());
+        assert!(settings(&["--mode", "colors", "--map", "30", "--cavemen"]).is_err());
     }
 
     /// Total War: every player's team is its side (the bots alternate); a Deathmatch gives each
     /// its own.
     #[test]
     fn total_war_teams_are_the_sides() {
-        for (total_war, teams) in [(true, [0, 1, 0]), (false, [0, 1, 2])] {
+        for (total_war, colors, teams) in [
+            (true, false, [0, 1, 0]),
+            (false, true, [0, 1, 0]),
+            (false, false, [0, 1, 2]),
+        ] {
             let mut g = game(Setup {
                 settings: Settings {
                     total_war,
+                    colors,
                     ..Settings::default()
                 },
                 ..Setup::default()

@@ -2,7 +2,8 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f] [MODE=deathmatch|total-war] crates/conker-server/bots.sh [seconds=150]. All processes exit by themselves (--seconds).
+# Usage: [PORT=5888] [MAP=2d|30|34|3f] [MODE=deathmatch|total-war|colors] [SCORE=1-40|unlimited] crates/conker-server/bots.sh [seconds=150].
+# All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -13,6 +14,7 @@ export NO_COLOR=1 RUST_LOG=info
 secs=${1:-150} bots=${BOTS:-2} humans=${HUMANS:-1} port=${PORT:-5888}
 
 mode=(); [[ -n ${MODE:-} ]] && mode=(--mode $MODE)
+[[ -n ${SCORE:-} ]] && mode+=(--score $SCORE)
 $bin/conker-server --port $port --map ${MAP:-2d} $mode --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!
@@ -49,5 +51,13 @@ for b in $(seq 0 $((bots - 1))); do
 done
 echo "kills: $(grep -oE 'player [A-Za-z]+\([0-9]+\) input .* kills [0-9]+' $logs/server.log | awk '{k[$2]=$NF} END {for (p in k) printf "%s %s  ", p, k[p]}')"
 echo "lift rides: $(grep -c 'takes the lift' $logs/server.log)"
+if [[ ${MODE:-} == colors ]]; then
+  caps=$(grep -c 'COLORS t=[0-9]* Score' $logs/server.log)
+  echo "colors: takes $(grep -c 'COLORS t=[0-9]* flag [01] taken' $logs/server.log)," \
+    "drops $(grep -c 'COLORS t=[0-9]* LetGo' $logs/server.log), captures $caps" \
+    "($(( caps * 60.0 / secs )) a minute) at t=$(grep -oE 'COLORS t=[0-9]+ Score' $logs/server.log | grep -oE '[0-9]+' | tr '\n' ' ')"
+fi
+report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))
+report "no panics" $(( ! $(cat $logs/*.log | grep -c 'panicked') ))
 echo "logs: $logs"
 exit $fail

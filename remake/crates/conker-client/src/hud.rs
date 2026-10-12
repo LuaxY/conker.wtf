@@ -463,35 +463,37 @@ fn haze(h: &Haze, k: u32) -> Vec<Sprite> {
         .collect()
 }
 
-/// A Total War outro's picture at `t` ([`Outro`]), in place of the HUD: its fade over the whole
-/// view, and the page shown in its speech bubble (its quads, then the lines upper case in black,
-/// left-aligned in a block centred on the text's x, 12 apart around its middle line's top).
+/// A War outro's picture at `t` ([`Outro`]), in place of the HUD: its fade over the whole view,
+/// and the page shown in its speech bubble where the bubble is then (its quads, then the lines upper
+/// case in black, left-aligned in a block centred on the text's x, 12 apart around its middle line's
+/// top).
 pub fn outro(hud: &Hud, o: &Outro, t: f32) -> Vec<Sprite> {
     let far = 10_000.0;
     let [r, g, b] = o.fade.rgb;
     let whole = [-far, -far, 2.0 * far, 2.0 * far];
     let centre = Anchor(Horizontal::Centre, Vertical::Middle);
     let mut out = vec![solid(whole, centre, [r, g, b, o.fade(t)], 9.0)];
-    let (s, Some(page)) = (&o.subtitles, o.page(t)) else {
+    let (Some(s), Some(page)) = (&o.subtitles, o.page(t)) else {
         return out;
     };
-    for (n, q) in s.quads.iter().enumerate() {
+    let (anchor, at, quads) = s.place(t);
+    for (n, q) in quads.iter().enumerate() {
         out.push(Sprite {
             tex: Tex::Texture(q.texture.clone()),
             uv: q.uv,
             rect: q.rect.map(f32::from),
-            anchor: s.anchor,
+            anchor,
             colour: q.colour,
             z: 5.0 + 0.1 * n as f32,
         });
     }
     let lines: Vec<String> = page.lines.iter().map(|l| l.to_uppercase()).collect();
     let widest = lines.iter().map(|l| width(hud, l)).fold(0.0, f32::max);
-    let [x, y] = s.text.map(f32::from);
+    let [x, y] = at.map(f32::from);
     let first = y - 6.0 * (lines.len() - 1) as f32;
     for (n, line) in lines.iter().enumerate() {
         let t = Text {
-            anchor: s.anchor,
+            anchor,
             at: [
                 (x - (widest / 2.0).ceil()) as i16,
                 (first + 12.0 * n as f32) as i16,
@@ -804,6 +806,7 @@ pub fn standing(c: &Combat) -> Standing {
         deaths: c.deaths,
         shots: c.shots,
         out: c.out,
+        score: c.score,
     }
 }
 
@@ -916,8 +919,9 @@ fn draw(
                 let all: Vec<_> = (roster.iter())
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
-                shown.results = Some((rows(&all, m.kill_limit, m.total_war), menu.choice));
-                shown.header = m.total_war.then(|| header(&all, own.1.team));
+                let teams = crate::outro::team_mode(m);
+                shown.results = Some((rows(&all, m.kill_limit, teams), menu.choice));
+                shown.header = teams.then(|| header(&all, own.1.team));
             }
             sprites(&a.hud, &shown)
         }
@@ -1504,57 +1508,68 @@ mod tests {
         );
     }
 
-    /// The outros' pages against the original's draws (`lab/research/mp-original/
-    /// total-war-outro-scratch/hw/cs*b_dl_*`, one capture a page: its I8 glyph rects): every glyph
+    /// The outros' pages against the original's draws (one capture's I8 glyph rects): every glyph
     /// where the original drew it, but on cs4's first page, whose last two lines the original draws
-    /// a pixel higher (open).
+    /// a pixel higher (open). Total War: `lab/research/mp-original/total-war-outro-scratch/hw/
+    /// cs*b_dl_*`, one capture a page. Colors' cs1: `colors-outro-scratch/hw/cs1_dl_N` (t = 2 (N −
+    /// 436)), each of the bubble's places, its text settled (around a move it fades out and in).
     #[test]
     fn outro_subtitles_match_the_originals_draws() {
-        let hw = concat!(
+        let research = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../lab/research/mp-original/total-war-outro-scratch/hw"
+            "/../../../lab/research/mp-original"
         );
-        let outros = std::fs::read(pack_dir().join("maps/2d/outros.json"));
-        let (Some(hud), Ok(outros)) = (pack_hud(), outros) else {
+        let load = |map: &str| -> Option<Vec<Outro>> {
+            let json = std::fs::read(pack_dir().join(format!("maps/{map}/outros.json"))).ok()?;
+            Some(serde_json::from_slice(&json).unwrap())
+        };
+        let (Some(hud), Some(war), Some(colors)) = (pack_hud(), load("2d"), load("30")) else {
             eprintln!("no pack outros: skipping");
             return;
         };
-        let outros: Vec<Outro> = serde_json::from_slice(&outros).unwrap();
         let sorted = |mut r: Vec<[f32; 4]>| {
             r.sort_by(|a, b| a.partial_cmp(b).unwrap());
             r
         };
-        for (o, reads) in outros
-            .iter()
-            .zip([[482, 560, 650, 760], [470, 600, 700, 800]])
-        {
-            for (n, (page, read)) in o.subtitles.pages.iter().zip(reads).enumerate() {
-                let file = format!("{hw}/cs{}b_dl_{read}/draws.json", o.cutscene);
-                let Ok(draws) = std::fs::read(&file) else {
-                    eprintln!("no {file}: skipping");
-                    return;
-                };
-                let draws: Vec<serde_json::Value> = serde_json::from_slice(&draws).unwrap();
-                let want = (draws.iter()).filter(|d| d["format"] == "I8").map(|d| {
-                    let r: [f32; 4] = serde_json::from_value(d["rect"].clone()).unwrap();
-                    match (o.cutscene, n, r[1] > 25.0) {
-                        (4, 0, true) => [r[0], r[1] + 1.0, r[2], r[3] + 1.0],
-                        _ => r,
-                    }
-                });
-                let got = (outro(&hud, o, f32::from(page.t)).into_iter())
-                    .filter(|q| matches!(q.tex, Tex::Glyph(_)) && q.colour == [0, 0, 0, 255])
-                    .map(|q| {
-                        [
-                            q.rect[0],
-                            q.rect[1],
-                            q.rect[0] + q.rect[2],
-                            q.rect[1] + q.rect[3],
-                        ]
-                    });
-                let page = format!("cutscene {} page {n}", o.cutscene);
-                assert_eq!(sorted(got.collect()), sorted(want.collect()), "{page}");
+        // (outro, t, capture)
+        let mut captures = vec![];
+        for (o, reads) in war.iter().zip([[482, 560, 650, 760], [470, 600, 700, 800]]) {
+            let pages = &o.subtitles.as_ref().unwrap().pages;
+            for (page, read) in pages.iter().zip(reads) {
+                let file = format!("total-war-outro-scratch/hw/cs{}b_dl_{read}", o.cutscene);
+                captures.push((o, f32::from(page.t), file));
             }
+        }
+        for n in [461, 536, 636, 666, 756] {
+            let file = format!("colors-outro-scratch/hw/cs1_dl_{n}");
+            captures.push((&colors[0], (2 * (n - 436)) as f32, file));
+        }
+        for (o, t, file) in captures {
+            let Ok(draws) = std::fs::read(format!("{research}/{file}/draws.json")) else {
+                eprintln!("no {file}: skipping");
+                return;
+            };
+            let draws: Vec<serde_json::Value> = serde_json::from_slice(&draws).unwrap();
+            let first = o.page(t) == o.subtitles.as_ref().and_then(|s| s.pages.first());
+            let want = (draws.iter()).filter(|d| d["format"] == "I8").map(|d| {
+                let r: [f32; 4] = serde_json::from_value(d["rect"].clone()).unwrap();
+                match (o.cutscene, first, r[1] > 25.0) {
+                    (4, true, true) => [r[0], r[1] + 1.0, r[2], r[3] + 1.0],
+                    _ => r,
+                }
+            });
+            let got = (outro(&hud, o, t).into_iter())
+                .filter(|q| matches!(q.tex, Tex::Glyph(_)) && q.colour == [0, 0, 0, 255])
+                .map(|q| {
+                    [
+                        q.rect[0],
+                        q.rect[1],
+                        q.rect[0] + q.rect[2],
+                        q.rect[1] + q.rect[3],
+                    ]
+                });
+            let page = format!("cutscene {} t {t} ({file})", o.cutscene);
+            assert_eq!(sorted(got.collect()), sorted(want.collect()), "{page}");
         }
     }
 }

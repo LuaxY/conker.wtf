@@ -49,7 +49,10 @@ use serde::{Deserialize, Serialize};
 /// `masked` (and the fighter's: the carrier's speed and lock-out are predicted).
 /// 15: the gas's look: [`Combat::haze`] (the fighter's start of it), and the fighter's mask clips
 /// (conker-rules' `Action::Mask`: their lock-out is predicted).
-pub const PROTOCOL_ID: u64 = 15;
+/// 16: War: Colors on scene 0x30: [`MatchView`]'s `colors`, `score_limit`, `scores`, `flags`
+/// ([`FlagView`]) and `fade`, [`Combat`]'s `flag` and `score`, `PlayerState::holding` (the
+/// carrier's speed is predicted) and the fighter's flag and poses (conker-rules' `Action::Pose`).
+pub const PROTOCOL_ID: u64 = 16;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -118,6 +121,28 @@ pub struct Combat {
     /// Total War: frames into this player's gassed screen (1-150; 0 none), which its own client
     /// draws over its view (conker-rules' `Fighter::gassed`).
     pub haze: u8,
+    /// War: Colors: the flag carried (0 the red, model 169, which the squirrels take; 1 the green,
+    /// 168, the Tediz'; conker-rules' `colors::FLAGS`), shown in the hand; the carry's clips are in
+    /// `anim` (conker-anim's `FLAG_*`).
+    pub flag: Option<u8>,
+    /// War: Colors: the player's team's score (what its place ranks by first: conker-rules'
+    /// `Standing::score`).
+    pub score: u16,
+}
+
+/// War: Colors' flag as the clients draw it (conker-rules' `colors::Flag`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlagView {
+    /// Drawn: the script created it (300 frames after the start, 300 after it was destroyed) and
+    /// has not destroyed it since; on the radar unless carried.
+    pub shown: bool,
+    /// The carrier's slot (the flag is in its hand: `pos` follows it).
+    pub carrier: Option<u16>,
+    /// At home, never let go of since its creation (else, not carried, dropped where it lies).
+    pub home: bool,
+    /// May be touched now: shown, not carried, 50 frames past its last release.
+    pub touchable: bool,
+    pub pos: [f32; 3],
 }
 
 /// The match, on one replicated entity.
@@ -160,6 +185,15 @@ pub struct MatchView {
     pub countdown: i32,
     pub gas: bool,
     pub props: u32,
+    /// War: Colors (conker-rules' `Settings::colors`): teams are the sides, the score target
+    /// (`score_limit`, 0 none), each team's captures ([0] squirrels, [1] Tediz), the flags, and the
+    /// screen's fade around the respawn after a capture: out (to black) or back in, over that many
+    /// VIs, from that tick.
+    pub colors: bool,
+    pub score_limit: u8,
+    pub scores: [u16; 2],
+    pub flags: [FlagView; 2],
+    pub fade: Option<(bool, u16, u32)>,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

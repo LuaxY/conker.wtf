@@ -273,7 +273,8 @@ fn sound_bank_decodes() {
 #[test]
 fn outros_follow_the_oracle() {
     let Some(rom) = rom() else { return };
-    let outros = conker_extract::outro::outros(&rom).unwrap();
+    let outros = conker_extract::outro::outros(&rom, 0x2D).unwrap();
+    let characters = conker_extract::outro::characters(&rom, &outros).unwrap();
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../lab/research/mp-original/total-war-outro-scratch"
@@ -287,29 +288,28 @@ fn outros_follow_the_oracle() {
                 .collect(),
         )
     };
-    let [(cs2, c2), (cs4, c4)] = &outros[..] else {
-        panic!("two outros")
+    let ([cs2, cs4], [c2, c4]) = (&outros[..], &characters[..]) else {
+        panic!("two outros, two characters")
     };
     assert_eq!((cs2.winner, cs2.cutscene, cs2.length), (0, 2, 650));
     assert_eq!((cs4.winner, cs4.cutscene, cs4.length), (1, 4, 800));
     assert_eq!((c2.entry, c2.model.joints.len(), c4.entry), (135, 40, 90));
+    assert_eq!((c2.clips.len(), c4.clips.len()), (1, 1));
     assert_eq!(cs2.actor.animation, "pair_0000_anim_0000");
     assert_eq!(cs4.actor.animation, "pair_0045_anim_0056");
-    let pages = |o: &conker_assets::outro::Outro| -> Vec<u16> {
-        o.subtitles.pages.iter().map(|p| p.t).collect()
+    assert!(cs2.cuts.is_empty() && cs2.cast.is_empty() && cs4.cuts.is_empty());
+    let pages = |o: &conker_assets::outro::Outro| -> (Vec<u16>, u16) {
+        let s = o.subtitles.as_ref().unwrap();
+        (s.pages.iter().map(|p| p.t).collect(), s.close)
     };
+    assert_eq!(pages(cs2), (vec![47, 159, 347, 475], 583));
+    assert_eq!(pages(cs4), (vec![16, 195, 354, 601], 745));
+    let lines = &cs4.subtitles.as_ref().unwrap().pages[0].lines;
+    assert_eq!(lines[2], "      bears");
+    let voice = |o: &conker_assets::outro::Outro| o.voice.as_ref().map(|v| (v.t, v.entry));
     assert_eq!(
-        (pages(cs2), cs2.subtitles.close),
-        (vec![47, 159, 347, 475], 583)
-    );
-    assert_eq!(
-        (pages(cs4), cs4.subtitles.close),
-        (vec![16, 195, 354, 601], 745)
-    );
-    assert_eq!(cs4.subtitles.pages[0].lines[2], "      bears");
-    assert_eq!(
-        (cs2.voice.t, cs2.voice.entry, cs4.voice.t, cs4.voice.entry),
-        (50, 0xB1, 30, 0xB3)
+        (voice(cs2), voice(cs4)),
+        (Some((50, 0xB1)), Some((30, 0xB3)))
     );
     let voices = conker_extract::outro::voices(&rom, &[cs2.clone(), cs4.clone()]).unwrap();
     for ((_, wav), secs) in voices.iter().zip([8.81, 12.24]) {
@@ -348,8 +348,8 @@ fn outros_follow_the_oracle() {
             let yaw = conker_assets::outro::value(&o.camera.yaw, t) + 90.0;
             assert!((yaw - f(10)).abs() < 1e-3, "cs{n} read {read}: yaw {yaw}");
             let a = &o.actor;
-            assert_eq!(a.at.map(f32::from), [f(17), f(18), f(19)]);
-            assert_eq!(a.facing.to_string(), row[20]);
+            assert_eq!(a.place(t), [f(17), f(18), f(19)]);
+            assert_eq!(a.facing(t).to_string(), row[20]);
             let logical = if n == 2 { "0" } else { "56" };
             assert_eq!((row[21].as_str(), a.rate), (logical, f(22)));
             let time = o.clip_time(k);
@@ -363,6 +363,152 @@ fn outros_follow_the_oracle() {
             if read > 457 {
                 let want: u8 = row[6].parse().unwrap();
                 assert_eq!(o.fade(o.t(read - 457)), want, "cs{n} read {read}");
+            }
+        }
+    }
+}
+
+/// War: Colors' outros (scene 0x30's cutscenes 1 and 5) against the oracle's frames (`../lab/
+/// research/mp-original/colors-outro-scratch/outro_cs{1,5}_{camera,actors}.csv`, `fade_cs{1,5}.csv`,
+/// runs cs1/cs5: read 439 (cs1) or 438 (cs5) is the outro's frame 0, a row the state after its
+/// read's frame), every frame from 1 through the STATS: the camera (its cuts) within 0.05 units, its
+/// yaw within 0.001°; every actor's place within 0.05 (its path by length), facing within 1 (u16),
+/// clip exact, clip time within 0.01 tick (on the loop); the fade's alpha exact; the length, characters, pages,
+/// voice (cs1: 0xD0 at t 20, none in cs5).
+#[test]
+fn colors_outros_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let outros = conker_extract::outro::outros(&rom, 0x30).unwrap();
+    let characters = conker_extract::outro::characters(&rom, &outros).unwrap();
+    let [cs1, cs5] = &outros[..] else {
+        panic!("two outros")
+    };
+    assert_eq!((cs1.winner, cs1.cutscene, cs1.length), (0, 1, 1110));
+    assert_eq!((cs5.winner, cs5.cutscene, cs5.length), (1, 5, 1100));
+    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
+    assert_eq!(entries, [135, 40, 88, 90]);
+    let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
+        std::iter::once(&o.camera)
+            .chain(&o.cuts)
+            .map(|c| c.from)
+            .collect()
+    };
+    assert_eq!(
+        (from(cs1), from(cs5)),
+        (vec![0, 100, 260, 450], vec![0, 300, 800])
+    );
+    assert_eq!((cs1.actors().count(), cs5.actors().count()), (5, 9));
+    let s = cs1.subtitles.as_ref().unwrap();
+    let pages: Vec<u16> = s.pages.iter().map(|p| p.t).collect();
+    assert_eq!((pages, s.close), (vec![36, 89, 245, 431, 606], 694));
+    assert_eq!(s.pages[0].lines, ["look at this scum."]);
+    let moves: Vec<u16> = s.moves.iter().map(|m| m.t).collect();
+    assert_eq!(moves, [100, 260, 450]);
+    assert!(cs5.subtitles.is_none() && cs5.voice.is_none());
+    let v = cs1.voice.as_ref().unwrap();
+    assert_eq!(
+        (v.t, v.entry, v.file.as_str()),
+        (20, 0xD0, "maps/30/voice-d0.wav")
+    );
+
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/colors-outro-scratch"
+    );
+    let rows = |file: &str| -> Option<Vec<Vec<String>>> {
+        let text = std::fs::read_to_string(format!("{dir}/{file}")).ok()?;
+        Some(
+            text.lines()
+                .skip(1)
+                .map(|l| l.split(',').map(String::from).collect())
+                .collect(),
+        )
+    };
+    let Some(..) = rows("outro_cs1_camera.csv") else {
+        eprintln!("{dir}: no oracle CSVs, skipping the frames");
+        return;
+    };
+    for (o, n, first) in [(cs1, 1, 439), (cs5, 5, 438)] {
+        for row in rows(&format!("outro_cs{n}_camera.csv")).unwrap() {
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 {
+                continue;
+            }
+            let t = o.t(k);
+            assert_eq!(t, f(1), "cs{n} read {read}");
+            let (eye, at) = o.camera(t);
+            for i in 0..3 {
+                assert!(
+                    (eye[i] - f(4 + i)).abs() < 0.05,
+                    "cs{n} read {read}: eye {eye:?}"
+                );
+                assert!(
+                    (at[i] - f(7 + i)).abs() < 0.05,
+                    "cs{n} read {read}: at {at:?}"
+                );
+            }
+            let yaw = conker_assets::outro::value(&o.view(t).yaw, t) + 90.0;
+            let want = f(10);
+            assert!(
+                ((yaw - want + 180.0).rem_euclid(360.0) - 180.0).abs() < 1e-3,
+                "cs{n} read {read}: yaw {yaw}"
+            );
+        }
+        let actors: Vec<_> = o.actors().collect();
+        // The script objects of the actors, in order.
+        let mut objects: Vec<u32> = Vec::new();
+        for row in rows(&format!("outro_cs{n}_actors.csv")).unwrap() {
+            let obj: u32 = row[2].parse().unwrap();
+            if !objects.contains(&obj) {
+                objects.push(obj);
+            }
+            let a = actors[objects.iter().position(|&x| x == obj).unwrap()];
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 {
+                continue;
+            }
+            let t = o.t(k);
+            let place = a.place(t);
+            for i in 0..3 {
+                assert!(
+                    (place[i] - f(6 + i)).abs() < 0.05,
+                    "cs{n} read {read} object {obj}: place {place:?}"
+                );
+            }
+            let facing: u16 = row[9].parse().unwrap();
+            assert!(
+                a.facing(t).abs_diff(facing) <= 1,
+                "cs{n} read {read} object {obj}: facing {}",
+                a.facing(t)
+            );
+            let (clip, time) = a.clip(k);
+            let (name, ticks) = a.clips().nth(clip).unwrap();
+            let logical: u16 = row[10].parse().unwrap();
+            assert!(
+                name.ends_with(&format!("_anim_{logical:04}"))
+                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                        && c.clips.iter().any(|x| x.logical.contains(&logical)
+                            && name.starts_with(&format!("pair_{:04}", x.pair)))),
+                "cs{n} read {read} object {obj}: clip {name}, want {logical}"
+            );
+            // On the loop: the oracle's sum can stop a hair under the end where the remake wraps.
+            let off = (time - f(12)).abs();
+            assert!(
+                off.min(f32::from(ticks) - off) < 0.01,
+                "cs{n} read {read} object {obj}: clip time {time}, want {}",
+                f(12)
+            );
+        }
+        assert_eq!(objects.len(), actors.len());
+        for row in rows(&format!("fade_cs{n}.csv")).unwrap() {
+            let read: u32 = row[0].parse().unwrap();
+            if read > first {
+                let want: u8 = row[6].parse().unwrap();
+                assert_eq!(o.fade(o.t(read - first)), want, "cs{n} read {read}");
             }
         }
     }

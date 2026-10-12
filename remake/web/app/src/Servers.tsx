@@ -162,7 +162,7 @@ const DEFAULT: NewServer = {
   name: "Bad Fur Day",
   map: "2d",
   mode: "deathmatch",
-  settings: { bots: 3, skill: "normal", time: 10, lives: 3, kills: 0, radar: true },
+  settings: { bots: 3, skill: "normal", time: 10, lives: 3, kills: 0, score: 20, radar: true },
 };
 
 const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
@@ -260,7 +260,13 @@ function CreateServer() {
           value={s.lives}
           options={range(1, 5).map((n) => [n, String(n)])}
           onChange={(lives) => setting({ lives })}
-          hint={s.time === "unlimited" ? undefined : "Only with unlimited time"}
+          hint={
+            !MODES[form.mode].lives
+              ? `Never lost in ${MODES[form.mode].name}`
+              : s.time === "unlimited"
+                ? undefined
+                : "Only with unlimited time"
+          }
         />
         <Select
           label="Kill limit"
@@ -268,6 +274,16 @@ function CreateServer() {
           options={range(0, 10).map((n) => [n, n ? String(n) : "None"])}
           onChange={(kills) => setting({ kills })}
           hint={MODES[form.mode].kills ? undefined : `None in ${MODES[form.mode].name}`}
+        />
+        <Select
+          label="Score"
+          value={s.score}
+          options={[
+            ...range(1, 40).map((n): [number, string] => [n, String(n)]),
+            ["unlimited", "Unlimited"],
+          ]}
+          onChange={(score) => setting({ score })}
+          hint={MODES[form.mode].score ? undefined : `None in ${MODES[form.mode].name}`}
         />
         <label className="grid content-start gap-1">
           <span className={LABEL}>Radar</span>

@@ -27,10 +27,10 @@ pub mod script;
 
 use brain::{Body, Unknown, World, g};
 use conker_camera::volume::{CameraHint, CameraVolume};
-use conker_rules::Rng;
 use conker_rules::game::{Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::weapon::Gives;
+use conker_rules::{Rng, colors};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{Input, atan2_u16, deadzone, stick_angle};
 use nav::Graph;
@@ -301,11 +301,13 @@ impl Bots {
                 skill: self.skill,
                 zones: &mut self.zones,
                 unknown: &mut unknown,
-                ffa: !m.settings.total_war,
+                ffa: !m.settings.total_war && !m.settings.colors,
                 forgiven: &mut self.forgiven,
                 slots: &self.slots,
                 touched,
                 effects: &mut effects,
+                flags: m.colors.flags,
+                starting: !self.started,
             };
             if !self.started {
                 self.started = true;
@@ -316,6 +318,7 @@ impl Bots {
                 {
                     self.faults += 1;
                 }
+                host.starting = false;
             }
             if self
                 .machine
@@ -331,17 +334,28 @@ impl Bots {
         // countdown, and the forced item G+0xFF0 as the canister carried (ponytail: from the frame
         // the script writes it, a frame before the game's item shows it, V d1 1040 → 1041; its
         // weapon manager reads it in the next frame's).
-        effects.push(Effect::Countdown(self.g.i32(g::COUNTDOWN)));
-        for (k, &slot) in self.slots.iter().enumerate() {
-            let carries = self.g.get(g::OVERRIDE, k) == i32::from(gas::CANISTER);
-            if m.players.get(slot).is_some_and(|f| f.carrying != carries) {
-                effects.push(Effect::Carry(slot, carries));
+        if m.settings.total_war {
+            effects.push(Effect::Countdown(self.g.i32(g::COUNTDOWN)));
+            for (k, &slot) in self.slots.iter().enumerate() {
+                let carries = self.g.get(g::OVERRIDE, k) == i32::from(gas::CANISTER);
+                if m.players.get(slot).is_some_and(|f| f.carrying != carries) {
+                    effects.push(Effect::Carry(slot, carries));
+                }
             }
-        }
-        if !m.settings.total_war {
+        } else if !m.settings.colors {
             effects.clear();
         }
-        let players: Vec<[f32; 3]> = bodies.iter().map(|b| b.pos).collect();
+        let mut players: Vec<[f32; 3]> = bodies.iter().map(|b| b.pos).collect();
+        // Colors' collectors run at a flag by its handle (command 0x19, [`Npc::target`]).
+        if m.settings.colors {
+            for (f, def) in m.colors.flags.iter().zip(&colors::FLAGS) {
+                let i = usize::from(def.handle);
+                if players.len() <= i {
+                    players.resize(i + 1, [0.0; 3]);
+                }
+                players[i] = f.pos;
+            }
+        }
         let bots = self
             .slots
             .iter()
@@ -431,6 +445,8 @@ impl Bots {
                     team: f.team,
                     suicides: f.suicides,
                     place: places[s],
+                    stunned: f.stun != 0,
+                    buttons: f.buttons,
                 }
             })
             .collect()

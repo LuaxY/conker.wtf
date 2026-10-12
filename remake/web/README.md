@@ -33,11 +33,11 @@ Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDi
 | URL | Screen |
 |---|---|
 | `/#/` | Home: the pitch, "Join game", the Total War briefing's battle plan between the two sides' banners, and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
-| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server": name, map, mode (the map's own), bots 0-15, bot skill, time (3-10 min or unlimited), lives (only with unlimited time), kill limit (none in Total War), radar; "Run it" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
+| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server": name, map, mode (the map's own), bots 0-15, bot skill, time (3-10 min or unlimited), lives (only with unlimited time; never lost in Colors), kill limit (none in Total War or Colors), score (Colors' captures to win: 1-40 or unlimited, default 20), radar; "Run it" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
 | `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings; your side (two cards on the map's riveted plates) and connection (WebTransport or WebSocket); "Join game" (running servers only) |
 
 **Real data only.** `app/src/data.ts` holds the maps and the modes each plays (`MAPS`: a new mode, e.g. Colors on 30,
-goes into its maps' lists; `MODES` says whether it has a kill limit), the bot skills, and the calls to the dev web server's
+goes into its maps' lists; `MODES` says whether it has a kill limit, lives and a score target), the bot skills, and the calls to the dev web server's
 `/api/servers`; `server.ts` validates against the same tables. No mock is left: no made-up servers, regions, player counts,
 pings, lobby players, ready states or chat. The lobby's player columns, ready toggle, chat and name field went with them
 (nothing real could fill them: the game server has no lobby service, and the client takes no name). "This machine" (this
@@ -88,13 +88,13 @@ request and has no authentication, so it listens on loopback only (127.0.0.1 and
   `assets/` (through its symlink), with Bun's types (`.wasm` application/wasm, `.gltf` model/gltf+json, `.bin`
   application/octet-stream, `.wav` audio/x-wav). No `..`, no folder listings.
 - `GET /api/servers`: the game servers it started, each `{id, name, map, mode, settings: {bots, skill, time, lives, kills,
-  radar}, port, address, digest, status, code, started, info}`. `address` is the host the page used plus the port; `status`
+  score, radar}, port, address, digest, status, code, started, info}`. `address` is the host the page used plus the port; `status`
   `starting`, `running` or `exited` (`code`: the exit code, 128 + the signal's number when killed); `started` ISO;
-  `info` the game server's own `/info` (`{"map":"2d","protocol":15}`) when it answers.
+  `info` the game server's own `/info` (`{"map":"2d","protocol":16}`) when it answers.
 - `POST /api/servers` (`content-type: application/json`, else 415), `{name, map, mode, settings}`: every value is checked
-  against a whitelist (400 otherwise: `total-war` off map 2d, bots over 15, a `$` in the name...). It takes the first even
+  against a whitelist (400 otherwise: `total-war` off map 2d, `colors` off map 30, bots over 15, a `$` in the name...). It takes the first even
   port N of the range whose TCP N and N + 1 are free and runs `conker-server --assets DIR --map M --mode MODE --port N
-  --digest-file TMP/digest.txt --bots B --skill S --time T --lives L --kills K --radar on|off`: an argv array, no shell;
+  --digest-file TMP/digest.txt --bots B --skill S --time T --lives L --kills K --score S --radar on|off`: an argv array, no shell;
   stdout and stderr go to `TMP/server.log` (TMP a new temp folder, printed by the dev server). It answers 201 and the
   record once the game server answers `/info` on N + 1 (it writes the digest just before); if the server exits first or
   takes over 30 s, 500 with the end of its log.
