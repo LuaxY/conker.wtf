@@ -1,5 +1,28 @@
 # Status after wave 6 (2026-10-10)
 
+## Landing: real game servers from a dev web server (2026-10-12)
+**The landing's mock data is gone. A temporary, local-only dev web server (`web/app/server.ts`, `bun run serve`) now serves
+`web/` in place of `python3 -m http.server`, and starts, lists and kills game servers: the Servers screen lists them,
+"Create server" (map, the map's modes, bots, skill, time, lives, kill limit, radar) runs one, Kill stops one, and the
+lobby joins with that server's own digest.** Not for the internet (loopback unless `--host`). The real hosting is still
+to come. Details: `web/README.md`, "Dev web server".
+
+| Part | What |
+|---|---|
+| Dev web server | `Bun.serve` on 127.0.0.1 and ::1 (`--port 8080`, `--host`, `--game-ports 5900-5949`, `--server`, `--assets`). `GET/POST /api/servers`, `DELETE /api/servers/:id`. Every value is whitelisted against `data.ts`'s tables, the argv is an array, JSON only (415 otherwise). It takes an even port N with TCP N, N + 1 free, writes the log and digest to a temp folder, answers once `/info` does. Kill is SIGTERM, then SIGKILL after 3 s. Ctrl-C/SIGTERM kills every child |
+| Landing | `data.ts`: `MAPS` (each map's modes: data, for Colors next), `MODES`, `SKILLS`, the API calls; no mocks, no "This machine". Servers: list, status, Lobby, Kill/Clear, refresh, the create form. Lobby: settings, side, connection, Join (`digest=`). Gone: regions, players, pings, ready, chat, name. Without the API (a static site, `deploy/`'s Caddy), the Servers screen says so and links to `play.html` |
+| Toolchain | `@types/bun` (dev), `tsconfig.server.json`, `check` covers `server.ts`. Vite's dev proxy adds `/api/` |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `bun run check`, `bun run build` | pass |
+| `bun run serve --port 8094 --game-ports 5990-5999`, release server | static: `/`, `play.html`, `play.js`, `.wasm`, `.gltf`, `.bin`, `.wav`, `pack.json` with their types, `..` refused. POST Deathmatch on 3f with 4 bots → 201 on 5990 in 0.9 s; Total War on 2d → 5992. GET lists both `running` with digests and `info` (`3f`/`2d`, protocol 15), `address` follows the page's host (`[::1]:5990`, `127.0.0.1:5990`); `/info` answers on 5991 and 5993. DELETE 1 → 204, pid gone, 5990/5991 free, temp folder gone. A server killed from outside shows `exited` (137), DELETE clears it. SIGTERM to `bun run serve` → the last game server killed, nothing left. 400 for total-war on 30, `;`/`|`/`$(...)` in map, skill, bots and name, bots 16, time 2.5, `__proto__`, non-JSON; 415 for text/plain; 404 for an unknown id. A bad `--assets` → 500 with the server's own error. Rerun on the final code: the same, then SIGINT (Ctrl-C) with a server up → killed, nothing left |
+| Browser | not run here (left to the user in Chrome) |
+
+Not done: no auth, no player counts or pings (the game server has no such endpoint), no logs in the page (the temp
+folder's `server.log`), no `--cavemen` switch (0x3F always has cavemen), and game servers left running if the dev server
+is SIGKILLed. `deploy/` (Caddy) has no `/api`, so its landing shows no list (`deploy/README.md` updated).
+
 ## War: Total War, part 6: the victory outros (2026-10-12)
 **When Total War ends, the winning team's cutscene now plays before the STATS: cs2 (0x2D/2) if the squirrels
 win, cs4 (0x2D/4) if the Tediz win, none on a DRAW. Each one has the original's camera path, its one actor

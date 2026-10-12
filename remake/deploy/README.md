@@ -8,9 +8,9 @@ What runs on the host:
 | `conker-server` (systemd) | TCP + UDP 5888, and `127.0.0.1:5889` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
 | certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to both |
 
-How a player connects: the landing (`/`) lists the servers and opens a lobby, whose "Join game" opens the game
-page, `/play.html?server=DOMAIN:5888&transport=wt&side=...` (`web/README.md`, "Landing"; the server list and lobbies
-are mock for now, "This machine" is this host's server). The game page (over https) loads the client, which asks `/info` which map the server plays
+How a player connects: the game page, `/play.html` (it connects to `DOMAIN:5888`; add `?transport=ws&side=...` as
+`web/README.md` lists). The landing (`/`) has no server list here: that comes from the local dev web server only
+(`web/README.md`, "Dev web server"), so on this site its Servers screen says so and links to `/play.html`. The game page (over https) loads the client, which asks `/info` which map the server plays
 (`conker-server --map 2d|30|34|3f`), fetches that map and the rest of the asset pack from `/assets/` and
 draws the level; then it fetches `/token` from its own origin. Caddy passes it to the
 game server, which signs a netcode connect token with its private key (`/etc/conker/token.key`, never
@@ -215,7 +215,7 @@ curl -s https://game.example.org/token | wc -c                                  
 nc -4 -vz game.example.org 5888 && nc -6 -vz game.example.org 5888                # TCP over IPv4 and IPv6
 ```
 
-Then open `https://game.example.org/` in Chrome: Join game, This machine, Join game opens the game page,
+Then open `https://game.example.org/` in Chrome: Join game, then the link to the game page opens it,
 which loads the pack and starts by itself; the line at the bottom left reads
 `connected to game.example.org:5888 over WebTransport`. Open `https://game.example.org/play.html?transport=ws` in a
 second window: `... over WebSocket` (that is `wss://`). For UDP over IPv4 (WebTransport into the `[::]`

@@ -1,38 +1,31 @@
 import { getRouteApi, Link, useRouter } from "@tanstack/react-router";
-import { Monitor, RefreshCw, Search, Users } from "lucide-react";
+import { LogIn, Play, RefreshCw, Skull, X } from "lucide-react";
 import { motion } from "motion/react";
-import { useState } from "react";
-import type { Server } from "./data";
-import { button, field, Ping, StatusBadge } from "./ui";
+import { type FormEvent, type ReactNode, useState } from "react";
+import {
+  createServer,
+  type GameServer,
+  killServer,
+  MAPS,
+  type MapId,
+  MODES,
+  type NewServer,
+  type Settings,
+  settingRows,
+  SKILLS,
+} from "./data";
+import { button, field, primary, StatusBadge } from "./ui";
 
 const route = getRouteApi("/servers");
 
-const SORTS = {
-  ping: { label: "Ping", compare: (a: Server, b: Server) => a.ping - b.ping },
-  players: { label: "Players", compare: (a: Server, b: Server) => b.players - a.players },
-  name: { label: "Name", compare: (a: Server, b: Server) => a.name.localeCompare(b.name) },
-};
-type Sort = keyof typeof SORTS;
-
 // One grid for the header and the rows: stacked on phones, columns from md up.
 const COLUMNS =
-  "grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1 md:grid-cols-[minmax(0,2.4fr)_1fr_1.4fr_5rem_5.5rem_6rem]";
+  "grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1 md:grid-cols-[minmax(0,1.5fr)_1.1fr_1.8fr_6.5rem_12rem]";
 
 export function Servers() {
   const servers = route.useLoaderData();
   const router = useRouter();
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<Sort>("ping");
   const [refreshing, setRefreshing] = useState(false);
-
-  const q = query.trim().toLowerCase();
-  const shown = servers
-    .filter((s) => [s.name, s.region, s.map, s.mode].some((f) => f.toLowerCase().includes(q)))
-    // "This machine" stays on top.
-    .sort(
-      (a, b) => Number(b.id === "local") - Number(a.id === "local") || SORTS[sort].compare(a, b),
-    );
-  const online = servers.reduce((n, s) => n + s.players, 0);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -46,44 +39,15 @@ export function Servers() {
       animate={{ opacity: 1, y: 0 }}
       className="mx-auto w-full max-w-6xl px-4 py-10"
     >
-      <h1 className="cartoon font-display text-5xl">Servers</h1>
-      <p className="mt-1 text-dust">
-        {servers.length} servers, {online} players online. Pick one to meet its lobby.
-      </p>
-
-      <div className="mt-6 flex flex-wrap items-end gap-3">
-        <label className="grid min-w-56 flex-1 gap-1">
-          <span className="font-stencil text-sm text-dust uppercase">Search</span>
-          <span className="relative">
-            <Search
-              aria-hidden
-              className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-dust"
-            />
-            <input
-              type="search"
-              name="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Name, region, map or mode"
-              className={`${field} pl-9`}
-            />
-          </span>
-        </label>
-        <label className="grid gap-1">
-          <span className="font-stencil text-sm text-dust uppercase">Sort by</span>
-          <select
-            name="sort"
-            value={sort}
-            onChange={(e) => setSort(e.target.value as Sort)}
-            className={`${field} w-auto`}
-          >
-            {Object.entries(SORTS).map(([id, { label }]) => (
-              <option key={id} value={id}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="cartoon font-display text-5xl">Servers</h1>
+          <p className="mt-1 text-dust">
+            {servers === null
+              ? "No server list on this site."
+              : `${servers.filter((s) => s.status === "running").length} running on this machine. Open one's lobby to join, or run a new one.`}
+          </p>
+        </div>
         <button
           type="button"
           onClick={refresh}
@@ -95,75 +59,287 @@ export function Servers() {
         </button>
       </div>
 
-      <div
-        aria-hidden
-        className={`${COLUMNS} mt-8 hidden px-4 font-stencil text-xs text-dust uppercase md:grid`}
-      >
-        <span>Server</span>
-        <span>Region</span>
-        <span>Map · mode</span>
-        <span>Players</span>
-        <span>Ping</span>
-        <span>Status</span>
-      </div>
-      <ul className="mt-2 grid gap-2">
-        {shown.map((server) => (
-          <li key={server.id}>
-            <ServerRow server={server} />
-          </li>
-        ))}
-      </ul>
-      {shown.length === 0 && (
-        <p className="mt-6 rounded-xl border-2 border-dashed border-mud p-6 text-center text-dust">
-          No server matches “{query}”.
+      {servers === null ? (
+        <p className="mt-8 rounded-xl border-2 border-dashed border-mud p-6 text-dust">
+          The server list and "Create server" come from the dev web server (
+          <code className="text-khaki">cd remake/web/app && bun run serve</code>), which this site
+          is not served by. You can still{" "}
+          <a href="play.html" className="text-acorn underline">
+            play on this site's own game server
+          </a>{" "}
+          (port 5888).
         </p>
+      ) : (
+        <>
+          <div
+            aria-hidden
+            className={`${COLUMNS} mt-8 hidden px-4 font-stencil text-xs text-dust uppercase md:grid`}
+          >
+            <span>Server</span>
+            <span>Map · mode</span>
+            <span>Settings</span>
+            <span>Status</span>
+          </div>
+          <ul className="mt-2 grid gap-2">
+            {servers.map((server) => (
+              <li key={server.id}>
+                <ServerRow server={server} />
+              </li>
+            ))}
+          </ul>
+          {servers.length === 0 && (
+            <p className="mt-6 rounded-xl border-2 border-dashed border-mud p-6 text-center text-dust">
+              No game server yet. Run one below.
+            </p>
+          )}
+          <CreateServer />
+        </>
       )}
     </motion.main>
   );
 }
 
-function ServerRow({ server: s }: { server: Server }) {
-  const local = s.id === "local";
-  const label = `${s.name}, ${s.region}, ${s.players} of ${s.maxPlayers} players, ${s.ping} ms${s.status === "in-game" ? ", in game" : ""}`;
-  const cells = (
-    <>
+function ServerRow({ server: s }: { server: GameServer }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const exited = s.status === "exited";
+
+  const kill = async () => {
+    setBusy(true);
+    try {
+      await killServer(s.id);
+    } finally {
+      await router.invalidate({ sync: true });
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className={`${COLUMNS} rounded-xl border-2 border-mud bg-trench px-4 py-3 ${exited ? "opacity-60" : ""}`}
+    >
       <span className="min-w-0">
-        <span className="flex items-center gap-2 font-semibold">
-          {local && <Monitor aria-hidden className="size-4 shrink-0 text-acorn" />}
-          <span className="md:truncate">{s.name}</span>
-        </span>
-        {local && <span className="block truncate font-mono text-xs text-dust">{s.address}</span>}
+        <span className="block font-semibold md:truncate">{s.name}</span>
+        <span className="block truncate font-mono text-xs text-dust">{s.address}</span>
       </span>
-      <span className="order-3 text-sm text-dust md:order-none md:text-base md:text-khaki">
-        {s.region}
+      <span className="order-3 text-sm text-dust md:order-none">
+        {MAPS[s.map].name} · {MODES[s.mode].name}
       </span>
       <span className="order-4 text-sm text-dust md:order-none">
-        {s.map} · {s.mode}
-      </span>
-      <span className="order-5 inline-flex items-center gap-1.5 tabular-nums md:order-none">
-        <Users aria-hidden className="size-4 text-dust" />
-        {s.players}/{s.maxPlayers}
-      </span>
-      <span className="order-6 md:order-none">
-        <Ping ms={s.ping} />
+        {settingRows(s)
+          .map(([label, value]) => `${label} ${value}`)
+          .join(" · ")}
       </span>
       <span className="order-2 justify-self-end md:order-none md:justify-self-start">
-        <StatusBadge status={s.status} />
+        <StatusBadge status={s.status} code={s.code} />
       </span>
-    </>
+      <span className="order-5 col-span-2 mt-2 flex gap-2 md:order-none md:col-span-1 md:mt-0 md:justify-self-end">
+        {s.status === "running" && (
+          <Link
+            to="/lobby/$serverId"
+            params={{ serverId: s.id }}
+            aria-label={`Lobby of ${s.name}`}
+            className={`${primary} h-10 px-3`}
+          >
+            <LogIn aria-hidden className="size-4" />
+            Lobby
+          </Link>
+        )}
+        <button
+          type="button"
+          onClick={kill}
+          disabled={busy}
+          aria-label={`${exited ? "Clear" : "Kill"} ${s.name}`}
+          className={`${button} h-10 border-2 border-mud bg-bunker px-3 hover:border-tediz hover:text-tediz`}
+        >
+          {exited ? <X aria-hidden className="size-4" /> : <Skull aria-hidden className="size-4" />}
+          {exited ? "Clear" : "Kill"}
+        </button>
+      </span>
+    </div>
   );
-  const box = `${COLUMNS} rounded-xl border-2 bg-trench px-4 py-3`;
-  if (s.status === "full") {
-    return <div className={`${box} border-mud opacity-60`}>{cells}</div>;
-  }
+}
+
+const DEFAULT: NewServer = {
+  name: "Bad Fur Day",
+  map: "2d",
+  mode: "deathmatch",
+  settings: { bots: 3, skill: "normal", time: 10, lives: 3, kills: 0, radar: true },
+};
+
+const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+const TIMES: [Settings["time"], string][] = [
+  ...range(3, 10).map((n): [number, string] => [n, `${n} min`]),
+  ["unlimited", "Unlimited"],
+];
+
+/** The game server's settings (conker-server's flags), and Run. */
+function CreateServer() {
+  const router = useRouter();
+  const [form, setForm] = useState(DEFAULT);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [started, setStarted] = useState("");
+  const map = MAPS[form.map];
+  const s = form.settings;
+  const setting = (change: Partial<Settings>) =>
+    setForm({ ...form, settings: { ...s, ...change } });
+
+  const run = async (e: FormEvent) => {
+    e.preventDefault();
+    setPending(true);
+    setError("");
+    setStarted("");
+    try {
+      const server = await createServer(form);
+      setStarted(`${server.name} is running at ${server.address}.`);
+      await router.invalidate({ sync: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
-    <Link
-      to="/lobby/$serverId"
-      params={{ serverId: s.id }}
-      aria-label={label}
-      className={`${box} transition hover:-translate-y-0.5 hover:border-acorn hover:bg-mud ${local ? "border-acorn/60" : "border-mud"}`}
+    <section
+      aria-labelledby="create"
+      className="mt-10 rounded-2xl border-2 border-acorn/70 bg-trench p-5"
     >
-      {cells}
-    </Link>
+      <h2 id="create" className="cartoon font-display text-3xl">
+        Create server
+      </h2>
+      <p className="text-sm text-dust">
+        Starts a game server on this machine. Several can run at once, each on its own port.
+      </p>
+      <form onSubmit={run} className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="grid content-start gap-1 sm:col-span-2">
+          <span className="font-stencil text-sm text-dust uppercase">Name</span>
+          <input
+            name="name"
+            required
+            maxLength={32}
+            autoComplete="off"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            className={field}
+          />
+        </label>
+        <Select
+          label="Map"
+          value={form.map}
+          options={(Object.keys(MAPS) as MapId[]).sort().map((id) => [id, MAPS[id].name])}
+          onChange={(id) => {
+            const modes = MAPS[id].modes;
+            setForm({ ...form, map: id, mode: modes.includes(form.mode) ? form.mode : modes[0] });
+          }}
+        />
+        <Select
+          label="Mode"
+          value={form.mode}
+          options={map.modes.map((m) => [m, MODES[m].name])}
+          onChange={(mode) => setForm({ ...form, mode })}
+        />
+        <Select
+          label="Bots"
+          value={s.bots}
+          options={range(0, 15).map((n) => [n, n ? String(n) : "None"])}
+          onChange={(bots) => setting({ bots })}
+        />
+        <Select
+          label="Bot skill"
+          value={s.skill}
+          options={SKILLS.map((k) => [k, k[0].toUpperCase() + k.slice(1)])}
+          onChange={(skill) => setting({ skill })}
+          hint={s.bots ? undefined : "No bots"}
+        />
+        <Select
+          label="Time"
+          value={s.time}
+          options={TIMES}
+          onChange={(time) => setting({ time })}
+        />
+        <Select
+          label="Lives"
+          value={s.lives}
+          options={range(1, 5).map((n) => [n, String(n)])}
+          onChange={(lives) => setting({ lives })}
+          hint={s.time === "unlimited" ? undefined : "Only with unlimited time"}
+        />
+        <Select
+          label="Kill limit"
+          value={s.kills}
+          options={range(0, 10).map((n) => [n, n ? String(n) : "None"])}
+          onChange={(kills) => setting({ kills })}
+          hint={MODES[form.mode].kills ? undefined : `None in ${MODES[form.mode].name}`}
+        />
+        <label className="grid content-start gap-1">
+          <span className="font-stencil text-sm text-dust uppercase">Radar</span>
+          <span className="flex h-11 items-center gap-3 rounded-lg border-2 border-mud bg-bunker px-3">
+            <input
+              type="checkbox"
+              name="radar"
+              checked={s.radar}
+              onChange={(e) => setting({ radar: e.target.checked })}
+              className="size-5 accent-acorn"
+            />
+            On the HUD
+          </span>
+        </label>
+        {map.note && <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">{map.note}</p>}
+        <div className="flex flex-wrap items-center gap-4 sm:col-span-2 lg:col-span-4">
+          <button type="submit" disabled={pending} className={`${primary} px-8 py-3 text-lg`}>
+            <Play aria-hidden className="size-5" />
+            {pending ? "Starting" : "Run"}
+          </button>
+          <output className="text-sm text-go">{started}</output>
+        </div>
+        {error && (
+          <pre
+            role="alert"
+            className="overflow-x-auto rounded-lg border-2 border-tediz/60 bg-bunker p-3 text-sm whitespace-pre-wrap text-tediz sm:col-span-2 lg:col-span-4"
+          >
+            {error}
+          </pre>
+        )}
+      </form>
+    </section>
+  );
+}
+
+/** A labelled select over typed values; with a hint, it is off (the setting doesn't apply). */
+function Select<T extends string | number>({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: T;
+  options: [T, string][];
+  onChange: (value: T) => void;
+  hint?: string;
+}): ReactNode {
+  return (
+    <label className="grid content-start gap-1">
+      <span className="font-stencil text-sm text-dust uppercase">{label}</span>
+      <select
+        value={String(value)}
+        disabled={hint !== undefined}
+        onChange={(e) => {
+          const found = options.find(([v]) => String(v) === e.target.value);
+          if (found) onChange(found[0]);
+        }}
+        className={`${field} disabled:opacity-50`}
+      >
+        {options.map(([v, text]) => (
+          <option key={String(v)} value={String(v)}>
+            {text}
+          </option>
+        ))}
+      </select>
+      {hint && <span className="text-xs text-dust">{hint}</span>}
+    </label>
   );
 }

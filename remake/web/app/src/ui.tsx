@@ -49,29 +49,20 @@ export function Emblem({ side, className = "" }: { side: Side; className?: strin
   );
 }
 
-export function Ping({ ms }: { ms: number }) {
-  const color = ms < 60 ? "bg-go" : ms < 150 ? "bg-acorn" : "bg-tediz";
-  return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap tabular-nums">
-      <span aria-hidden className={`size-2 rounded-full ${color}`} />
-      {ms} ms
-    </span>
-  );
-}
-
 const STATUS: Record<Status, [label: string, style: string]> = {
-  open: ["Open", "bg-go/15 text-go"],
-  full: ["Full", "bg-dust/15 text-dust"],
-  "in-game": ["In game", "bg-acorn/15 text-acorn"],
+  starting: ["Starting", "bg-acorn/15 text-acorn"],
+  running: ["Running", "bg-go/15 text-go"],
+  exited: ["Exited", "bg-dust/15 text-dust"],
 };
 
-export function StatusBadge({ status }: { status: Status }) {
+export function StatusBadge({ status, code }: { status: Status; code: number | null }) {
   const [label, style] = STATUS[status];
   return (
     <span
       className={`rounded-md px-2 py-0.5 font-stencil text-xs whitespace-nowrap uppercase ${style}`}
     >
       {label}
+      {status === "exited" && code !== null && ` (${code})`}
     </span>
   );
 }

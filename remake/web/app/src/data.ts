@@ -1,209 +1,111 @@
-// The server browser's and the lobby's data. Mock for now, shaped like the endpoints that will serve
-// it later (a server list, then each server's lobby). Only "This machine" is real: the game server on
-// this page's host, which play.html connects to.
+// The server browser's and the lobby's data: the game servers the dev web server (`server.ts`,
+// `bun run serve`) started, from its /api/servers. server.ts validates against the tables below, so
+// this module touches no browser global when it loads.
 
 export type Side = "squirrels" | "tediz";
-export type Status = "open" | "full" | "in-game";
 
-export interface Server {
-  id: string;
+export type Mode = "deathmatch" | "total-war";
+/** `conker-server --mode`; `kills`: whether the mode has a kill limit. */
+export const MODES: Record<Mode, { name: string; kills: boolean }> = {
+  deathmatch: { name: "Deathmatch", kills: true },
+  "total-war": { name: "War: Total War", kills: false },
+};
+
+export type MapId = "2d" | "30" | "34" | "3f";
+/** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
+export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
+  "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
+  "30": { name: "Colors 0x30", modes: ["deathmatch"] },
+  "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
+  "3f": { name: "Temple 0x3F", modes: ["deathmatch"], note: "The bots are cavemen on this map." },
+};
+
+/** The bots' skill (`--skill`), as the original's SET-UP screen names them. */
+export const SKILLS = ["inbred", "crap", "normal", "bastard", "einstein"] as const;
+export type Skill = (typeof SKILLS)[number];
+
+export interface Settings {
+  /** 0-15. */
+  bots: number;
+  skill: Skill;
+  /** Minutes on the clock, 3-10, or none. */
+  time: number | "unlimited";
+  /** 1-5, each player's lives: only without a clock. */
+  lives: number;
+  /** 0-10, the kill limit (0: none): only in modes that have one. */
+  kills: number;
+  radar: boolean;
+}
+
+/** What POST /api/servers takes. */
+export interface NewServer {
   name: string;
-  region: string;
-  /** host:port, as play.html's `server` option takes it. */
+  map: MapId;
+  mode: Mode;
+  settings: Settings;
+}
+
+export type Status = "starting" | "running" | "exited";
+
+/** What GET /api/servers lists. */
+export interface GameServer extends NewServer {
+  id: string;
+  /** The game port (WebTransport and WebSocket); its /token and /info are on port + 1. */
+  port: number;
+  /** host:port, as play.html's `server` option takes it (the host this page was loaded from). */
   address: string;
-  map: string;
-  mode: string;
-  players: number;
-  maxPlayers: number;
-  /** Round trip, ms. */
-  ping: number;
+  /** The WebTransport certificate's SHA-256 (play.html's `digest`): a new one per start. */
+  digest: string;
   status: Status;
+  /** The exit code once exited (128 + the signal's number when killed). */
+  code: number | null;
+  /** ISO time. */
+  started: string;
+  /** The game server's own /info, when it answered. */
+  info?: { map: string; protocol: number };
 }
 
-export interface LobbyPlayer {
-  id: string;
-  name: string;
-  side: Side;
-  ready: boolean;
-  ping: number;
-  host: boolean;
-}
-
-export interface ChatMessage {
-  id: string;
-  from: string;
-  side?: Side;
-  text: string;
-}
-
-export interface Lobby {
-  server: Server;
-  players: LobbyPlayer[];
-  chat: ChatMessage[];
-}
-
-/** The game server's default port (conker-server --port). */
-const GAME_PORT = 5888;
-
-// The landing's own ?server=host:port moves "This machine" (e.g. a server started on another port).
-const localAddress =
-  new URLSearchParams(location.search).get("server") ?? `${location.hostname}:${GAME_PORT}`;
-
-const MAP = "Arena 0x2D";
-const MODE = "Deathmatch";
-
-const MOCK_SERVERS: Omit<Server, "map" | "mode">[] = [
-  {
-    id: "acorn-front",
-    name: "Acorn Front",
-    region: "EU West",
-    address: "eu-west.conker.example:5888",
-    players: 5,
-    maxPlayers: 8,
-    ping: 34,
-    status: "open",
-  },
-  {
-    id: "shc-hq",
-    name: "Squirrel High Command",
-    region: "EU Central",
-    address: "eu-central.conker.example:5888",
-    players: 8,
-    maxPlayers: 8,
-    ping: 41,
-    status: "full",
-  },
-  {
-    id: "tediz-bunker",
-    name: "Tediz Bunker",
-    region: "EU Central",
-    address: "eu-central-2.conker.example:5888",
-    players: 6,
-    maxPlayers: 8,
-    ping: 47,
-    status: "in-game",
-  },
-  {
-    id: "bad-fur-night",
-    name: "Bad Fur Night",
-    region: "US East",
-    address: "us-east.conker.example:5888",
-    players: 3,
-    maxPlayers: 8,
-    ping: 92,
-    status: "open",
-  },
-  {
-    id: "total-war",
-    name: "Total War 24/7",
-    region: "US West",
-    address: "us-west.conker.example:5888",
-    players: 7,
-    maxPlayers: 8,
-    ping: 148,
-    status: "in-game",
-  },
-  {
-    id: "rookies",
-    name: "Rookies Only (be nice)",
-    region: "US East",
-    address: "us-east-2.conker.example:5888",
-    players: 1,
-    maxPlayers: 4,
-    ping: 101,
-    status: "open",
-  },
-  {
-    id: "beach-landing",
-    name: "Beach Landing",
-    region: "South America",
-    address: "sa-east.conker.example:5888",
-    players: 4,
-    maxPlayers: 4,
-    ping: 186,
-    status: "full",
-  },
-  {
-    id: "panther-table",
-    name: "The Panther King's Table",
-    region: "Asia",
-    address: "ap-east.conker.example:5888",
-    players: 2,
-    maxPlayers: 8,
-    ping: 231,
-    status: "open",
-  },
-  {
-    id: "cheese-run",
-    name: "Great Mighty Cheese Run",
-    region: "Oceania",
-    address: "au-east.conker.example:5888",
-    players: 5,
-    maxPlayers: 8,
-    ping: 274,
-    status: "in-game",
-  },
-];
-
-const NAMES = [
-  "AcornHoarder",
-  "Sgt. Nutz",
-  "TeddyKruger",
-  "BushyTail",
-  "StuffingSpiller",
-  "PawsOfFury",
-  "Bolt99",
-  "FurBall",
-  "Private Pecan",
-  "GrizzlyBizness",
-];
-
-const CHAT = [
-  "who took the sniper rifle again",
-  "Tediz never die, we just respawn",
-  "cook it longer next time",
-  "gg last round",
-];
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const jitter = (ms: number) => Math.max(1, Math.round(ms * (0.85 + Math.random() * 0.3)));
-
-export async function listServers(): Promise<Server[]> {
-  await wait(250);
-  const local: Server = {
-    id: "local",
-    name: "This machine",
-    region: "Local",
-    address: localAddress,
-    map: MAP,
-    mode: MODE,
-    players: 0,
-    maxPlayers: 8,
-    ping: 1,
-    status: "open",
-  };
-  return [
-    local,
-    ...MOCK_SERVERS.map((s) => ({ ...s, map: MAP, mode: MODE, ping: jitter(s.ping) })),
+/** The settings that apply to this server's mode, as label and value. */
+export function settingRows({ mode, settings: s }: NewServer): [string, string][] {
+  const rows: [string, string][] = [
+    ["Bots", s.bots ? `${s.bots}, ${s.skill}` : "none"],
+    ["Time", s.time === "unlimited" ? "unlimited" : `${s.time} min`],
   ];
+  if (s.time === "unlimited") rows.push(["Lives", String(s.lives)]);
+  if (MODES[mode].kills) rows.push(["Kill limit", s.kills ? String(s.kills) : "none"]);
+  rows.push(["Radar", s.radar ? "on" : "off"]);
+  return rows;
 }
 
-export async function getLobby(serverId: string): Promise<Lobby | undefined> {
-  const server = (await listServers()).find((s) => s.id === serverId);
-  if (!server) return undefined;
-  const seed = serverId.length;
-  // "This machine" has no lobby service yet: only you (its bots join in the match itself).
-  const count = server.id === "local" ? 0 : Math.min(server.players, NAMES.length);
-  const players = Array.from({ length: count }, (_, i): LobbyPlayer => ({
-    id: `p${i}`,
-    name: NAMES[(i + seed) % NAMES.length],
-    side: i % 2 ? "tediz" : "squirrels",
-    ready: i % 3 !== 2,
-    ping: server.ping + ((i * 13) % 40),
-    host: i === 0,
-  }));
-  const chat = players
-    .slice(0, CHAT.length)
-    .map((p, i): ChatMessage => ({ id: `m${i}`, from: p.name, side: p.side, text: CHAT[i] }));
-  return { server, players, chat };
+/** The servers, or null on a site without the dev web server (a plain static server). */
+export async function listServers(): Promise<GameServer[] | null> {
+  const res = await fetch("api/servers", { cache: "no-store" }).catch(() => null);
+  if (!res?.ok || !res.headers.get("content-type")?.includes("json")) return null;
+  return (await res.json()) as GameServer[];
+}
+
+export async function getServer(id: string): Promise<GameServer | undefined> {
+  return (await listServers())?.find((s) => s.id === id);
+}
+
+async function send(path: string, init: RequestInit): Promise<Response> {
+  const res = await fetch(path, init);
+  if (res.ok) return res;
+  const body = (await res.json().catch(() => null)) as { error?: string } | null;
+  throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+}
+
+/** Starts a game server; resolves once it is listening. */
+export async function createServer(server: NewServer): Promise<GameServer> {
+  const res = await send("api/servers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(server),
+  });
+  return (await res.json()) as GameServer;
+}
+
+/** Kills a game server (or clears an exited one). */
+export async function killServer(id: string): Promise<void> {
+  await send(`api/servers/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

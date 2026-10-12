@@ -19,7 +19,8 @@ cd remake/web/app
 bun install
 bun run build    # -> web/index.html + web/landing/ (gitignored), next to play.html, dist/ and assets/
 bun run check    # typecheck (tsc) + lint (oxlint with the react and jsx-a11y rules) + format check (oxfmt)
-bun run dev      # Vite on :5173 for UI work; play.html, play.js, dist/ and assets/ come from the static server on :8080
+bun run dev      # Vite on :5173 for UI work; play.html, play.js, dist/, assets/ and /api/ come from `bun run serve` on :8080
+bun run serve    # the dev web server (below): web/ on :8080, and the game servers the landing starts
 ```
 
 Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDir: false`; `bun run build` clears
@@ -28,36 +29,71 @@ Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDi
 | URL | Screen |
 |---|---|
 | `/#/` | Home: the pitch, "Join game", and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
-| `/#/servers` | The server browser: name, region, map, mode, players, ping, status (open, full, in game); search, sort (ping, players, name), refresh. "This machine" stays on top; a full server can't be opened |
-| `/#/lobby/ID` | The lobby: the server's name, address, map, mode, region, players and ping; the players in two columns (Squirrels, the good guys; Tediz, the bad guys) with ready, ping and the host's badge; your name, side and connection (WebTransport or WebSocket); a ready toggle; a chat; "Join game" |
+| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited). Under the list, "Create server": name, map, mode (the map's own), bots 0-15, bot skill, time (3-10 min or unlimited), lives (only with unlimited time), kill limit (none in Total War), radar; "Run" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
+| `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings; your side and connection (WebTransport or WebSocket); "Join game" (running servers only) |
 
-**Mock and real.** `app/src/data.ts` holds the data: `listServers()` and `getLobby(id)`, async functions returning mock
-data, shaped for a server-list endpoint and a per-server lobby endpoint. The other servers, the lobby's players, ready
-states, pings and chat are mock, and nothing is sent anywhere. One entry is real: "This machine", the game server on this
-page's host at its default port 5888 (`localhost:5888` in dev, `DOMAIN:5888` in production), so Home → Join game → This
-machine → Join game reaches a match.
+**Real data only.** `app/src/data.ts` holds the maps and the modes each plays (`MAPS`: a new mode, e.g. Colors on 30,
+goes into its maps' lists; `MODES` says whether it has a kill limit), the bot skills, and the calls to the dev web server's
+`/api/servers`; `server.ts` validates against the same tables. No mock is left: no made-up servers, regions, player counts,
+pings, lobby players, ready states or chat. The lobby's player columns, ready toggle, chat and name field went with them
+(nothing real could fill them: the game server has no lobby service, and the client takes no name). "This machine" (this
+host's port 5888) is gone from the list too: a game server started by hand is reached with `play.html?server=HOST:PORT`.
 
 **URL contract.**
-- The lobby's "Join game" opens `play.html?server=HOST:PORT&transport=wt|ws&side=squirrels|tediz` (URL-encoded:
-  `server=localhost%3A5888`; the client decodes it). The game page hands its URL to the client unchanged, and the client
-  rejects any option it does not know (table below). `side` is new: until the client knows it, the game page says
-  `Could not start: unknown option side`.
-- The landing's own `?server=HOST:PORT`, before the `#`, moves "This machine", e.g.
-  `http://localhost:8080/?server=localhost:5971#/servers` for a server started with `--port 5971`.
-- Your name and the ready toggle stay in the landing: the client has no option for them yet.
+- The lobby's "Join game" opens `play.html?server=HOST:PORT&transport=wt|ws&side=squirrels|tediz&digest=HEX` (URL-encoded:
+  `server=localhost%3A5900`; the client decodes it). `digest` is that server's WebTransport certificate hash, from
+  `/api/servers`: several servers run at once, so `dist/digest.txt` (one server's at most) can't serve them all. The game
+  page hands its URL to the client unchanged, and the client rejects any option it does not know (table below).
 
 **Imagery.** Three of the map's textures, fetched at run time from `assets/` (the pack served next to the page; nothing is
 copied into this tree): the Squirrels' "S" banner (`0172`), the Tediz' lightning badge (`0605`) and the brick wall behind
 the title (`0113`), drawn with big pixels. Without the pack the page shows lucide icons (a squirrel, a panda) and a plain
 background instead.
 
-**Tested in Chrome 153** (2026-10-10, the built landing on `http.server`, the debug server with `--bots 2 --port 5971`):
+**Tested in Chrome 153** (2026-10-10, the mock landing before the dev web server, built, on `http.server`, the debug server with `--bots 2 --port 5971`):
 Home → Join game → This machine → Join game opened `play.html?server=localhost%3A5971&transport=wt&side=tediz`, which the
 current `dist/` refuses (`unknown option side`); the same address without `side` connected over WebTransport (HUD up),
 and `transport=ws` over WebSocket, also through Caddy with `deploy/build.sh`'s site layout (cache headers checked). Search,
 sort, refresh, the side picker (arrow keys), ready, chat, a bad lobby id (back to the list), an unknown route and the
 missing pack all behaved; no console errors or warnings on any screen; no horizontal scroll at 390 px. Screenshots, desktop
 (1440 px) and phone (390 px): `../lab/screens/landing/` (outside this tree).
+
+### Dev web server (`bun run serve`)
+
+**A temporary local tool** until game servers are hosted for real, **not for the internet**: it starts processes on
+request and has no authentication, so it listens on loopback only (127.0.0.1 and ::1) unless told otherwise. `app/server.ts`
+(Bun only: `Bun.serve`, no framework, no new runtime dependency):
+
+- Serves `web/` as `python3 -m http.server --directory web` did: `index.html`, `landing/`, `play.html`, `play.js`, `dist/`,
+  `assets/` (through its symlink), with Bun's types (`.wasm` application/wasm, `.gltf` model/gltf+json, `.bin`
+  application/octet-stream, `.wav` audio/x-wav). No `..`, no folder listings.
+- `GET /api/servers`: the game servers it started, each `{id, name, map, mode, settings: {bots, skill, time, lives, kills,
+  radar}, port, address, digest, status, code, started, info}`. `address` is the host the page used plus the port; `status`
+  `starting`, `running` or `exited` (`code`: the exit code, 128 + the signal's number when killed); `started` ISO;
+  `info` the game server's own `/info` (`{"map":"2d","protocol":15}`) when it answers.
+- `POST /api/servers` (`content-type: application/json`, else 415), `{name, map, mode, settings}`: every value is checked
+  against a whitelist (400 otherwise: `total-war` off map 2d, bots over 15, a `$` in the name...). It takes the first even
+  port N of the range whose TCP N and N + 1 are free and runs `conker-server --assets DIR --map M --mode MODE --port N
+  --digest-file TMP/digest.txt --bots B --skill S --time T --lives L --kills K --radar on|off`: an argv array, no shell;
+  stdout and stderr go to `TMP/server.log` (TMP a new temp folder, printed by the dev server). It answers 201 and the
+  record once the game server answers `/info` on N + 1 (it writes the digest just before); if the server exits first or
+  takes over 30 s, 500 with the end of its log.
+- `DELETE /api/servers/ID`: SIGTERM, then SIGKILL after 3 s, its temp folder removed, the record dropped (an exited one is
+  just cleared); 204.
+- A game server that dies on its own stays listed as exited until cleared. Ctrl-C or SIGTERM stops every game server
+  first; a SIGKILL of the dev server leaves them running (`pkill -f release/conker-server`). The list lives in memory.
+
+```sh
+cd remake/web/app
+bun run serve                                     # http://localhost:8080/
+bun run serve --port 8094 --game-ports 5990-5999  # also --server PATH, --assets DIR
+bun run serve --host ::                           # the LAN too: anyone there can start and kill servers (it warns)
+```
+
+Defaults: `--port 8080`, `--host localhost`, `--game-ports 5900-5949` (25 servers), `--server
+../../target-net/release/conker-server` (`CARGO_TARGET_DIR=target-net cargo build --release -p conker-server` from
+`remake/`), `--assets ../../../assets` (the pack next to `remake/`). The game servers listen on every interface (`[::]`)
+as always. The map 0x3F always has caveman bots, so the form has no `--cavemen` switch.
 
 ## Build
 
@@ -112,14 +148,22 @@ ln -s ../../assets web/assets
 (cd web/app && bun install && bun run build)   # the landing (above)
 ```
 
-Then two processes, from `remake/`:
+Then the dev web server ("Dev web server" above), which serves `web/` and runs the game servers the landing asks for
+(Join game, Create server, Run, Lobby, Join game):
+
+```sh
+(cd web/app && bun run serve)   # http://localhost:8080/
+```
+
+The tests below start a game server by hand, from `remake/`, and open `play.html` directly; any static server over `web/`
+works for that (the landing's server list needs the dev web server):
 
 ```sh
 target-net/debug/conker-server --assets ../assets --digest-file web/dist/digest.txt   # ../assets: the default
-python3 -m http.server 8080 --bind :: --directory web   # serve web/, not web/dist/ (:: serves IPv4 and IPv6)
+python3 -m http.server 8080 --bind :: --directory web   # or this: serve web/, not web/dist/ (:: serves IPv4 and IPv6)
 ```
 
-Open <http://localhost:8080/> for the landing (Join game, This machine, Join game) or
+Open <http://localhost:8080/> for the landing (Join game, then Create server or a server's Lobby) or
 <http://localhost:8080/play.html> for the game page, which starts by itself, with a status line while the pack loads. The client
 first asks the game server which map it plays: `GET /info` next to the token endpoint below (`http://localhost:5889/info`,
 `{"map":"2d","protocol":11}`; the server's `--map 2d|30|34|3f`, default `2d`; a client of another protocol stops there and says
@@ -238,7 +282,7 @@ The same pages (the landing's `index.html` and `landing/`, `play.html`, `play.js
 |---|---|---|
 | Bundle | `web/build.sh` into `web/dist/` (`client.js`, `client_bg.wasm`); `bun run build` in `web/app` into `web/index.html` + `web/landing/` | `deploy/build.sh` into `target-net/site/`: `index.html` and `landing/` (the landing), `play.html`, `play.js` (its import rewritten), the client in `v/<content hash>/`, every text file also as `.br` and `.gz` |
 | Asset pack (`/assets/`) | `web/assets`, a symlink to `../assets` (gitignored) | `deploy/pack.sh` uploads a copy with `.br` and `.gz` files to a host folder outside the site; Caddy serves it at `/assets/` (`handle_path`), `no-cache` with an ETag (the pack is editable); the server reads the same folder |
-| Static server | `python3 -m http.server`: no compression (21.8 MB per load), no cache headers | Caddy (`deploy/Caddyfile`): brotli or gzip as the browser asks (4.3 MB), `v/*` and `landing/*` cached a year as `immutable`, the pages and `play.js` `no-cache` (revalidated) |
+| Static server | `bun run serve` (the dev web server; or `python3 -m http.server`): no compression (21.8 MB per load), no cache headers | Caddy (`deploy/Caddyfile`): brotli or gzip as the browser asks (4.3 MB), `v/*` and `landing/*` cached a year as `immutable`, the pages and `play.js` `no-cache` (revalidated) |
 | Page | `http://localhost` | `https://DOMAIN` |
 | Connect token (fetched once the assets loaded), and `/info` (first) | `http://<server host>:<port + 1>/token` and `/info`, the game server's own endpoint (on `[::]`) | `/token` and `/info` on the page's own origin, which Caddy proxies to the game server's endpoint on loopback |
 | Token key | a new random key at each server start | `--token-key FILE`, and `--public` names the addresses the tokens carry (the server checks them) |
@@ -660,7 +704,8 @@ Limits in every browser:
   need `IPV6_V6ONLY` off. The native client's WebTransport binds IPv4 only (lightyear), so native clients reach the
   server over IPv4 with WebTransport, or over either with WebSocket.
 - **Secure context (spec, not tested here):** WebTransport needs a secure context. `http://localhost` and `http://127.0.0.1` are secure
-  contexts; a LAN address such as `http://192.168.1.20:8080` is not, so use `?transport=ws` there.
+  contexts; a LAN address such as `http://192.168.1.20:8080` is not, so use `?transport=ws` there (and `bun run serve --host ::`: it
+  listens on loopback only by default).
 - **Mixed content (spec, not tested here):** plain `ws://` is blocked from an `https://` page. An https page
   uses `wss://` and checks the WebTransport certificate as any site's (no digest): deploying with a real
   certificate is `../deploy/README.md` (wave 6).

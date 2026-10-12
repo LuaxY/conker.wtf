@@ -14,7 +14,7 @@ import {
 import { MotionConfig } from "motion/react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { getLobby, listServers } from "./data";
+import { getServer, listServers } from "./data";
 import { Home } from "./Home";
 import { Lobby } from "./Lobby";
 import { Servers } from "./Servers";
@@ -76,18 +76,16 @@ const routes = [
   createRoute({
     getParentRoute: () => root,
     path: "/lobby/$serverId",
-    // A fresh lobby (ready, chat) per server.
-    remountDeps: ({ params }) => params.serverId,
     loader: async ({ params }) => {
-      const lobby = await getLobby(params.serverId);
-      if (!lobby) throw redirect({ to: "/servers" });
-      return lobby;
+      const server = await getServer(params.serverId);
+      if (!server) throw redirect({ to: "/servers" });
+      return server;
     },
     component: Lobby,
   }),
 ] as const;
 
-// Hash URLs (/#/servers, /#/lobby/local): any static server serves them, no fallback needed.
+// Hash URLs (/#/servers, /#/lobby/1): any static server serves them, no fallback needed.
 const router = createRouter({ routeTree: root.addChildren(routes), history: createHashHistory() });
 
 declare module "@tanstack/react-router" {

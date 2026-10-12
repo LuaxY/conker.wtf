@@ -8,6 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: "./",
   build: { outDir: "..", emptyOutDir: false, assetsDir: "landing" },
-  // `bun run dev`: the game page, the client and the asset pack come from the static server.
-  server: { proxy: { "^/(play\\.(html|js)|dist/|assets/)": "http://localhost:8080" } },
+  // `bun run dev`: the game page, the client, the asset pack and the server list come from the dev
+  // web server (`bun run serve`, :8080).
+  server: { proxy: { "^/(play\\.(html|js)|dist/|assets/|api/)": "http://localhost:8080" } },
 });
