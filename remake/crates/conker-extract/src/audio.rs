@@ -269,6 +269,43 @@ pub fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
     out
 }
 
+/// An MP3 stream (bank 0x16's voice lines: MPEG-2 layer III, 22050 Hz mono) as a mono WAV
+/// ([`wav`]), decoded with symphonia.
+pub fn mp3_wav(mp3: &[u8]) -> Result<Vec<u8>> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::errors::Error as Decode;
+    use symphonia::core::io::MediaSourceStream;
+    let source = MediaSourceStream::new(Box::new(std::io::Cursor::new(mp3.to_vec())), default());
+    let mut hint = symphonia::core::probe::Hint::new();
+    hint.with_extension("mp3");
+    let probed = symphonia::default::get_probe().format(&hint, source, &default(), &default())?;
+    let mut format = probed.format;
+    let track = format.default_track().context("an MP3 without a track")?;
+    let (id, rate) = (track.id, track.codec_params.sample_rate.context("no rate")?);
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &default())?;
+    let mut samples = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(Decode::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        };
+        if packet.track_id() != id {
+            continue;
+        }
+        let decoded = decoder.decode(&packet)?;
+        ensure!(decoded.spec().channels.count() == 1, "a mono voice");
+        let mut buf = SampleBuffer::<i16>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        samples.extend_from_slice(buf.samples());
+    }
+    Ok(wav(&samples, rate))
+}
+
+fn default<T: Default>() -> T {
+    T::default()
+}
+
 /// Reads a mono 16-bit PCM WAV file back: its rate and samples (the pack test's round trip).
 pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
     ensure!(

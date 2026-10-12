@@ -17,6 +17,8 @@ conker-assets = { path = "../conker-assets" }
 conker-rules = { path = "../conker-rules" }
 # `pack`: the scene's AI script (`conker_bots::script`).
 conker-bots = { path = "../conker-bots" }
+# `pack`: War: Total War's outro voice lines (bank 0x16's MP3s) to WAV, pure Rust.
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
 gltf-json.workspace = true

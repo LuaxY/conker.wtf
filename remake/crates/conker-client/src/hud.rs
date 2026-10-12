@@ -26,6 +26,7 @@ use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
     Align, Anchor, End, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Text, Vertical,
 };
+use conker_assets::outro::Outro;
 use conker_rules::game::{Standing, places, team_places, team_result};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, PeerId, Predicted};
@@ -118,15 +119,55 @@ fn image(p: &Picture) -> (Tex, [f32; 4]) {
     (Tex::Texture(p.texture.clone()), [x, y, x + w, y + h])
 }
 
-/// A line of text: (the glyph index, or a rank suffix) per character.
+/// A line of text: (the glyph index, a rank suffix, or a space) per character.
 enum Item {
     Glyph(usize),
     Suffix(usize),
+    Space,
+}
+
+/// Pixels a space moves the pen (V: the outros' subtitles, "YOU DID"'s U ends at 191, D starts at
+/// 195; the team strip's `" %d"`).
+const SPACE: f32 = 4.0;
+
+/// `line`'s items: its characters with a glyph, and its spaces.
+fn items(hud: &Hud, line: &str) -> Vec<Item> {
+    let glyph = |c: char| hud.font.iter().position(|g| g.ch == c);
+    (line.chars())
+        .filter_map(|c| match c {
+            ' ' => Some(Item::Space),
+            c => glyph(c).map(Item::Glyph),
+        })
+        .collect()
+}
+
+/// An item's width as a line is measured: a glyph's width less 1, without its x offset (V: the
+/// outros' lines ending in ".").
+fn measure(hud: &Hud, item: &Item) -> f32 {
+    match item {
+        Item::Glyph(g) => f32::from(hud.font[*g].size[0]) - 1.0,
+        Item::Suffix(_) => f32::from(hud.rank.width),
+        Item::Space => SPACE,
+    }
+}
+
+/// How far an item moves the pen as it is drawn: a glyph past its x offset too (V: the outros'
+/// "DON'T", the ' at 212 and the T at 214).
+fn advance(hud: &Hud, item: &Item) -> f32 {
+    match item {
+        Item::Glyph(g) => f32::from(hud.font[*g].offset[0]) + measure(hud, item),
+        Item::Suffix(_) => f32::from(hud.rank.advance),
+        Item::Space => SPACE,
+    }
+}
+
+/// `line`'s measured width.
+fn width(hud: &Hud, line: &str) -> f32 {
+    items(hud, line).iter().map(|i| measure(hud, i)).sum()
 }
 
 fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<Sprite> {
-    let glyph = |c: char| hud.font.iter().position(|g| g.ch == c);
-    let mut items: Vec<Item> = line.chars().filter_map(glyph).map(Item::Glyph).collect();
+    let mut items = items(hud, line);
     if let Some(s) = suffix {
         // The rank: "(1" suffix ")", or "1" suffix.
         let close = line.ends_with(')').then(|| items.pop()).flatten();
@@ -134,16 +175,7 @@ fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<S
         items.extend(close);
     }
     let rank = &hud.rank;
-    let advance = |i: &Item| match i {
-        Item::Glyph(g) => f32::from(hud.font[*g].size[0]) - 1.0,
-        Item::Suffix(_) => f32::from(rank.advance),
-    };
-    let width: f32 = (items.iter())
-        .map(|i| match i {
-            Item::Suffix(_) => f32::from(rank.width),
-            _ => advance(i),
-        })
-        .sum();
+    let width: f32 = items.iter().map(|i| measure(hud, i)).sum();
     let [x, top] = t.at.map(f32::from);
     let mut pen = match t.align {
         Align::Left => x,
@@ -152,6 +184,10 @@ fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<S
     let mut out = Vec::new();
     for item in &items {
         let (tex, uv, rect) = match item {
+            Item::Space => {
+                pen += SPACE;
+                continue;
+            }
             Item::Glyph(g) => {
                 let glyph = &hud.font[*g];
                 let [w, h] = glyph.size.map(f32::from);
@@ -186,7 +222,7 @@ fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<S
             colour: t.colour,
             z,
         });
-        pen += advance(item);
+        pen += advance(hud, item);
     }
     out
 }
@@ -425,6 +461,48 @@ fn haze(h: &Haze, k: u32) -> Vec<Sprite> {
             }
         })
         .collect()
+}
+
+/// A Total War outro's picture at `t` ([`Outro`]), in place of the HUD: its fade over the whole
+/// view, and the page shown in its speech bubble (its quads, then the lines upper case in black,
+/// left-aligned in a block centred on the text's x, 12 apart around its middle line's top).
+pub fn outro(hud: &Hud, o: &Outro, t: f32) -> Vec<Sprite> {
+    let far = 10_000.0;
+    let [r, g, b] = o.fade.rgb;
+    let whole = [-far, -far, 2.0 * far, 2.0 * far];
+    let centre = Anchor(Horizontal::Centre, Vertical::Middle);
+    let mut out = vec![solid(whole, centre, [r, g, b, o.fade(t)], 9.0)];
+    let (s, Some(page)) = (&o.subtitles, o.page(t)) else {
+        return out;
+    };
+    for (n, q) in s.quads.iter().enumerate() {
+        out.push(Sprite {
+            tex: Tex::Texture(q.texture.clone()),
+            uv: q.uv,
+            rect: q.rect.map(f32::from),
+            anchor: s.anchor,
+            colour: q.colour,
+            z: 5.0 + 0.1 * n as f32,
+        });
+    }
+    let lines: Vec<String> = page.lines.iter().map(|l| l.to_uppercase()).collect();
+    let widest = lines.iter().map(|l| width(hud, l)).fold(0.0, f32::max);
+    let [x, y] = s.text.map(f32::from);
+    let first = y - 6.0 * (lines.len() - 1) as f32;
+    for (n, line) in lines.iter().enumerate() {
+        let t = Text {
+            anchor: s.anchor,
+            at: [
+                (x - (widest / 2.0).ceil()) as i16,
+                (first + 12.0 * n as f32) as i16,
+            ],
+            align: Align::Left,
+            colour: [0, 0, 0, 255],
+            shadow: None,
+        };
+        out.extend(text(hud, line, None, &t, 6.0));
+    }
+    out
 }
 
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
@@ -812,6 +890,7 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
+    (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: Local<HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>>,
@@ -829,15 +908,21 @@ fn draw(
     if *status != NetStatus::Connected {
         return;
     }
-    let mut shown = shown(&a.hud, own, &everyone, m);
-    if m.phase == 2 {
-        let all: Vec<_> = (roster.iter())
-            .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
-            .collect();
-        shown.results = Some((rows(&all, m.kill_limit, m.total_war), menu.choice));
-        shown.header = m.total_war.then(|| header(&all, own.1.team));
-    }
-    for s in sprites(&a.hud, &shown) {
+    let quads = match playing.running(&outros) {
+        Some((o, k)) => outro(&a.hud, o, o.t(k)),
+        None => {
+            let mut shown = shown(&a.hud, own, &everyone, m);
+            if m.phase == 2 {
+                let all: Vec<_> = (roster.iter())
+                    .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
+                    .collect();
+                shown.results = Some((rows(&all, m.kill_limit, m.total_war), menu.choice));
+                shown.header = m.total_war.then(|| header(&all, own.1.team));
+            }
+            sprites(&a.hud, &shown)
+        }
+    };
+    for s in quads {
         let key = (s.tex.clone(), s.uv.map(f32::to_bits), s.colour);
         let material = cache.entry(key).or_insert_with(|| {
             let (texture, size) = match &s.tex {
@@ -886,12 +971,16 @@ fn draw(
 mod tests {
     use super::*;
 
-    /// The pack's HUD (env `CONKER_ASSETS`, else `<repo>/assets`); None (the test skips) without
-    /// one.
-    fn pack_hud() -> Option<Hud> {
+    /// The pack: env `CONKER_ASSETS`, else `<repo>/assets`.
+    fn pack_dir() -> std::path::PathBuf {
         let dir = std::env::var("CONKER_ASSETS")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
-        let dir = std::path::PathBuf::from(dir);
+        dir.into()
+    }
+
+    /// The pack's HUD; None (the test skips) without one.
+    fn pack_hud() -> Option<Hud> {
+        let dir = pack_dir();
         let mut hud = Hud::load(|p| std::fs::read(dir.join(p))).ok();
         if let Some(h) = &mut hud {
             h.end = End::load(|p| std::fs::read(dir.join(p))).ok();
@@ -1413,5 +1502,59 @@ mod tests {
                 vec![]
             )
         );
+    }
+
+    /// The outros' pages against the original's draws (`lab/research/mp-original/
+    /// total-war-outro-scratch/hw/cs*b_dl_*`, one capture a page: its I8 glyph rects): every glyph
+    /// where the original drew it, but on cs4's first page, whose last two lines the original draws
+    /// a pixel higher (open).
+    #[test]
+    fn outro_subtitles_match_the_originals_draws() {
+        let hw = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../lab/research/mp-original/total-war-outro-scratch/hw"
+        );
+        let outros = std::fs::read(pack_dir().join("maps/2d/outros.json"));
+        let (Some(hud), Ok(outros)) = (pack_hud(), outros) else {
+            eprintln!("no pack outros: skipping");
+            return;
+        };
+        let outros: Vec<Outro> = serde_json::from_slice(&outros).unwrap();
+        let sorted = |mut r: Vec<[f32; 4]>| {
+            r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            r
+        };
+        for (o, reads) in outros
+            .iter()
+            .zip([[482, 560, 650, 760], [470, 600, 700, 800]])
+        {
+            for (n, (page, read)) in o.subtitles.pages.iter().zip(reads).enumerate() {
+                let file = format!("{hw}/cs{}b_dl_{read}/draws.json", o.cutscene);
+                let Ok(draws) = std::fs::read(&file) else {
+                    eprintln!("no {file}: skipping");
+                    return;
+                };
+                let draws: Vec<serde_json::Value> = serde_json::from_slice(&draws).unwrap();
+                let want = (draws.iter()).filter(|d| d["format"] == "I8").map(|d| {
+                    let r: [f32; 4] = serde_json::from_value(d["rect"].clone()).unwrap();
+                    match (o.cutscene, n, r[1] > 25.0) {
+                        (4, 0, true) => [r[0], r[1] + 1.0, r[2], r[3] + 1.0],
+                        _ => r,
+                    }
+                });
+                let got = (outro(&hud, o, f32::from(page.t)).into_iter())
+                    .filter(|q| matches!(q.tex, Tex::Glyph(_)) && q.colour == [0, 0, 0, 255])
+                    .map(|q| {
+                        [
+                            q.rect[0],
+                            q.rect[1],
+                            q.rect[0] + q.rect[2],
+                            q.rect[1] + q.rect[3],
+                        ]
+                    });
+                let page = format!("cutscene {} page {n}", o.cutscene);
+                assert_eq!(sorted(got.collect()), sorted(want.collect()), "{page}");
+            }
+        }
     }
 }

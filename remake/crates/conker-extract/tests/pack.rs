@@ -397,7 +397,8 @@ fn pack_refuses_to_overwrite_or_to_write_in_the_source_tree() {
 
 /// The pack's sound (`audio/`): `Audio::load` reads it back; every WAV it names is there and holds
 /// the bank's sound decoded sample for sample at the bank's rate, with its loop, volume and pan;
-/// no other file is under `audio/`; and the event map holds what the oracle's sound calls showed.
+/// no other file is under `audio/` but the outros' voices; and the event map holds what the
+/// oracle's sound calls showed.
 #[test]
 fn pack_audio_reads_back() {
     use conker_assets::audio::{Audio, Channel, ClipAction, On};
@@ -478,6 +479,10 @@ fn pack_audio_reads_back() {
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
+    // War: Total War's outro voices (`maps/2d/outros.json`).
+    let outros: Vec<conker_assets::outro::Outro> =
+        serde_json::from_slice(files["maps/2d/outros.json"]).unwrap();
+    listed.extend(outros.iter().map(|o| format!("audio/{}", o.voice.file)));
     // Scene 0x30's own surface kind 0x11, 0x34's 6 and 0xE and 0x3F's 7 have footsteps; 0x2D's
     // bubbles are the only emitters; 0x34's and 0x3F's backgrounds are other sequences.
     for kind in [0x11, 6, 0xE, 7] {

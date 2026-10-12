@@ -1,5 +1,45 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Total War, part 6: the victory outros (2026-10-12)
+**When Total War ends, the winning team's cutscene now plays before the STATS: cs2 (0x2D/2) if the squirrels
+win, cs4 (0x2D/4) if the Tediz win, none on a DRAW. Each one has the original's camera path, its one actor
+looping its clip, the fade from black, the speech bubble's pages and the voice line. Players and the HUD are
+hidden. The STATS then come up over the last picture, with the actor still looping. The server's results
+countdown and RESTART votes start after the outro.** `PROTOCOL_ID` unchanged (15): no replicated field was
+added. Both sides compute the outro from `team_result`. Research: `../lab/research/mp-original/total-war-outro.md`.
+
+| Part | What |
+|---|---|
+| Extract | New `outro.rs`. It decodes only what cs2 and cs4 use from `[6, 0x2D, n]`: the 0xFF length; the camera (kind 1) path and channels 10/7/8 (keys `f32, interp, channel, t`, Catmull-Rom for interp 0); the actor (kind 2): its uid's model from bank 0x0E's 0x30-byte records (0x13 → 135, 0x18 → 90), its place and facing (ch7 + 90°), and its op 2 clip with rate 2·ticks / VIs to the next op 2; op 5 b=1 fade (colours 0x80084110); op 7 subtitle pages; op 0x0B voice. It writes `maps/<map>/outros.json`, characters 135 and 90 with just that clip, and `audio/maps/2d/voice-b1.wav` / `voice-b3.wav` (bank 0x16 MP3s decoded by `audio::mp3_wav`, symphonia 0.5 mp3-only, conker-extract only). HUD textures `bubble` 0x1047 and `tail` 0x1049 (IA8, the RAM's 0x8025F250 / 0x8022E320). The bubble quads are the DLs' rects and s/t (steps in 5.10). The manifest lists 135 and 90 |
+| Assets | `outro::{Outro, Camera, Key, Actor, Fade, Voice, Subtitles, Page, Quad}` and `value` (the key curve). `Slice.outros` is the 13th data file. Frame k shows t = min(2k, length), the STATS show at `frames()` = length / 2 |
+| Client | New `outro.rs`. `Playing` (outro, frame) starts the tick the client sees Over in Total War, using `team_result` over the roster's `Combat`. The actors are spawned hidden once (their glTF handle is held for the clip). `show` poses the actor at `clip_time(k)`, hides `Model`s and drives the camera (eye + 400 along yaw/pitch). `hud::outro` draws the fade over the whole view, then the bubble quads and the lines, upper case and black. The text gets spaces (4 px), and the pen now moves the glyph's x offset too (the `'`), while widths are measured without it. `results::menu` waits for the outro. The audio plays the voice flat at `MIX` on its frame (`VOICE − n`), and Over stops only the background |
+| Server | `Game.outros` (frames per winner from the pack). `results_at` = end fade + 1 + the winner's outro (0 on a DRAW or outside Total War). `restart_in` counts from it, and `restart_votes` only takes votes from it |
+| Pack | `../assets`: `README.md` (outros.json, 135/90, voices, bubble/tail, the pen rule), `pack.json`, `hud/hud.json`, `hud/bubble.png`, `hud/tail.png`, `maps/*/outros.json`, `characters/135`, `characters/90`, `audio/maps/2d/voice-b1.wav`, `voice-b3.wav` |
+| Lab | `../lab/screens/total-war/outro.sh squirrels|tediz` (port 5980; the gas ends the match: P1 on its side's canister, warped in at read 1000, the others die at 1300, Over seen at ~1554) |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| Tests (target-net, `CONKER_ROM`, the full line + extract-character) | pass (exit 0, 288 tests). New: conker-extract `outros_follow_the_oracle` checks winners, lengths, models (135 has 40 joints), clips, page times, voices (22050 Hz, 8.81 / 12.24 s ± 0.08), and against `outro_cs{2,4}.csv` at reads 458, 476, 556, 756 and the last: t exact, eye/look-at within 0.05, yaw within 0.001°, actor place/facing/clip/rate exact, clip time within 0.001 tick, and every `fade_cs*.csv` alpha exact. conker-client `outro_subtitles_match_the_originals_draws`: every glyph rect equals the DL's (`hw/cs*b_dl_*`), 7 of 8 pages exact, the 8th as listed below. conker-assets `keys_hold_ease_and_interpolate` and the round trip with an outro. conker-server `the_results_count_down` (Total War: DRAW at once, Tediz win + 400). conker-extract `pack_audio_reads_back` lists the voices |
+| Deathmatch combat replays | output identical to HEAD's (110 lines, `--nocapture`; HEAD from `git archive`) |
+| `cargo fmt --check`; clippy `-D warnings` (10 crates, all targets; conker-client wasm32) | clean |
+| Fresh export (the task's command) vs `../assets` | `diff -r` empty after the copy (983 files) |
+| Browser delivery (read, not run) | the pack is served whole (`web/assets` symlink; Caddy `handle_path /assets/*`), and the page fetches `Slice::files`, which now includes `outros.json`. Bevy loads the glTFs, PNGs and WAVs from the same folder |
+| `outro.sh squirrels` | `outro-squirrels-early.png` (frame ~4): the officer (135) at the squirrels' base, half faded from black. `-bubble.png` (frame 120): page 2 in the bubble at the top right, as the DL sheet. `-stats.png`: SQUIRRELS WIN over the last picture, the clip in another pose |
+| `outro.sh tediz` | `outro-tediz-early.png`: the stitched Tedi (90) before the Tediz' base, fist up, fading in. `-bubble.png` (frame 140): ARE VICTORIOUS ! at the top left. `-stats.png`: TEDIZ WIN over the frozen frame, the Tedi still looping |
+
+Not done or I. On cs4's first page the original draws lines 2-3 one pixel higher than lines are spaced elsewhere (open; the test allows it). The `.` advance with its x offset is unverified, since it always ends a line. Not modelled: the head channels 0-2 (nod and turn), the talk flag (op5 b=0x17), the bubble growing at the open and shrinking at the close, each page's text fading in and out, cs4's attachment set 0x71 (op 0x0D), the STATS fading in (+4·dt), the DLs' two other fill alphas (env 0xD7/0xC7, then 0x17 at t 32; open in the research), and the voice fading out when the STATS are left. The voice's volume (`MIX`) and whether the match music stops are I. The fade blends in linear light, so it reads lighter than the N64's at the same alpha. A client that has never drawn a solid quad (here a player who never died) shows the fade only once Bevy has compiled its pipeline, a few frames in. Lift 0 for 135/90 and their feet on the floor are not visible in any shot (the framing cuts at the knees). The outro restarts on a client that joins during it, and roster changes during Over can change the winner the client computes.
+
+Reported "stuck gas death" (2026-10-12; `../lab/screens/total-war/stuck-gas-death-*.log`: 1 browser squirrel, 1
+headless Tedi, untimed, 1 life, warp at read 1500): not a bug in the rules or the server. That run's own logs show
+the end: the Tedi's HUD lines (the server's replicated `Combat` and `MatchView`) read OUT OF LIVES at t 2339 and MATCH
+OVER at 2395. That is the gas hit at 2142 + 86 + 52 + 55 = 2335, then `END_DELAY` + `FADE`. Clip 0x59 loops, as
+an out player's dead pose does, and the server logs no line at the Over. Native rerun (port 5970, same flags, the
+squirrel placed on canister 0): out at 2199, Over at 2255, both clients log `outro: cutscene 2, 325 frames`. With
+`--wait` the server never starts a next match (by design). The browser was not checked. No code change. New guard
+test conker-rules `a_gas_death_puts_out_or_respawns`: Total War, untimed, a gas `Hit` through `apply`; with 1 life
+the victim is out and the match ends at 193; with 2 lives it respawns at 193. It passes on the current tree. There
+was no fix, so it is a guard, not a regression test.
+
 ## War: Total War, part 5: the gas's look and the mask clips (2026-10-12)
 **A gassed player's view gets the original's green/red scrolling haze (0xE013) from the script's call. During the
 countdown the shelter goes red (0xE016: lamps off, the red light pulsing), and a canister at home and a carrier shine

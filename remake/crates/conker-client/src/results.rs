@@ -1,4 +1,5 @@
-//! The end of a match: the results over the frozen level ([`crate::hud`] draws them), and their
+//! The end of a match: the results over the frozen level ([`crate::hud`] draws them; in War: Total
+//! War after the winner's outro, [`crate::outro`]), and their
 //! menu. RESTART votes for the next match (conker-sim's [`Restart`]: the server starts it once every
 //! human voted, or on its own after its countdown); QUIT leaves: the browser goes back to the
 //! landing page (`index.html`), the native client exits.
@@ -57,10 +58,11 @@ pub fn build(app: &mut App) {
     app.add_systems(FixedUpdate, menu.run_if(not(is_in_rollback)));
 }
 
-/// Over, the local pad drives the menu; playing, the menu waits (fresh, but for the pad: a button
-/// held into the results is no press).
+/// Over (past a Total War outro), the local pad drives the menu; before, the menu waits (fresh, but
+/// for the pad: a button held into the results is no press).
 fn menu(
     game: Query<&MatchView>,
+    (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
     own: Query<&ActionState<Input>, With<InputMarker<Input>>>,
     mut menu: ResMut<Menu>,
     mut senders: Query<&mut MessageSender<Restart>>,
@@ -72,7 +74,10 @@ fn menu(
     let Input {
         buttons, stick_x, ..
     } = input.0;
-    if !game.iter().any(|m| m.phase == 2) {
+    if !game
+        .iter()
+        .any(|m| crate::outro::results(m, &playing, &outros))
+    {
         *menu = Menu::default();
         menu.last = (buttons, stick_x);
         return;

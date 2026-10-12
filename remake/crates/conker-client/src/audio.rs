@@ -10,7 +10,8 @@
 //!   [`hit_weapon`] reads the weapon from the victim's first reaction); the match ([`MatchView`]: a
 //!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
 //!   (its player's [`Combat::carrying`] going on); the grenades in flight (the local fighter
-//!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots.
+//!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
+//!   a Total War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I).
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
 //!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
@@ -64,6 +65,9 @@ pub const MUTE_KEY: KeyCode = KeyCode::KeyM;
 const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
 /// The background's voice id (the game's sound ids start at 1).
 const BACKGROUND: u16 = 0;
+/// War: Total War's outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
+/// sound ids end at 1762).
+const VOICE: u16 = u16::MAX;
 /// Ticks a loop with `ticks` fades out over once they have run (killing bullets' 1278, C
 /// `func_1000EBC4`; the length is I).
 const FADE: u32 = 12;
@@ -892,7 +896,7 @@ impl Sounds {
                 };
                 self.push(cx, v);
             }
-            (2, _) => self.stop(|v| v.flat),
+            (2, _) => self.stop(|v| v.id == BACKGROUND),
             _ => {}
         }
         if m.phase < 2 {
@@ -980,6 +984,7 @@ fn hear(
         Option<&PlayerId>,
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
+    (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
     mut commands: Commands,
 ) {
     let tick = timeline.tick().0;
@@ -1053,6 +1058,32 @@ fn hear(
     }
     s.grenades(&cx, grenades);
     s.match_sounds(&cx, m, &all);
+    if let Some((i, _)) =
+        (playing.0).filter(|&(i, k)| outros.0.get(i).is_some_and(|o| k == o.voice_frame()))
+    {
+        let v = Voice {
+            id: VOICE - i as u16,
+            owner: Owner::World,
+            channel: Channel::Free,
+            tag: None,
+            pos: cx.ear.pos,
+            follows: None,
+            flat: true,
+            volume: 32767.0,
+            own: None,
+            near: 0.0,
+            far: 0.0,
+            base: MIX,
+            speed: 1.0,
+            looped: false,
+            until: None,
+            fade: None,
+            started: tick,
+            stopped: false,
+            control: None,
+        };
+        s.push(&cx, v);
+    }
     let out = output.as_deref().zip(pcms.as_deref());
     s.upkeep(&cx, &all, out);
     s.players = all;
@@ -1085,6 +1116,7 @@ fn open(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pack: Res<Pack>,
+    outros: Res<crate::outro::Outros>,
     assets: Res<AssetServer>,
     mut commands: Commands,
     mut tried: Local<bool>,
@@ -1120,6 +1152,9 @@ fn open(
         .collect();
     if let Some(b) = &pack.background {
         sounds.insert(BACKGROUND, load(&b.file));
+    }
+    for (n, o) in outros.0.iter().enumerate() {
+        sounds.insert(VOICE - n as u16, load(&o.voice.file));
     }
     commands.insert_resource(Output { device, sounds });
 }

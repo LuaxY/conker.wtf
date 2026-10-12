@@ -3596,4 +3596,31 @@ mod tests {
         assert_eq!((d.kills, d.hits, d.suicides), (1, 1, 0));
         assert_eq!((m.players[2].hits, m.players[2].suicides), (0, 0));
     }
+
+    /// The gas's kill ends as any kill, 86 + 52 + 55 frames on: untimed with 1 life the victim is
+    /// out and Total War ends; with a life left it respawns.
+    #[test]
+    fn a_gas_death_puts_out_or_respawns() {
+        for lives in [1, 2] {
+            let (arena, m, w) = duel();
+            let mut m = m.with(Settings {
+                time: None,
+                lives,
+                total_war: true,
+                ..Settings::default()
+            });
+            m.apply(&[Effect::Hit {
+                slot: 1,
+                kind: damage::GAS,
+                attacker: Some(0),
+            }]);
+            let ev = run(&mut m, &arena, &w, 200, |_| 0);
+            let respawn = (ev.iter()).find(|e| matches!(e.1, Event::Respawn { .. }));
+            let end = (m.players[1].out, m.ended_at, respawn.map(|e| e.0));
+            match lives {
+                1 => assert_eq!(end, (2, Some(193), None)),
+                _ => assert_eq!(end, (0, None, Some(193))),
+            }
+        }
+    }
 }

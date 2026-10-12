@@ -18,6 +18,7 @@ pub mod connection;
 pub mod held;
 pub mod hud;
 pub mod lights;
+pub mod outro;
 pub mod render;
 pub mod results;
 pub mod smooth;
@@ -724,6 +725,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
+    outro::build(&mut app, slice.outros.clone());
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     if cfg.headless {
         app.add_plugins((

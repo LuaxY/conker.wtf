@@ -6,7 +6,8 @@
 //! follow camera ([`crate::FollowCamera`]) and a free debug camera. Combat adds the match's bullets,
 //! aimed shots, grenades and rockets (placeholder spheres: the pack has no models for them), hides the level's pickup
 //! models while taken (they are the level glTF's placement nodes); War: Total War adds its props
-//! ([`props_scene`]), shown as the match says. The HUD is [`crate::hud`]'s;
+//! ([`props_scene`]), shown as the match says, and its victory outro ([`crate::outro`]). The HUD is
+//! [`crate::hud`]'s;
 //! [`TEXT_HUD_KEY`] shows the old text readout too ([`crate::hud_text`]; in the browser, the page's
 //! `#hud` element).
 //!
@@ -117,7 +118,7 @@ impl Characters {
 
 /// A player entity that has its model.
 #[derive(Component)]
-struct Model;
+pub(crate) struct Model;
 
 /// A bullet or grenade drawn this frame (respawned every frame from the [`MatchView`]).
 #[derive(Component)]
@@ -248,8 +249,10 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             place_players,
             pose_players.run_if(ready),
             follow_camera,
+            crate::outro::show,
             draw_projectiles,
             add_props.run_if(ready),
+            crate::outro::add_actors.run_if(ready),
             show_pickups,
             toggle_text_hud,
             update_hud,

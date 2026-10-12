@@ -147,13 +147,15 @@ shotgun (0x37). Leftovers:
      team branch, team HUD strip, radar colours, team STATS (part 1); the gas (part 2): the AI script drives it as in
      the game (its natives became effects the server applies), the two canisters (carried at the 0x25 speed, 80%),
      trigger 5's 10 s countdown and HUD digit, the doorways' damage, the gas kill credited to the deliverer, the 6
-     masks, the doors and covers, the gas loop and pickup sounds. Left: the outro cutscenes (2/4), the team screen and
-     BALANCE, a human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, both teams out on
-     one frame; the gas effects 0xE013/0xE016/0xE017 (unknown); the mask put-on/take-off clips 81/78; the canister's
-     3-frame shrink; the prop collision (covers solid, doors not, as in Deathmatch); the kill frame's "1" and the
-     delivery sound; the pickup sound's busy table; the canister and mask fitted by eye (the Tedi's hands unchecked);
-     a carrier can jump; a join or leave mid-match restarts the script (cancels the gas); the bots never carry a
-     canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z` makes a delivery without walking.
+     masks, the doors and covers, the gas loop and pickup sounds; the gas visuals (the gassed haze 0xE013, the
+     shelter's red alarm light and the canisters' green lights, 0xE016/0xE017: the original has no gas cloud), the mask
+     put-on/take-off clips (0x151/0x14E, bank-09 masks #66/#67), the victory outros (cs2 squirrel officer, cs4 stitched
+     Tedi: camera, actor, fade, bubble subtitles, voice, from `[6, 0x2D, 2|4]`). Left: the team screen and BALANCE, a
+     human out of lives taking over a team-mate bot, the forgiven traitor's +0x70 reset, both teams out on one frame;
+     the shelter lighting is an approximation (the level's light table isn't found); overlays (haze, fade) blend in
+     linear light, a little stronger than the N64's; the outro actors' head nods, talk flag, bubble grow and page fades,
+     cs4's attachment; the mask clips cut a turn short; a carrier can jump; a join or leave mid-match restarts the
+     script; the bots never carry a canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z`.
      The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.

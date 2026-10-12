@@ -9,6 +9,7 @@
 
 pub mod audio;
 pub mod hud;
+pub mod outro;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -484,20 +485,26 @@ pub fn map_name(scene: usize) -> String {
 /// The asset pack (`conker-extract pack`): the data files ([`conker_assets::Slice`]) of each map
 /// (the first one also writes the shared files), their levels, the characters
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
-/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`.
+/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D, War: Total
+/// War's outros ([`outro::outros`]): their actors' characters (one clip each) and voice lines.
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
     let caveman = on_tedi_rig(rom, CAVEMAN, &tedi)?;
     let characters = [on_tedi_rig(rom, SQUIRREL_SOLDIER, &tedi)?, tedi, caveman];
     let (held, models, scenes) = held_level(rom)?;
+    let outros = match maps.iter().any(|m| m.scene == SLICE_SCENE) {
+        true => outro::outros(rom)?,
+        false => Vec::new(),
+    };
+    let baked: Vec<_> = outros.iter().map(|o| o.0.clone()).collect();
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();
     let (mut gltfs, mut surfaces, mut summary) = (Vec::new(), BTreeSet::new(), Vec::new());
     let mut data = None;
     for (i, map) in maps.iter().enumerate() {
         let name = map_name(map.scene);
-        let d = pack_data(rom, map.scene, &characters, &held)?;
+        let d = pack_data(rom, map.scene, &characters, &held, &baked)?;
         for (path, bytes) in d.write(&name, &PACK_CHARACTERS, PACK_WEAPONS)? {
             if i == 0 || path.starts_with("maps/") {
                 out.add(path, bytes);
@@ -534,6 +541,16 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
         gltfs.push((assets::character_gltf(name), json, bin, images));
     }
+    for (o, c) in &outros {
+        let g = c.gltf(&textures, true)?;
+        let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
+        gltfs.push((
+            assets::character_gltf(&o.actor.character),
+            json,
+            bin,
+            images,
+        ));
+    }
     gltfs.push((
         assets::held_gltf(PACK_WEAPONS),
         parse(&held_models.json)?,
@@ -568,11 +585,15 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let (hud_files, hud) = hud::pack_hud(rom)?;
     out.files.extend(hud_files);
     out.files.extend(hud::pack_end(rom)?.0);
+    out.files.extend(outro::voices(rom, &baked)?);
+    let outro_characters = baked.iter().map(|o| o.actor.character.clone());
     let manifest = Manifest {
         format: FORMAT,
         source_rom_sha1: US_SHA1.into(),
         maps: maps.iter().map(|m| map_name(m.scene)).collect(),
-        characters: PACK_CHARACTERS.map(String::from).into(),
+        characters: (PACK_CHARACTERS.map(String::from).into_iter())
+            .chain(outro_characters)
+            .collect(),
         weapons: vec![PACK_WEAPONS.into()],
         audio,
         hud: true,
@@ -726,13 +747,14 @@ fn pickup_table(scene: usize) -> Result<(&'static [weapon::Pickup], &'static [[i
 
 /// A map's data from the ROM, as the pack keeps it: what the server and the client read from the
 /// ROM (the collision, spawn records, pickups on their placements or spots, trigger table,
-/// navigation graph, clips, held models, acos table and the bots' scripts), and the sink table and
-/// model lifts they compile in.
+/// navigation graph, clips, held models, acos table and the bots' scripts), the sink table and
+/// model lifts they compile in, and on 0x2D War: Total War's `outros`.
 fn pack_data(
     rom: &Rom,
     scene: usize,
     characters: &[Character],
     held: &[Held],
+    outros: &[assets::outro::Outro],
 ) -> Result<assets::Slice> {
     let placements = scene_placements(rom, scene)?;
     let (pickups, spots) = pickup_table(scene)?;
@@ -780,6 +802,10 @@ fn pack_data(
         triggers: rom.asset(&[0x0C, scene, 5])?.into_owned(),
         nav: rom.asset(&[0x19, scene])?.into_owned(),
         lights: map_lights(scene),
+        outros: match scene {
+            SLICE_SCENE => outros.to_vec(),
+            _ => Vec::new(),
+        },
         ai: rom.asset(&[0x14, conker_bots::script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, 0])?.into_owned(),
         characters: (characters.iter())

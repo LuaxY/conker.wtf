@@ -21,10 +21,11 @@ const CHARS_AT: usize = 0x8008_5930 - GAME_DATA;
 const GLYPHS: usize = 95;
 
 /// (name, blob id, format, width, height, smooth): every texture the HUD draws, loaded as its
-/// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready); the last, War:
-/// Total War's gassed screen's (`func_151D2830`; V: white, alpha 1-7 of 15, equal to the RAM's at
-/// 0x8023B390, `../lab/research/mp-original/total-war-effects.md` §2).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 14] = [
+/// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready); War: Total War's
+/// gassed screen's (`func_151D2830`; V: white, alpha 1-7 of 15, equal to the RAM's at 0x8023B390,
+/// `../lab/research/mp-original/total-war-effects.md` §2); its outros' speech bubble and its tail
+/// (V: equal to the RAM's at 0x8025F250 and 0x8022E320 that the outro's DLs draw, `lab/hud/texfind`).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 16] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -39,6 +40,8 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 14] = [
     ("rank_th", 0x11B7, Format::Rgba16, 16, 16, false),
     ("teams", 0xD10, Format::Rgba32, 32, 32, false),
     ("haze", 0xA48, Format::Ia8, 64, 64, true),
+    ("bubble", 0x1047, Format::Ia8, 64, 64, true),
+    ("tail", 0x1049, Format::Ia8, 16, 16, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):

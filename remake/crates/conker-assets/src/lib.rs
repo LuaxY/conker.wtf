@@ -5,8 +5,8 @@
 //! Layout, relative to the pack root (the pack's own `README.md` documents every file):
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
-//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`; on `2d`, `props.gltf`
-//!   (+ `props.bin`);
+//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
+//!   `outros.json` ([`outro::Outro`]); on `2d`, `props.gltf` (+ `props.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
@@ -20,6 +20,7 @@
 
 pub mod audio;
 pub mod hud;
+pub mod outro;
 
 use std::fmt::Display;
 use std::io::{self, Write};
@@ -286,6 +287,8 @@ pub struct Slice {
     pub nav: Vec<u8>,
     /// `maps/<map>/lights.json`.
     pub lights: Lights,
+    /// `maps/<map>/outros.json`: War: Total War's victory outros (on `2d`; none elsewhere).
+    pub outros: Vec<outro::Outro>,
     /// The characters, in the order [`Slice::load`] was given their folders.
     pub characters: Vec<Character>,
     /// `weapons/<set>/held.json`: glTF scene `i` of the held glTF is `held[i]`.
@@ -302,7 +305,7 @@ pub struct Slice {
 
 /// The data files of a slice, relative to the pack root, in [`Slice::files`] order: the manifest,
 /// the map's five, the weapon set's, the game's two, the map's AI script, the game's class data,
-/// the map's lights, then one per character.
+/// the map's lights and outros, then one per character.
 fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
     let mut files = vec![
         MANIFEST.into(),
@@ -317,6 +320,7 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
         format!("maps/{map}/ai.bin"),
         "game/class.bin".into(),
         format!("maps/{map}/lights.json"),
+        format!("maps/{map}/outros.json"),
     ];
     files.extend(
         characters
@@ -484,9 +488,10 @@ impl Slice {
             ai,
             class,
             lights,
-        ] = &files[..12]
+            outros,
+        ] = &files[..13]
         else {
-            unreachable!("data_files lists 12 files before the characters")
+            unreachable!("data_files lists 13 files before the characters")
         };
         let mut bytes = |file: &str| {
             read(file).map_err(|e| Error::Read {
@@ -555,10 +560,11 @@ impl Slice {
             pickups: parse_json(pickups, &bytes(pickups)?)?,
             triggers: records.iter().flat_map(Trigger::bytes).collect(),
             nav: nav_bytes(&nodes),
-            characters: (files[12..].iter())
+            characters: (files[13..].iter())
                 .map(|f| parse_json(f, &bytes(f)?))
                 .collect::<Result<_>>()?,
             lights: parse_json(lights, &bytes(lights)?)?,
+            outros: parse_json(outros, &bytes(outros)?)?,
             held: parse_json(held, &bytes(held)?)?,
             acos: acos_table,
             sink: parse_json(sink, &bytes(sink)?)?,
@@ -596,10 +602,11 @@ impl Slice {
             ai,
             class,
             lights,
-        ] = files[..12]
+            outros,
+        ] = files[..13]
             .to_vec()
             .try_into()
-            .expect("12 files before the characters");
+            .expect("13 files before the characters");
         let mut runs: Vec<Run> = Vec::new();
         for t in &self.collision {
             let face = Face(t.points, t.surface);
@@ -645,8 +652,9 @@ impl Slice {
             (ai, self.ai.clone()),
             (class, self.class.clone()),
             (lights, to_json(&self.lights, 2)),
+            (outros, to_json(&self.outros, 3)),
         ];
-        let character_files = files[12..].iter().cloned();
+        let character_files = files[13..].iter().cloned();
         out.extend(character_files.zip(self.characters.iter().map(|c| to_json(c, 2))));
         Ok(out)
     }
@@ -886,6 +894,7 @@ mod tests {
                     })
                     .into(),
             },
+            outros: vec![sample_outro()],
             characters: vec![
                 Character {
                     model_lift: 42,
@@ -919,6 +928,56 @@ mod tests {
             sink: std::array::from_fn(|k| [k as i8, -(k as i8), 90]),
             ai: vec![1, 2, 3],
             class: vec![],
+        }
+    }
+
+    fn sample_outro() -> outro::Outro {
+        use outro::*;
+        let key = |t, value, catmull| Key { t, value, catmull };
+        Outro {
+            winner: 1,
+            cutscene: 4,
+            length: 800,
+            camera: Camera {
+                path: [[-2849, -481, 6019], [-2848, -481, 5907]],
+                along: vec![key(0, 0.0, false), key(800, 100.0, false)],
+                yaw: vec![key(0, 64.0, true), key(800, 108.0, true)],
+                pitch: vec![key(1, 12.0, false)],
+            },
+            actor: Actor {
+                character: "90".into(),
+                animation: "pair_0045_anim_0056".into(),
+                ticks: 51,
+                rate: 1.2,
+                at: [-3000, -521, 5948],
+                facing: 182,
+                lift: 0,
+                scale: 0.5,
+            },
+            fade: Fade {
+                rgb: [0; 3],
+                duration: 25,
+            },
+            voice: Voice {
+                t: 30,
+                entry: 0xB3,
+                file: "maps/2d/voice-b3.wav".into(),
+            },
+            subtitles: Subtitles {
+                pages: vec![Page {
+                    t: 16,
+                    lines: vec!["are victorious !".into(), " ".into()],
+                }],
+                close: 745,
+                anchor: hud::Anchor(hud::Horizontal::Left, hud::Vertical::Top),
+                text: [71, 28],
+                quads: vec![Quad {
+                    texture: "bubble".into(),
+                    rect: [124, 1, 173, 57],
+                    uv: [63.0, 0.21875, -0.359375, 62.75],
+                    colour: [255; 4],
+                }],
+            },
         }
     }
 

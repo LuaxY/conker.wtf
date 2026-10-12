@@ -264,3 +264,106 @@ fn sound_bank_decodes() {
     );
     assert!(looped > 0 && worst <= 2, "{looped} loops, worst {worst}");
 }
+
+/// War: Total War's outros against the oracle's frames (`../lab/research/mp-original/
+/// total-war-outro-scratch/outro_cs{2,4}.csv` and `fade_cs{2,4}.csv`, runs cs2a/cs4a: read 457 is
+/// the outro's frame 0, a row the state after its read's frame): the camera's eye and look-at
+/// within 0.05 units, its yaw within 0.001°, the actor's place, facing, clip and rate exact, its
+/// clip time within 0.001 tick, the fade's alpha exact; and the voices' lengths (8.81 s, 12.24 s).
+#[test]
+fn outros_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let outros = conker_extract::outro::outros(&rom).unwrap();
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/total-war-outro-scratch"
+    );
+    let rows = |file: &str| -> Option<Vec<Vec<String>>> {
+        let text = std::fs::read_to_string(format!("{dir}/{file}")).ok()?;
+        Some(
+            text.lines()
+                .skip(1)
+                .map(|l| l.split(',').map(String::from).collect())
+                .collect(),
+        )
+    };
+    let [(cs2, c2), (cs4, c4)] = &outros[..] else {
+        panic!("two outros")
+    };
+    assert_eq!((cs2.winner, cs2.cutscene, cs2.length), (0, 2, 650));
+    assert_eq!((cs4.winner, cs4.cutscene, cs4.length), (1, 4, 800));
+    assert_eq!((c2.entry, c2.model.joints.len(), c4.entry), (135, 40, 90));
+    assert_eq!(cs2.actor.animation, "pair_0000_anim_0000");
+    assert_eq!(cs4.actor.animation, "pair_0045_anim_0056");
+    let pages = |o: &conker_assets::outro::Outro| -> Vec<u16> {
+        o.subtitles.pages.iter().map(|p| p.t).collect()
+    };
+    assert_eq!(
+        (pages(cs2), cs2.subtitles.close),
+        (vec![47, 159, 347, 475], 583)
+    );
+    assert_eq!(
+        (pages(cs4), cs4.subtitles.close),
+        (vec![16, 195, 354, 601], 745)
+    );
+    assert_eq!(cs4.subtitles.pages[0].lines[2], "      bears");
+    assert_eq!(
+        (cs2.voice.t, cs2.voice.entry, cs4.voice.t, cs4.voice.entry),
+        (50, 0xB1, 30, 0xB3)
+    );
+    let voices = conker_extract::outro::voices(&rom, &[cs2.clone(), cs4.clone()]).unwrap();
+    for ((_, wav), secs) in voices.iter().zip([8.81, 12.24]) {
+        let (rate, samples) = conker_extract::audio::read_wav(wav).unwrap();
+        let length = samples.len() as f32 / rate as f32;
+        assert!(
+            rate == 22050 && (length - secs).abs() < 0.08,
+            "{rate} Hz {length} s"
+        );
+    }
+
+    let (Some(..), Some(..)) = (rows("outro_cs2.csv"), rows("fade_cs4.csv")) else {
+        eprintln!("{dir}: no oracle CSVs, skipping the frames");
+        return;
+    };
+    for (o, n) in [(cs2, 2), (cs4, 4)] {
+        let frames = rows(&format!("outro_cs{n}.csv")).unwrap();
+        let last = frames.last().unwrap()[0].parse::<u32>().unwrap();
+        for read in [458, 476, 556, 756, last] {
+            let row = frames.iter().find(|r| r[0] == read.to_string()).unwrap();
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let k = read - 457;
+            let t = o.t(k);
+            assert_eq!(t, f(1), "cs{n} read {read}");
+            let (eye, at) = o.camera(t);
+            for i in 0..3 {
+                assert!(
+                    (eye[i] - f(4 + i)).abs() < 0.05,
+                    "cs{n} read {read}: eye {eye:?}"
+                );
+                assert!(
+                    (at[i] - f(7 + i)).abs() < 0.05,
+                    "cs{n} read {read}: at {at:?}"
+                );
+            }
+            let yaw = conker_assets::outro::value(&o.camera.yaw, t) + 90.0;
+            assert!((yaw - f(10)).abs() < 1e-3, "cs{n} read {read}: yaw {yaw}");
+            let a = &o.actor;
+            assert_eq!(a.at.map(f32::from), [f(17), f(18), f(19)]);
+            assert_eq!(a.facing.to_string(), row[20]);
+            let logical = if n == 2 { "0" } else { "56" };
+            assert_eq!((row[21].as_str(), a.rate), (logical, f(22)));
+            let time = o.clip_time(k);
+            assert!(
+                (time - f(23)).abs() < 1e-3,
+                "cs{n} read {read}: clip {time}"
+            );
+        }
+        for row in rows(&format!("fade_cs{n}.csv")).unwrap() {
+            let read: u32 = row[0].parse().unwrap();
+            if read > 457 {
+                let want: u8 = row[6].parse().unwrap();
+                assert_eq!(o.fade(o.t(read - 457)), want, "cs{n} read {read}");
+            }
+        }
+    }
+}

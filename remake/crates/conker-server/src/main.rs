@@ -110,7 +110,7 @@ use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
-use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE};
+use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, Standing, team_result};
 use conker_rules::gas::Effect;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
@@ -365,6 +365,9 @@ fn main() {
     app.insert_resource(Collision(world));
     let mut game = Game::new(arena, setup);
     game.starts = starts;
+    for o in &pack.outros {
+        game.outros[usize::from(o.winner)] = o.frames();
+    }
     game.cavemen = game.setup.cavemen || scene == 0x3F;
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
@@ -595,6 +598,8 @@ struct Game {
     ai: Ai,
     /// Over, the slots whose human sent [`Restart`].
     votes: BTreeSet<usize>,
+    /// War: Total War: each winning team's outro, in ticks (the pack's `outros.json`; 0 none).
+    outros: [u32; 2],
     /// Scene 0x3F's Deathmatch (scenario 7, V oracle): the bots are cavemen, the humans Tediz, and
     /// every player starts holding item 0x40 ([`Fighter::start`]).
     cavemen: bool,
@@ -619,6 +624,7 @@ impl Game {
                 scene: 0x2D,
             },
             votes: BTreeSet::new(),
+            outros: [0; 2],
             cavemen: false,
         }
     }
@@ -721,13 +727,23 @@ impl Game {
         (t >= start).then(|| self.setup.first_read + (t - start))
     }
 
-    /// Over: ticks before the next match starts anyway ([`RESULTS`] until then).
+    /// The tick the results show from: the end fade's last frame, then in War: Total War the
+    /// winning team's outro (none on a DRAW: `team_result`, as the clients' STATS rank the teams).
+    fn results_at(&self) -> Option<u32> {
+        let m = &self.m;
+        let all: Vec<_> = (m.players.iter().enumerate())
+            .map(|(i, f)| (!m.free.contains(&i)).then(|| Standing::of(f)))
+            .collect();
+        let outro = match m.settings.total_war {
+            true => team_result(&all).map_or(0, |t| self.outros[usize::from(t)]),
+            false => 0,
+        };
+        Some(m.ended_at? + END_DELAY + FADE + 1 + outro)
+    }
+
+    /// Over: ticks before the next match starts anyway ([`RESULTS`] until the results show).
     fn restart_in(&self, t: u32) -> u32 {
-        let over = |e: u32| e + END_DELAY + FADE + 1;
-        let left = self
-            .m
-            .ended_at
-            .map_or(RESULTS, |e| (over(e) + RESULTS).saturating_sub(t));
+        let left = (self.results_at()).map_or(RESULTS, |r| (r + RESULTS).saturating_sub(t));
         left.min(RESULTS)
     }
 
@@ -1064,7 +1080,7 @@ fn on_left(trigger: On<Remove, Slot>, slots: Query<&Slot>, mut game: ResMut<Game
     }
 }
 
-/// Over, a client's RESTART: its player's vote for the next match.
+/// Over, a client's RESTART: its player's vote for the next match, once the results show.
 fn restart_votes(
     mut clients: Query<(Entity, &mut MessageReceiver<Restart>), With<ClientOf>>,
     players: Query<(&Slot, &ControlledBy)>,
@@ -1076,7 +1092,8 @@ fn restart_votes(
             .iter()
             .find(|p| p.1.owner == client)
             .map(|p| p.0.index);
-        if let Some(slot) = slot.filter(|_| voted && game.m.phase() == Phase::Over) {
+        let shown = game.results_at().is_some_and(|r| game.m.tick >= r);
+        if let Some(slot) = slot.filter(|_| voted && shown) {
             game.votes.insert(slot);
             info!("slot {slot} votes to restart");
         }
@@ -1701,6 +1718,22 @@ mod tests {
         assert_eq!(g.restart_in(over), RESULTS);
         assert_eq!(g.restart_in(over + 30), RESULTS - 30);
         assert_eq!(g.restart_in(over + RESULTS + 5), 0);
+        // Total War: after the winner's outro (325 or 400 ticks), none on a DRAW.
+        let mut g = game(Setup {
+            settings: Settings {
+                total_war: true,
+                ..Settings::default()
+            },
+            ..Setup::default()
+        });
+        g.outros = [325, 400];
+        let _ = (g.join_bot(0), g.join_bot(1));
+        g.m.ended_at = Some(100);
+        assert_eq!(g.results_at(), Some(over));
+        g.m.players[1].kills = 1;
+        assert_eq!(g.results_at(), Some(over + 400));
+        assert_eq!(g.restart_in(over + 400 - 30), RESULTS);
+        assert_eq!(g.restart_in(over + 400 + 30), RESULTS - 30);
     }
 
     /// `--public` takes the game port unless it names one; the token endpoint defaults to port + 1.
