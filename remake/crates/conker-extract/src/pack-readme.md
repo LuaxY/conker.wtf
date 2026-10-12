@@ -327,15 +327,16 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   - `handles` [0] the left, [1] the right, as they are, and `lit`, the same handle lit by the
     muzzle flash, crossfaded with them while the gun fires: at rest the handle's alpha is 255 and
     `lit`'s 0; on a shot, on the side that fired, `lit` goes to 0x53 and the handle to 0xAC (their
-    sum stays 255), then `lit` fades out (V: 0x09, then 0x01, a frame apart); that side also drops
+    sum stays 255), then `lit` fades out (V: 0x09, then 0x01, two frames apart); that side also drops
     10-21 pixels (not exported);
   - the zoom bar, as `scope`'s: `back` in `back_colour`, a bar `bar_width` wide from `bar_x`,
-    centred on y 108, in `bar_colour`;
+    centred on y 108, in `bar_colour`; 16 frames after the zoom stops it turns `bar_flash`, then
+    fades back to `bar_colour` over 35 frames;
   - `flash`, after each shot: `image` centred on `centre` for barrel 0 (`joint_05`, at +x: the flash
     on the right, where the right handle drops), mirrored across
     the frame's centre for barrel 1, its size random in `width` × `height`, its alpha random in
-    `alpha`, for a random `life` VIs (2 a frame). It fades over its life (V: alpha 0xF9 one frame, 0
-    the next); the curve is not exported.
+    `alpha`, for a random `life` VIs (2 a frame, from its own): over its last 2 VIs its alpha is at
+    most 0x55 a VI left (V: alpha 0xF9 on its shot's frame, 0 two frames later).
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.

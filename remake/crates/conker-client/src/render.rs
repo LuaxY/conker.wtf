@@ -374,9 +374,10 @@ fn setup_scene(
         Camera3d::default(),
         // ponytail: no tonemapping LUTs in the build (wasm size); N64 colours need none anyway.
         Tonemapping::None,
-        // I: field of view; near/far for a ~70-unit character on a ~13,000-unit map.
+        // The view's vertical angle ([`fov`]); I: near/far for a ~70-unit character on a
+        // ~13,000-unit map.
         Projection::Perspective(PerspectiveProjection {
-            fov: 50f32.to_radians(),
+            fov: conker_camera::VIEW_ANGLES[1].to_radians(),
             near: 4.0,
             far: 40_000.0,
             ..default()
@@ -614,17 +615,37 @@ fn pin_creep_root(players: Query<(&Anim, &Rig)>, mut joints: Query<&mut Transfor
 
 /// The view is the follow camera's: from its view eye to its view look-at point (y up, game units;
 /// the aim camera's lift included); after a correction, the drawn body's camera's
-/// ([`crate::smooth::Drawn::view`]).
+/// ([`crate::smooth::Drawn::view`]). Through a scope its field of view narrows by the zoom
+/// ([`fov`]).
 #[allow(clippy::type_complexity)]
 fn follow_camera(
     player: Query<&FollowCamera>,
-    camera: Single<(&mut Transform, &FreeCameraState), (Without<Model>, Without<Projectile>)>,
+    camera: Single<
+        (&mut Transform, &mut Projection, &FreeCameraState),
+        (Without<Model>, Without<Projectile>),
+    >,
 ) {
-    let (mut camera, free) = camera.into_inner();
+    let (mut camera, mut projection, free) = camera.into_inner();
     if let (false, Ok(follow)) = (free.enabled, player.single()) {
         let (eye, at) = follow.drawn.view(&follow.follow);
         *camera = Transform::from_translation(eye).looking_at(at, Vec3::Y);
+        if let Projection::Perspective(p) = &mut *projection {
+            let fov = fov(&follow.follow.cam.scope).to_radians();
+            if p.fov != fov {
+                p.fov = fov;
+            }
+        }
     }
+}
+
+/// The view's vertical field of view in degrees: the view's angle, plus the zoom through a scope.
+/// Every scope's view (`func_15126378` → `func_1510B128`) is a perspective of the view's angles
+/// (`+0x6C`, `+0x70`) plus the zoom (`cam+0x19C`, `+0x1A0`), and leaving it zeroes the zoom
+/// (`func_15127EB8`) (C; V gcA's projections: 82.42° × 50° unzoomed, 56.04° × 34° at the gun's
+/// zoom −26.37, −16).
+pub fn fov(scope: &conker_camera::Scope) -> f32 {
+    let zoom = if scope.on { scope.zoom[1] } else { 0.0 };
+    conker_camera::VIEW_ANGLES[1] + zoom
 }
 
 /// The match's bullets, aimed shots, grenades and rockets where the server last put them.
@@ -823,6 +844,21 @@ mod tests {
                 "{facing}"
             );
         }
+    }
+
+    /// gcA's projections (`lab/research/mp-original/mounted-gun-scratch/gc`): cot(fovy/2) 2.1445
+    /// unzoomed, 3.2707 at the gun's zoom (−26.373, −16.0) 16 C-up frames in: 50° and 34°.
+    #[test]
+    fn a_scope_narrows_the_view_by_its_zoom() {
+        let mut scope = conker_camera::Scope {
+            on: true,
+            zoom: [-26.373, -26.373 * 50.0 / conker_camera::VIEW_ANGLES[0]],
+            ..default()
+        };
+        let cot = |deg: f32| 1.0 / (deg / 2.0).to_radians().tan();
+        assert!((cot(fov(&scope)) - 3.2707).abs() < 1e-3, "{}", fov(&scope));
+        scope.on = false;
+        assert!((cot(fov(&scope)) - 2.1445).abs() < 1e-3);
     }
 
     #[test]

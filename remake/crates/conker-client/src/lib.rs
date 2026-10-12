@@ -395,6 +395,7 @@ pub fn device_input(
         ),
         (held(&[KeyB]), BUTTON_B),
         (held(&[KeyR]) || clicked(MouseButton::Right), BUTTON_R),
+        (held(&[KeyT]), C_UP),
         (held(&[KeyG]), C_DOWN),
         (held(&[KeyQ]), C_LEFT),
         (held(&[KeyE]), C_RIGHT),
@@ -636,12 +637,13 @@ pub fn hud_text(c: &Combat, m: &MatchView) -> String {
 pub struct Spawns(pub Vec<SpawnPoint>);
 
 /// The match's static data the local player's prediction needs: the spawn records (a predicted
-/// respawn picks one, among its fighter's `spawn_mask`); pickups are the server's.
+/// respawn picks one, among its fighter's `spawn_mask`) and the scene's mounted guns at home (their
+/// bodies push it); pickups are the server's.
 #[derive(Resource, Clone, Debug)]
-pub struct MatchArena(pub Arena);
+pub struct MatchArena(pub Arena, pub Vec<gun::Gun>);
 
 impl MatchArena {
-    pub fn new(spawns: &[SpawnPoint]) -> Self {
+    pub fn new(spawns: &[SpawnPoint], scene: usize) -> Self {
         let spawns = spawns
             .iter()
             .map(|s| Spawn {
@@ -653,10 +655,11 @@ impl MatchArena {
                 b15: s.byte_15,
             })
             .collect();
-        Self(Arena {
+        let arena = Arena {
             spawns,
             pickups: Vec::new(),
-        })
+        };
+        Self(arena, gun::spawn(scene))
     }
 }
 
@@ -724,7 +727,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     let clips: Vec<Clips> = clips.collect();
     app.insert_resource(SideClips(clips.try_into().expect("a character per side")));
     app.insert_resource(Spawns(slice.spawns.clone()));
-    app.insert_resource(MatchArena::new(&slice.spawns));
+    app.insert_resource(MatchArena::new(&slice.spawns, scene.into()));
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
@@ -1089,13 +1092,16 @@ fn own_tick(
     input: &Input,
     others: &Known,
     shown: &[(usize, [f32; 3])],
-    arena: &Arena,
+    arena: &MatchArena,
     world: &CollisionWorld,
 ) -> (Match, usize, Vec<Event>) {
     let slot = usize::from(fighting.slot);
     let bodies = others.iter().map(|o| (o.0, o.1));
     let own = fighting.fighter(*body);
-    let mut m = known_match(tick, slot, own, bodies, &fighting.grenades, arena).with(settings);
+    let mut m = known_match(tick, slot, own, bodies, &fighting.grenades, &arena.0).with(settings);
+    // ponytail: the guns at home, free; a manned gun's state isn't replicated into the prediction,
+    // so walking into one mispredicts a mount until the server corrects it.
+    m.guns = arena.1.clone();
     let mut events = Vec::new();
     if !over && fighting.state.since <= tick {
         let seen = |s: usize, v: usize| {
@@ -1103,7 +1109,7 @@ fn own_tick(
                 .then(|| shown.iter().find(|o| o.0 == v).map(|o| o.1))
                 .flatten()
         };
-        events = m.step_player(slot, arena, input, world, &seen);
+        events = m.step_player(slot, &arena.0, input, world, &seen);
     }
     (m, slot, events)
 }
@@ -1144,7 +1150,7 @@ fn predict(
     let shown: Positions = others.iter().map(|o| (o.0, o.2)).collect();
     for (mut player, mut fighting, input, camera) in &mut own {
         let (mut m, i, events) = own_tick(
-            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
+            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
         );
         let f = &mut m.players[i];
         if let Some(mut camera) = camera {
@@ -1220,7 +1226,7 @@ fn predict_again(
     );
     for (mut player, mut fighting, input, camera) in &mut own {
         let (mut m, i, _) = own_tick(
-            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena.0, &world,
+            tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
         );
         let f = &mut m.players[i];
         if let Some(camera) = camera {
@@ -1535,7 +1541,7 @@ mod tests {
             };
             Fighter::new(&place, 0, 5)
         };
-        let arena = MatchArena::new(&[]).0;
+        let arena = MatchArena::new(&[], 0x2D).0;
         let m = known_match(9, 2, at(2.0), [(0, at(0.0)), (2, at(-1.0))], &[], &arena);
         assert_eq!((m.tick, m.players.len()), (9, 3));
         assert_eq!(m.players[0].body.pos[0], 0.0);

@@ -291,6 +291,8 @@ pub struct Gun {
     pub bar_width: f32,
     pub bar_half: [f32; 2],
     pub bar_colour: Rgba,
+    /// The zoom bar's colour when the zoom stops, fading back to `bar_colour`.
+    pub bar_flash: Rgba,
     pub flash: Flash,
 }
 

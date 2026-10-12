@@ -549,8 +549,10 @@ fn footsteps(rom: &Rom, kinds: &BTreeSet<u8>) -> Result<Footsteps> {
 /// The hit reactions (`func_1505E874`): the reaction each weapon's hit plays (the damage types'
 /// byte 0, `../lab/oracle/combat_README.md` §4), whose entry in the shared reaction list
 /// (`[0x0F, entry]`, header word 2; 0x18-byte entries, byte 0 the reaction, word 1 its sound word)
-/// names the voice; `func_15060A30` plays it on slot B.
-const REACTIONS: [(u8, u8); 18] = [
+/// names the voice; `func_15060A30` plays it on slot B. The mounted gun's (0x1B, its bullet entry
+/// 0x2C) plays only when the hit does not kill (V `mounted-gun-scratch/gc`: gcQ the squirrel's 887
+/// at 24000 on a hit, gcQK nothing on the kill).
+const REACTIONS: [(u8, u8); 19] = [
     (0x09, 0x21),
     (0x39, 0x21),
     (0x23, 0x31),
@@ -569,6 +571,7 @@ const REACTIONS: [(u8, u8); 18] = [
     (0x37, 0x2B),
     (0x40, 0x25),
     (0x40, 0x26),
+    (0x1B, 0x31),
 ];
 
 fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Result<Vec<Cue>> {
@@ -588,18 +591,17 @@ fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Res
         else {
             continue;
         };
-        if cues.iter().any(|c| {
-            c.on == (On::Hit {
-                weapon,
-                lethal: None,
-            })
-        }) {
+        let on = On::Hit {
+            weapon,
+            lethal: (weapon == 0x1B).then_some(false),
+        };
+        if cues.iter().any(|c| c.on == on) {
             continue;
         }
         let mut p = play(sounds, 28000, Some(24000), 500, 2500, Channel::B);
         (p.chance, p.if_idle) = (chance, if_idle);
         cues.push(Cue {
-            on: On::Hit { weapon, lethal: None },
+            on,
             character: Some(character.into()),
             play: p,
             then: vec![],

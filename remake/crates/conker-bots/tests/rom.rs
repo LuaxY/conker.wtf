@@ -735,9 +735,96 @@ fn colors_bots_take_a_flag() {
     assert!(carrier < 7, "by a bot, at {t}: slot {carrier}");
 }
 
+/// The mounted guns' bodies on scene 0x30 against the oracle (`mounted-gun-scratch/body/`, Tedis):
+/// p1, a player put 40 in front of gun B (manned) at read 100 on its slope, pushed out to rest
+/// 81.65 from the origin (the 3-D gap 93); w1, one skidding into gun B's side at 17.5 a frame from
+/// read 438, stopped 89.498 out; t1, gun A free: a player put on its floor 91 from the origin does
+/// not touch it, one 88 out does (pushed to 88.55 first).
+#[test]
+fn mounted_gun_bodies() {
+    use conker_rules::{Arena, Fighter, Match, Placement, Rng, gun};
+    use conker_sim::movement::{Input, state};
+    let Some(rom) = rom() else { return };
+    let world = world(&rom, 0x30);
+    let arena = Arena {
+        spawns: Vec::new(),
+        pickups: Vec::new(),
+    };
+    let fighter = |pos, facing, team| {
+        let place = Placement {
+            index: 0,
+            pos,
+            facing,
+            camera: [0.0; 3],
+        };
+        Fighter::new(&place, team, 0)
+    };
+    let near = |a: [f32; 3], b: [f32; 3], d: f32| a.iter().zip(b).all(|(x, y)| (x - y).abs() < d);
+    // P1 on gun B's seat, P2 at `p2`; P2's rows as the match steps with idle pads.
+    let manned = |p2: Fighter, frames: u32| {
+        let b = gun::places(0x30)[1];
+        let mut p1 = fighter(gun::seat(b.pos, b.yaw, 0), b.yaw, 0);
+        p1.gun = Some(gun::Mount {
+            state: gun::IDLE,
+            ..gun::Mount::new(1, b.pos)
+        });
+        let mut m = Match::new(&arena, vec![p1, p2], Rng::default(), 0);
+        m.guns = gun::spawn(0x30);
+        (0..frames)
+            .map(|_| {
+                m.step(&arena, &[Input::default(); 2], &world);
+                assert_eq!(m.players[1].gun, None);
+                m.players[1].body.pos
+            })
+            .collect::<Vec<_>>()
+    };
+    // On the slope the floor under it rises 0.7 above the oracle's on rows 102-110 (the floor
+    // routine's, I), which shifts its path by up to 0.19; it comes to rest where the oracle's does.
+    let p1 = manned(fighter([170.0, 544.0, 5898.0], 17152, 1), 30);
+    for (read, at, d) in [
+        (101, [170.0, 531.035, 5882.553], 0.01),
+        (102, [170.0, 523.875, 5872.809], 0.75),
+        (105, [170.0, 515.285, 5860.361], 0.2),
+        (110, [170.0, 512.391, 5856.788], 0.75),
+        (130, [170.0, 512.391, 5856.354], 0.01),
+    ] {
+        let got = p1[read - 101];
+        assert!(near(got, at, d), "p1 {read}: {got:?}, want {at:?}");
+    }
+    let mut p2 = fighter([233.3426, 544.0, 6015.0386], 34465, 1);
+    (p2.body.state, p2.body.xz_speed, p2.body.timer) = (state::SKID, 17.5, 10);
+    let w1 = manned(p2, 20);
+    for (read, at) in [
+        (439, [225.9417, 544.0, 6016.2534]),
+        (441, [214.8402, 544.0, 6018.0757]),
+        (443, [208.6728, 544.0, 6019.0879]),
+        (444, [207.4395, 544.0, 6019.2910]),
+        (458, [207.4404, 544.0, 6019.2910]),
+    ] {
+        let got = w1[read - 439];
+        assert!(near(got, at, 0.01), "w1 {read}: {got:?}, want {at:?}");
+    }
+    // t1: gun A free, nobody on it.
+    for (x, touched, after) in [(-231.0, false, -231.0), (-234.0, true, -233.4457)] {
+        let p = fighter([x, -387.3711, -3621.0], 17152, 1);
+        let far = fighter([-436.0, -914.41, -5917.0], 17152, 0);
+        let mut m = Match::new(&arena, vec![far, p], Rng::default(), 0);
+        m.guns = gun::spawn(0x30);
+        m.step(&arena, &[Input::default(); 2], &world);
+        let f = &m.players[1];
+        assert_eq!(f.gun.is_some(), touched, "t1 at {x}");
+        assert!(
+            (f.body.pos[0] - after).abs() < 0.01,
+            "t1 at {x}: {:?}",
+            f.body.pos
+        );
+    }
+}
+
 /// The mounted guns against the oracle (`lab/research/mp-original/mounted-gun.md` §5.4), each P1
-/// where the run's poke put it (on the floor). m2 (gun B, scene 0x30): P1 jumps on at read 61
-/// (the game's push-out of the gun's body first, which the remake lacks): 0x32 for 19 rows, then 0x38,
+/// where the run's poke put it (on the floor). m2 (gun B, scene 0x30): P1 jumps on at read 61, the
+/// gun's body pushing it out first (to 66.84 from the origin; here 64.66, from the floor where the
+/// poke left it 16 above, I): 0x32 for 19 rows, then 0x38,
 /// the ceiling stops the rise at row 72 (687, velocity 0), the seat at 83, 0x1A1 from 84. e1 (scene
 /// 0x34): the jump from read 41 lands at 66; seated, 12° down, Z from read 100 hits P2 300 ahead
 /// once in 60 frames, on the first shot (6 → 4, 0x19C), and flings it about 140 back.
@@ -852,7 +939,13 @@ fn mounted_guns_m2_and_e1() {
             assert_eq!(m.players[0].seated(), t == 66);
         }
     }
-    assert!(near(m.players[0].body.pos, [2472.52, 717.14, 492.48], 0.01));
+    // The seat tilted with the 12° pitch (V e1 99; firing, the clip's recoil moves it 0.25 more).
+    let seat = [2471.8904, 717.911, 493.1097];
+    assert!(
+        near(m.players[0].body.pos, seat, 0.01),
+        "{:?}",
+        m.players[0].body.pos
+    );
     assert!(m.guns[0].shots >= 8, "{}", m.guns[0].shots);
     assert_eq!((hits, m.players[1].health), (vec![(101, 2, 0x19C)], 4));
     let p = m.players[1].body.pos;

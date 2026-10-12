@@ -529,6 +529,22 @@ impl Other {
             y_scale,
         }
     }
+
+    /// The two bodies overlap ([`push_apart`]'s test; the game sets the touch bits of
+    /// `0x800CC268` on it, `func_1505D408`).
+    pub fn overlaps(&self, o: &Other) -> bool {
+        let ([dx, dy, dz], sum) = self.offset(o);
+        dx * dx + dy * dy + dz * dz < sum * sum
+    }
+
+    /// The offset from `o` to this body, its height difference between the centres times the mean
+    /// vertical scale, and the radii's sum.
+    fn offset(&self, o: &Other) -> ([f32; 3], f32) {
+        let top = self.pos[1] + f32::from(self.lift);
+        let dy = (top - (o.pos[1] + f32::from(o.lift))) * ((self.y_scale + o.y_scale) * 0.5);
+        let d = [self.pos[0] - o.pos[0], dy, self.pos[2] - o.pos[2]];
+        (d, f32::from(self.radius) + f32::from(o.radius))
+    }
 }
 
 /// `func_1505D6F0` → `func_1505D408` (C; V: combat_e_w14b from 820): for each overlapping body, where
@@ -541,12 +557,8 @@ impl Other {
 pub fn push_apart(pos: &mut [f32; 3], side: Side, others: &[Other]) -> bool {
     let me = Other::player(side, *pos);
     let start = *pos;
-    let top = me.pos[1] + f32::from(me.lift);
     for o in others {
-        let mut dx = me.pos[0] - o.pos[0];
-        let dz = me.pos[2] - o.pos[2];
-        let dy = (top - (o.pos[1] + f32::from(o.lift))) * ((me.y_scale + o.y_scale) * 0.5);
-        let sum = f32::from(me.radius) + f32::from(o.radius);
+        let ([mut dx, dy, dz], sum) = me.offset(o);
         let mut d2 = dx * dx + dy * dy + dz * dz;
         if d2 >= sum * sum {
             continue;

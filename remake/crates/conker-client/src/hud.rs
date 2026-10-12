@@ -124,40 +124,84 @@ pub struct Sight {
     pub elevation: f32,
     /// The zoom, 0 opened to 1 at the gun's closest.
     pub zoom: f32,
-    /// This frame's muzzle flash ([`gun_fire`]): the barrel that fired, its size and alpha.
-    pub flash: Option<(u8, [f32; 2], u8)>,
-    /// Each handle's kick, [0] the left and [1] the right: how far it drops, and its lit
-    /// picture's alpha (the handle's is 255 less).
+    /// How far the handles slide down with the zoom (`func_151CB970`, `func_151CC1D4`, C: 3 a
+    /// degree of the view's mean zoom, clamped to 25; the one-view constants -25 and 0.04).
+    pub slide: f32,
+    /// Frames since the zoom bar went red ([`bar_colour`]).
+    pub bar_red: Option<u32>,
+    /// Each barrel's muzzle flash this frame ([`gun_fire`]): its size and alpha.
+    pub flash: [Option<([f32; 2], u8)>; 2],
+    /// Each handle's kick ([`kick`]), [0] the left and [1] the right: how far it drops, and its
+    /// lit picture's alpha (the handle's is 255 less).
     pub kick: [(f32, u8); 2],
 }
 
-/// The kick of the handle on a shot's side, from the frame after its flash: how far the handle
-/// drops and its lit picture's alpha (V one-view DLs 221, 223, 225; I: the fire's overlapping kicks
-/// are not modelled, V 240 drops a handle 18.75 with lit 3).
-pub const KICK: [(f32, u8); 3] = [(10.0, 0x53), (20.75, 0x09), (12.0, 0x01)];
+/// A handle's kick `k` frames after its barrel's shot (`func_151CB970`, C; the shot's message
+/// reaches it the next frame): it drops 21 × the sine of a phase stepping 0.505 a frame, until the
+/// phase reaches π (6 frames); its lit picture's alpha is 255 − v, v from 0 closing 0.676 of its gap
+/// to 255 a frame, in f32 (lit 1 from the 6th frame to the 16th, 0 after).
+pub fn kick(k: u32) -> (f32, u8) {
+    const STEP: f32 = 0.505;
+    if k == 0 {
+        return (0.0, 0);
+    }
+    let end = STEP * k as f32;
+    let drop = if end < core::f32::consts::PI {
+        21.0 * (end - STEP).sin()
+    } else {
+        0.0
+    };
+    let mut v = 0.0_f32;
+    for _ in 1..k.min(32) {
+        v += (255.0 - v) * f32::from_bits(0x3F2D_0E57);
+    }
+    (drop, 255 - v as u8)
+}
 
-/// The sight's flash and handle kicks at `tick`, from each barrel's last shot (the tick this
-/// client saw it, the gun's shot count then). A shot flashes its frame (`func_150FB8C0`, C: barrel
-/// 0's at the flash's centre, on the right, barrel 1's mirrored) and kicks its side's handle from
-/// the next ([`KICK`]); the flash's size and alpha are dice in their ranges (seeded by the count).
-/// I: the flash's fade (V: 0xF9, then 0 a frame later in 223/225; 0x55 in 221).
+/// A flash's alpha `k` frames after its shot (`func_15154C90`, C): its `life` VIs (5-8) lose 2 a
+/// frame from the shot's own; it shows while any are left, at most 0x55 a VI over its last 2.
+pub fn flash_alpha(alpha: u8, life: u32, k: u32) -> Option<u8> {
+    let left = life.checked_sub(2 * k.min(8) + 2)?;
+    Some(if left < 3 {
+        alpha.min(0x55 * left as u8)
+    } else {
+        alpha
+    })
+}
+
+/// The zoom bar's colour `red` frames after it went red, 16 frames after the zoom stopped
+/// (`func_151CBC60`, `func_151CC2BC`, C: `bar_flash` back to `bar_colour` over 35 frames).
+pub fn bar_colour(n: &conker_assets::hud::Gun, red: Option<u32>) -> Rgba {
+    match red {
+        Some(k) if k < 35 => std::array::from_fn(|i| {
+            let [from, to] = [n.bar_flash[i], n.bar_colour[i]].map(f32::from);
+            (to + (from - to) * ((35 - k) as f32 * (1.0 / 35.0))) as u8
+        }),
+        _ => n.bar_colour,
+    }
+}
+
+/// The sight's flashes and handle kicks at `tick`, from each barrel's last shot (the tick this
+/// client saw it, the gun's shot count then). A shot flashes from its frame (`func_150FB8C0`, C:
+/// barrel 0's at the flash's centre, on the right, barrel 1's mirrored; [`flash_alpha`]) and kicks
+/// its side's handle ([`kick`]); the flash's size, alpha and life are dice in their ranges (seeded
+/// by the count).
 pub fn gun_fire(f: &Flash, last: [Option<(u32, u16)>; 2], tick: u32) -> Sight {
     let mut sight = Sight::default();
     for (b, shot) in last.iter().enumerate() {
         let Some((t, n)) = *shot else {
             continue;
         };
-        let k = tick.saturating_sub(t) as usize;
-        if let Some(&kick) = k.checked_sub(1).and_then(|k| KICK.get(k)) {
-            sight.kick[1 - b] = kick;
-        }
-        if k == 0 {
-            let mut rng = conker_rules::Rng::new(u64::from(n) << 32 | 0x8128_0784);
-            let mut dice = |[lo, hi]: [f32; 2]| lo + rng.next_f32() * (hi - lo);
-            let size = [dice(f.width), dice(f.height)];
-            let [lo, hi] = f.alpha.map(f32::from);
-            sight.flash = Some((b as u8, size, dice([lo, hi + 0.99]) as u8));
-        }
+        let k = tick.saturating_sub(t);
+        sight.kick[1 - b] = kick(k);
+        let mut rng = conker_rules::Rng::new(u64::from(n) << 32 | 0x8128_0784);
+        let mut dice = |[lo, hi]: [f32; 2]| lo + rng.next_f32() * (hi - lo);
+        let size = [dice(f.width), dice(f.height)];
+        let [lo, hi] = f.alpha.map(f32::from);
+        let alpha = dice([lo, hi + 0.99]) as u8;
+        let [lo, hi] = f.life.map(u32::from);
+        let life = lo + rng.next_u32() % (hi - lo + 1);
+        sight.flash[b] = flash_alpha(alpha, life, k).map(|alpha| (size, alpha));
     }
     sight
 }
@@ -763,7 +807,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         let a = n.anchor;
         for (h, (drop, lit)) in n.handles.iter().zip(g.kick) {
             let [x, y, w, hh] = h.rect;
-            let rect = [x, y + drop, w, hh];
+            let rect = [x, y + ((g.slide + drop) * 4.0).floor() / 4.0, w, hh];
             out.push(flipped(&n.lit, h.flip, rect, a, [255, 255, 255, lit], 0.2));
             out.push(flipped(
                 &h.image,
@@ -774,7 +818,10 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 0.3,
             ));
         }
-        if let Some((barrel, [w, h], alpha)) = g.flash {
+        for (barrel, flash) in g.flash.iter().enumerate() {
+            let Some(([w, h], alpha)) = *flash else {
+                continue;
+            };
             let f = &n.flash;
             let [x, y] = f.centre;
             let x = if barrel == 0 {
@@ -799,7 +846,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             n.bar_half[0] + n.bar_half[1] * g.zoom.clamp(0.0, 1.0),
         );
         let bar = [n.bar_x, cy - half, n.bar_width, 2.0 * half];
-        out.push(solid(bar, a, n.bar_colour, 6.5));
+        out.push(solid(bar, a, bar_colour(n, g.bar_red), 6.5));
         for p in &n.sight {
             out.push(flipped(&p.image, p.flip, p.rect, a, n.colour, 6.5));
         }
@@ -1040,6 +1087,7 @@ fn shown(
         heading: scope.yaw + 90.0,
         elevation: -scope.pitch,
         zoom: scope.zoom[0] / conker_camera::zoom_limit(conker_camera::GUN),
+        slide: -3.0 * ((scope.zoom[0] + scope.zoom[1]) / 2.0).clamp(-25.0, 0.0),
         ..Sight::default()
     });
     // The place among everyone, this player first; Total War's strip: each team's kills, untimed
@@ -1105,7 +1153,10 @@ fn draw(
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
     timeline: Res<LocalTimeline>,
     mut fading: Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
-    mut fired: Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
+    (mut fired, mut zoomed): (
+        Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
+        Local<(u32, f32, bool, Option<u32>)>,
+    ),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: Local<HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>>,
@@ -1163,6 +1214,18 @@ fn draw(
             if let Some(g) = &mut shown.gun {
                 let Sight { flash, kick, .. } = gun_fire(&a.hud.gun.flash, fired.1, tick);
                 (g.flash, g.kick) = (flash, kick);
+                // The zoom bar goes red 16 frames after the zoom stops, with its last step's sound.
+                let (at, last, moving, red) = &mut *zoomed;
+                if tick != *at {
+                    let moved = g.zoom != *last;
+                    if *moving && !moved {
+                        *red = Some(tick + 16);
+                    }
+                    (*at, *last, *moving) = (tick, g.zoom, moved);
+                }
+                g.bar_red = red.and_then(|r| tick.checked_sub(r));
+            } else {
+                *zoomed = Default::default();
             }
             if m.phase == 2 {
                 let all: Vec<_> = (roster.iter())
@@ -1814,9 +1877,10 @@ mod tests {
     /// mounted-gun-scratch/one-view`: P1 on gun B, yaw 15872): every gun draw of each DL is one of
     /// ours, its rect within a quarter pixel, its colour (the handles' and flash's alpha), its
     /// mirroring and its tapes' texels (modulo a picture). 125: at rest, heading 108°, level. 221:
-    /// barrel 0's flash (the right, its size the DL's), the right handle a frame into its kick; 223:
-    /// barrel 1's (mirrored), the right handle 2 frames in; 225: the left a frame in, the right 3,
-    /// heading 177.19° at 40° up (221 and 223 turn up: their tapes are not compared).
+    /// barrel 0's flash (the right, its size the DL's) 2 frames after its shot, its handle kicking;
+    /// 223: barrel 1's on its shot's frame (mirrored), the right handle 4 frames in; 225: barrel 1's
+    /// at alpha 0, the left 2 frames in, the right 6, heading 177.19° at 40° up; 240: the left 5 in,
+    /// the right at rest but lit 1 (221 and 223 turn up: their tapes are not compared).
     #[test]
     fn gun_matches_the_originals_draws() {
         let Some(hud) = pack_hud() else {
@@ -1837,44 +1901,47 @@ mod tests {
             ("802262e0", "gun_tape_elevation"),
             ("8022abd8", "gun_tape_heading"),
         ];
-        let rest = [(0.0, 0); 2];
         let sight = |heading, elevation, flash, kick| Sight {
             heading,
             elevation,
-            zoom: 0.0,
             flash,
             kick,
+            ..Sight::default()
         };
+        let (b0, b1) = (
+            Some(([102.25, 181.75], 0x55)),
+            Some(([95.25, 196.75], 0xF9)),
+        );
         let cases = [
-            ("hud125", sight(108.0, 0.0, None, rest), true),
+            ("hud125", sight(108.0, 0.0, [None; 2], [kick(0); 2]), true),
             (
                 "hud221",
-                sight(
-                    177.19,
-                    0.0,
-                    Some((0, [102.25, 181.75], 0x55)),
-                    [rest[0], KICK[0]],
-                ),
+                sight(177.19, 0.0, [b0, None], [kick(0), kick(2)]),
                 false,
             ),
             (
                 "hud223",
-                sight(
-                    177.19,
-                    0.0,
-                    Some((1, [95.25, 196.75], 0xF9)),
-                    [rest[0], KICK[1]],
-                ),
+                sight(177.19, 0.0, [None, b1], [kick(0), kick(4)]),
                 false,
             ),
             (
                 "hud225",
-                sight(177.19, 40.0, None, [KICK[0], KICK[2]]),
+                sight(
+                    177.19,
+                    40.0,
+                    [None, b1.map(|(size, _)| (size, 0))],
+                    [kick(2), kick(6)],
+                ),
+                true,
+            ),
+            (
+                "hud240",
+                sight(177.19, 40.0, [None; 2], [kick(5), kick(10)]),
                 true,
             ),
         ];
         for (dump, gun, tapes) in cases {
-            let flash = usize::from(gun.flash.is_some());
+            let flashes = gun.flash.iter().flatten().count();
             let Ok(json) = std::fs::read(format!("{dir}/{dump}/draws.json")) else {
                 eprintln!("no {dump}: skipping");
                 return;
@@ -1902,8 +1969,7 @@ mod tests {
                     Tex::Texture(n) => n.as_str(),
                     _ => "",
                 };
-                if (name.starts_with("gun_tape") && !tapes) || (name == "gun_flash" && env[3] == 0)
-                {
+                if name.starts_with("gun_tape") && !tapes {
                     continue;
                 }
                 let colour = match name {
@@ -1938,32 +2004,68 @@ mod tests {
                 );
                 seen += 1;
             }
-            // 4 handle pictures, 2 bars and 9 sight pictures, the tapes and a flash.
-            assert_eq!(seen, 15 + 2 * usize::from(tapes) + flash, "{dump}");
+            // 4 handle pictures, 2 bars and 9 sight pictures, the tapes and the flashes.
+            assert_eq!(seen, 15 + 2 * usize::from(tapes) + flashes, "{dump}");
         }
     }
 
-    /// A shot flashes its frame and kicks its side's handle from the next: barrel 0 the right.
+    /// A shot flashes from its frame and kicks its side's handle from the next: barrel 0 the right.
     #[test]
     fn gun_shots_flash_and_kick_their_side() {
         let Some(hud) = pack_hud() else {
             return;
         };
         let f = &hud.gun.flash;
-        let shot = gun_fire(f, [Some((100, 7)), None], 100);
-        let (barrel, [w, h], alpha) = shot.flash.unwrap();
-        assert_eq!(barrel, 0);
+        let shot = |t| gun_fire(f, [Some((100, 7)), None], t);
+        let [Some(([w, h], alpha)), None] = shot(100).flash else {
+            panic!("no flash");
+        };
         assert!((80.0..=120.0).contains(&w) && (160.0..=200.0).contains(&h) && alpha >= 200);
-        assert_eq!(shot.kick, [(0.0, 0); 2]);
-        let kicks = [101, 102, 103, 104].map(|t| gun_fire(f, [Some((100, 7)), None], t));
-        assert!(kicks.iter().all(|s| s.flash.is_none()));
-        assert_eq!(kicks[0].kick[0], (0.0, 0));
-        assert_eq!(
-            kicks.map(|s| s.kick[1]),
-            [KICK[0], KICK[1], KICK[2], (0.0, 0)]
-        );
+        assert_eq!(shot(100).kick, [(0.0, 0); 2]);
+        let later = (101..=120).map(shot);
+        assert!((later.clone()).all(|s| s.flash[1].is_none() && s.kick[0] == (0.0, 0)));
+        assert!((later.clone()).skip(3).all(|s| s.flash[0].is_none()));
+        assert!(later.map(|s| s.kick[1]).eq((1..=20).map(kick)));
         let left = gun_fire(f, [None, Some((100, 8))], 101);
-        assert_eq!(left.kick, [KICK[0], (0.0, 0)]);
+        assert_eq!(left.kick, [kick(1), (0.0, 0)]);
+        assert!(left.flash[0].is_none() && left.flash[1].is_some());
+    }
+
+    /// The handles' kick and the flash's fade against the one-view DLs (the handles' drop and their
+    /// lit pictures' alpha; the flash's alpha): 221-225 the right handle 2, 4 and 6 frames after its
+    /// shot, 225 and 240 the left 2 and 5; barrel 0's flash (life 7) 2 frames after its shot in
+    /// 221, barrel 1's (life 6) on its shot's frame in 223 and 2 frames after in 225.
+    #[test]
+    fn gun_kicks_and_flashes_fade_as_the_original() {
+        let quarter = |(drop, lit): (f32, u8)| ((drop * 4.0).floor() / 4.0, lit);
+        let v = [1, 2, 4, 5, 6, 7, 16, 17].map(|k| quarter(kick(k)));
+        assert_eq!(
+            v.map(|k| k.0),
+            [0.0, 10.0, 20.75, 18.75, 12.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(v.map(|k| k.1), [255, 0x53, 0x09, 0x03, 0x01, 1, 1, 0]);
+        assert_eq!(kick(0), (0.0, 0));
+        assert_eq!(flash_alpha(0xD0, 7, 2), Some(0x55));
+        assert_eq!(flash_alpha(0xF9, 6, 0), Some(0xF9));
+        assert_eq!(flash_alpha(0xF9, 6, 1), Some(0xAA));
+        assert_eq!(flash_alpha(0xF9, 6, 2), Some(0));
+        assert_eq!(flash_alpha(0xD0, 7, 4), None);
+        assert_eq!(flash_alpha(0xD0, 8, 4), None);
+    }
+
+    /// The zoom bar's colour after the zoom stops, against the original's (V `mounted-gun-scratch/
+    /// gc/gcA`: 29 and 33 of 35 frames left, ff2b00e2 and ff0e00f5).
+    #[test]
+    fn the_zoom_bar_flashes_red_and_fades() {
+        let Some(hud) = pack_hud() else {
+            return;
+        };
+        let g = &hud.gun;
+        assert_eq!(bar_colour(g, None), g.bar_colour);
+        assert_eq!(bar_colour(g, Some(0)), g.bar_flash);
+        assert_eq!(bar_colour(g, Some(6)), [0xFF, 0x2B, 0x00, 0xE2]);
+        assert_eq!(bar_colour(g, Some(2)), [0xFF, 0x0E, 0x00, 0xF5]);
+        assert_eq!(bar_colour(g, Some(35)), g.bar_colour);
     }
 
     /// The outros' pages against the original's draws (one capture's I8 glyph rects): every glyph

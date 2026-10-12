@@ -1325,10 +1325,12 @@ impl Match {
             self.give(i, id);
         }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
-        // earlier in the slot order where they moved to this frame.
+        // earlier in the slot order where they moved to this frame, and so do the mounted guns (a
+        // gunner and one jumping on move by their own rules).
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i)
             .map(|(_, p)| Other::player(p.side, p.body.pos))
+            .chain(self.guns.iter().map(|g| gun::body(g.place.pos)))
             .collect();
         let melee = |f: &Fighter| {
             f.drawn
@@ -1389,7 +1391,8 @@ impl Match {
                 };
                 let yaw = f.body.move_angle;
                 if f.body.pos[1] < m.at[1] + gun::MOUNT_HEIGHT && f.body.y_vel < 0.0 {
-                    movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+                    // Level: an unmanned gun's pitch has decayed by then (30 frames of state 5).
+                    movement::sit(&mut f.body, gun::seat(m.at, yaw, 0), yaw);
                     (m.state, f.immune) = (gun::IDLE, 0);
                 }
                 f.gun = Some(m);
@@ -1415,7 +1418,8 @@ impl Match {
                 gun::FIRING => anim::GUN_FIRING,
                 _ => anim::GUN_SEATED,
             };
-            movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+            let seat = gun::seat(m.at, yaw, gun::pitch10(f.scope_pitch));
+            movement::sit(&mut f.body, seat, yaw);
             f.gun = Some(m);
             return;
         }
@@ -2485,7 +2489,8 @@ impl Match {
             Some(mut m) => {
                 m.step(false, false);
                 let yaw = f.body.facing;
-                movement::sit(&mut f.body, gun::seat(m.at, yaw), yaw);
+                let seat = gun::seat(m.at, yaw, gun::pitch10(f.scope_pitch));
+                movement::sit(&mut f.body, seat, yaw);
                 f.gun = Some(m);
             }
             None => knock(f, reaction, step, world, others),
@@ -2573,11 +2578,7 @@ impl Match {
                                 | Action::Aim { .. }
                                 | Action::Reload { .. }
                         )
-                        && gun::touches(
-                            at,
-                            f.body.pos,
-                            Other::player(f.side, f.body.pos).radius.into(),
-                        )
+                        && gun::touches(at, &Other::player(f.side, f.body.pos))
                 });
                 if let (Some(i), 0) = (toucher, g.leave) {
                     let yaw = g.yaw;
@@ -2597,7 +2598,7 @@ impl Match {
             }
             g.yaw = f.body.facing;
             let pitch = (f.scope_pitch + 180.0).rem_euclid(360.0) - 180.0;
-            g.pitch10 = (pitch * 10.0) as i32;
+            g.pitch10 = gun::pitch10(f.scope_pitch);
             if f.gun.is_none_or(|m| m.state != gun::FIRING) {
                 g.firing = false;
                 continue;
@@ -4166,7 +4167,7 @@ mod tests {
             assert!(n < 40 && m.players[1].gun.is_none());
         }
         assert_eq!((n, m.players[0].immune, m.players[1].gun), (26, 0, None));
-        assert_eq!(m.players[0].body.pos, gun::seat(place.pos, 0));
+        assert_eq!(m.players[0].body.pos, gun::seat(place.pos, 0, 0));
         assert_eq!(m.players[0].camera_weapon(), conker_camera::GUN);
         step(&mut m, 0);
         assert_eq!(

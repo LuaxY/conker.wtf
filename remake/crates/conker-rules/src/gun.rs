@@ -9,6 +9,7 @@
 //! wait) are the server's.
 
 use crate::projectile::local_to_world;
+use conker_sim::movement::Other;
 
 /// The gun's states (gun+0x232, V): free, a player jumping on, manned idle, firing, the dismount's
 /// wait, stopped (B or overheat).
@@ -49,11 +50,9 @@ pub const MUZZLE: [f32; 3] = [124.62, 22.175, 57.94];
 /// two directions, (−0.629, −0.234, 0.742) and (−0.748, −0.197, 0.633), to 0.002; the game crosses
 /// the camera's ray with a barrel plane).
 pub const SIGHT: f32 = 333.0;
-/// The touch: the gun's body, radius 44 (the push-out to 67 of a Tedi, radius 23: V m2, e1), from
-/// 90 below its origin to 112 above (I).
-pub const RADIUS: f32 = 44.0;
-pub const BELOW: f32 = 90.0;
-pub const ABOVE: f32 = 112.0;
+/// The gun's body (obj+0xE4/0xE8/0xEC, V m2: radius 70, centre 70 up, vertical scale 70/99): it pushes
+/// every player but its gunner out ([`body`]), and a player inside it touches it.
+const BODY: (i16, i16, u32) = (70, 70, 0x3F35_0296);
 
 /// A gun's place: its origin (+0x2C) and home yaw (+0x78).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,9 +196,19 @@ impl Mount {
     }
 }
 
-/// Where the gun at `at` turned `yaw` seats its gunner.
-pub fn seat(at: [f32; 3], yaw: u16) -> [f32; 3] {
-    local_to_world(at, yaw, SEAT)
+pub use conker_camera::{gun_pitch10 as pitch10, gun_tilt as tilt};
+
+/// Where the gun at `at` turned `yaw`, its barrels at `pitch10` (+0x2E4), seats its gunner. The
+/// whole gun tilts about its origin by [`tilt`], and the seat (joint 3) with it.
+pub fn seat(at: [f32; 3], yaw: u16, pitch10: i32) -> [f32; 3] {
+    local_to_world(at, yaw, tilted(tilt(pitch10), SEAT))
+}
+
+/// A point (ahead, side, up) of the gun's frame, the gun tilted `t` degrees nose down.
+fn tilted(t: f32, [f, s, u]: [f32; 3]) -> [f32; 3] {
+    let t = t.to_radians();
+    let (c, sn) = (t.cos(), t.sin());
+    [f * c + u * sn, s, u * c - f * sn]
 }
 
 /// The barrels pitched `pitch` degrees down: a point (ahead, side, up) of the barrels' frame from the
@@ -210,11 +219,12 @@ fn pitched(pitch: f32, [f, s, u]: [f32; 3]) -> [f32; 3] {
     [PIVOT[0] + f * pc + u * ps, s, PIVOT[1] + u * pc - f * ps]
 }
 
-/// Barrel `b`'s muzzle.
+/// Barrel `b`'s muzzle: the gun tilted by [`tilt`], the barrels by the rest of `pitch`.
 pub fn muzzle(at: [f32; 3], yaw: u16, pitch: f32, b: u8) -> [f32; 3] {
     let [f, s, u] = MUZZLE;
     let s = if b == 0 { -s } else { s };
-    local_to_world(at, yaw, pitched(pitch, [f, s, u]))
+    let t = tilt(pitch10(pitch));
+    local_to_world(at, yaw, tilted(t, pitched(pitch - t, [f, s, u])))
 }
 
 /// A bot's shot (it has no camera): along barrel `b`, toed in by `toe` (1 to 7 units in 100, C: the
@@ -228,11 +238,25 @@ pub fn barrel_dir(yaw: u16, pitch: f32, b: u8, toe: f32) -> [f32; 3] {
     v.map(|c| c / n)
 }
 
-/// The touch: a point within the gun's body (the player's own radius added).
-pub fn touches(at: [f32; 3], pos: [f32; 3], radius: f32) -> bool {
-    let (dx, dz) = (pos[0] - at[0], pos[2] - at[2]);
-    let r = RADIUS + radius;
-    dx * dx + dz * dz < r * r && (at[1] - BELOW..at[1] + ABOVE).contains(&pos[1])
+/// The gun at `at` as a body the players are pushed out of (`func_1505D6F0`, C; V p1: a Tedi put 40
+/// in front of a manned gun on its slope comes to rest 81.65 from the origin, the 3-D gap 93). The
+/// gunner is not (its obj+0x65 skips the push), nor one jumping on (s126+0x27, C `func_1505327C`).
+pub fn body(at: [f32; 3]) -> Other {
+    let (radius, lift, y_scale) = BODY;
+    Other {
+        pos: at,
+        radius,
+        lift,
+        y_scale: f32::from_bits(y_scale),
+    }
+}
+
+/// The touch: the player overlaps the gun's body. The gun's own update pushes against the players
+/// (`func_15059140` → `func_1505D6F0`) and takes the bit its overlap test sets (C; V t1: a Tedi on
+/// the floor 91 from the origin does not touch, 88 does, after its own push to 88.55; the gap is
+/// 89.5 there).
+pub fn touches(at: [f32; 3], player: &Other) -> bool {
+    body(at).overlaps(player)
 }
 
 #[cfg(test)]
@@ -294,8 +318,17 @@ mod tests {
     fn seat_and_barrels() {
         let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02);
         let [a, b] = [places(0x30)[1], places(0x34)[0]];
-        assert!(near(seat(a.pos, a.yaw), [166.91, 616.14, 6000.88]));
-        assert!(near(seat(b.pos, b.yaw), [2472.52, 717.14, 492.48]));
+        assert!(near(seat(a.pos, a.yaw, 0), [166.91, 616.14, 6000.88]));
+        assert!(near(seat(b.pos, b.yaw, 0), [2472.52, 717.14, 492.48]));
+        // m2's seat as the pitch (+0x2E4) moves: reads 1406, 1430, 1482 and 1510.
+        for (p10, at) in [
+            (39, [166.921555, 616.336609, 6000.66309]),
+            (500, [167.099411, 619.327881, 5997.04248]),
+            (-9, [166.899826, 615.950256, 6001.10547]),
+            (-600, [166.678955, 611.733215, 6005.60107]),
+        ] {
+            assert!(near(seat(a.pos, a.yaw, p10), at), "{p10}");
+        }
         // Level, at yaw 0 (forward +x, side +z): both 186 ahead, 110.2 up, 22.2 to either side.
         let m = [0, 1].map(|k| muzzle([0.0; 3], 0, 0.0, k));
         assert!(near(m[0], [186.04, 110.205, -22.175]) && near(m[1], [186.04, 110.205, 22.175]));

@@ -110,6 +110,9 @@ mod skill {
 pub struct Body {
     pub pos: [f32; 3],
     pub old: [f32; 3],
+    /// obj+0x2C as the AI reads it, before the frame's updates: where it stood a frame earlier
+    /// (the lead of skills 3 and 4, [`World::attack`]).
+    pub prev: [f32; 3],
     /// Height above the floor (obj+0x28).
     pub height: f32,
     /// The facing as the game's heading in degrees (obj+0x40).
@@ -1291,11 +1294,28 @@ impl World<'_> {
             _ => 0,
         };
         let o = 4 * p as i32;
-        let (tx, ty, tz) = if head && !tb.is_bot {
+        let (mut tx, ty, mut tz) = if head && !tb.is_bot {
             (tb.pos[0], tb.pos[1] + HEAD, tb.pos[2])
         } else {
             (tb.pos[0], tb.pos[1] + 40.0, tb.pos[2])
         };
+        // Skills 3 and 4 lead a moving target with these weapons: its last move times its distance
+        // times the weapon's factor over the frame's VIs (C; V lead/l1 at skill 4: 145 of 146 aim
+        // points of 0x14 and 0x16 to 1e-4, the target's head joint plus the lead, all as the frame
+        // before; I: script 0xB9's lead at any skill, not an MP scene's).
+        let lead = match weapon {
+            0x18 | 0x41 | 0x1B => f32::from_bits(0x3C83_126F), // 0.016
+            0x14 | 0x3F => f32::from_bits(0x3CCA_E5D8),        // 0.0248
+            0x16 => f32::from_bits(0x3D03_126F),               // 0.032
+            _ => 0.0,
+        };
+        let dt = g.f32(g::DT);
+        if self.skill >= 3 && lead != 0.0 && dt > 0.0 {
+            let d: [f32; 3] = core::array::from_fn(|i| tb.pos[i] - b.pos[i]);
+            let k = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() * lead / dt;
+            tx += (tb.pos[0] - tb.prev[0]) * k;
+            tz += (tb.pos[2] - tb.prev[2]) * k;
+        }
         let rate = (g.f32(g::AIM_RATE + o) * 2.0).min(1.0);
         let (mut ax, mut az) = (g.f32(g::AIM_X + o), g.f32(g::AIM_Z + o));
         ax += (tx - ax) * rate;
@@ -1634,6 +1654,96 @@ mod tests {
         w.command(&mut Globals::new(0), 0x4000, 1, &[0x4000, 1]);
         assert_eq!(q(&mut w, &[0x4000, 0x10]), 0);
         assert!(w.unknown.is_empty());
+    }
+
+    /// The lead against the oracle's lead/l1 (skill 4, aim rate 1): the aim point less the target's
+    /// head joint, as the frame before showed the attacker, the target and its last move. Bot 3 with
+    /// 0x14 at read 950 (the target running 17.5 a frame, 2965 away) and bot 2 with 0x16 at 2781;
+    /// the mounted gun's factor is the crossbow's (C). Skill 2 does not lead.
+    #[test]
+    fn skill_3_and_4_lead_a_moving_target() {
+        let (graph, world) = (Graph::default(), CollisionWorld::default());
+        for (skill, weapon, me, pos, prev, lead) in [
+            (
+                4,
+                0x14,
+                [-1594.7598, 0.984375, 6413.4478],
+                [-3478.55, 1.0, 4124.001],
+                [-3463.239, 1.0, 4132.476],
+                [-562.1628, -311.1733],
+            ),
+            (
+                4,
+                0x16,
+                [-459.6799, 160.8789, 232.79465],
+                [764.8716, 1254.0, -3242.486],
+                [764.84625, 1254.0, -3246.486],
+                [1.5576, 245.98],
+            ),
+            (
+                4,
+                0x1B,
+                [0.0; 3],
+                [300.0, 0.0, 400.0],
+                [290.0, 0.0, 400.0],
+                [40.0, 0.0],
+            ),
+            (
+                2,
+                0x14,
+                [0.0; 3],
+                [300.0, 0.0, 400.0],
+                [290.0, 0.0, 400.0],
+                [0.0, 0.0],
+            ),
+        ] {
+            let bodies = [
+                Body {
+                    pos: me,
+                    drawn: weapon,
+                    is_bot: true,
+                    health: 6,
+                    ..Body::default()
+                },
+                Body {
+                    pos,
+                    prev,
+                    is_bot: true,
+                    health: 6,
+                    ..Body::default()
+                },
+            ];
+            let mut npcs = [Npc::default(); 2];
+            let (mut rng, mut unknown) = (Rng::default(), Unknown::new());
+            let mut w = World {
+                bodies: &bodies,
+                npcs: &mut npcs,
+                graph: &graph,
+                world: &world,
+                rng: &mut rng,
+                humans: 0,
+                skill,
+                zones: &mut [],
+                unknown: &mut unknown,
+                ffa: true,
+                forgiven: &mut [],
+                slots: &[0, 1],
+                touched: [0; 2],
+                effects: &mut Vec::new(),
+                flags: Default::default(),
+                starting: false,
+                gunners: Vec::new(),
+            };
+            let mut g = Globals::new(g::SIZE);
+            g.set_f32(g::AIM_RATE, 1.0);
+            g.set_f32(g::DT, 2.0);
+            w.attack(&mut g, 0, 1, false, false, 0, 0);
+            let got = [g.f32(g::AIM_X) - pos[0], g.f32(g::AIM_Z) - pos[2]];
+            assert!(
+                (got[0] - lead[0]).abs() < 0.01 && (got[1] - lead[1]).abs() < 0.01,
+                "skill {skill} {weapon:#x}: {got:?}"
+            );
+        }
     }
 
     #[test]

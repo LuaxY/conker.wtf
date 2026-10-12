@@ -1,7 +1,7 @@
 //! The mounted machine guns of maps 0x30 and 0x34 (`../lab/research/mp-original/mounted-gun.md`
 //! §3, §4.4): model 138 at half scale where [`MatchView::guns`] has each, turned to its yaw, its
-//! barrels (`joint_04`) pitched down by its pitch. While a gun fires (state 4) its fire clip loops
-//! and, on 0x30, its belt of rounds scrolls; at rest it stands in its model's rest pose. No flash
+//! barrels (`joint_04`) pitched down by its pitch (the whole gun by `gun::tilt` of it). While a gun fires (state 4) its fire clip loops
+//! and its belt of rounds scrolls; at rest it stands in its model's rest pose. No flash
 //! on the model: the original draws only the gunner's HUD flash. The local gunner's gun turns with
 //! its own predicted scope (the server's lags a round trip) and hides while its sight is up: the
 //! HUD's handles stand in for it ([`crate::hud`]).
@@ -23,14 +23,29 @@ use crate::{Config, FollowCamera};
 const MODEL: &str = "138";
 /// Drawn at half its model units, as the players (STATUS, the pack's handoff).
 const SCALE: f32 = 0.5;
-/// The barrels' pivot, which the pitch turns.
+/// The model's root, which the gun's tilt turns.
+const ROOT: &str = "joint_00";
+/// The barrels' pivot, which the rest of the pitch turns.
 const PIVOT: &str = "joint_04";
-/// The belt of rounds' material (`textures/character-15.png`).
+/// The belt of rounds' material (`textures/character-15.png`, 64 × 16, repeating along T).
 const BELT: &str = "material_15";
-/// On 0x30, while the fire clip plays, the belt's 12 vertices' T moves −40 (1/32 texel) a VI
-/// (`func_15061B4C` → `func_15062FC0(…, 12, 0, VIs × −40)`, C): 2.5 of its 16 texels a frame. Its
-/// sampler repeats along T.
-const BELT_STEP: f32 = -2.5 / 16.0;
+
+/// How far the belt's texture moves a frame while the fire clip plays (`func_15061B4C`, C), as a
+/// share of its 16 texels along v. Its texel row t falls, so v rises (v = 1 − t / 16,
+/// `extract_gbi::Texture::uv`; the uv transform adds to the mesh's v): the rounds run toward the
+/// belt's top, the receiver's end, whose T is the largest. On 0x30 `func_15062FC0(…, 12, 0, VIs ×
+/// −40)` moves the belt's 12 vertices' T by −40/32 texel a VI, 2 VIs a frame. Elsewhere (0x34)
+/// `func_15062D10` moves the belt's 3 mip tiles' (64×16, 32×8, 16×4) ult by 16, 8 and 4 quarter
+/// texels a frame, wrapping at their heights (V gcA DLs 130-132, 190: level 0's 0x002, 0x012,
+/// 0x022, 0x032): level 0's 4 texels.
+fn belt_step(map: &str) -> f32 {
+    let texels = if map == "30" {
+        40.0 * 2.0 / 32.0
+    } else {
+        16.0 / 4.0
+    };
+    texels / 16.0
+}
 
 /// Gun `k` of [`MatchView::guns`]: its glTF, its rig once its scene is in, and what it showed last.
 #[derive(Component)]
@@ -43,11 +58,12 @@ pub struct Gun {
     belt: f32,
 }
 
-/// A gun's posed parts: its `AnimationPlayer` and clip, the pivot, every joint's rest pose, and its
-/// own copy of the belt's material with that material's own uv transform.
+/// A gun's posed parts: its `AnimationPlayer` and clip, the root and the pivot, every joint's rest
+/// pose, and its own copy of the belt's material with that material's own uv transform.
 struct Rig {
     animator: Entity,
     clip: AnimationNodeIndex,
+    root: Entity,
     pivot: Entity,
     rest: Vec<(Entity, Transform)>,
     belt: Option<(Handle<StandardMaterial>, Affine2)>,
@@ -135,12 +151,17 @@ fn ready(
         .filter_map(|&e| joints.get(e).ok().map(|(n, t)| (e, n, *t)))
         .filter(|(_, n, _)| n.starts_with("joint_"))
         .collect();
-    let pivot = rest.iter().find(|j| j.1.as_str() == PIVOT).map(|j| j.0);
+    let joint = |name: &str| rest.iter().find(|j| j.1.as_str() == name).map(|j| j.0);
+    let (root, pivot) = (joint(ROOT), joint(PIVOT));
     let clip = gltfs
         .get(&gun.gltf)
         .and_then(|g| g.animations.first().cloned());
-    let (Some(animator), Some(pivot), Some(clip)) = (animator, pivot, clip) else {
-        warn!("gun {}: no animation player, {PIVOT} or clip", gun.k);
+    let (Some(animator), Some(root), Some(pivot), Some(clip)) = (animator, root, pivot, clip)
+    else {
+        warn!(
+            "gun {}: no animation player, {ROOT}, {PIVOT} or clip",
+            gun.k
+        );
         return;
     };
     let (graph, node) = made.0.get_or_insert_with(|| {
@@ -170,6 +191,7 @@ fn ready(
     gun.rig = Some(Rig {
         animator,
         clip: *node,
+        root,
         pivot,
         rest: rest.into_iter().map(|(e, _, t)| (e, t)).collect(),
         belt,
@@ -177,7 +199,7 @@ fn ready(
 }
 
 /// Each gun where and as the match has it (the local gunner's from its predicted scope), its fire
-/// clip and belt while it fires.
+/// clip and belt ([`belt_step`]) while it fires.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn show(
     game: Query<&MatchView>,
@@ -223,8 +245,9 @@ fn show(
             }
             gun.firing = firing;
         }
-        if firing && cfg.map == "30" {
-            let belt = gun.belt + BELT_STEP * conker_sim::TICK_HZ as f32 * time.delta_secs();
+        if firing {
+            let step = belt_step(&cfg.map) * conker_sim::TICK_HZ as f32;
+            let belt = gun.belt + step * time.delta_secs();
             gun.belt = belt.rem_euclid(1.0);
         }
         if let Some((belt, base)) = gun.rig.as_ref().and_then(|r| r.belt.as_ref())
@@ -239,7 +262,7 @@ fn show(
 }
 
 /// After the clips: a gun at rest stands in its rest pose (a stopped clip leaves its last pose),
-/// and every gun's barrels pitch about the pivot.
+/// and every gun tilts about its root by `gun::tilt` and its barrels pitch the rest about the pivot.
 fn pose(guns: Query<&Gun>, mut joints: Query<&mut Transform>) {
     for gun in &guns {
         let Some(rig) = &gun.rig else {
@@ -252,8 +275,12 @@ fn pose(guns: Query<&Gun>, mut joints: Query<&mut Transform>) {
                 }
             }
         }
+        let t = gun::tilt(gun::pitch10(gun.pitch));
+        if let Ok(mut root) = joints.get_mut(rig.root) {
+            root.rotation = tilt(t) * root.rotation;
+        }
         if let Ok(mut pivot) = joints.get_mut(rig.pivot) {
-            pivot.rotation = tilt(gun.pitch) * pivot.rotation;
+            pivot.rotation = tilt(gun.pitch - t) * pivot.rotation;
         }
     }
 }
@@ -289,7 +316,8 @@ mod tests {
                 for b in 0..2u8 {
                     let x = if b == 0 { 13.0 } else { -13.0 };
                     let muzzle = barrels[usize::from(b)] + Vec3::new(x, 0.0, 200.0);
-                    let local = SCALE * (pivot + tilt(pitch) * muzzle);
+                    let t = gun::tilt(gun::pitch10(pitch));
+                    let local = SCALE * (tilt(t) * (pivot + tilt(pitch - t) * muzzle));
                     let drawn = Vec3::from_array(at) + turn(yaw) * local;
                     let rules = Vec3::from_array(gun::muzzle(at, yaw, pitch, b));
                     assert!(
@@ -300,5 +328,49 @@ mod tests {
             }
         }
         assert!((tilt(30.0) * Vec3::Z).y < 0.0);
+    }
+
+    /// The belt moves 2.5 of its 16 texels a frame on 0x30 and 4 elsewhere (C), its v rising:
+    /// toward the belt's top end (the receiver's, the most T), whose v is the least in the glTF.
+    #[test]
+    fn the_belt_feeds_the_gun() {
+        assert_eq!([belt_step("30"), belt_step("34")], [2.5 / 16.0, 0.25]);
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../assets/characters/138"
+        );
+        let (Ok(json), Ok(bin)) = (
+            std::fs::read(format!("{dir}/character.gltf")),
+            std::fs::read(format!("{dir}/character.bin")),
+        ) else {
+            eprintln!("no pack gun model: skipping");
+            return;
+        };
+        let gltf: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let floats = |i: &serde_json::Value, n: usize| -> Vec<f32> {
+            let a = &gltf["accessors"][i.as_u64().unwrap() as usize];
+            let v = &gltf["bufferViews"][a["bufferView"].as_u64().unwrap() as usize];
+            let at = (v["byteOffset"].as_u64().unwrap_or(0) + a["byteOffset"].as_u64().unwrap_or(0))
+                as usize;
+            let count = a["count"].as_u64().unwrap() as usize * n;
+            (bin[at..at + 4 * count].chunks(4))
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect()
+        };
+        let prims = gltf["meshes"][0]["primitives"].as_array().unwrap();
+        let belt = prims.iter().find(|p| p["material"] == 15).unwrap();
+        let (pos, uv) = (
+            floats(&belt["attributes"]["POSITION"], 3),
+            floats(&belt["attributes"]["TEXCOORD_0"], 2),
+        );
+        let top = (0..pos.len() / 3)
+            .max_by(|&a, &b| pos[3 * a + 1].total_cmp(&pos[3 * b + 1]))
+            .unwrap();
+        let least = uv.chunks(2).map(|t| t[1]).fold(f32::MAX, f32::min);
+        assert!(
+            uv[2 * top + 1] < least + 0.2,
+            "{:?}",
+            &uv[2 * top..2 * top + 2]
+        );
     }
 }

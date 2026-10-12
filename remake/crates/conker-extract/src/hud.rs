@@ -319,9 +319,10 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
 /// along; `func_151CC77C`: offset 2 · ∓angle / 360 · 2560 in 1/32 texels, the angles of the view
 /// direction s126+0x130; V at reads 127 and 242: −48 and −78.72 texels at headings 108° and
 /// 177.19°). The handles (`func_151CB5FC`, sprites 0x7B / 0x7C at (±88, 91), 49 × 18: at rest
-/// alpha 255 / 0; while firing the side that fired drops 10-21 pixels and `lit` comes up to 0x53,
-/// not modelled). The zoom bar (`func_151C9F38` type 3: x 37, w 1, h 30; colours 0x800AAC90 /
-/// 0x800AACE0 entry 3; its half height 1 + 29 × zoom, I as the sniper's 2 + 58). The flash
+/// alpha 255 / 0; the side that fired kicks, the client's `hud::kick`). The zoom bar
+/// (`func_151C9F38` type 3: x 37, w 1, h 30; colours 0x800AAC90 / 0x800AACE0 entry 3; its half
+/// height 1 + 29 × zoom, I as the sniper's 2 + 58; `bar_flash` 0x800AAC80, the red it turns 16
+/// frames after the zoom stops, `func_151CBC60` / `func_151CC2BC`). The flash
 /// (`func_150FB8C0`: sprite 0x55 at (±59, 68), half size 40 + rand · 20 by 80 + rand · 20, alpha
 /// 200 + rand % 56, life (rand & 3) + 5; V DL 221 and 223).
 fn gun() -> Gun {
@@ -371,6 +372,7 @@ fn gun() -> Gun {
         bar_width: 2.0,
         bar_half: [1.0, 29.0],
         bar_colour: [255, 255, 0, 0x5A],
+        bar_flash: [255, 0, 0, 255],
         flash: Flash {
             image: image("gun_flash", [0, 0, 32, 32]),
             centre: [205.0, 176.0],

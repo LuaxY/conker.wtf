@@ -256,6 +256,7 @@ weapon, drawn or not and rounds, grenades, kills, the clock, the respawn countdo
 | B | B | West (X) | draw or put away the weapon you picked up |
 | Z | left mouse button, F, Shift | either trigger, left bumper | fire a drawn weapon (through a scope, along the look); a melee swing locks onto the nearest player within 200; crouch when unarmed |
 | R | right mouse button, R | right bumper | aim: the zoom camera, the gun's twist, the scope of the sniper rifle and of 0x14. The rocket launcher and the scoped revolver (0x23) do not fire while it is held |
+| C-up | T | right stick up | on the mounted gun: zoom in (C-down zooms out) |
 | C-down | G | right stick down | throw a grenade; hold to cook it (held too long it goes off in the hand) |
 | C-left / C-right | Q / E | right stick left / right | strafe, standing or with the stick held, armed or not |
 

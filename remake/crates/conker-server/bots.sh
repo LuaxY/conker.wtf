@@ -2,7 +2,8 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f] [MODE=deathmatch|total-war|colors] [SCORE=1-40|unlimited] crates/conker-server/bots.sh [seconds=150].
+# Usage: [PORT=5888] [MAP=2d|30|34|3f] [MODE=deathmatch|total-war|colors] [SCORE=1-40|unlimited]
+#   [SKILL=inbred|crap|normal|bastard|einstein] crates/conker-server/bots.sh [seconds=150].
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures.
 set -u
 cd "${0:A:h}/../.."
@@ -15,6 +16,7 @@ secs=${1:-150} bots=${BOTS:-2} humans=${HUMANS:-1} port=${PORT:-5888}
 
 mode=(); [[ -n ${MODE:-} ]] && mode=(--mode $MODE)
 [[ -n ${SCORE:-} ]] && mode+=(--score $SCORE)
+[[ -n ${SKILL:-} ]] && mode+=(--skill $SKILL)
 $bin/conker-server --port $port --map ${MAP:-2d} $mode --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!

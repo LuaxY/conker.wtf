@@ -416,7 +416,8 @@ fn burning(p: &Seen) -> bool {
 /// The weapon that hit `victim`, which the server does not send, from its first reaction (its
 /// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21 or the
 /// club 0x40 (the nearest holding it drawn), 0x11C the club's second swing, 0xD3
-/// weapon 0x14's shot or the crossbow's bolt, 0x69 the flame, 0x19C weapon 0x23; a blast (0xF3) is a
+/// weapon 0x14's shot or the crossbow's bolt, 0x69 the flame, 0x19C weapon 0x23 or the mounted gun
+/// (its seated gunner's weapon, the nearest of the two); a blast (0xF3) is a
 /// rocket's when one went off this tick or the last (`rocket`), else the shotgun's or a grenade's;
 /// the kill 0x17E is the sniper's, melee 0x22's, the crossbow's or the shotgun's, and the stagger
 /// 0x11D a bullet's or the shotgun's (or a lethal shot or burn): the nearest other player holding
@@ -436,7 +437,7 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
         HIT_CLUB => 0x40,
         HIT_SHOT => nearest(&[SHOTS, 0x18]).unwrap_or(SHOTS),
         FLAME_HIT => 0x15,
-        DEATH_BLAST => 0x23,
+        DEATH_BLAST => nearest(&[0x23, conker_camera::GUN]).unwrap_or(0x23),
         BLOWN_UP if rocket => ROCKETS,
         BLOWN_UP => nearest(&[0x37]).unwrap_or(GRENADE),
         DEATH_SHOT => nearest(&[0x24, 0x22, 0x18, 0x37]).unwrap_or(0x24),
@@ -1751,6 +1752,20 @@ mod tests {
             ..victim
         };
         assert_eq!(hit_weapon(&kill, false, &all, false), 0x24);
+        let flung = Seen {
+            reaction: DEATH_BLAST,
+            ..victim
+        };
+        let gunner = (
+            at(3, 700.0, conker_camera::GUN),
+            at(3, 700.0, conker_camera::GUN),
+        );
+        assert_eq!(hit_weapon(&flung, false, &all, false), 0x23);
+        assert_eq!(
+            hit_weapon(&flung, false, &[all[0], all[1], gunner], false),
+            conker_camera::GUN,
+            "the mounted gun's bullet"
+        );
     }
 
     #[test]

@@ -105,6 +105,8 @@ pub struct Bots {
     /// gun the scope its stick turns.
     scopes: Vec<Option<(f32, f32)>>,
     guns: Vec<Scope>,
+    /// Per participant: where it stood at the last [`Bots::tick`] ([`brain::Body::prev`]).
+    prev: Vec<[f32; 3]>,
     noises: Vec<([f32; 3], f32)>,
     /// The trigger records and their switches ([`World::zones`]).
     zones: Vec<(CameraHint, bool)>,
@@ -144,6 +146,7 @@ impl Bots {
             aims: vec![None; n],
             scopes: vec![None; n],
             guns: vec![Scope::default(); n],
+            prev: Vec::new(),
             noises: Vec::new(),
             zones: (assets.triggers.as_chunks::<0x34>().0.iter())
                 .map(|r| {
@@ -437,6 +440,7 @@ impl Bots {
                 *i = input;
             }
         }
+        self.prev = bodies.iter().map(|b| b.pos).collect();
         effects
     }
 
@@ -454,6 +458,7 @@ impl Bots {
                 Body {
                     pos: f.body.pos,
                     old: f.body.pos,
+                    prev: self.prev.get(k).copied().unwrap_or(f.body.pos),
                     height: if f.body.airborne {
                         f.body.pos[1] - f.body.floor_y
                     } else {

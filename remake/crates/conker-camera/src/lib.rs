@@ -199,15 +199,34 @@ impl PlayerView {
 /// The mounted gun's weapon id (`struct126+0x78` while on one).
 pub const GUN: u8 = 0x1B;
 
+/// +0x2E4 for the gun scope's `pitch` (degrees, positive down): ×10 within ±180 (`func_150BDB70`, C).
+pub fn gun_pitch10(pitch: f32) -> i32 {
+    (((pitch + 180.0).rem_euclid(360.0) - 180.0) * 10.0) as i32
+}
+
+/// The mounted gun's tilt (degrees, nose down) for `pitch10`: the whole gun turns about its origin by
+/// a sixteenth of the pitch as a game angle, floored to the sine table's 32 (V m2 1400-1520: the seat
+/// stays 95.75 from the origin and turns by −32 units at pitch 3.9, −544 at 50 and 704 at −60, on the
+/// read the pitch changes); the barrels' joint takes the rest (I: the eye then fits within 0.4).
+pub fn gun_tilt(pitch10: i32) -> f32 {
+    let units = (pitch10 as f32 * (65536.0 / 3600.0)) as i32 >> 4;
+    (units & !31) as f32 * (360.0 / 65536.0)
+}
+
 /// The mounted gun's eye (`func_1512623C`: its joint 4's matrix × (0, 116, 130), C), for the gun at
 /// `origin` turned `yaw` (u16 angle) with its barrels pitched `pitch` degrees (positive down): joint 4,
 /// the barrels' pivot, sits 61.42 ahead and 52.265 up (the model's (0, 104.53, 122.84) at scale 0.5),
 /// the eye (0, 58, 65) from it. V m2: level, origin + (126.42 ahead, 110.27 up), to the hundredth;
 /// pitched, within 4 (I: the game's eye also lags the gun's turn a frame, its last matrix).
 pub fn gun_eye(origin: [f32; 3], yaw: u16, pitch: f32) -> [f32; 3] {
-    let (pc, ps) = (cos(pitch * DEG_TO_RAD), sin(pitch * DEG_TO_RAD));
-    let ahead = 61.42 + 65.0 * pc + 58.0 * ps;
-    let up = 52.265 + 58.0 * pc - 65.0 * ps;
+    let t = gun_tilt(gun_pitch10(pitch));
+    let (pc, ps) = (cos((pitch - t) * DEG_TO_RAD), sin((pitch - t) * DEG_TO_RAD));
+    let (f, u) = (
+        61.42 + 65.0 * pc + 58.0 * ps,
+        52.265 + 58.0 * pc - 65.0 * ps,
+    );
+    let (tc, ts) = (cos(t * DEG_TO_RAD), sin(t * DEG_TO_RAD));
+    let (ahead, up) = (f * tc + u * ts, u * tc - f * ts);
     let a = f32::from(yaw) * (360.0 / 65536.0) * DEG_TO_RAD;
     [
         origin[0] + ahead * cos(a),
