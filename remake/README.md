@@ -28,5 +28,11 @@ cargo check -p extract-core --target wasm32-unknown-unknown
 cargo run -p conker-extract -- --rom "/path/to/rom.z64" list
 ```
 
+Shortcuts from the repository root (`../package.json`, run with bun; the ROM defaults to
+`../Conker's Bad Fur Day (USA).z64`, or set `CONKER_ROM`): `bun run build` (native server and client, the
+browser client, the landing), `bun run serve` (the dev site on :8080 that runs and kills game servers), `bun run
+start` (both), `bun run server -- --bots 3` and `bun run client -- --side tediz` (one game server and the native
+client, extra flags passed on), `bun run pack -- --force` (re-export `../assets`), `bun run test`, `bun run check`.
+
 Ported formats credit DevOldSchool/conkers-bfd-decomp (MIT, commit `e2400b27dda6`) and CBFD-Recompiled (MIT)
 in the modules that use them.
