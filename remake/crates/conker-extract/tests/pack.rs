@@ -589,6 +589,10 @@ fn pack_audio_reads_back() {
         clips: vec![0x7C, 0x20D],
     };
     assert_eq!(cue(&firing, None), Some(vec![719]));
+    // The mounted guns (`mounted-gun.md` §4.4; V the oracle's sound calls).
+    assert_eq!(cue(&On::Gun { from: 3, to: 4 }, None), Some(vec![0x616]));
+    assert_eq!(cue(&On::GunStop, None), Some(vec![0x618, 0x619, 0x61A]));
+    assert_eq!(cue(&On::GunZoom { step: 2 }, None), Some(vec![0x622]));
 }
 
 /// The pack's HUD (`hud/`): `Hud::load` reads `hud.json` back and writes it out the same, as
@@ -647,4 +651,33 @@ fn pack_hud_reads_back() {
     assert_eq!(hud.weapon.icons[&0x39].texture, "atlas2");
     // The results' place, accuracy and labels are drawn with these.
     assert!(['%', 'P'].iter().all(|&c| hud.glyph(c).is_some()));
+    // A mounted gun's gunner view (`mounted-gun.md` §3; its PNGs' sizes checked above).
+    let size = |name: &str| hud.textures[name].size;
+    assert_eq!(
+        [
+            "gun_handle",
+            "gun_handle_lit",
+            "gun_flash",
+            "gun_corner",
+            "gun_tick_side",
+            "gun_tape_heading",
+            "gun_tape_elevation"
+        ]
+        .map(size),
+        [
+            [64, 32],
+            [64, 32],
+            [32, 32],
+            [16, 16],
+            [16, 16],
+            [16, 8],
+            [8, 16]
+        ]
+    );
+    assert_eq!(
+        (hud.gun.sight.len(), &hud.gun.sight[0].image.texture[..]),
+        (9, "reticle")
+    );
+    assert_eq!(hud.gun.handles.each_ref().map(|h| h.rect[0]), [9.0, 185.0]);
+    assert_eq!(hud.gun.flash.centre, [205.0, 176.0]);
 }

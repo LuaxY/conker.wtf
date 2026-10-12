@@ -48,6 +48,8 @@ pub const HELD_CLIPS: [u16; 15] = [
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;
+/// The mounted gun (class 0x8A): two on 0x30, one on 0x34 (`../lab/research/mp-original/mounted-gun.md`).
+pub const MOUNTED_GUN: usize = 138;
 /// How far below a floor plane a spawn point may sit and still stand on it (spawns on slopes sit
 /// up to ~1.3 units under the plane; the extract-scene example uses the same value).
 const FLOOR_TOLERANCE: f32 = 2.0;
@@ -487,7 +489,8 @@ pub fn map_name(scene: usize) -> String {
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
 /// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D or 0x30,
 /// War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and voice
-/// lines; with 0x30, War: Colors' two flags as characters (every clip).
+/// lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30 or 0x34, the
+/// mounted gun ([`MOUNTED_GUN`]) as a character (its clip).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -504,6 +507,10 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         for f in conker_rules::colors::FLAGS {
             outro_characters.push(Character::load(rom, usize::from(f.model))?);
         }
+    }
+    // The mounted guns on 0x30 and 0x34 (bank 01 #138: 12 joints, clip 1 the fire loop).
+    if maps.iter().any(|m| matches!(m.scene, 0x30 | 0x34)) {
+        outro_characters.push(Character::load(rom, MOUNTED_GUN)?);
     }
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();

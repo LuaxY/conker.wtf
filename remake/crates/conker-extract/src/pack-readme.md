@@ -32,6 +32,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
 | `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier) and 90 (a stitched Tedi): the outros' actors, each with the clips they play (`outros.json` says which); no `character.json` |
 | `characters/169/`, `characters/168/` `character.gltf`, `.bin`, `textures/*.png` | War: Colors' red flag (169) and green flag (168), packed with map 30: 9 joints, the cloth's 4 clips (glTF animation n is pair n: 3 standing, at home or let go of; 0 carried; 1 the carrier walking; 2 running), drawn at half their model units like the players; carried, in the carrier's right hand (`joint_09`); no `character.json` |
+| `characters/138/` `character.gltf`, `.bin`, `textures/*.png` | The mounted machine gun, packed with maps 30 and 34: 12 joints, drawn at half its model units like the players, turned to the gun's yaw. `joint_03` the seat (the gunner sits there); `joint_04` the barrels' and the camera's pivot, which takes the pitch (the gunner's eye is `joint_04` × (0, 116, 130)); `joint_05` and `joint_07` the barrels, their muzzles at (13, 0, 200) and (−13, 0, 200) from them; `joint_06`, `joint_08` the barrel tips; `joint_09`-`joint_11` a side part. One glTF animation, `pair_0000_anim_0001` (logical clip 1): the 12-frame fire loop, played while the gun fires. `textures/character-15.png` (material 15) is the ammunition belt, which scrolls along its S while the fire loop plays: −40 × the frame's VIs per frame on map 30, in the game's texture-scroll units (I: 1/32 texel); map 34's belt scroll is not exported. No `character.json` |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
@@ -44,7 +45,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
 | `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png` |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -251,7 +252,14 @@ Sections:
   one character, `then` plays when a firing loop ends; `note` says where it comes from. Every cue
   whose `on` (and `character`) matches plays: a head shot plays two. War: Total War's: `gas` (a loop
   while the gas is out) and `carry` (a gas canister taken: `canister` 0 or 1, `bot` a bot's). War:
-  Colors': `flag` (a flag taken: `flag` 0 the red, 1 the green, `bot` a bot's).
+  Colors': `flag` (a flag taken: `flag` 0 the red, 1 the green, `bot` a bot's). The mounted guns
+  (maps 30 and 34): `gun` (at the gun, its state going `from` → `to`: 1 free, 2 a player jumping
+  on, 3 manned, 4 firing, 11 stopped by B or overheating, 5 left; 3 → 4 starts the firing loop on
+  channel `a`; a looping sound plays until the gun's state changes again), `gun_stop` (at the gunner, when its firing stops), `gun_zoom` (the gunner's zoom,
+  heard by the gunner only: `step` 0 while it moves, a loop; 1 when it stops; 2 once step 1's sound
+  has ended), `gun_aim` (the gunner's aim: `step` 0 while it keeps changing, from its 10th VI of
+  change, a loop; 1 when it stops); and character 128's `firing` with weapon 27 (0x1B, the mounted
+  gun), the squirrel gunner's battle cry. There is no sound per shot.
 
 ### `hud/hud.json`
 Positions are in the original's frame, `frame`: 292 × 216 pixels, the picture the game draws
@@ -308,6 +316,26 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   shelter, under the rest of the HUD, for 150 frames (fading in over 32, out from the 132nd): per
   layer, `image` repeated, `texel` texels a pixel, starting at texel (frame / 4, `t`) and drifting
   a quarter texel a frame, in `colour` at the screen's strength times `share`.
+- `gun`: a mounted gun's gunner view (maps 30 and 34), the rest of the HUD as usual. A sprite is
+  its `image` over `rect`, mirrored across x and/or y as `flip` says. Everything blends as usual
+  (alpha over the picture beneath); a grey picture (the sight, the tapes) is its grey times the
+  colour, for colour and alpha alike:
+  - `sight`, in `colour`: the reticle, the four ticks and the four corners;
+  - `tapes`, in `tape_colour`: [0] the heading's, [1] the elevation's: `image` repeated `repeats`
+    times along `rect`'s long side, starting `per_degree` × the angle texels in (the heading, the
+    view direction's atan2(x, z), and the elevation above the horizontal, in degrees);
+  - `handles` [0] the left, [1] the right, as they are, and `lit`, the same handle lit by the
+    muzzle flash, crossfaded with them while the gun fires: at rest the handle's alpha is 255 and
+    `lit`'s 0; on a shot, on the side that fired, `lit` goes to 0x53 and the handle to 0xAC (their
+    sum stays 255), then `lit` fades out (V: 0x09, then 0x01, a frame apart); that side also drops
+    10-21 pixels (not exported);
+  - the zoom bar, as `scope`'s: `back` in `back_colour`, a bar `bar_width` wide from `bar_x`,
+    centred on y 108, in `bar_colour`;
+  - `flash`, after each shot: `image` centred on `centre` for barrel 0 (`joint_05`, at +x: the flash
+    on the right, where the right handle drops), mirrored across
+    the frame's centre for barrel 1, its size random in `width` × `height`, its alpha random in
+    `alpha`, for a random `life` VIs (2 a frame). It fades over its life (V: alpha 0xF9 one frame, 0
+    the next); the curve is not exported.
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.

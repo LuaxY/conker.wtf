@@ -6,9 +6,9 @@
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
-    Align, Anchor, Button, End, Glyph, Grenades, Haze, HazeLayer, Health, Horizontal as H, Hud,
-    Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle, Scope, Strip, Teams, Text, Texture,
-    Tv, Vertical as V, Weapon,
+    Align, Anchor, Button, End, Flash, Glyph, Grenades, Gun, Haze, HazeLayer, Health,
+    Horizontal as H, Hud, Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle, Scope, Sprite,
+    Strip, Tape, Teams, Text, Texture, Tv, Vertical as V, Weapon,
 };
 use extract_core::Rom;
 use extract_gbi::{Format, Tlut, decode, png};
@@ -24,8 +24,10 @@ const GLYPHS: usize = 95;
 /// display lists load it (by LOADBLOCK with dxt 0: odd rows stored TMEM-ready); War: Total War's
 /// gassed screen's (`func_151D2830`; V: white, alpha 1-7 of 15, equal to the RAM's at 0x8023B390,
 /// `../lab/research/mp-original/total-war-effects.md` §2); its outros' speech bubble and its tail
-/// (V: equal to the RAM's at 0x8025F250 and 0x8022E320 that the outro's DLs draw, `lab/hud/texfind`).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 16] = [
+/// (V: equal to the RAM's at 0x8025F250 and 0x8022E320 that the outro's DLs draw, `lab/hud/texfind`);
+/// a mounted gun's gunner view's (V: the RAM's that a 1-view gunner's DLs draw, found by `texfind`;
+/// its centre is the `reticle`).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 24] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -42,6 +44,14 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 16] = [
     ("haze", 0xA48, Format::Ia8, 64, 64, true),
     ("bubble", 0x1047, Format::Ia8, 64, 64, true),
     ("tail", 0x1049, Format::Ia8, 16, 16, true),
+    ("gun_handle", 0x3D1, Format::Ia16, 64, 32, true),
+    ("gun_handle_lit", 0x3D2, Format::Ia16, 64, 32, true),
+    ("gun_flash", 0x3D0, Format::Rgba32, 32, 32, true),
+    ("gun_corner", 0x1127, Format::I8, 16, 16, true),
+    ("gun_tick_side", 0x1198, Format::I4, 16, 16, true),
+    ("gun_tick_end", 0x1197, Format::I4, 16, 16, true),
+    ("gun_tape_heading", 0xFF3, Format::I8, 16, 8, true),
+    ("gun_tape_elevation", 0xFF4, Format::I8, 8, 16, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):
@@ -296,7 +306,79 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
                 },
             ],
         },
+        gun: gun(),
         end: None,
+    }
+}
+
+/// A mounted gun's gunner view in one view (`func_151C9BA0` case 0x1B, C; V the private oracle's
+/// DLs 125-260 of a gunner on 0x30's gun B, `hudwalk`): overlay sprites centred off the view's
+/// centre (146, 108), each its half size × 2 wide. The sight (`func_151CC840`): sprites 0x64 (the
+/// reticle) 12, 0x9D at x ±55 and 0x9C at y ±55 7, 0x9E at (±44, ±44) 6, env (255, 0, 0, 0xB4).
+/// The tapes (`func_151CC524`, sprites 0x9A at y −37, 0x9B at x −37, 28 × 4.2, the texture 5 times
+/// along; `func_151CC77C`: offset 2 · ∓angle / 360 · 2560 in 1/32 texels, the angles of the view
+/// direction s126+0x130; V at reads 127 and 242: −48 and −78.72 texels at headings 108° and
+/// 177.19°). The handles (`func_151CB5FC`, sprites 0x7B / 0x7C at (±88, 91), 49 × 18: at rest
+/// alpha 255 / 0; while firing the side that fired drops 10-21 pixels and `lit` comes up to 0x53,
+/// not modelled). The zoom bar (`func_151C9F38` type 3: x 37, w 1, h 30; colours 0x800AAC90 /
+/// 0x800AACE0 entry 3; its half height 1 + 29 × zoom, I as the sniper's 2 + 58). The flash
+/// (`func_150FB8C0`: sprite 0x55 at (±59, 68), half size 40 + rand · 20 by 80 + rand · 20, alpha
+/// 200 + rand % 56, life (rand & 3) + 5; V DL 221 and 223).
+fn gun() -> Gun {
+    let sprite = |rect, texture: &str, size: [u16; 2], flip| Sprite {
+        rect,
+        image: image(texture, [0, 0, size[0], size[1]]),
+        flip,
+    };
+    let (no, x, y, xy) = ([false, false], [true, false], [false, true], [true, true]);
+    Gun {
+        anchor: Anchor(H::Centre, V::Middle),
+        sight: vec![
+            sprite([134.0, 96.0, 24.0, 24.0], "reticle", [32, 32], no),
+            sprite([84.0, 101.0, 14.0, 14.0], "gun_tick_side", [16, 16], x),
+            sprite([194.0, 101.0, 14.0, 14.0], "gun_tick_side", [16, 16], no),
+            sprite([139.0, 46.0, 14.0, 14.0], "gun_tick_end", [16, 16], no),
+            sprite([139.0, 156.0, 14.0, 14.0], "gun_tick_end", [16, 16], y),
+            sprite([96.0, 58.0, 12.0, 12.0], "gun_corner", [16, 16], no),
+            sprite([184.0, 58.0, 12.0, 12.0], "gun_corner", [16, 16], x),
+            sprite([96.0, 146.0, 12.0, 12.0], "gun_corner", [16, 16], y),
+            sprite([184.0, 146.0, 12.0, 12.0], "gun_corner", [16, 16], xy),
+        ],
+        colour: [255, 0, 0, 0xB4],
+        tapes: [
+            Tape {
+                rect: [118.0, 66.75, 56.0, 8.25],
+                image: image("gun_tape_heading", [0, 0, 16, 8]),
+                repeats: 5.0,
+                per_degree: -4.0 / 9.0,
+            },
+            Tape {
+                rect: [104.75, 80.0, 8.25, 56.0],
+                image: image("gun_tape_elevation", [0, 0, 8, 16]),
+                repeats: 5.0,
+                per_degree: -4.0 / 9.0,
+            },
+        ],
+        tape_colour: [255, 0, 0, 0x82],
+        handles: [
+            sprite([9.0, 181.0, 98.0, 36.0], "gun_handle", [64, 32], no),
+            sprite([185.0, 181.0, 98.0, 36.0], "gun_handle", [64, 32], x),
+        ],
+        lit: image("gun_handle_lit", [0, 0, 64, 32]),
+        back: [180.0, 76.0, 6.0, 64.0],
+        back_colour: [255, 0, 0, 0x41],
+        bar_x: 182.0,
+        bar_width: 2.0,
+        bar_half: [1.0, 29.0],
+        bar_colour: [255, 255, 0, 0x5A],
+        flash: Flash {
+            image: image("gun_flash", [0, 0, 32, 32]),
+            centre: [205.0, 176.0],
+            width: [80.0, 120.0],
+            height: [160.0, 200.0],
+            alpha: [200, 255],
+            life: [5, 8],
+        },
     }
 }
 

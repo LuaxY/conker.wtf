@@ -237,6 +237,63 @@ pub struct HazeLayer {
     pub t: f32,
 }
 
+/// `image` over `rect` (`[x, y, width, height]`, fractional), mirrored across its x and/or y.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sprite {
+    pub rect: [f32; 4],
+    pub image: Image,
+    pub flip: [bool; 2],
+}
+
+/// A scale that scrolls with the view: `image` repeated `repeats` times along `rect`'s long side,
+/// starting `per_degree` × the angle texels in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tape {
+    pub rect: [f32; 4],
+    pub image: Image,
+    pub repeats: f32,
+    pub per_degree: f32,
+}
+
+/// A mounted gun's muzzle flash over the gunner's view, after each shot: `image` centred on
+/// `centre` for the gun's barrel 0 (joint 5), mirrored across the view's centre (picture and
+/// place) for barrel 1, its width and height random in `width` and `height`, its alpha random in
+/// `alpha`, for a random `life` VIs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Flash {
+    pub image: Image,
+    pub centre: [f32; 2],
+    pub width: [f32; 2],
+    pub height: [f32; 2],
+    pub alpha: [u8; 2],
+    pub life: [u8; 2],
+}
+
+/// A mounted gun's gunner view (maps 0x30 and 0x34; the HUD's other parts as usual). The
+/// `sight` in `colour`; the `tapes` in `tape_colour`: [0] the heading's (the view direction's
+/// atan2(x, z), degrees), [1] the elevation's (degrees above the horizontal); the `handles` at
+/// rest, [0] the left and [1] the right, drawn as they are (their own colours); the zoom bar as
+/// [`Scope`]'s (`back`, `bar_x`, `bar_width`, `bar_half`, centred on y 108) in `bar_colour`; the
+/// `flash` as it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gun {
+    pub anchor: Anchor,
+    pub sight: Vec<Sprite>,
+    pub colour: Rgba,
+    pub tapes: [Tape; 2],
+    pub tape_colour: Rgba,
+    pub handles: [Sprite; 2],
+    /// The handles lit by the muzzle flash, crossfaded over them while the gun fires.
+    pub lit: Image,
+    pub back: [f32; 4],
+    pub back_colour: Rgba,
+    pub bar_x: f32,
+    pub bar_width: f32,
+    pub bar_half: [f32; 2],
+    pub bar_colour: Rgba,
+    pub flash: Flash,
+}
+
 /// `hud/hud.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hud {
@@ -261,6 +318,7 @@ pub struct Hud {
     /// War: Total War's gas countdown: the seconds left until the gas kills.
     pub countdown: Text,
     pub haze: Haze,
+    pub gun: Gun,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,
@@ -284,6 +342,20 @@ impl Hud {
             all.extend((icons.iter().enumerate()).map(|(n, i)| (format!("strip.{name}[{n}]"), i)));
         }
         all.extend((self.flags.iter().enumerate()).map(|(n, f)| (format!("flags[{n}]"), &f.image)));
+        let gun = &self.gun;
+        all.extend(
+            (gun.sight.iter().enumerate()).map(|(n, s)| (format!("gun.sight[{n}]"), &s.image)),
+        );
+        all.extend(
+            (gun.tapes.iter().enumerate()).map(|(n, t)| (format!("gun.tapes[{n}]"), &t.image)),
+        );
+        all.extend(
+            (gun.handles.iter().enumerate()).map(|(n, h)| (format!("gun.handles[{n}]"), &h.image)),
+        );
+        all.extend([
+            ("gun.lit".into(), &gun.lit),
+            ("gun.flash".into(), &gun.flash.image),
+        ]);
         all
     }
 

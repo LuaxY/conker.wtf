@@ -513,3 +513,29 @@ fn colors_outros_follow_the_oracle() {
         }
     }
 }
+
+/// The mounted gun, bank 01 #138 (`mounted-gun.md` §5.2): its seat, pivot and barrels, and its
+/// one clip, the fire loop.
+#[test]
+fn mounted_gun_model() {
+    let Some(rom) = rom() else { return };
+    let gun = extract_character::Character::load(&rom, conker_extract::MOUNTED_GUN).unwrap();
+    let joints = &gun.model.joints;
+    assert_eq!(joints.len(), 12);
+    let at = |j: usize| joints[j].translation.map(|v| (v * 100.0).round() / 100.0);
+    assert_eq!(at(3), [0.0, 144.29, -125.92]);
+    assert_eq!(at(4), [0.0, 104.53, 122.84]);
+    assert_eq!(
+        (at(5), at(7)),
+        ([31.35, 115.88, 49.24], [-31.35, 115.88, 49.24])
+    );
+    let parents: Vec<_> = (3..9).map(|j| joints[j].parent).collect();
+    assert_eq!(
+        parents,
+        [Some(0), Some(0), Some(4), Some(5), Some(4), Some(7)]
+    );
+    let clips: Vec<_> = (gun.playable_clips())
+        .map(|c| (c.pair, c.logical.clone(), c.duration))
+        .collect();
+    assert_eq!(clips, [(0, vec![1], 12)]);
+}

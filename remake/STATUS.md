@@ -1,5 +1,56 @@
 # Status after wave 6 (2026-10-10)
 
+## Mounted guns: the pack (2026-10-12)
+**The pack now has what the client needs for the mounted machine guns on maps 30 and 34: the gun model with its fire
+loop, the gunner's sight, tapes, handles, zoom bar and muzzle flash, and the guns' sounds. Nothing uses them yet.**
+Research: `../lab/research/mp-original/mounted-gun.md` (§3, §4.4, §5.2) and the oracle's one-view DLs and sound calls.
+
+| Part | What |
+|---|---|
+| Extract | `MOUNTED_GUN` = 138, packed with map 30 or 34 as `characters/138` (12 joints; one glTF animation, `pair_0000_anim_0001` = logical clip 1, the 12-tick fire loop; no `character.json`). `hud.rs`: 8 textures (`gun_handle` 0x3D1 and `gun_handle_lit` 0x3D2 IA16 64×32, `gun_flash` 0x3D0 RGBA32 32×32, `gun_corner` 0x1127 I8 16×16, `gun_tick_side` 0x1198 and `gun_tick_end` 0x1197 I4 16×16, `gun_tape_heading` 0xFF3 I8 16×8, `gun_tape_elevation` 0xFF4 I8 8×16) and `gun()`, the one-view layout (`func_151CC840`, `func_151CC524`, `func_151CB5FC`, `func_151C9F38`, `func_150FB8C0`), rect for rect the oracle's DLs. `audio.rs` `gun_cues()`: 12 cues, 12 WAVs. README template updated |
+| Assets | `hud::{Gun, Sprite, Tape, Flash}`, `Hud.gun`; `On::{Gun { from, to }, GunStop, GunZoom { step }, GunAim { step }}` |
+
+**Handoff for the client:**
+- **Model:** `characters/138/character.gltf`, drawn at scale 0.5 and turned to the gun's yaw.
+  - `joint_03`: the seat.
+  - `joint_04`: the pivot; put the pitch here. The eye is `joint_04` × (0, 116, 130).
+  - `joint_05` and `joint_07`: the barrels. Their muzzles are at (13, 0, 200) and (−13, 0, 200), local to each barrel joint.
+  - `joint_06` and `joint_08`: the barrel tips.
+  - Play `pair_0000_anim_0001` while the gun fires (state 4).
+  - The belt is `textures/character-15.png` (material 15). On 0x30, while the clip plays, scroll its S by −40 × the frame's VIs (I: 1/32 texel).
+- **HUD:** `Hud.gun` (`hud.json` `gun`), anchored centre-middle, drawn with normal alpha blending; a grey picture is its grey × the colour.
+  - `sight: Vec<Sprite>`, drawn in `colour`.
+  - `tapes: [Tape; 2]`, drawn in `tape_colour`. [0] is the heading, [1] the elevation; each starts `per_degree` × the angle in degrees texels in.
+  - `handles: [Sprite; 2]`, plus `lit: Image`, which crossfades with them while the gun fires. At rest the handle's alpha is 255 and `lit`'s is 0. On a shot, on the side that fired, `lit` goes to 0x53 and the handle to 0xAC, then `lit` fades (V: 0x09, then 0x01).
+  - The zoom bar works like `Scope`'s: `back`, `back_colour`, `bar_x`, `bar_width`, `bar_half`, `bar_colour`.
+  - `flash: Flash`: barrel 0 at `centre`, barrel 1 mirrored; its size, alpha and life are random within their ranges. Barrel 0 is `joint_05`, at +x: its flash is at x 205, on the right, and the right handle drops. Check that +x shows on the right in the remake.
+  - A `Sprite` is `{ rect, image, flip: [x, y] }`.
+- **Sounds:** `events.json` cues named `gun`, `gun_stop`, `gun_zoom` and `gun_aim`.
+  - `On::Gun { from, to }` plays at the gun, on the gun's own channels. A looping sound plays until the gun's state changes again; that change is what stops 0x60E on B:
+    - 3→4: the 0x616 loop on A and 0x60E on B;
+    - 4→3 and 4→11: 0x617 on A;
+    - 11→3: 0x61B on B.
+  - `On::GunStop` plays at the gunner.
+  - `On::GunZoom { step: 0 | 1 | 2 }` and `On::GunAim { step: 0 | 1 }` are heard only by the gunner (`own`).
+  - Character 128 also has `On::Firing { weapon: 0x1B, clips: [0x1A4, 0x350] }`, the squirrel gunner's battle cry.
+  - There is no sound per shot.
+- **Player clips:** 0x32 (launch), 0x1A1 (seated) and 0x1A4 (seated firing) are in 128, 117 and 136. They are not in 135, 40, 88 or 90, which are outro actors only and never gunners.
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `tests/rom.rs` `mounted_gun_model` | 12 joints; the j3/j4/j5/j7 translations and the j3-j8 parents; one playable clip (pair 0, logical [1], 12 ticks) |
+| `tests/pack.rs` `pack_audio_reads_back` | `Audio::load` reads back the gun cues (3→4: 0x616; `gun_stop`: 0x618-0x61A; `gun_zoom` 2: 0x622), and each new WAV is the bank's sound, sample for sample |
+| `tests/pack.rs` `pack_hud_reads_back` | the gun textures' sizes (every PNG's size is checked against `hud.json`), 9 sight sprites, the handles at x 9 and 185, the flash centre; `Hud` round trip |
+| Pack | the task's command to `/tmp/pack-mg`, copied into `../assets`, `diff -r` empty. Additions only: characters/138, 12 WAVs (1550, 1558-1565, 1568-1570), 8 `hud/gun_*.png`, and gun entries in events/sounds/hud.json; in pack.json, 138 is appended to `characters`; in the README, two table rows are extended and new text added |
+| PNGs (seen) | the 8 HUD PNGs equal the oracle's RAM textures pixel for pixel; `character-15.png` is the belt of rounds |
+| `cargo test -p conker-extract -p conker-assets` | pass |
+| `bun run check` | clippy (every crate) and the web check pass. `cargo fmt --check` fails only in `crates/conker-camera/src/lib.rs`, the rules agent's work in progress |
+
+**Not done or I:**
+- **HUD:** the handle recoil (the side that fired drops 10-21 pixels) and the curve of `lit`'s fade; the flash's fade curve (V: alpha 0xF9, then 0 a frame later); the 2-player sight (I8 64×64), since the remake has no split screen.
+- **Model:** the belt scroll on 0x34 (tile scrolls 0x253/0x255/0x257); model 138 was not rendered (no renderer here), only checked by its glTF numbers and textures.
+- **Sounds:** `gun_stop`'s unpositioned replay 15 frames later is not exported; 0x622's sample loops but its envelope fades in 0.1 s and nothing stops it; when B stops the gun, no 0x617 was seen (once).
+
 ## War: Colors, part 3: the client (2026-10-12)
 **The client now draws War: Colors. The two flags stand at home, lie where they were let go of, and hang in the
 carrier's hand with the cloth waving. The HUD shows the captures in the strip, the blinking carried-flag icons, the

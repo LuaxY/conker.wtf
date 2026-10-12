@@ -988,7 +988,90 @@ fn code_cues() -> Vec<Cue> {
             ));
         }
     }
+    cues.extend(gun_cues());
     cues
+}
+
+/// The mounted guns' sounds (`../lab/research/mp-original/mounted-gun.md` §4.4; V: the sound calls
+/// of a gunner on 0x30's gun B, scenario 5, reads 83-693). There is no sound per shot: the gun's
+/// class script loops 0x616 on its channel A while it fires.
+fn gun_cues() -> Vec<Cue> {
+    let gun = |from, to| On::Gun { from, to };
+    // The gunner's own records at its position, 299/300: only the gunner hears them.
+    let gunner = |id, volume| play([id], volume, Some(volume), 299, 300, Channel::Free);
+    let mut cry = record(range(0x57C, 6), 32767, 500, 1000);
+    cry.chance = 63;
+    vec![
+        cue(
+            gun(3, 4),
+            play([0x616], 28000, None, 700, 4000, Channel::A),
+            "the firing, a loop (C func_1507BC14, the gun's class script; V: on each start of fire)",
+        ),
+        cue(
+            gun(3, 4),
+            play([0x60E], 28000, None, 300, 3000, Channel::B),
+            "the firing's second sound, stopped when firing ends (V: the class script, channel B)",
+        ),
+        cue(
+            gun(4, 3),
+            play([0x617], 28000, None, 700, 4000, Channel::A),
+            "firing ends, 20 frames after Z is let go (V: the class script, channel A)",
+        ),
+        cue(
+            gun(4, 0xB),
+            play([0x617], 28000, None, 300, 1800, Channel::A),
+            "firing stopped (V: on overheating; I: none when B stops it, seen once)",
+        ),
+        cue(
+            gun(0xB, 3),
+            play([0x61B], 28000, None, 300, 3000, Channel::B),
+            "the stop's end, 25 frames after B or overheating (V: the class script, channel B)",
+        ),
+        cue(
+            On::GunStop,
+            record(range(0x618, 3), 32000, 200, 500),
+            "a record at the gunner (C func_15065A5C case 0x1B: 0x618 + rand % 3; V; its callback \
+             func_1000EC24 plays it again unpositioned 15 frames later)",
+        ),
+        Cue {
+            character: Some("128".into()),
+            ..cue(
+                On::Firing {
+                    weapon: 0x1B,
+                    clips: vec![0x1A4, 0x350],
+                },
+                cry,
+                "a squirrel gunner's battle cry, one start of fire in four, cut when the gunner \
+                 leaves these clips (C func_15065A5C: class 0x80, func_1000F568(0x57C, 6), list 0x800996D0)",
+            )
+        },
+        cue(
+            On::GunZoom { step: 0 },
+            gunner(0x620, 26000),
+            "the zoom record's loop (C func_15126378, func_15127520: table 0x800894E0 entry 1; V)",
+        ),
+        cue(
+            On::GunZoom { step: 1 },
+            gunner(0x621, 26000),
+            "the zoom stops: the record's sound, and again unpositioned at 20000 (C func_15127520; V)",
+        ),
+        cue(
+            On::GunZoom { step: 2 },
+            gunner(0x622, 20000),
+            "unpositioned once the record's sound has ended (C func_15127520, flag 0x80: I; V 16 frames after step 1, \
+             never stopped: its sample loops but its envelope decays in 0.1 s, I)",
+        ),
+        cue(
+            On::GunAim { step: 0 },
+            gunner(0x61C, 16000),
+            "the aim record's loop (C func_15126378, func_151277B0; V)",
+        ),
+        cue(
+            On::GunAim { step: 1 },
+            gunner(0x61D, 16000),
+            "the aim stops (C func_151277B0; V)",
+        ),
+    ]
 }
 
 /// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.

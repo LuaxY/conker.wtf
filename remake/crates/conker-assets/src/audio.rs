@@ -191,6 +191,19 @@ pub enum On {
     /// War: Colors: a player taking flag `flag` (0 the red, 1 the green), at it; `bot`: a player
     /// without a camera.
     Flag { flag: u8, bot: bool },
+    /// A mounted gun (maps 0x30 and 0x34), at the gun: its state (gun+0x232: 1 free, 2 a player
+    /// jumping on, 3 manned, 4 firing, 0xB stopped by B or by overheating, 5 left) going from
+    /// `from` to `to`; a looping sound plays until the state changes again.
+    Gun { from: u8, to: u8 },
+    /// A mounted gun's firing stopped by its gunner (Z let go while it fires, B, or overheating),
+    /// at the gunner.
+    GunStop,
+    /// A gunner's zoom (C-up, C-down), heard by the gunner: `step` 0 while the zoom moves (a
+    /// loop), 1 when it stops, 2 when step 1's sound has ended.
+    GunZoom { step: u8 },
+    /// A gunner's aim (the yaw target times the pitch target), heard by the gunner: `step` 0
+    /// while it keeps changing (from its 10th VI of change, a loop), 1 when it stops.
+    GunAim { step: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
