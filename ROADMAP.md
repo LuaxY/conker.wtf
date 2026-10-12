@@ -3,6 +3,53 @@
 Where things stand: `RUST_REMAKE_PLAN.md` (status) and `remake/STATUS.md` (details, verification, gaps).
 Written 2026-10-10, updated after waves 5 and 6 the same day. Within each list, order is priority.
 
+## Completion batches (planned 2026-10-13)
+Goal: finish the game. Phase E fixes what is wrong or missing in the modes already done; phase M adds the missing
+modes. Run in order, one batch at a time; commit after each. Each batch is 1-3 agents in disjoint crates. A
+research agent writes `lab/research/mp-original/<topic>.md`. I read it, then the implementation agents start,
+then I check and commit. Agents never commit. Prompts follow the Beach ones:
+- lanes by crate;
+- ports 5970-5979 and 5980-5989, two apart (the server binds port+1);
+- a private `ConkerRecomp.<tag>` copy of the oracle; no commits in the oracle repo;
+- V/C/I tags;
+- `CARGO_TARGET_DIR=target-net`;
+- `assets/` must equal a fresh `conker-extract pack`;
+- kill only your own PIDs;
+- a reply of at most 25 lines.
+
+Sources: `remake/STATUS.md` sections and the lines of this file named per item.
+
+| Batch | Agents (lanes) | Items | Status |
+|---|---|---|---|
+| E1 match-flow bugs | rules/server/bots; client | A join or leave mid-match restarts the level AI script (Total War part 3, Colors part 1, this file "Total War done"/"Colors"); both teams out on one frame; Colors untimed + unlimited never ends, and after the final capture it still fades and respawns in the end phase (Colors part 3); Beach's cap of 8 villagers (Beach rules gaps); a waiting player's lethal hit counts (Wave 8); bots treat a free slot as an always-dead human, per-slot `Lifts` reset, `DEV_PRIVATE_KEY` (Wave 7 item 4). Client: an outro restarts for a mid-outro joiner, and roster changes in Over flip the computed winner (Total War part 6); STATS rows overlap with more than 4 humans | |
+| E2 bots fidelity | research ×2 (DM maps; Beach + club), then conker-bots | 0x30 lift-pair riders (DM 0x30 gaps); 0x34 node 60-62 jump loop (DM 0x34); ledge climb (0x30 node 48, state 235); camping (`func_1508A6FC` mask); club drawn 21% vs 52% (caveman); Beach escapes, 9 vs 5 (Beach rules gaps); `bots.sh` "bot 1 dies" flake; a seated gunner's shots unheard | |
+| E3 mounted guns | rules/sim/server; client | Launch homing, the leap's first frame and brake, e1's knock angle, a hurt gunner's trigger, `Effect::Gun`'s drop spot (Mounted guns: gameplay); the fire reaching the gunner late (server-only); `gun_stop`'s replay, the flash's pale box (Mounted guns: client) | |
+| E4 held weapons | rules/sim; client | C-down with the twin guns or flamethrower; the crossbow's hip push (~5.3 a shot), the shotgun's point-blank sphere, bolts on odd ticks (crossbow/shotgun gaps); hide the weapon on the death frame; the crossbow's string clips and bolt sound; the caveman's grenade clips 0x175/0x16C, the club icon's pixel, a lethal first swing (caveman gaps) | |
+| E5 Total War + Colors leftovers | research, then rules; client | TW: a human out of lives takes over a team-mate bot; the traitor's +0x70 reset; a carrier can't jump, its camera weapon 0x25, it has no weapon; canister shrink; props' collision by +0x6E; doors at 51; the mask clips' turn and brakes, the muffled mask sound (TW parts 3/5). Colors: capture jingles, the flag sound's 3rd argument, the touch radius 45, the end-phase fade, the home flag's mirrored "S" (Colors part 3) | |
+| E6 outros | research, then pack + client | Head nods and turns (op 0x11, channels 0-2), talk flag, bubble grow/shrink, page fades, attachments (op 0x0D: 0x70/0x71, helmets and guns on 88/90), cs5's sounds and smoke, op 9, per-camera FOV, the STATS fade-in, the voice fade-out, Beach's part masks (op 5 0x3C), props 0xFC/0xFD, song 0x8A, cs3's near plane (TW part 6, Colors part 2, Beach pack) | |
+| E7 Beach environment | research, then pack + client | Lamp flicker (behaviour 4, on 0x2D too), sweeping ground lights (19), strike decal 0x3103, song 0x4D's positional channels 13/14, the escape loop 0x4A7, explosion sizes and emitter, the shake, the bots' radio record, the plunger sinking, the escape teleport and Tedi ejection reads, 0x2D's gate lifts predicted (Beach gaps) | |
+| E8 visuals | pack/extract; client | Bullet, grenade and rocket models; flame particles; the gun twist on the model; the white quad near record 1; the twin guns' 3 untextured materials (Wave 7 item 1); fades and flash blended like the N64 (display space) | |
+| E9 HUD + audio | client (+ rules/server if the hit's weapon goes on the wire) | Own body in the sniper scope; rank on ties; death iris timing and centre; 0x16's R tint; scope dots' turn; the `#net` overlap (HUD gaps). Fly-by 802, fuse 929, landing order, the killing bullet 1278's trigger, the hit's weapon from the server (Audio gaps) | |
+| E10 DM maps + results | research, then sim/rules; client | Camera script zones and volumes on 0x30/0x34; the 0x34 corridor camera; 0x34 boxes and 0x2B placements sinking; kind 0xE's call; trigger kinds 12/17 (0x34) and 5/18 (0x3F); per-frame music volume; 0x2D props 0-1 for 51 frames. Results: skull grow, sky-only eliminated view, button pulse, HUD hidden in the fade, RESTART's 17-frame fade, P3/P4 colours, the accuracy hit rule | |
+| E11 around the match | server; web | The team screen with BALANCE; bot caps by human count; a side switch without reconnecting; the real lobby (player counts, the 9/8 mock); pack checks between server and client; `pickups.json` ids (this file "Missing compared…" 1, "Asset pack") | |
+| M1 Heist research | research ×2 (rules; presentation) | Scenario 0 on 0x1A: 4 teams, the bag and vault, the win rule, respawns, the 4 roaming pickups, Wise Guy 59, item 0x19, tommy gun 0x38, HUD, outros, sounds | |
+| M2 Vault + DM 0x1A | pack/extract; rules/sim/server | Map 0x1A, character 59, its weapons, roaming pickups; Deathmatch on 0x1A | |
+| M3 Heist rules | rules/server/bots | The mode from its AI script | |
+| M4 Heist client | client (+ pack) | HUD, effects, outros, sounds | |
+| M5 Raptor research | research ×2 | Scenario 2 on 0x3F: raptor 83 (39 joints), the bite, eggs and baby, bone crossbow 0x41, bone knives 0x3F, the win rule, outros | |
+| M6 Raptor pack + rules | pack; rules/server/bots | Raptor rig and clips, items, the mode | |
+| M7 Raptor client | client | Drawing, HUD, outros, sounds | |
+| M8 Tank research + pack | research; pack | Scene 0x24, scenario 1: tank 119, the 4 power-ups' bits, missiles, posts, wrecks | |
+| M9 Tank rules | rules/sim/server/bots | Tank movement, firing, damage, power-ups | |
+| M10 Tank client | client | Drawing, HUD, sounds | |
+| M11 Race oracle + research | one agent alone (oracle rebuild) | An env-gated hook so the race doesn't drop to the bar; then laps, the win rule, the two tracks (11/12), hoverboards, power-ups | |
+| M12 Race pack + rules | pack; rules/sim/server/bots | Scene 0x33, the board movement, laps 1-20, untimed | |
+| M13 Race client | client | Drawing, HUD, sounds | |
+| M14 characters | research, then pack + client + server | Per-map character sets, the cheat characters (`D_800AB57C`: Conker, the weasel guard, zombies, bats, Gregg…) | |
+
+Needs you, outside the batches: the real deployment (host and domain, "Wave 7" item 3); Firefox, Safari, background
+tabs and a real gamepad (manual); split screen and the other offline options stay out.
+
 ## Before wave 5 (done 2026-10-10)
 - Feet under the floor: fixed. The game draws the model 0.5 × 43 above the player (bank 0x11 record +6, obj+0xC8,
   `func_1502DF38`); `MODEL_LIFT` in the client. Matches the game's drawn joints on idle, run, crouch, crouch-walk.
