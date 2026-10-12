@@ -15,6 +15,7 @@
 
 pub mod audio;
 pub mod connection;
+pub mod flags;
 pub mod held;
 pub mod hud;
 pub mod lights;

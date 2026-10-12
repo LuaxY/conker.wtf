@@ -140,8 +140,9 @@ pub struct Rank {
 /// and a `blip`-sized square for every other living player within `range` frame pixels, `scale`
 /// pixels per game unit away. A blip on another level (`levels`: the heights between them) gets a
 /// `level_mark` bar above it (higher) or below it (lower). Holding a weapon in `hidden_with`
-/// keeps a player off it. In War: Total War a blip is in its player's team's `team_colours[team]`
-/// ([0] the squirrels', [1] the Tediz') instead of `blip_colour`.
+/// keeps a player off it. In War (Total War, Colors) a blip is in its player's team's
+/// `team_colours[team]` ([0] the squirrels', [1] the Tediz') instead of `blip_colour`; War:
+/// Colors' flags not carried get a blip too, in `flag_colour`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Radar {
     pub anchor: Anchor,
@@ -157,6 +158,7 @@ pub struct Radar {
     pub level_mark: Rgba,
     pub hidden_with: Vec<u8>,
     pub team_colours: [Rgba; 2],
+    pub flag_colour: Rgba,
 }
 
 /// War: Total War's team strip, in place of the own kills and rank (the results draw it too): per
@@ -253,6 +255,9 @@ pub struct Hud {
     pub scope: Scope,
     pub iris: Iris,
     pub strip: Strip,
+    /// War: Colors' carried-flag icons, by flag ([0] the red, which the squirrels carry; [1] the
+    /// green, the Tediz'): shown while it is carried, blinking.
+    pub flags: [Placed; 2],
     /// War: Total War's gas countdown: the seconds left until the gas kills.
     pub countdown: Text,
     pub haze: Haze,
@@ -278,6 +283,7 @@ impl Hud {
         for (name, icons) in [("kills", &self.strip.kills), ("lives", &self.strip.lives)] {
             all.extend((icons.iter().enumerate()).map(|(n, i)| (format!("strip.{name}[{n}]"), i)));
         }
+        all.extend((self.flags.iter().enumerate()).map(|(n, f)| (format!("flags[{n}]"), &f.image)));
         all
     }
 

@@ -15,8 +15,9 @@
 //!
 //! Per frame: [`lift::Lifts::ride`] (and [`Bots::lifted`] for every slot it moved), [`Bots::tick`]
 //! (fills the bot slots' inputs and returns what the script did to the match, for `Match::apply`),
-//! [`Bots::scopes`] (the snipers' aim into the match), `Match::step`, then [`Bots::observe`] with
-//! the step's events. Total War runs the script with no bot too: it holds the gas. Notes, oracle numbers and the approximations:
+//! [`Bots::scopes`] (the snipers' aim and the bots' pickup reach into the match), `Match::step`,
+//! then [`Bots::observe`] with the step's events. Total War runs the script with no bot too: it
+//! holds the gas. Notes, oracle numbers and the approximations:
 //! `lab/oracle/bot_README.md` (outside this tree).
 
 pub mod brain;
@@ -206,6 +207,11 @@ impl Bots {
     /// bot_long2; 0x18: I, as a human's aim, V combat5_ctlw18) and its shot follows the aim's yaw
     /// and pitch (s126+0x16C, +0x170), which conker-rules reads from `body.scope_yaw` and
     /// `scope_pitch`. Other weapons fire along the facing there (twin guns: flag 0, V).
+    ///
+    /// And every slot's reach for pickups (`Match::reach`, s126+0x1AF): a bot's as its script
+    /// last set it (command 0x7B, [`Npc::pickup`]), a human's the default. Without it a bot took
+    /// every pickup it ran over (a Colors collector, the melee weapon on its way to the red flag at
+    /// node 109, then turned back to fetch its preferred weapon again, and never took the flag).
     pub fn scopes(&self, m: &mut Match) {
         for (&slot, scope) in self.slots.iter().zip(&self.scopes).skip(self.humans) {
             if let Some(f) = m.players.get_mut(slot) {
@@ -213,6 +219,12 @@ impl Bots {
                 f.scope_pitch = scope.map_or(0.0, |s| s.1);
             }
         }
+        m.reach = (0..m.players.len())
+            .map(|s| match self.by_slot(s) {
+                Some(k) if k >= self.humans => self.npcs[k].pickup,
+                _ => conker_rules::weapon::REACH,
+            })
+            .collect();
     }
 
     /// The participant playing match slot `slot`.

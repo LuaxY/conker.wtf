@@ -157,6 +157,12 @@ shotgun (0x37). Leftovers:
      cs4's attachment; the mask clips cut a turn short; a carrier can jump; a join or leave mid-match restarts the
      script; the bots never carry a canister (nor did the game's in 620 s). Test-only `--warp SLOT:READ:X,Y,Z`.
      The oracle needs `CONKER_MP_OPTS=-48=2,-24=4,-23=5` for scenario 9's teams.
+   - **Colors mostly done (2026-10-12, `--mode colors --score N`):** the flags, takes, drops, returns, captures,
+     score and end from the level's AI script 0xBB; the victory outros (cs1/cs5); the flags drawn at home, dropped and
+     carried, with their cloth clips; the HUD strip's captures, the blinking carried-flag icons, the radar's flag
+     blips, the capture fade and the take sounds; the bots take and capture (pickup reach from the script's 0x7B).
+     Next: the mounted machine guns (0x30 ×2, 0x34 ×1). Left: the capture jingles, the touch radius (45, I), the
+     end-phase fade, a join or leave restarting the script, untimed + unlimited never ending.
 4. Vehicle modes: Tank (tanks, 4 power-ups) and Race (hoverboards, laps 1-20, 2 tracks). The oracle's Race returns
    to the bar after about 1 s, so its start needs fixing first.
 5. Not needed online: split screen, 4:3/16:9, hi-res, language, AI-VIEW.

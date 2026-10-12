@@ -188,6 +188,9 @@ pub enum On {
     /// War: Total War: a player taking gas canister `canister` (its team's), at it; `bot`: a player
     /// without a camera.
     Carry { canister: u8, bot: bool },
+    /// War: Colors: a player taking flag `flag` (0 the red, 1 the green), at it; `bot`: a player
+    /// without a camera.
+    Flag { flag: u8, bot: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

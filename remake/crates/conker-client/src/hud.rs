@@ -4,7 +4,9 @@
 //! reticle, the scope and the death iris; untimed, the lives left; out of lives, a skull; and once
 //! the match is over, the results (`hud/end.json`, [`End`]). War: Total War draws its team strip in
 //! place of the kills and rank, the radar's blips by team, its results' header, and a gassed
-//! player's haze under the HUD ([`haze`]).
+//! player's haze under the HUD ([`haze`]); War: Colors its strip with the team scores, the carried
+//! flags' blinking icons ([`flag_icons`]), the flags on the radar and the capture's fade
+//! ([`capture_fade`]).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -29,7 +31,7 @@ use conker_assets::hud::{
 use conker_assets::outro::Outro;
 use conker_rules::game::{Standing, places, team_places, team_result};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
-use lightyear::prelude::{Interpolated, PeerId, Predicted};
+use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
 use crate::connection::NetStatus;
 use crate::{Anim, FollowCamera};
@@ -88,8 +90,14 @@ pub struct Shown {
     /// Out of lives: a skull over the view, no radar.
     pub out: bool,
     /// War: Total War: the team strip's numbers, [0] the squirrels', [1] the Tediz': their kills,
-    /// untimed (`lives` shown) their lives left; in place of the own kills and rank.
+    /// untimed (`lives` shown) their lives left; in place of the own kills and rank. War: Colors:
+    /// the team scores.
     pub strip: Option<[u32; 2]>,
+    /// War: Colors: each flag's carried icon shown this frame (carried, in the blink's shown
+    /// phase); `Some` also puts the heads on the strip.
+    pub flags: Option<[bool; 2]>,
+    /// War: Colors: the capture's fade, black over the whole view at this alpha.
+    pub fade: Option<u8>,
     /// Total War: the gas countdown's seconds ([`countdown`]).
     pub countdown: Option<u32>,
     /// Total War: frames into this player's gassed screen (1-150, [`Combat::haze`]).
@@ -509,17 +517,30 @@ pub fn outro(hud: &Hud, o: &Outro, t: f32) -> Vec<Sprite> {
 
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
 pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
-    // Untimed matches count lives (the lives digit, the strip's lives).
+    // Untimed matches count lives (the lives digit, the strip's lives); Colors' strip has the
+    // heads too (HUD flag 0x2000: `func_151E9D18`'s icon row 0, C; V e0 DL 360).
     let untimed = s.lives.is_some();
+    let heads = untimed || s.flags.is_some();
     if let (Some((rows, choice)), Some(end)) = (&s.results, &hud.end) {
         let mut out = results(hud, end, rows, *choice, s.header);
-        // Total War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
+        // War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
         if let Some(n) = s.strip {
-            out.extend(strip(hud, n, untimed, end.results.anchor));
+            out.extend(strip(hud, n, heads, end.results.anchor));
         }
         return out;
     }
     let mut out = s.haze.map_or_else(Vec::new, |k| haze(&hud.haze, k));
+    // Colors: the capture's fade over everything (I: over the HUD or under it is not read).
+    if let Some(alpha) = s.fade.filter(|&a| a > 0) {
+        let far = 10_000.0;
+        let centre = Anchor(Horizontal::Centre, Vertical::Middle);
+        out.push(solid(
+            [-far, -far, 2.0 * far, 2.0 * far],
+            centre,
+            [0, 0, 0, alpha],
+            8.5,
+        ));
+    }
     let white = [255; 4];
     // Untimed: the lives left; out of them, the skull.
     if let (Some(n), Some(end)) = (s.lives, &hud.end) {
@@ -600,7 +621,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // Kills and rank (HUD flags 0x400, 0x800), or Total War's team strip (0x200 timed, 0x100
     // untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
     match s.strip {
-        Some(n) => out.extend(strip(hud, n, untimed, hud.strip.anchor)),
+        Some(n) => out.extend(strip(hud, n, heads, hud.strip.anchor)),
         None => {
             out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
             out.extend(text(
@@ -611,6 +632,11 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 5.0,
             ));
         }
+    }
+    // Colors: each carried flag's icon (HUD flag 0x8000), blinking.
+    for (f, _) in s.flags.iter().flatten().enumerate().filter(|f| *f.1) {
+        let p = &hud.flags[f];
+        out.push(quad(&p.image, p.rect.map(f32::from), p.anchor, white, 5.0));
     }
     if let Some(secs) = s.secs {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
@@ -798,6 +824,21 @@ pub fn countdown(countdown: i32) -> Option<u32> {
         .then(|| (countdown + 1 + 59) as u32 / 60)
 }
 
+/// War: Colors' carried-flag icons show while the VI counter (`0x800BE9AC`, 2 a frame) has its
+/// low 5 bits at 11 or more: 21 of every 32 VIs; the carriers' radar blips show in the other 11
+/// (`0x800E0BCC` masks them; C `func_15093B58`; V e0, e1: 18, 26, 30, 12 shown, 0, 10, 2 not).
+pub fn flag_icons(vi: u32) -> bool {
+    vi & 31 >= 11
+}
+
+/// War: Colors' fade around a capture's respawn (`command(0x50BB, 0x12, …, vis, out)`) `frames`
+/// into it: to black over `vis` VIs, or back. I: the curve is the outro's (`func_1517EF00`, 255 −
+/// e·255/d with e the VIs gone), its call here not read.
+pub fn capture_fade(out: bool, vis: u16, frames: u32) -> u8 {
+    let step = (2 * frames * 255 / u32::from(vis).max(1)).min(255) as u8;
+    if out { step } else { 255 - step }
+}
+
 /// What ranks a player (conker-rules' [`places`]).
 pub fn standing(c: &Combat) -> Standing {
     Standing {
@@ -817,6 +858,7 @@ fn shown(
     own: (&Player, &Combat, &FollowCamera, &Anim),
     everyone: &Query<(&Player, &Combat, Has<Predicted>), Or<(With<Predicted>, With<Interpolated>)>>,
     m: &MatchView,
+    vi: u32,
 ) -> Shown {
     let (p, c, camera, anim) = own;
     let clock = &anim.0;
@@ -826,21 +868,27 @@ fn shown(
     let ahead = Vec2::new(at.x - eye.x, at.z - eye.z).normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-ahead.y, ahead.x);
     let level = |y: f32| hud.radar.levels.iter().filter(|&&l| l <= y).count();
-    // Total War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328).
+    // War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328).
     let r = &hud.radar;
     let colour = |o: &Combat| {
         let team = r.team_colours.get(usize::from(o.team));
-        (team.filter(|_| m.total_war).copied()).unwrap_or(r.blip_colour)
+        (team.filter(|_| crate::outro::team_mode(m)).copied()).unwrap_or(r.blip_colour)
     };
-    let blips = (everyone.iter())
+    let blip = |pos: [f32; 3], colour| {
+        let d = Vec2::new(pos[0] - p.pos[0], pos[2] - p.pos[2]);
+        let higher = level(pos[1]).cmp(&level(p.pos[1])) as i8;
+        ([d.dot(right), d.dot(ahead)], higher, colour)
+    };
+    // Colors: a carrier's blip blinks against the icons; a flag not carried is a blip.
+    let icons = flag_icons(vi);
+    let mut blips: Vec<_> = (everyone.iter())
         .filter(|(_, o, predicted)| !predicted && o.health > 0)
         .filter(|(_, o, _)| !hud.radar.hidden_with.contains(&o.weapon))
-        .map(|(o, oc, _)| {
-            let d = Vec2::new(o.pos[0] - p.pos[0], o.pos[2] - p.pos[2]);
-            let higher = level(o.pos[1]).cmp(&level(p.pos[1])) as i8;
-            ([d.dot(right), d.dot(ahead)], higher, colour(oc))
-        })
+        .filter(|(_, o, _)| o.flag.is_none() || !icons)
+        .map(|(o, oc, _)| blip(o.pos, colour(oc)))
         .collect();
+    let lying = m.flags.iter().filter(|f| f.shown && f.carrier.is_none());
+    blips.extend((lying.filter(|_| m.colors)).map(|f| blip(f.pos, r.flag_colour)));
     let scope = camera.follow.cam.scope;
     // The place among everyone, this player first; Total War's strip: each team's kills, untimed
     // its lives left (`func_151E9D18`).
@@ -871,9 +919,14 @@ fn shown(
             .on
             .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
-        lives: (m.time == 0).then_some(c.lives_left),
+        lives: (m.time == 0 && !m.colors).then_some(c.lives_left),
         out: c.out > 0,
-        strip: m.total_war.then_some(strip),
+        strip: match m.colors {
+            true => Some(m.scores.map(u32::from)),
+            false => m.total_war.then_some(strip),
+        },
+        flags: (m.colors).then(|| m.flags.map(|f| icons && f.carrier.is_some())),
+        fade: None,
         countdown: countdown(m.countdown),
         haze: (c.haze > 0).then_some(u32::from(c.haze)),
         results: None,
@@ -894,6 +947,8 @@ fn draw(
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
+    timeline: Res<LocalTimeline>,
+    mut fading: Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: Local<HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>>,
@@ -914,7 +969,28 @@ fn draw(
     let quads = match playing.running(&outros) {
         Some((o, k)) => outro(&a.hud, o, o.t(k)),
         None => {
-            let mut shown = shown(&a.hud, own, &everyone, m);
+            let tick = timeline.tick().0;
+            let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick);
+            // Colors' fade from the tick this client saw it change (the match's tick is not sent);
+            // the one already there when this client first sees the match is not replayed.
+            match *fading {
+                Some((last, _)) if last == m.fade => {}
+                before => {
+                    *fading = Some((m.fade, before.map(|_| tick)));
+                    if let (Some(_), Some((out, vis, _))) = (before, m.fade) {
+                        let read = crate::script_read(tick, own.2.since, Some(m)).unwrap_or(0);
+                        info!(
+                            "capture fade: out {out} over {vis} VIs from tick {tick} (read {read})"
+                        );
+                    }
+                }
+            }
+            shown.fade = match *fading {
+                Some((Some((out, vis, _)), Some(at))) if m.phase == 0 => {
+                    Some(capture_fade(out, vis, tick.saturating_sub(at)))
+                }
+                _ => None,
+            };
             if m.phase == 2 {
                 let all: Vec<_> = (roster.iter())
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
@@ -1505,6 +1581,59 @@ mod tests {
                 vec![[146.0, 34.0, 64.0, 32.0]],
                 vec![]
             )
+        );
+    }
+
+    /// War: Colors' HUD where the original drew it (`lab/research/mp-original/colors-scratch/hw`:
+    /// e0 DL 360, a squirrel carrying the red flag, timed, 0-0; e1 DL 325, both flags carried): the
+    /// heads on the strip, the scores in grey, the red flag's icon at x 236 and the green's at 40;
+    /// the icons' blink; the capture's fade.
+    #[test]
+    fn colors_matches_the_originals_draws() {
+        let Some(hud) = pack_hud() else {
+            return;
+        };
+        let carrying = Shown {
+            strip: Some([0, 0]),
+            flags: Some([true, false]),
+            ..state()
+        };
+        assert_eq!(
+            rects(&hud, &carrying, &texture("teams")),
+            [
+                ([198.0, 196.0, 16.0, 16.0], [0.0, 0.0, 16.0, 16.0]),
+                ([66.0, 196.0, 16.0, 16.0], [16.0, 0.0, 32.0, 16.0]),
+                ([236.0, 196.0, 16.0, 16.0], [16.0, 16.0, 32.0, 32.0]),
+            ]
+        );
+        let grey =
+            (sprites(&hud, &carrying).into_iter()).filter(|q| q.colour == [192, 192, 192, 255]);
+        let grey: Vec<_> = grey.map(|q| q.rect).collect();
+        assert_eq!(grey, [[215.0, 197.0, 8.0, 11.0], [83.0, 197.0, 8.0, 11.0]]);
+        let both = Shown {
+            flags: Some([true, true]),
+            ..carrying.clone()
+        };
+        assert!(
+            rects(&hud, &both, &texture("teams"))
+                .contains(&([40.0, 196.0, 16.0, 16.0], [0.0, 16.0, 16.0, 32.0]))
+        );
+        let blink = Shown {
+            flags: Some([false, false]),
+            ..carrying
+        };
+        assert_eq!(rects(&hud, &blink, &texture("teams")).len(), 2);
+        assert_eq!((0..32).filter(|&vi| flag_icons(vi)).count(), 21);
+        assert!([18, 26, 30, 12].map(flag_icons) == [true; 4]);
+        assert!([0, 10, 2].map(flag_icons) == [false; 3]);
+        // Out over 60 VIs (30 frames), in over 100 (50).
+        assert_eq!(
+            [0, 15, 30, 40].map(|k| capture_fade(true, 60, k)),
+            [0, 127, 255, 255]
+        );
+        assert_eq!(
+            [0, 25, 50].map(|k| capture_fade(false, 100, k)),
+            [255, 128, 0]
         );
     }
 

@@ -1,5 +1,34 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Colors, part 3: the client (2026-10-12)
+**The client now draws War: Colors. The two flags stand at home, lie where they were let go of, and hang in the
+carrier's hand with the cloth waving. The HUD shows the captures in the strip, the blinking carried-flag icons, the
+flags on the radar and the fade around each capture. A flag being taken plays its sound. The STATS use the strip
+with the captures.** Research: `../lab/research/mp-original/colors.md`.
+
+| Part | What |
+|---|---|
+| Extract | With map 30, the pack has 01:169 (red) and 01:168 (green) as characters (9 joints, 4 cloth clips: glTF animation n is pair n). `hud.json`: `flags` (`teams.png` row 16: the red at (236,196), the green at (40,196), centre-bottom) and the radar's white `flag_colour` (obj+0x328 = 5). `events.json`: `flag` cues: squirrel 0x5A3 / bot 0x5A4, Tedi 0x642 / bot 0x643, volumes 30000/32700 (script 0xBB's obj mode 4). README template updated |
+| Assets | `Hud.flags`, `Radar.flag_colour`, `On::Flag { flag, bot }` |
+| Client | New `flags.rs`. Each standing flag is drawn at half scale. At home it faces 0x3E00 (177.19°); a dropped flag keeps its last carrier's turn. A carrier's flag hangs under its `joint_09` (the right hand = rules' `HELD`). The pole stays upright because the carry clips leave the root unturned. Cloth clip pair: 3 standing, 0 carried, 1 walking (0x1B0), 2 running (0x1B1). Clip lengths are +1 tick, and the flags hide during outros. `hud.rs`: the strip shows the team scores S with the heads (as at `func_151E9D18`). The carried icons are shown when `vi & 31 >= 11`, and the carrier's radar blip only in the other phase. Flags not carried are white blips. War team colours are used in both War modes. The capture fade is `2·frames·255/VIs` from the tick the client sees `MatchView.fade` change (not the value already there when it joins: no fade from black on a late join), black over the whole view including the HUD, in phase 0 only. `audio.rs`: a rising `Combat.flag` plays the `flag` cue |
+| Lab | `../lab/screens/colors/flags.sh live\|capture` (port 5984; uses `--spawn`, `--warp` and `--view`) |
+
+| Check (2026-10-12) | Result |
+|---|---|
+| `hud.rs` `colors_matches_the_originals_draws` | e0 DL 360 / e1 DL 325: head rects, the S digits at 215/83, the red icon (236,196) and green icon (40,196). The blink is on for 21 of 32 VIs; the fade values are sampled |
+| `flags.rs` `flags_stand_and_wave_as_the_game` | the home yaw is 177.19° ± 0.01; a dropped flag keeps its last turn; the cloth pairs match by clip |
+| Pack | the task's command to `/tmp/pack-cc`, copied into `../assets`, `diff -r` empty. Only additions: characters/168 and /169, 4 WAVs, and `flag` entries in events/sounds/hud/pack.json plus the README |
+| `bun run test`, `bun run check`, wasm32 clippy of conker-client | pass, run on the tree with the bots agent's in-progress work |
+| Fade timing | the server fades at reads 461 (out, 60 VIs) and 490 (in, 100 VIs); clients see them at 464-465 and 493. Mean frame brightness: 0.30 before, 0.17 at 485, 0.03 at 497, 0.21 at 525. The clock darkens with it |
+| Screens (read) | `flag-home` (the green flag upright at home), `carrier` (the pole upright in the hand), `tedi` (the red banner held aloft, the icon off and the carrier's blip on), `carrier-hud-a/b` (the icon on/off), `radar` (white flag blip), `scored-a/b` (the strip at Tediz 0, squirrels 1, the red icon during the plant), `cheer`, `lose`, `fade-out/-black/-in`, `stats` (SQUIRRELS WIN, the strip at 0 and 2) |
+
+Not done or I: the cloth's clip rate (a tick a frame); whether the fade covers the HUD; Bevy blends in linear light, so
+partial fades look lighter; the fade starts at the tick the client sees it (≈3 ticks late), and a client that joins
+mid-fade misses it; the capture jingles (0x7662/0x7664, 0x7657/0x7659) are not played; the flag sound's 3rd argument
+is not read; the home flag's "S" reads mirrored from the approach side (not checked against the original); after the
+final capture the rules still fade and respawn during the end phase (rules lane; the client draws the fade in phase 0
+only); split screen.
+
 ## War: Colors, part 2: the victory outros (2026-10-12)
 **When War: Colors ends, the winning team's cutscene now plays before the STATS: cs1 (0x30/1, 555 frames) if the
 squirrels win, cs5 (0x30/5, 550 frames) if the Tediz win, none on a DRAW.**
@@ -53,6 +82,20 @@ next). Research: `../lab/research/mp-original/colors.md`.
 | Deathmatch combat replays | identical to HEAD's (`--nocapture`, HEAD from `git archive`) |
 | clippy `-D warnings` (all targets; conker-client wasm32 too), `cargo fmt` of these files, web `bun run check` | clean (the outro agent's in-progress conker-extract was left out) |
 | Bots (`MODE=colors MAP=30`, 330 s each: `BOTS=7`, the idle human a Tedi, port 5970; `BOTS=6`, the human a squirrel as in the research's bots1, port 5972) | no faults, no unknown natives, no panics, and the flags show at t 555/556. **But 0 takes, 0 captures in either run** (bots1: the first take at 1719, captures at 2983 and 6449 in 9898 frames). The collectors do run at the flags (state 4, goal = query 0xCA = node 111 under the red flag, 103 under the green). The squirrels reach node 109 (~1,150 from the red flag) by the lift and 25 → 108 → 109, and by the next 30-tick sample they are in state 6 (fetching a weapon at G[0x14F4]'s node 123), with an enemy newly set: the Tediz' gunner, which camps at node 3 by the stubbed south mounted gun, or the idle human. The straight walk (script 6) never shows. The Tediz get no closer than 800 to the green flag's high ledge, as in bots1 (700-900). Query 0xCB was checked against the C (an unlimited ray, then the barrier lines only past a hit beyond the target) on every same-band node within 2,000 of each flag: the same answers. From 109 it is 0 in both, so the straight walk can only start from 110. Open: the guns, the roles drawn, what the bots see. `bots.sh`'s Deathmatch check fails for bots that camp and never die (snipers, gunners) |
+
+**Fixed: the bots take the flags (2026-10-12).** The original's pickup radius is `100 · s126+0x1AF / 64` (C
+`func_1511DF6C`). A bot's +0x1AF is set by its AI script with command 0x7B: 0xBB sets 0 at 0x18BC every frame, 0x40 at
+0x1F8E (within 100 of its goal) and 0x2902 (state 6) (V, the oracle's bots: 64 only in state 6). The remake used 64 for
+every bot, so a squirrel collector at node 109 took melee pickup 7 (on its way). Then it held something other than its
+preferred weapon, went to state 6 and walked back across the map. Fix: `Match.reach` per slot, filled by `Bots::scopes`
+from `Npc::pickup`; humans keep 64. `weapon::touches(.., reach)` covers pickups and canisters, so Deathmatch and Total
+War bots are gated too (0xBA's 0x7B: 0 at 0x16D6, 0x40/0x20 in its fetch states). Test: `rom.rs`
+`colors_bots_take_a_flag`. It uses the server's 7 bots + 1 Tedi: a Tedi takes the green flag at 2,398, with a bound of
+5,400. Without the fix: no take in 9,900. Same set-up, seeds 1-6, 9,900 frames: first take at 1,766-3,199, 1-2
+captures each. `bots.sh` 330 s: `BOTS=6` (bots1's set-up), takes at 2171 and 3007, captures at 3351 and 6630 (bots1:
+1719; 2983, 6449). `BOTS=7`: 3 takes (the first at 6513), 0 captures. DM/TW vs HEAD's server, same runs: 2d 9/9 hits,
+10/9 pickups; 30 35/44 hits, 21/18 pickups; TW 42/38 hits, 30/37 pickups, 16/16 vs 15/16 checks. Open: whether the
+flag touch also reads +0x1AF (I); the mounted guns (the oracle's Tedi gunner mounts gun A at ~480 and stays there).
 
 Open or I: the touch radius (45, between 40 picked up and 48 not); the meaning of 0x45 values besides 9/0xA/0xC; the
 +0x8A command (0x3F, a no-op); the guns (stubbed); a join or a leave restarts the script, which brings the flags home

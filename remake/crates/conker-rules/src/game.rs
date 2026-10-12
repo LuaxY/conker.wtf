@@ -674,6 +674,9 @@ pub struct Match {
     pub gas: Gas,
     /// War: Colors' flags and scores ([`Self::apply`]).
     pub colors: Colors,
+    /// Per slot, s126+0x1AF: how far it reaches for a pickup or canister ([`weapon::touches`]);
+    /// [`weapon::REACH`] for a slot not listed. The bots' AI script sets a bot's each frame.
+    pub reach: Vec<u8>,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -748,6 +751,7 @@ impl Match {
             free: BTreeSet::new(),
             gas: Gas::default(),
             colors: Colors::default(),
+            reach: Vec::new(),
         }
     }
 
@@ -1057,10 +1061,10 @@ impl Match {
             // scene 0x2D while G+0x1FE4 ≤ 0, C), and not by a player wearing one (I).
             let countdown = self.gas.countdown;
             let may = |f: &Fighter| def.gives != Gives::Mask || (countdown > 0 && !f.masked);
-            let toucher = self
-                .players
-                .iter()
-                .position(|f| f.health > 0 && may(f) && weapon::touches(*pos, f.body.pos));
+            let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
+            let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
+                f.health > 0 && may(f) && weapon::touches(*pos, f.body.pos, reach(i))
+            });
             if let Some(i) = toucher {
                 *p = PickupState {
                     timer: weapon::PICKUP_RESPAWN,
@@ -1079,8 +1083,11 @@ impl Match {
             let Some(&prop) = self.gas.prop(placement).filter(|p| p.shown) else {
                 continue;
             };
-            let toucher = self.players.iter().position(|f| {
-                f.health > 0 && gas::admits(prop.gate, f.team) && weapon::touches(pos, f.body.pos)
+            let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
+            let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
+                f.health > 0
+                    && gas::admits(prop.gate, f.team)
+                    && weapon::touches(pos, f.body.pos, reach(i))
             });
             if let (Some(i), Some(p)) = (toucher, self.gas.prop_mut(placement)) {
                 (p.flag, p.since, p.shown) = (i as i32 + 1, t, false);

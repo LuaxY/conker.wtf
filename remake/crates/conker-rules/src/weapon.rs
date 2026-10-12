@@ -565,21 +565,23 @@ pub fn pickups(scene: u16) -> Option<(&'static [Pickup], &'static [[i16; 3]])> {
     }
 }
 
-/// Touch radius (`100 · s126+0x1AF / 64`, with +0x1AF = 64; C `func_1511DF6C`).
-pub const PICKUP_RADIUS: f32 = 100.0;
+/// A human's s126+0x1AF, the touch radius's scale: radius `100 · reach / 64` (C `func_1511DF6C`).
+/// A bot's is the AI script's (command 0x7B: 0 at the start of each of its frames, 0x40 or 0x20 in
+/// a few states, C; V: 64 in state 6, fetching a weapon, and 0 in every other, the oracle's Colors
+/// bots), so a bot passing a pickup leaves it ([`crate::Match::reach`]).
+pub const REACH: u8 = 64;
 /// A taken pickup is back after 240 VIs (MP+0xEAC) = 120 frames (V `combat_pick57`).
 pub const PICKUP_RESPAWN: u16 = 120;
 pub const MAX_GRENADES: u8 = 6;
 pub const START_GRENADES: u8 = 3;
 
-/// The touch test, before the player moves that frame: within 100 horizontally and the pickup's
-/// height within 100 of the player's 90-unit body (C; the extra `prop.y < obj+0x17C` test is
-/// left out, I).
-pub fn touches(pickup: [f32; 3], player: [f32; 3]) -> bool {
+/// The touch test, before the player moves that frame, for a player of s126+0x1AF `reach`
+/// ([`REACH`]): within the radius horizontally and the pickup's height within it of the player's
+/// 90-unit body (C; the extra `prop.y < obj+0x17C` test is left out, I).
+pub fn touches(pickup: [f32; 3], player: [f32; 3], reach: u8) -> bool {
+    let r = 100.0 * f32::from(reach) / 64.0;
     let (dx, dz) = (pickup[0] - player[0], pickup[2] - player[2]);
-    dx * dx + dz * dz < PICKUP_RADIUS * PICKUP_RADIUS
-        && pickup[1] - PICKUP_RADIUS < player[1] + 90.0
-        && player[1] < pickup[1] + PICKUP_RADIUS
+    dx * dx + dz * dz < r * r && pickup[1] - r < player[1] + 90.0 && player[1] < pickup[1] + r
 }
 
 #[cfg(test)]
@@ -604,12 +606,14 @@ mod tests {
         assert!(matches!(W16.attack, Attack::Rocket { .. }) && W16.fire.1 == 28);
     }
 
-    /// combat_pick57: touched at xz 93.0 (read 154), not at 110.5 (read 153).
+    /// combat_pick57: touched at xz 93.0 (read 154), not at 110.5 (read 153). A bot's reach 0
+    /// touches nothing, even standing on it.
     #[test]
     fn touch_radius() {
         let p = [-2016.0, -435.0, 7507.0];
-        assert!(touches(p, [-2016.0 + 93.0, -435.0, 7507.0]));
-        assert!(!touches(p, [-2016.0 + 110.5, -435.0, 7507.0]));
-        assert!(!touches(p, [-2016.0, -435.0 + 150.0, 7507.0]));
+        assert!(touches(p, [-2016.0 + 93.0, -435.0, 7507.0], REACH));
+        assert!(!touches(p, [-2016.0 + 110.5, -435.0, 7507.0], REACH));
+        assert!(!touches(p, [-2016.0, -435.0 + 150.0, 7507.0], REACH));
+        assert!(!touches(p, p, 0));
     }
 }

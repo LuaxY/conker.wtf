@@ -977,6 +977,17 @@ fn code_cues() -> Vec<Cue> {
             ));
         }
     }
+    // War: Colors' flags, the same mode 4 from script 0xBB's pickup (I: the third argument, 2 and 7
+    // here, 0 for the canisters, is unread).
+    for (flag, id) in [(0, 0x5A3), (1, 0x642)] {
+        for (bot, id, volume) in [(false, id, 30000), (true, id + 1, 32700)] {
+            cues.push(cue(
+                On::Flag { flag, bot },
+                record([id], volume, 32766, 32767),
+                "a flag taken (C script 0xBB: obj(0x75A3, 4, 2, carrier, 0, 1) by a squirrel, obj(0x7642, 4, 7, carrier, 1, 1) by a Tedi)",
+            ));
+        }
+    }
     cues
 }
 

@@ -31,6 +31,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
 | `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier) and 90 (a stitched Tedi): the outros' actors, each with the clips they play (`outros.json` says which); no `character.json` |
+| `characters/169/`, `characters/168/` `character.gltf`, `.bin`, `textures/*.png` | War: Colors' red flag (169) and green flag (168), packed with map 30: 9 joints, the cloth's 4 clips (glTF animation n is pair n: 3 standing, at home or let go of; 0 carried; 1 the carrier walking; 2 running), drawn at half their model units like the players; carried, in the carrier's right hand (`joint_09`); no `character.json` |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, and the root-motion clips |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (14 models: the twin guns are two), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
@@ -43,7 +44,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
 | `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its bubbling spots and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War: Total War's team icons), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -249,7 +250,8 @@ Sections:
   an explosion, a pickup, a weapon in hand…) with its weapon id in decimal, `character` limits it to
   one character, `then` plays when a firing loop ends; `note` says where it comes from. Every cue
   whose `on` (and `character`) matches plays: a head shot plays two. War: Total War's: `gas` (a loop
-  while the gas is out) and `carry` (a gas canister taken: `canister` 0 or 1, `bot` a bot's).
+  while the gas is out) and `carry` (a gas canister taken: `canister` 0 or 1, `bot` a bot's). War:
+  Colors': `flag` (a flag taken: `flag` 0 the red, 1 the green, `bot` a bot's).
 
 ### `hud/hud.json`
 Positions are in the original's frame, `frame`: 292 × 216 pixels, the picture the game draws
@@ -280,8 +282,10 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   view (up is where the camera looks). Every other living player within `range` pixels, at `scale`
   pixels per game unit, is a `blip`-pixel square in `blip_colour`; one on another level (`levels`:
   the heights between levels) gets a `level_mark` bar above the square if higher, below if lower.
-  A player holding a weapon in `hidden_with` is not shown. In War: Total War a blip is in its
-  player's team's `team_colours` entry instead (the first the squirrels', the second the Tediz').
+  A player holding a weapon in `hidden_with` is not shown. In War (Total War, Colors) a blip is in
+  its player's team's `team_colours` entry instead (the first the squirrels', the second the
+  Tediz'). In War: Colors a flag not carried is a blip too, in `flag_colour`, and a carrier's blip
+  shows only while the `flags` icons are blinked off.
 - `reticle`: while aiming (R) with one of `weapons`: the `image` over `rect`, in `colour`.
 - `scope`: while looking through a scope: the `ring` picture is a quarter (its centre at its bottom
   right corner), drawn four times mirrored, `quadrant` pixels each, around `centre`; `dots` copies
@@ -294,7 +298,11 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
 - `strip`: War: Total War's team strip, drawn instead of `score` and `rank` (and under the results):
   per team (the first entry of each list the squirrels', the second the Tediz') its icon over
   `rects`, from `kills` in a match on the clock or `lives` in one without, and its number as
-  `numbers` (text as above): its players' kills, or without a clock their lives left.
+  `numbers` (text as above): its players' kills, or without a clock their lives left. War: Colors
+  draws it too, with the `lives` icons and each team's captures as its number.
+- `flags`: War: Colors' carried-flag icons, per flag (the first the red, which the squirrels carry,
+  the second the green, the Tediz'): its `image` over `rect` while the flag is carried, blinking
+  (hidden while the frame's VI count, 2 a frame, is under 11 in its low 5 bits).
 - `countdown`: War: Total War's gas countdown (text as above): the seconds left until the gas kills.
 - `haze`: War: Total War's gassed screen, over the whole view of a player caught outside the
   shelter, under the rest of the HUD, for 150 frames (fading in over 32, out from the 132nd): per

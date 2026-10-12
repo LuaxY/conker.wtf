@@ -224,6 +224,8 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             // The name colours 0x800AB62C by obj+0x328 − 1: 3 on team 0, 1 on team 1 (C
             // `func_15093B58`; V `sides_s9`, the gas run's DL 3000 drew 0x78FF16).
             team_colours: [[120, 255, 22, 255], [255, 55, 55, 255]],
+            // War: Colors' flags not carried: obj+0x328 = 5, the name colour 4 (C; V e1 DL 325).
+            flag_colour: [255, 255, 255, 255],
         },
         reticle: Reticle {
             anchor: Anchor(H::Centre, V::Middle),
@@ -256,6 +258,14 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             radius: IRIS.into(),
         },
         strip: strip(),
+        // War: Colors' carried-flag icons (HUD flag 0x8000; V e0 DL 360/364, e1 DL 325/360/382):
+        // texture 0xD10's flags, sharp, the red (16, 16) at x 236 while a squirrel carries it, the
+        // green (0, 16) at x 40 while a Tedi does.
+        flags: [(236, 16), (40, 0)].map(|(x, s)| Placed {
+            anchor: Anchor(H::Centre, V::Bottom),
+            rect: [x, 196, 16, 16],
+            image: image("teams", [s, 16, 16, 16]),
+        }),
         // Command F 1 (`func_1509DFC4`, C): `func_15042D94(150, 86, 1, "%d", (t + 59) / 60)` in white,
         // flags 1: centred, no shadow (0x80), off the viewport's scale (0x40 clear: 1 in one view;
         // `func_15043384`).

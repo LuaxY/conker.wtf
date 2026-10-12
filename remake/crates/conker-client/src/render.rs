@@ -164,6 +164,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
         .cloned();
     crate::lights::build(app, slice.lights, &slice.triggers);
     crate::held::build(app, slice.held, carried);
+    crate::flags::build(app);
     // The pack has no `.meta` files: don't ask for one before each file.
     let mut assets = AssetPlugin {
         meta_check: AssetMetaCheck::Never,
@@ -253,6 +254,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             draw_projectiles,
             add_props.run_if(ready),
             crate::outro::add_actors.run_if(ready),
+            crate::flags::add.run_if(ready),
             show_pickups,
             toggle_text_hud,
             update_hud,

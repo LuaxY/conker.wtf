@@ -644,3 +644,93 @@ fn colors_flags_and_captures() {
     assert_eq!(m.colors.scores, [3, 0]);
     assert_eq!(m.ended_at, Some(captures[2].at));
 }
+
+/// War: Colors with bots, as the server runs it (7 bots, the squirrels in the even slots, and an
+/// idle human, a Tedi): a collector takes the enemy flag within 5,400 frames (here a Tedi, the
+/// green flag, at 2,398; V bots1: a squirrel, the red flag, 1,719 frames in). The collectors' way
+/// to each flag passes a melee pickup (7 at node 109, 6 by the green flag's ledge): a bot's reach
+/// is the script's, 0 out of state 6 (V, the oracle's s126+0x1AF), so it leaves it. Without the
+/// reach it took it, turned back to fetch its preferred weapon (state 6), and no flag was taken
+/// in 9,900 frames.
+#[test]
+fn colors_bots_take_a_flag() {
+    use conker_bots::lift::Lifts;
+    use conker_bots::{Assets, Bots, DEFAULT_SKILL};
+    use conker_rules::{Arena, Fighter, Match, Rng, Settings, Spawn, spawn, weapon};
+    use conker_sim::movement::{Input, Side};
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x30).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x30);
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(&rom, 0x30).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let (picks, spots) = weapon::pickups(0x30).unwrap();
+    let pickups = (picks.iter().zip(spots))
+        .map(|(p, at)| (*p, at.map(f32::from)))
+        .collect();
+    let arena = Arena { spawns, pickups };
+    // The server's places: each side's k-th player on its k-th start record.
+    let starts = spawn::starts(0x30).unwrap();
+    let mut rng = Rng::default();
+    let mut members = [0; 2];
+    let players: Vec<Fighter> = (0..8)
+        .map(|slot| {
+            let team = if slot == 7 { 1 } else { slot % 2 };
+            let record = starts.sides[team][members[team]];
+            members[team] += 1;
+            let place = spawn::place(&arena.spawns, usize::from(record), &mut rng);
+            Fighter {
+                side: [Side::Squirrels, Side::Tediz][team],
+                spawn_mask: starts.side_masks[team],
+                bot: slot < 7,
+                ..Fighter::new(&place, team as u8, 0)
+            }
+        })
+        .collect();
+    let settings = Settings {
+        colors: true,
+        ..Settings::default()
+    };
+    let mut m = Match::new(&arena, players, rng, 0).with(settings);
+    let slots: Vec<usize> = (0..7).collect();
+    let mut bots = Bots::new(assets, 8, &slots, DEFAULT_SKILL, rng).unwrap();
+    let mut lifts = Lifts::new(assets.triggers, 0x30);
+    let mut taken = None;
+    for t in 0..5400 {
+        for (slot, _) in lifts.ride(&mut m, &arena) {
+            bots.lifted(slot);
+        }
+        let mut inputs = vec![Input::default(); 8];
+        let effects = bots.tick(&m, &arena, &world, &mut inputs);
+        let mut ev = m.apply(&effects);
+        bots.scopes(&mut m);
+        ev.extend(m.step(&arena, &inputs, &world));
+        bots.observe(&ev, &m);
+        if let Some(c) = m.colors.flags.iter().find_map(|f| f.carrier) {
+            taken = Some((t, c));
+            break;
+        }
+    }
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+    let (t, carrier) = taken.expect("a flag taken");
+    assert!(carrier < 7, "by a bot, at {t}: slot {carrier}");
+}

@@ -9,7 +9,7 @@
 //!   burning); its fire clip starting (a shot) or its scope coming up; its health dropping (a hit:
 //!   [`hit_weapon`] reads the weapon from the victim's first reaction); the match ([`MatchView`]: a
 //!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
-//!   (its player's [`Combat::carrying`] going on); the grenades in flight (the local fighter
+//!   (its player's [`Combat::carrying`] going on), War: Colors' flag taken ([`Combat::flag`]); the grenades in flight (the local fighter
 //!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
 //!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I).
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
@@ -204,6 +204,8 @@ struct Seen {
     speed: f32,
     /// Total War: carrying its team's gas canister, and whether it is a bot ([`On::Carry`]).
     carry: Option<(u8, bool)>,
+    /// War: Colors: carrying flag f, and whether it is a bot ([`On::Flag`]).
+    flag: Option<(u8, bool)>,
 }
 
 /// A player as the last tick saw it.
@@ -596,6 +598,9 @@ impl Sounds {
         }
         if let (Some((canister, bot)), None) = (is.carry, was.carry) {
             self.cues(cx, is, me, |on| *on == On::Carry { canister, bot });
+        }
+        if let (Some((flag, bot)), None) = (is.flag, was.flag) {
+            self.cues(cx, is, me, |on| *on == On::Flag { flag, bot });
         }
         let fire =
             |w: u8, p: &Seen| p.weapon == w && weapon(w).is_some_and(|w| w.fire.0 == p.clock.id);
@@ -1000,6 +1005,7 @@ fn hear(
         if let Some(f) = fighting.filter(|_| predicted) {
             grenades = &f.grenades;
         }
+        let bot = id.is_some_and(|i| matches!(i.0, PeerId::Local(_)));
         let seen = Seen {
             slot: c.slot,
             side: c.side,
@@ -1013,8 +1019,8 @@ fn hear(
             local: predicted,
             floor: p.floor.map(|f| (f.surface & 0x1F) as u8),
             speed: p.xz_speed,
-            carry: (c.carrying)
-                .then(|| (c.team, id.is_some_and(|i| matches!(i.0, PeerId::Local(_))))),
+            carry: (c.carrying).then_some((c.team, bot)),
+            flag: c.flag.map(|f| (f, bot)),
         };
         match heard {
             Some(mut h) => {
@@ -1573,6 +1579,7 @@ mod tests {
             floor: None,
             speed: 0.0,
             carry: None,
+            flag: None,
         };
         let victim = Seen {
             reaction: conker_anim::combat::HIT,

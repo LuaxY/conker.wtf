@@ -487,7 +487,7 @@ pub fn map_name(scene: usize) -> String {
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
 /// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D or 0x30,
 /// War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and voice
-/// lines.
+/// lines; with 0x30, War: Colors' two flags as characters (every clip).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -498,7 +498,13 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         .map(|m| outro::outros(rom, m.scene))
         .collect::<Result<_>>()?;
     let baked: Vec<_> = outros.concat();
-    let outro_characters = outro::characters(rom, &baked)?;
+    let mut outro_characters = outro::characters(rom, &baked)?;
+    // War: Colors' flags on 0x30 (bank 01 #169 red, #168 green: 9 joints, the cloth's 4 clips).
+    if maps.iter().any(|m| m.scene == 0x30) {
+        for f in conker_rules::colors::FLAGS {
+            outro_characters.push(Character::load(rom, usize::from(f.model))?);
+        }
+    }
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();
     let (mut gltfs, mut surfaces, mut summary) = (Vec::new(), BTreeSet::new(), Vec::new());
