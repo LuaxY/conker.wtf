@@ -346,18 +346,21 @@ pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
 /// and map 0x1A's bat (draw 0x10E, 0x110) and tommy gun (draw 0x1DD, idles 0x1DE/0x1DF, fire
 /// 0x1E0, 0x253, 0x254) (C `func_15065A5C`; V `../lab/research/mp-original/heist.md` h3, h4), and
 /// Heist's carrier's grab, idle, walk, run and throw (0x114-0x118; its hit 0x11B is already the
-/// club's: V `../lab/research/mp-original/heist-presentation.md` §2).
-pub const MATCH_CLIPS: [u16; 130] = [
+/// club's: V `../lab/research/mp-original/heist-presentation.md` §2), and War: Raptor's egg
+/// carrier's grab, throw, walk, idle and run (0xD5-0xD8, 0x2E4: V `raptor.md` r4), a standing bite's
+/// victim (0x170: V r2), the bone crossbow's draw and shot (0x2C8, 0x2C9: V r10) and the bone knives'
+/// draw and throw (0x2CA, 0x2CC: V r9).
+pub const MATCH_CLIPS: [u16; 140] = [
     0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x2B, 0x32, 0x36, 0x37, 0x38,
     0x4C, 0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xC5, 0xC6,
-    0xCF, 0xD3, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8, 0xF9, 0xFB, 0xFC,
-    0x102, 0x103, 0x10A, 0x10C, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x114, 0x115, 0x116,
-    0x117, 0x118, 0x119, 0x11A, 0x11B, 0x11C, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A,
-    0x12B, 0x144, 0x14E, 0x151, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B,
-    0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176,
-    0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1DD, 0x1DE, 0x1DF, 0x1E0, 0x1EA, 0x1EB, 0x1ED, 0x1EE,
-    0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x253,
-    0x254, 0x26E, 0x28E, 0x2C2, 0x2C3,
+    0xCF, 0xD3, 0xD5, 0xD6, 0xD7, 0xD8, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8,
+    0xF9, 0xFB, 0xFC, 0x102, 0x103, 0x10A, 0x10C, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x114,
+    0x115, 0x116, 0x117, 0x118, 0x119, 0x11A, 0x11B, 0x11C, 0x11D, 0x120, 0x121, 0x122, 0x124,
+    0x129, 0x12A, 0x12B, 0x144, 0x14E, 0x151, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159,
+    0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B,
+    0x16F, 0x170, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1DD, 0x1DE, 0x1DF, 0x1E0, 0x1EA,
+    0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C,
+    0x235, 0x238, 0x253, 0x254, 0x26E, 0x28E, 0x2C2, 0x2C3, 0x2C8, 0x2C9, 0x2CA, 0x2CC, 0x2E4,
 ];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
@@ -374,7 +377,7 @@ const OP_STOP_B: u32 = 107;
 const OP_STOP_A: u32 = 108;
 /// Ops whose argument goes through `func_1506E46C` (voice table, random count, chance, busy flag):
 /// (op, channel, near, far, volume for others, own volume). C: their handlers.
-const VOICED: [(u32, Channel, u16, u16, u16, u16); 13] = [
+const VOICED: [(u32, Channel, u16, u16, u16, u16); 15] = [
     (53, Channel::A, 300, 1800, 28000, 24000),
     (55, Channel::B, 3000, 8000, 28000, 24000),
     (56, Channel::A, 3000, 8000, 28000, 24000),
@@ -389,6 +392,10 @@ const VOICED: [(u32, Channel, u16, u16, u16, u16); 13] = [
     (111, Channel::A, 300, 3000, 14000, 12000),
     // The shotgun's blast (`func_1506E6FC`: op 53's call, farther; V sounds 755/756 as e_w24's).
     (144, Channel::A, 700, 4000, 28000, 24000),
+    // The raptor's and the baby's calls and steps (`func_1506E998`, `func_1506BAD8(300, 3000)`) and
+    // War: Raptor's body's (`func_1506E67C`, `func_1506BA4C(190, 1300)`).
+    (141, Channel::B, 300, 3000, 28000, 24000),
+    (145, Channel::A, 190, 1300, 28000, 24000),
 ];
 
 fn play(
@@ -463,17 +470,26 @@ fn sound_op(arg: u32, class: u8) -> Option<ClipAction> {
     Some(ClipAction::Play(p))
 }
 
-/// The sound events of character `class`'s Deathmatch clips (Heist's bag, [`crate::CASH`], and the
-/// tank, [`crate::TANK`]: all their clips): its route table's events (`[0x0F, route entry]`, as held.rs reads them) decoded as their
-/// op handlers do.
+/// The sound events of character `class`'s Deathmatch clips (Heist's bag, [`crate::CASH`], the
+/// tank, [`crate::TANK`], and War: Raptor's raptor, baby and body: all their clips): its route
+/// table's events (`[0x0F, route entry]`, as held.rs reads them; the baby's are the raptor's, as
+/// [`crate::load_character`]'s clips) decoded as their op handlers do.
 fn clip_sounds(rom: &Rom, game_data: &[u8], class: usize) -> Result<Vec<ClipSound>> {
-    let entry = animation_entry(game_data, animation_entry(game_data, class)?)?;
+    let animated = if class == crate::BABY {
+        crate::RAPTOR
+    } else {
+        class
+    };
+    let entry = animation_entry(game_data, animation_entry(game_data, animated)?)?;
     let table = rom.asset(&[ROUTE_BANK, entry])?;
     let voices = rom.asset(&[VOICE_BANK, class])?;
     let mut out = Vec::new();
     for (clip, route) in parse_routes(&table)?.iter().enumerate() {
         let clip = clip as u16;
-        let every = matches!(class, crate::CASH | crate::TANK);
+        let every = matches!(
+            class,
+            crate::CASH | crate::TANK | crate::RAPTOR | crate::BABY | crate::BODY
+        );
         if route.aux_offset == 0 || (!every && !MATCH_CLIPS.contains(&clip)) {
             continue;
         }
@@ -560,8 +576,10 @@ fn footsteps(rom: &Rom, kinds: &BTreeSet<u8>) -> Result<Footsteps> {
 /// 0x2C) plays only when the hit does not kill (V `mounted-gun-scratch/gc`: gcQ the squirrel's 887
 /// at 24000 on a hit, gcQK nothing on the kill). Map 0x1A's bat (0x19) swings as the club (the same
 /// `func_150641D8(0x113, 0x113, 0x119)`, C); its tommy gun's (0x38) bullet has the pistol bullet's
-/// numbers (I, `heist.md` §3.1).
-const REACTIONS: [(u8, u8); 22] = [
+/// numbers (I, `heist.md` §3.1). War: Raptor's bone knives (0x3F) and bolts (0x41) hurt the raptor
+/// as weapon 0x14's knives and 0x18's bolts do, reaction 0x20 (I: V its hurt clip 12, which the
+/// raptor's reactions 0x11, 0x1A and 0x20 all play, `raptor.md` r9, r10).
+const REACTIONS: [(u8, u8); 24] = [
     (0x09, 0x21),
     (0x39, 0x21),
     (0x23, 0x31),
@@ -584,6 +602,8 @@ const REACTIONS: [(u8, u8); 22] = [
     (0x19, 0x25),
     (0x19, 0x26),
     (0x38, 0x21),
+    (0x3F, 0x20),
+    (0x41, 0x20),
 ];
 
 fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Result<Vec<Cue>> {
@@ -1621,6 +1641,12 @@ pub fn pack_audio(
     }
     if maps.iter().any(|m| m.0 == "24") {
         cues.extend(tank_cues());
+    }
+    // War: Raptor's baby and body on 0x3F: their clips' sounds (the raptor's are a character's).
+    if maps.iter().any(|m| m.0 == "3f") {
+        for prop in [crate::BABY, crate::BODY] {
+            characters.insert(prop.to_string(), clip_sounds(rom, &game_data, prop)?);
+        }
     }
     // No cues for a character the pack leaves out (the Wise Guy's without map 0x1A).
     cues.retain(|c| (c.character.as_ref()).is_none_or(|n| characters.contains_key(n)));

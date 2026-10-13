@@ -20,6 +20,8 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides and the quads it never draws, bank-03 #0x33). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map), `2b` (scene 0x2B, the Beach, War: Beach's map, scenario 8), `1a` (scene 0x1A, the Vault, Heist's map, scenario 0, and Deathmatch scenario 6), `24` (scene 0x24, Tank's map, scenario 1) |
 | `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister at the origin (in a carrier's hands). Textures in `textures/` with the level's |
 | `maps/24/props.gltf`, `props.bin` | Tank's props the level leaves out, in place, nodes named as the level's: the gas bomb (`03-50@12`, shown on the centre post by the match; `@14` a second, never shown), the wrecks (`03-5f@17` to `@33`: 18 + slot shown where a tank died, 17 never), and the unused `03-48@9`, `@13`, `03-47@15` |
+| `maps/3f/props.gltf`, `props.bin` | War: Raptor's props the level leaves out, in place, nodes named as the level's: the cooked eggs (`04-3f-04@0` to `@3`, shown one at a time where an egg was delivered), `03-55@4` to `@6` (never shown) and the bone crossbows and bone knives on their pickup spots (`03-6b@15`, `@16`, `@19`, `@20`; `03-6a@17`, `@18`, `@21`, `@22`) |
+| `maps/3f/raptor.json` | What War: Raptor adds to the map: its hidden placements, its pickups, the teams' spawn records, its script's zones, the baby, the body and the eggs, and the raptor's rig and bites (below) |
 | `maps/<map>/collision.json` | What players stand on and run into, in the game's build order |
 | `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30, 12 on 0x34, 16 on 0x3F, 12 on 0x2B, 32 on 0x1A, 20 on 0x24) |
 | `maps/<map>/pickups.json` | The weapon and grenade pickups (19 on 0x2D and War: Total War's 6 gas masks, 17 on 0x30, 16 on 0x34, 10 on 0x3F, 8 on 0x1A, and on 0x2B War: Beach's 2 vitamin bottles, which give the villagers' item 0x3E; on 0x24 Tank's 4 power-ups) |
@@ -27,7 +29,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
 | `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, War: Beach's night lights on 0x2B, the level's own 34 on 0x1A and 16 on 0x24, none on the others |
-| `maps/<map>/outros.json` | The victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), Heist's on 0x1A (cutscenes 2 and 3), none on the others |
+| `maps/<map>/outros.json` | The victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), Heist's on 0x1A (cutscenes 2 and 3), Raptor's on 0x3F (cutscenes 2 and 4), none on the others |
 | `maps/<map>/outro.gltf`, `outro.bin` | The models the outros show (2d, 30, 2b, 1a): glTF scenes named `09-<entry>` (hex: a bank-09 attachment, in its joint's frame, character model units) and `prop-<placement>` (a placement the level leaves out, at the origin: the outro places it). Textures in `textures/` |
 | `maps/2b/effects.gltf`, `effects.bin` | War: Beach's effect models: scene `09-157`, the detonation's ring (bank 09 #0x157, a sphere of radius 100 at the origin, alpha-blended; the client scales it flat and fades it). Textures in `textures/` |
 | `maps/34/traps/*.png` | Scene 0x34's traps, the game's own textures: `flame.png` (a fire jet's flame, blob 0x916: a quad facing the camera, as wide as the jet and as tall, its texture's S running up the jet and scrolling), `puff.png` (the jets' particles, 0xBA6) and `arc.png` (the electric floor's arcs and bolts, 0x753: ribbons across its first row, tinted by the client) |
@@ -41,10 +43,12 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/59/` `character.gltf`, `.bin`, `textures/*.png` | Character 59, the Wise Guy: every Heist player (class 1), packed with map 1a. The same skeleton and animations, with a `character.json` that has its `teams`: `textures/team-0.png` to `team-3.png` are the four teams' looks (REDS, BLUES, GREENS, YELLOWS) |
 | `characters/87/` `character.gltf`, `.bin`, `textures/*.png` | Character 87, Heist's money bag, packed with map 1a: 5 joints, 12 clips (glTF animation n is pair n; the game's logical clips 0, 9 and 10 play pair 0, 1 pair 1, 3 pair 2, 2 pair 3, 4 pair 4, 5 and 6 pair 6, 7 pair 7, 8 pair 8, 11 pair 9, 12 pair 10, 13 pair 11; pair 5 has none); drawn at 0.4 of its model units; no `character.json` |
 | `characters/119/` `character.gltf`, `.bin`, `textures/*.png` | Character 119, the tank: every Tank player (class 8), packed with map 24. Its own 14 joints and 8 clips; drawn as the match does (brake lights unlit, headlights lit, the red flag). Its `character.json` has its `teams` (`textures/team-0.png` to `team-3.png`: the antenna's red, blue, green and yellow flags) and its `tank` parts (`textures/brake-lit.png`: the brake lights while it brakes) |
+| `characters/83/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 83, the raptor: War: Raptor's raptor side (class 9), packed with map 3f. Its own 39 joints and 37 clips (3 with root motion), model lift 0, drawn at 0.7 of its model units (`raptor.json`): `joint_05` the skull, `joint_06` the lower jaw (a carried body hangs at its origin), `joint_07` the crest |
+| `characters/165/`, `characters/171/`, `characters/22/` `character.gltf`, `.bin`, `textures/*.png` | War: Raptor's baby raptor (165: the raptor's 39 joints and its 37 clips, as the game plays them), egg (171: one joint, no clip) and the body a raptor carries (22: 31 joints, 32 clips), packed with map 3f; no `character.json` |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, the villagers' looks, the Wise Guy's team looks and the tank's flags and parts |
-| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (16 models: the twin guns are two; the Vault's bat and tommy gun among them), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
+| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
-| `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5) (a bullet has none) |
+| `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5), 5 War: Raptor's bone knife (bank 09 #0x7C; the bone crossbow's bolt is 3) (a bullet has none) |
 | `weapons/deathmatch/flame.png` | The flamethrower's stream (blob 0x916, as `maps/34/traps/flame.png`): a ribbon through its flame points, its S along the stream |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
@@ -53,7 +57,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/events.json` | Which game event plays which sound, at what volume, from where |
 | `audio/common/*.wav` | Sounds anyone makes: weapons, footsteps, hits, pickups, explosions (16-bit mono PCM, the game's own rates) |
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
-| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps and 0x1A's lamps and switching lights play the same sounds, kept there; 0x1A's bases' hum, `1116.wav`, in `maps/1a`; on 0x24 `countdown.wav`, the bomb's countdown music, song 50, a recording, `--song`) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, `song-8a.wav`, Beach cs4's song (a recording, `--song`), and `background_stem.wav`, the music's channels 13 and 14 (a recording, `--stem`, cut as `background.wav`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7; on 0x34 `0566.wav`, sound 0x236, the electric floor's (its fire jets' 0x1AA is `common/0426.wav`, the flamethrower's); on 0x1A Heist's outros' `voice-b5.wav` and `voice-ce.wav` (entries 0xB5, 0xCE) and their sounds `0010.wav` and `0012.wav`). A sound more than one folder's owner plays is in `common`: with map 24, the tank's sounds 12, 1191 and 1192 (0x2B's tunnels play 1191, Colors cs5's tanks 1192) |
+| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps and 0x1A's lamps and switching lights play the same sounds, kept there; 0x1A's bases' hum, `1116.wav`, in `maps/1a`; on 0x24 `countdown.wav`, the bomb's countdown music, song 50, a recording, `--song`) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, `song-8a.wav`, Beach cs4's song (a recording, `--song`), and `background_stem.wav`, the music's channels 13 and 14 (a recording, `--stem`, cut as `background.wav`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7; on 0x34 `0566.wav`, sound 0x236, the electric floor's (its fire jets' 0x1AA is `common/0426.wav`, the flamethrower's); on 0x1A Heist's outros' `voice-b5.wav` and `voice-ce.wav` (entries 0xB5, 0xCE) and their sounds `0010.wav` and `0012.wav`; on 0x3F Raptor cs2's `voice-1c5.wav`, entry 0x1C5). A sound more than one folder's owner plays is in `common`: with map 24, the tank's sounds 12, 1191 and 1192 (0x2B's tunnels play 1191, Colors cs5's tanks 1192) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
 | `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell); War: Beach's strike: `strike_glow.png` (its red floor glow) and `strike_streak.png` (its spinning streak), white with the intensity in alpha, tinted red by the client; Heist's `pips.png` (the strip's "$" pip, texels [14, 16, 7, 7]) and `bubble_particle.png` (the bubbles its outro cs3 sends up) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
@@ -199,9 +203,10 @@ out: a white one ahead, a red one behind while it brakes.
 ### `maps/<map>/outros.json`
 The victory outros, one per winning team (`winner`: 0 the squirrels (on 0x2B the villagers), 1
 the Tediz; a DRAW plays none; on 0x1A, Heist's, 0 when a team with a human player won, 1 when
-none did), from the original's cutscene `cutscene` of the map's scene (Total War's 2 and 4 on
-0x2D, Colors' 1 and 5 on 0x30, Beach's 4 and 3 on 0x2B, Heist's 2 and 3 on 0x1A; the tanks' smoke
-and texture swap are not exported). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
+none did; on 0x3F, Raptor's, 0 when the cavemen rank first, 1 otherwise), from the original's
+cutscene `cutscene` of the map's scene (Total War's 2 and 4 on 0x2D, Colors' 1 and 5 on 0x30,
+Beach's 4 and 3 on 0x2B, Heist's 2 and 3 on 0x1A, Raptor's 2 and 4 on 0x3F; the tanks' smoke and
+texture swap are not exported, nor Raptor's speech bubbles). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
 outro shows t = min(2k, `length`), a command at t from the first tick with t ≤ 2k (tick 1 at the
 earliest); the results come up after it, over its last picture. Fields an outro doesn't use are left
 out (Total War's are the simplest case).
@@ -257,9 +262,35 @@ out (Total War's are the simplest case).
   `fade_in` and out from `fade_out` to `stop` when given; full volume (0x7F7F), panned by place;
 - `near`: the camera's near plane (Beach's cs3: 30).
 
+### `maps/3f/raptor.json`
+War: Raptor (the original's scenario 2) on 0x3F; indices are placements, `triggers.json` records and
+`spawns.json` records:
+- `hidden`: the placements the match hides from its start (the level draws them all but
+  Deathmatch's): the cooked eggs till shown, 4-6 (never shown) and Deathmatch's weapons (7-14);
+- `cooked`: the cooked eggs (`props.gltf`), in turn: a delivered egg shows the next one, moved to
+  the egg's x and z (its y kept);
+- `pickups`: as `pickups.json`'s: the bone crossbows (0x41) and bone knives (0x3F) on 15-22, the
+  grenades on 23 and 24, each back 240 VIs after it is taken; only cavemen take them;
+- `spawns`: each team's spawn records, the cavemen's (team 0, east) then the raptors' (team 1, by
+  the nest);
+- `delivery`: the zone a carried egg scores in; `feed`: a raptor carrying a body inside one feeds
+  the baby (inside the first, the nest's ledge, turned to 340°); `hazard`: a player on the ground
+  inside one is hurt and thrown up; `jumps`: the raptor bots' jump zones;
+- `baby`, `body`, `eggs`: the scene's character records: `character` (its folder), `uid`, `at`
+  (where it is made; the baby stands on the floor under it), `yaw` (1/256 turns), `start` (the
+  behaviour it starts in), `scale` (of its model units: 0.45, 0.51, 0.2). The body is made in a
+  raptor's jaws at a standing bite's kill (this record is its look and scale);
+- `raptor`: the raptor's rig: `character` 83, `scale` 0.7, joints `head` (the skull), `jaw`, `carry`
+  (a carried body's origin, turned with the raptor); `attacks`, its attack table: each bite's area
+  `distance` × scale / 0.125 / 2 ahead, turned `angle` × 256 from the facing, `height` × scale /
+  0.25 up, of radius `radius` × 4 × scale; `damage`; the victim's `reaction` (0x46 killed, 0x1C
+  knocked back) and `sound`; `flags`; `raw` the whole entry (hex); `hits`: from tick `t` of clip
+  `clip` (a logical id), the area of `attacks[attack]` is tested every tick for `window` ticks;
+  `attack` null ends it.
+
 ### `characters/<id>/character.json`
 - `model_lift`: model units the model is drawn above the player (43 for 117, 42 for 128, 49 for 136
-  and 59).
+  and 59, 0 for 83).
 - `clips`: one entry per animation of `character.gltf`. The client finds a clip's animation by its
   name, `pair_NNNN_anim_IIII`: its `pair`, then its first `logical` id, in decimal.
   - `pair`: the clip in the ROM;
@@ -297,7 +328,8 @@ the server and the clients, not in the pack.
 ### `weapons/deathmatch/held.json`
 One entry per glTF scene of `held.gltf`, in order:
 - `entry`: the model, whose meshes are named `09-<entry>-<part>` in hex (the crossbow, a child
-  object: `01-6e-<list>`, its bank-01 model in its bind pose; for reference: glTF scene `i` is
+  object: `01-6e-<list>`, the bone crossbow's `01-2f-<list>`, their bank-01 models in their bind
+  pose; for reference: glTF scene `i` is
   entry `i`).
 - `joint`: the character joint it hangs from (`joint_09`, the right hand; `joint_04`, the left;
   `joint_12`, the head).
@@ -515,7 +547,7 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
 - **glTF models** (`level.gltf`, `props.gltf`, `character.gltf`, `held.gltf`): in Blender, *File > Import >
   glTF 2.0*. Export with *Format: glTF Separate (.gltf + .bin + textures)*, *Include > Custom
   Properties* on, to the same file name and folder. Keep:
-  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbow's `01-6e-…`), and the level's and props' `…@N` nodes (the client
+  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbows' `01-6e-…`, `01-2f-…`), and the level's and props' `…@N` nodes (the client
     hides node `…@N` while the pickup on placement N is taken, and War: Total War's props as its match says);
   - the character's animations' names (`pair_NNNN_anim_IIII`): the client finds each clip by its
     name, so their order may change;

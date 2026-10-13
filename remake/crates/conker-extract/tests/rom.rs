@@ -112,9 +112,9 @@ fn slice_in_memory() {
         assert_eq!(e["logicalIds"], serde_json::json!(c.logical));
     }
 
-    // The weapons and the grenade in the hand: 15 models (the twin guns are two; map 0x1A's bat and
-    // tommy gun), and the gas mask in the hand and on the head, one mesh each but the crossbow, a
-    // child object with a list per joint.
+    // The weapons and the grenade in the hand: 17 models (the twin guns are two; map 0x1A's bat and
+    // tommy gun; War: Raptor's bone crossbow and knives), and the gas mask in the hand and on the
+    // head, one mesh each but the crossbows, child objects with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -122,7 +122,7 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 18);
+    assert_eq!(slice.held.len(), 20);
     // The bat (bank 09 #0x38) in the right hand from its draw 0x10E (15 ticks in), away at 0x110
     // (its holster: the club's 0x2C3 is not it); the tommy gun (#0x5F) from 0x1DD at 11, away at
     // 0x1DE at 12 (ROM clip events, C).
@@ -1026,20 +1026,20 @@ fn mounted_gun_model() {
 }
 
 /// The projectiles' models in flight (E8, V the oracle's batches: the grenade 12 + 8 + 8 vertices,
-/// the rocket 16 with its nose at +484 and tail at −316, the bolt 23) and the quads 0x2D and 0x34
-/// never draw (bank-03 #0x33), out of their levels.
+/// the rocket 16 with its nose at +484 and tail at −316, the bolt 23, the bone knife 23 + 22)
+/// and the quads 0x2D and 0x34 never draw (bank-03 #0x33), out of their levels.
 #[test]
 fn projectiles_and_undrawn_quads() {
     let Some(rom) = rom() else { return };
     let (level, scenes) = conker_extract::projectiles_level(&rom).unwrap();
     let counts: Vec<_> = (level.meshes.iter()).map(|m| m.ir.vertices.len()).collect();
-    assert_eq!(counts, [28, 16, 34, 23, 16]);
+    assert_eq!(counts, [28, 16, 34, 23, 16, 45]);
     let z: Vec<_> = (level.meshes[1].ir.vertices.iter())
         .map(|v| v.position[2])
         .collect();
     assert_eq!((z.iter().min(), z.iter().max()), (Some(&-316), Some(&484)));
     assert!(level.meshes.iter().all(|m| m.ir.unresolved.len() <= 1));
-    assert_eq!(scenes.as_array().unwrap().len(), 5);
+    assert_eq!(scenes.as_array().unwrap().len(), 6);
     // Tank's shell: a five-sided prism with its nose at +48 (V sh1 DL 42, drawn at 1.5).
     let z: Vec<_> = (level.meshes[4].ir.vertices.iter())
         .map(|v| v.position[2])
@@ -1406,4 +1406,59 @@ fn tank_model_and_map() {
         ]
     );
     assert!(names[5..].iter().all(|(m, _)| m == &[3, 95]));
+}
+
+/// War: Raptor's models and outros (`../lab/research/mp-original/raptor.md`): the raptor (bank 01
+/// #83): 39 joints, the skull (5) on the neck (4), the jaw (6) and the crest (7) on the skull; the
+/// baby (165) on the raptor's rig plays its clips (V r3); the egg (171) one joint. The outros (C, no
+/// oracle CSVs): cs2 if the cavemen win, three cavemen talking, two turning their heads, voice
+/// 0x1C5; cs4 if the raptors win, three raptors in part mask 2 and the baby; their 0xFF lengths
+/// 1,530 and 830 VIs (the oracle's 1,500 and 749); no subtitles (no DLs of their bubbles).
+#[test]
+fn raptor_models_and_outros() {
+    let Some(rom) = rom() else { return };
+    let raptor = extract_character::Character::load(&rom, conker_extract::RAPTOR).unwrap();
+    let joints = &raptor.model.joints;
+    let parents: Vec<_> = (4..8).map(|j| joints[j].parent).collect();
+    assert_eq!(
+        (joints.len(), parents),
+        (39, vec![Some(3), Some(4), Some(5), Some(5)])
+    );
+    let clips = |c: &extract_character::Character| {
+        (c.playable_clips())
+            .map(|k| (k.pair, k.logical.clone(), k.duration))
+            .collect::<Vec<_>>()
+    };
+    let baby = conker_extract::load_character(&rom, conker_extract::BABY).unwrap();
+    assert_eq!(baby.model.joints.len(), 39);
+    assert_eq!(clips(&baby), clips(&raptor));
+    assert_eq!(clips(&raptor).len(), 37);
+    let egg = conker_extract::load_character(&rom, conker_extract::EGG).unwrap();
+    assert_eq!((egg.model.joints.len(), clips(&egg).len()), (1, 0));
+
+    let outros = conker_extract::outro::outros(&rom, conker_extract::TEMPLE).unwrap();
+    let summary: Vec<_> = (outros.iter())
+        .map(|o| {
+            let cast: Vec<_> = o.actors().map(|a| a.character.as_str()).collect();
+            (o.winner, o.cutscene, o.length, cast, o.subtitles.is_none())
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (0, 2, 1530, vec!["136"; 3], true),
+            (1, 4, 830, vec!["83", "83", "83", "165"], true)
+        ]
+    );
+    let voice = outros[0]
+        .voice
+        .as_ref()
+        .map(|v| (v.t, v.entry, v.file.as_str()));
+    assert_eq!(voice, Some((30, 0x1C5, "maps/3f/voice-1c5.wav")));
+    let heads: Vec<_> = (outros[0].actors())
+        .map(|a| (a.head.is_some(), a.talk.is_some()))
+        .collect();
+    assert_eq!(heads, [(true, true), (true, true), (false, true)]);
+    let masks: Vec<_> = outros[1].actors().map(|a| a.mask).collect();
+    assert_eq!(masks, [Some(2), Some(2), Some(2), None]);
 }

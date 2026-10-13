@@ -129,14 +129,14 @@ struct Jet {
     due: f32,
 }
 
-/// A particle: game units and frames.
+/// A particle: game units and frames (Heist cs3's bubbles too, `outro::bubbles`).
 #[derive(Component)]
-struct Puff {
-    vel: Vec3,
-    fall: f32,
-    age: f32,
-    life: f32,
-    alpha: f32,
+pub(crate) struct Puff {
+    pub(crate) vel: Vec3,
+    pub(crate) fall: f32,
+    pub(crate) age: f32,
+    pub(crate) life: f32,
+    pub(crate) alpha: f32,
 }
 
 /// An arc or a bolt: its points, half-width and life.
@@ -299,7 +299,7 @@ fn setup(mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetServer>, mut command
     });
 }
 
-fn material(texture: &Handle<Image>, rgb: [u8; 3], alpha: f32) -> StandardMaterial {
+pub(crate) fn material(texture: &Handle<Image>, rgb: [u8; 3], alpha: f32) -> StandardMaterial {
     StandardMaterial {
         base_color: Color::srgba_u8(rgb[0], rgb[1], rgb[2], 255).with_alpha(alpha),
         base_color_texture: Some(texture.clone()),
@@ -533,7 +533,7 @@ fn burning(
 
 /// The particles rise, slow and fade, facing the camera; gone at the end of their life.
 #[allow(clippy::type_complexity)]
-fn puffs(
+pub(crate) fn puffs(
     time: Res<Time>,
     camera: Query<&GlobalTransform, (With<Camera3d>, With<FreeCameraState>)>,
     mut puffs: Query<(

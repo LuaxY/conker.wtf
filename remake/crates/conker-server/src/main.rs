@@ -1905,6 +1905,7 @@ fn publish(
         .filter(|(_, s)| s.timer > 0)
         .fold(0u64, |acc, (p, _)| acc | 1 << p.0.placement);
     let s = m.settings;
+    let voice = view.voice;
     view.set_if_neq(MatchView {
         timer: m.timer,
         time: s.time.unwrap_or(0),
@@ -1991,6 +1992,12 @@ fn publish(
             }
         },
         human_won: s.heist && m.ended_at.is_some() && game.human_won(),
+        voice: (events.0.iter().rev())
+            .find_map(|e| match *e {
+                Event::Voice { player, id } => Some((m.tick, player as u16, id)),
+                _ => None,
+            })
+            .or(voice),
     });
 }
 

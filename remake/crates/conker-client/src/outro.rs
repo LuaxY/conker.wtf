@@ -50,10 +50,19 @@ impl Playing {
     }
 }
 
-/// Whether the match is a War mode (Total War, Colors, Beach), whose end plays the winning team's
-/// outro (as the server's `results_at` waits for it).
+/// Whether the match is a War mode (Total War, Colors, Beach, Heist), whose end plays the winning
+/// team's outro (as the server's `results_at` waits for it).
 pub fn team_mode(m: &MatchView) -> bool {
-    m.total_war || m.colors || m.beach
+    m.total_war || m.colors || m.beach || m.heist
+}
+
+/// The [`Outro::winner`] the end plays: the winning team's, Heist's by whether a human's team won
+/// (key 0, cutscene 2; else key 1, cutscene 3: the server's `outro`).
+fn key(m: &MatchView) -> Option<u8> {
+    match m.heist {
+        true => Some(u8::from(!m.human_won)),
+        false => m.winner,
+    }
 }
 
 /// Whether the match's results show: over, and past its outro if it has one.
@@ -65,11 +74,20 @@ pub fn build(app: &mut App, outros: Vec<Outro>) {
     let forced = std::env::var("CONKER_OUTRO")
         .ok()
         .and_then(|c| c.parse().ok());
+    let particles = outros.iter().any(|o| !o.particles.is_empty());
     app.insert_resource(Outros(outros, forced));
     app.init_resource::<Playing>();
     app.add_systems(FixedUpdate, clock.run_if(not(is_in_rollback)));
     // Headless clients have no asset server (nor actors to dress).
     app.add_systems(Update, dress.run_if(resource_exists::<AssetServer>));
+    app.add_systems(
+        Update,
+        wear.run_if(resource_exists::<crate::render::TeamLooks>),
+    );
+    if particles {
+        let particles = (bubbles, crate::traps::puffs).chain();
+        app.add_systems(Update, particles.run_if(resource_exists::<AssetServer>));
+    }
     app.add_systems(
         PostUpdate,
         pose.after(AnimationSystems)
@@ -93,7 +111,7 @@ fn clock(game: Query<&MatchView>, outros: Res<Outros>, mut playing: ResMut<Playi
             let (i, k) = match outros.1 {
                 Some(c) => ((outros.0.iter()).position(|o| o.cutscene == c), 0),
                 None => {
-                    let i = (outros.0.iter()).position(|o| Some(o.winner) == m.winner);
+                    let i = (outros.0.iter()).position(|o| Some(o.winner) == key(m));
                     (
                         i,
                         start(i.map_or(0, |i| outros.0[i].frames()), m.restart_in),
@@ -146,6 +164,14 @@ impl Actor {
 /// An outro's prop (an index of [`Outros`]): shown while it plays.
 #[derive(Component)]
 pub struct OutroProp(usize);
+
+/// An outro's light (an index of [`Outros`], the t it comes on).
+#[derive(Component)]
+pub struct OutroLight(usize, u16);
+
+/// An actor dressed in its team's look (or with none).
+#[derive(Component)]
+struct Worn;
 
 /// The villagers' head turn is left to their clips: their joint 12's channels compose with the
 /// clip in a way the research does not settle (I: `heads_b3.csv`, `heads_b4.csv`).
@@ -213,6 +239,24 @@ pub(crate) fn add_actors(
     }
     *added = true;
     for (outro, o) in outros.0.iter().enumerate() {
+        // Its point light (Heist's white one over the vault's door), shown from its `t`.
+        if let Some(l) = &o.light {
+            let light = conker_assets::Light {
+                at: l.at.map(f32::from),
+                rgb: l.rgb,
+                size: l.size,
+                swing: 0.0,
+                step: 0.0,
+                when: conker_assets::When::Calm,
+                flicker: false,
+            };
+            commands.spawn((
+                OutroLight(outro, l.t),
+                crate::lights::point_light(&light, l.size),
+                Transform::from_translation(Vec3::from_array(light.at)),
+                Visibility::Hidden,
+            ));
+        }
         for (n, a) in o.actors().enumerate() {
             let gltf = character_gltf(&a.character);
             let scene = format!("{gltf}#Scene0");
@@ -234,11 +278,17 @@ pub(crate) fn add_actors(
     }
 }
 
-/// Where `a` stands at `t`, facing its way.
+/// Where `a` stands at `t`, facing its way, rolled about its forward axis and pitched about its
+/// side one by its channels 6 and 8 (Heist cs3's sinking Wise Guy; I: the axes and signs).
 fn place(a: &conker_assets::outro::Actor, t: f32) -> Transform {
     let at = Vec3::from_array(a.place(t)) + Vec3::Y * a.scale * f32::from(a.lift);
+    let [roll, pitch] = [&a.roll, &a.pitch].map(|keys| value(keys, t).to_radians());
     Transform::from_translation(at)
-        .with_rotation(Quat::from_rotation_y(model_yaw(a.facing(t))))
+        .with_rotation(
+            Quat::from_rotation_y(model_yaw(a.facing(t)))
+                * Quat::from_rotation_z(roll)
+                * Quat::from_rotation_x(pitch),
+        )
         .with_scale(Vec3::splat(a.scale))
 }
 
@@ -292,8 +342,12 @@ pub(crate) fn show(
     outros: Res<Outros>,
     mut actors: Query<(&Actor, &mut Transform, &mut Visibility), Without<Model>>,
     mut props: Query<(&OutroProp, &mut Visibility), (Without<Actor>, Without<Model>)>,
+    mut lights: Query<
+        (&OutroLight, &mut Visibility),
+        (Without<OutroProp>, Without<Actor>, Without<Model>),
+    >,
     mut animators: Query<&mut AnimationPlayer>,
-    mut players: Query<&mut Visibility, (With<Model>, Without<OutroProp>)>,
+    mut players: Query<&mut Visibility, (With<Model>, Without<OutroProp>, Without<OutroLight>)>,
     camera: Single<
         (
             &mut Transform,
@@ -311,6 +365,14 @@ pub(crate) fn show(
     };
     for (prop, mut visibility) in &mut props {
         visibility.set_if_neq(shows(prop.0));
+    }
+    for (light, mut visibility) in &mut lights {
+        let on = shown.is_some_and(|(o, k)| o.t(k) >= f32::from(light.1));
+        visibility.set_if_neq(if on {
+            shows(light.0)
+        } else {
+            Visibility::Hidden
+        });
     }
     for (actor, mut transform, mut visibility) in &mut actors {
         visibility.set_if_neq(shows(actor.outro));
@@ -364,6 +426,89 @@ pub(crate) fn show(
     }
 }
 
+/// Once its scene is in, an actor with a team look (`Actor::team`: Heist cs3's Wise Guy in REDS'
+/// shirt) wears it as a player's model does (`render::dress_teams`).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn wear(
+    actors: Query<(Entity, &Actor), Without<Worn>>,
+    outros: Res<Outros>,
+    cfg: Res<crate::Config>,
+    looks: Res<crate::render::TeamLooks>,
+    children: Query<&Children>,
+    mut parts: Query<(
+        &bevy::gltf::GltfMaterialName,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    assets: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    for (entity, actor) in actors.iter().filter(|(_, a)| a.animator.is_some()) {
+        commands.entity(entity).insert(Worn);
+        let a = actor.of(&outros);
+        let body = (crate::characters(&cfg.map).iter()).position(|c| *c == a.character);
+        let Some((name, texture)) = a.team.zip(body).and_then(|(t, b)| looks.of(b, t)) else {
+            continue;
+        };
+        let look = (name, assets.load(texture.to_string()));
+        crate::render::wear(entity, look, &children, &mut parts, &mut materials);
+    }
+}
+
+/// An outro's particles ([`script::Particles`]: Heist cs3's bubbles off the sinking Wise Guy):
+/// while an emitter runs, a bubble a frame (I) about its actor, `hud/bubble_particle.png` 3.1-11.8
+/// units big (I: its sizes 31-118, V, over 10), rising 1-2 a frame (I) for 50-156 frames (V),
+/// fading out ([`crate::traps::puffs`]).
+#[allow(clippy::too_many_arguments)]
+fn bubbles(
+    playing: Res<Playing>,
+    outros: Res<Outros>,
+    actors: Query<(&Actor, &Transform)>,
+    assets: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut look: Local<Option<(Handle<Mesh>, Handle<Image>)>>,
+    mut last: Local<Option<u32>>,
+    mut rng: Local<Rng>,
+    mut commands: Commands,
+) {
+    let Some((i, k)) = playing.0.filter(|p| *last != Some(p.1)) else {
+        *last = playing.0.map(|p| p.1);
+        return;
+    };
+    *last = Some(k);
+    let o = &outros.0[i];
+    let t = o.t(k);
+    for p in (o.particles.iter()).filter(|p| (f32::from(p.t)..f32::from(p.until)).contains(&t)) {
+        let n = usize::from(p.actor);
+        let Some((_, at)) = actors.iter().find(|(a, _)| a.outro == i && a.n == n) else {
+            continue;
+        };
+        let (mesh, texture) = look
+            .get_or_insert_with(|| {
+                let quad = meshes.add(Rectangle::new(1.0, 1.0));
+                (quad, assets.load("hud/bubble_particle.png"))
+            })
+            .clone();
+        let mut r = || rng.next_f32();
+        let size = (31.0 + 87.0 * r()) / 10.0;
+        let at = at.translation + Vec3::new(20.0 * r() - 10.0, 40.0 * r(), 20.0 * r() - 10.0);
+        let puff = crate::traps::Puff {
+            vel: Vec3::Y * (1.0 + r()),
+            fall: 0.0,
+            age: 0.0,
+            life: 50.0 + 106.0 * r(),
+            alpha: 1.0,
+        };
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(materials.add(crate::traps::material(&texture, [255; 3], 1.0))),
+            Transform::from_translation(at).with_scale(Vec3::splat(size)),
+            puff,
+        ));
+    }
+}
+
 /// Once an actor's scene is in: its head and jaw joints are found, its attachments hang hidden
 /// under their joints (`outro.gltf`'s `09-<entry>`, loaded after the actors' scenes), and its
 /// masked display lists hide (a villager's look, `beach::hidden`'s rule with the outro's mask).
@@ -409,7 +554,8 @@ fn dress(
                     OutroProp(n),
                     WorldAssetRoot(scene.clone()),
                     Transform::from_translation(Vec3::from_array(p.at.map(f32::from)))
-                        .with_rotation(turn(x, y)),
+                        .with_rotation(turn(x, y))
+                        .with_scale(p.scale.map_or(Vec3::ONE, Vec3::from_array)),
                     Visibility::Hidden,
                     crate::lights::Lit,
                 ));
@@ -555,6 +701,95 @@ mod tests {
         let r = Mat3::from_quat(q);
         let (x, y, z) = (r.x_axis, r.y_axis, r.z_axis);
         [z.x.atan2(z.z), (-z.y).asin(), x.y.atan2(y.y)].map(f32::to_degrees)
+    }
+
+    /// Heist's outros against the oracle (`lab/research/mp-original/heist-presentation-scratch/
+    /// outro`): a human's team 1st plays cutscene 2 (325 frames), else 3 (775); frame k is read 459
+    /// + k (cs2) or 157 + k (cs3): its clock, each actor's place (feet), facing, scale and roll
+    /// (channel 6, about its forward axis: I) as the CSVs', and the fade's alpha.
+    #[test]
+    fn heist_outros_follow_the_oracle() {
+        let Some(outros) = pack_outros("1a") else {
+            eprintln!("no pack outros: skipping");
+            return;
+        };
+        let pick = |human_won| {
+            let m = MatchView {
+                heist: true,
+                human_won,
+                winner: Some(3),
+                ..MatchView::default()
+            };
+            (outros.iter()).position(|o| Some(o.winner) == key(&m))
+        };
+        assert_eq!((pick(true), pick(false)), (Some(0), Some(1)));
+        let shape: Vec<_> = outros.iter().map(|o| (o.cutscene, o.frames())).collect();
+        assert_eq!(shape, [(2, 325), (3, 775)]);
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../lab/research/mp-original/heist-presentation-scratch/outro"
+        );
+        let csv = |name: String| -> Option<Vec<Vec<String>>> {
+            let text = std::fs::read_to_string(format!("{dir}/{name}")).ok()?;
+            let rows = text.lines().skip(1);
+            Some(
+                rows.map(|l| l.split(',').map(String::from).collect())
+                    .collect(),
+            )
+        };
+        for (o, n, first) in [(&outros[0], 2, 459), (&outros[1], 3, 157)] {
+            let (Some(actors), Some(fades)) = (
+                csv(format!("outro_cs{n}_actors.csv")),
+                csv(format!("fade_cs{n}.csv")),
+            ) else {
+                eprintln!("no oracle CSVs: skipping");
+                return;
+            };
+            let mut objects = Vec::new();
+            let mut checked = 0;
+            for row in &actors {
+                let f = |c: usize| row[c].parse::<f32>().unwrap();
+                let obj = row[2].clone();
+                if !objects.contains(&obj) {
+                    objects.push(obj.clone());
+                }
+                let a = (o.actors())
+                    .nth(objects.iter().position(|x| *x == obj).unwrap())
+                    .unwrap();
+                let k = row[0].parse::<u32>().unwrap() - first;
+                if k == 0 || k > o.frames() {
+                    continue;
+                }
+                let t = o.t(k);
+                assert_eq!(t, f(1), "cs{n} frame {k}");
+                let p = place(a, t);
+                let feet = p.translation - Vec3::Y * a.scale * f32::from(a.lift);
+                let want = Vec3::new(f(6), f(7), f(8));
+                assert!(feet.distance(want) < 0.1, "cs{n} t {t}: {feet} not {want}");
+                assert_eq!(p.scale, Vec3::splat(f(22)), "cs{n} t {t}");
+                assert!(a.facing(t).abs_diff(row[9].parse().unwrap()) <= 1);
+                let roll = angles(p.rotation)[2];
+                assert!(
+                    (roll - f(24)).abs() < 0.05,
+                    "cs{n} t {t}: roll {roll} not {}",
+                    f(24)
+                );
+                checked += 1;
+            }
+            assert!(checked > 100, "cs{n}: {checked} rows");
+            for row in fades
+                .iter()
+                .filter(|r| r.get(6).is_some_and(|a| !a.is_empty()))
+            {
+                let k = row[0].parse::<u32>().unwrap() - first;
+                let alpha: i32 = row[6].parse().unwrap();
+                let got = i32::from(o.fade(o.t(k)));
+                assert!(
+                    (got - alpha).abs() <= 1,
+                    "cs{n} frame {k}: fade {got} not {alpha}"
+                );
+            }
+        }
     }
 
     /// TW cs4's Conker and Colors cs5's soldiers turn their heads by the channels: joint 3's yaw,

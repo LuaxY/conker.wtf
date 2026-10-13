@@ -89,7 +89,37 @@ struct ModelLift(Vec<f32>);
 /// glTF material's name (extract-character names material i `material_ii`, C) and each team's
 /// texture, by body ([`crate::characters`]).
 #[derive(Resource)]
-struct TeamLooks(Vec<Option<(String, Vec<String>)>>);
+pub(crate) struct TeamLooks(Vec<Option<(String, Vec<String>)>>);
+
+impl TeamLooks {
+    /// Body `body`'s team material and team `team`'s texture (`team & 3`), if it has team looks.
+    pub(crate) fn of(&self, body: usize, team: u8) -> Option<(&str, &str)> {
+        let (name, textures) = self.0.get(body)?.as_ref()?;
+        Some((name, textures.get(usize::from(team & 3))?))
+    }
+}
+
+/// Dresses the parts of `scene` drawn in material `name` in `texture`, each on its own copy of it.
+pub(crate) fn wear(
+    scene: Entity,
+    (name, texture): (&str, Handle<Image>),
+    children: &Query<&Children>,
+    parts: &mut Query<(
+        &bevy::gltf::GltfMaterialName,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    for e in children.iter_descendants(scene) {
+        if let Ok((n, mut m)) = parts.get_mut(e)
+            && n.0 == name
+        {
+            let mut own = materials.get(&m.0).cloned().unwrap_or_default();
+            own.base_color_texture = Some(texture.clone());
+            m.0 = materials.add(own);
+        }
+    }
+}
 
 /// The team a player's model is dressed as, and the model.
 #[derive(Component)]
@@ -536,24 +566,14 @@ fn dress_teams(
 ) {
     for (entity, c, model, dressed) in &players {
         let team = c.team & 3;
-        let Some((name, texture)) = (looks.0.get(model.body).and_then(Option::as_ref))
-            .and_then(|(name, t)| Some((name, t.get(usize::from(team))?)))
-        else {
+        let Some((name, texture)) = looks.of(model.body, team) else {
             continue;
         };
         if dressed.is_some_and(|d| d.0 == team && d.1 == model.scene) {
             continue;
         }
-        let texture: Handle<Image> = assets.load(texture);
-        for e in children.iter_descendants(model.scene) {
-            if let Ok((n, mut m)) = parts.get_mut(e)
-                && n.0 == *name
-            {
-                let mut own = materials.get(&m.0).cloned().unwrap_or_default();
-                own.base_color_texture = Some(texture.clone());
-                m.0 = materials.add(own);
-            }
-        }
+        let look = (name, assets.load(texture.to_string()));
+        wear(model.scene, look, &children, &mut parts, &mut materials);
         commands
             .entity(entity)
             .insert(TeamDressed(team, model.scene));

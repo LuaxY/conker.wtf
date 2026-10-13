@@ -6,7 +6,8 @@
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
 //!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
-//!   `outros.json` ([`outro::Outro`]); on `2d`, `props.gltf` (+ `props.bin`); on `2b`,
+//!   `outros.json` ([`outro::Outro`]); on `2d`, `24` and `3f`, `props.gltf` (+ `props.bin`); on `3f`,
+//!   `raptor.json` ([`raptor::Raptor`]); on `2b`,
 //!   `effects.gltf` (+ `effects.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
@@ -22,6 +23,7 @@
 pub mod audio;
 pub mod hud;
 pub mod outro;
+pub mod raptor;
 
 use std::fmt::Display;
 use std::io::{self, Write};
@@ -129,8 +131,8 @@ pub fn held_gltf(weapons: &str) -> String {
     format!("weapons/{weapons}/held.gltf")
 }
 
-/// The projectiles in flight: glTF scenes 0-3 the thrown grenade, the rocket, the knife and the
-/// bolt, at the origin with +z along the flight.
+/// The projectiles in flight: glTF scenes 0-5 the thrown grenade, the rocket, the knife, the bolt
+/// (both crossbows'), Tank's shell and the bone knife, at the origin with +z along the flight.
 pub fn projectiles_gltf(weapons: &str) -> String {
     format!("weapons/{weapons}/projectiles.gltf")
 }

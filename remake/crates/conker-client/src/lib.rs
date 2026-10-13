@@ -18,6 +18,7 @@ pub mod beach;
 pub mod connection;
 pub mod flags;
 pub mod guns;
+pub mod heist;
 pub mod held;
 pub mod hud;
 pub mod lights;
@@ -770,6 +771,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
+    heist::build(&mut app, !cfg.headless);
     lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     let triggers = slice.triggers.clone();
@@ -1383,6 +1385,14 @@ fn tick_anims(
         };
         if launching && id == conker_anim::id::JUMP {
             req.rate = 1.3;
+        }
+        // Heist's carrier walks at e/6 + 0.4 and runs at e/26 + 0.5, the target capped at 25.2
+        // (V `heist-presentation.md` §2).
+        let e = || conker_anim::effective_speed(p.xz_speed, p.target_speed.min(25.2));
+        match id {
+            conker_rules::heist::WALK => req.rate = e() / 6.0 + 0.4,
+            conker_rules::heist::RUN => req.rate = e() / 26.0 + 0.5,
+            _ => {}
         }
         let body = combat.map_or(Side::default() as usize, body);
         anim.0.tick(req, clips.of(body).duration(id));

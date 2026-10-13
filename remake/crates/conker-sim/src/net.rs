@@ -71,7 +71,8 @@ use serde::{Deserialize, Serialize};
 /// (conker-rules' `Fighter::climb`).
 /// 25: War: Heist ([`MatchView`]'s `heist`, `heist_scores`, `cash`, `human_won`; [`Combat::bags`];
 /// the carrier's `PlayerState::heavy`, predicted).
-pub const PROTOCOL_ID: u64 = 25;
+/// 26: Heist's voice lines ([`MatchView::voice`]).
+pub const PROTOCOL_ID: u64 = 26;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -302,6 +303,11 @@ pub struct MatchView {
     pub heist_scores: [u16; 4],
     pub cash: CashView,
     pub human_won: bool,
+    /// Heist: the last voice line (conker-rules' `Event::Voice`): the tick it was said, the
+    /// speaker's slot, the sound id. A client plays it when this changes.
+    /// ponytail: two lines on one tick, or across updates a lossy link drops, play as the later
+    /// only (the script says one per touch, delivery or steal); a list if that ever matters.
+    pub voice: Option<(u32, u16, u16)>,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

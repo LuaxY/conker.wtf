@@ -29,13 +29,15 @@ use crate::{GAME_DATA, map_name, model_lift};
 
 /// Each scene's (winning team, cutscene): `func_1501D348(scene, n)`, the first n if team 0 ranks
 /// 1st, else the second (table 0x800AB7BC, V).
-const OUTROS: [(usize, [(u8, u8); 2]); 4] = [
+const OUTROS: [(usize, [(u8, u8); 2]); 5] = [
     (0x2D, [(0, 2), (1, 4)]),
     (0x30, [(0, 1), (1, 5)]),
     (0x2B, [(0, 4), (1, 3)]),
     // Heist: cutscene 2 if some human's team ranks 1st, else 3 (`func_151E43DC`'s scenario-0 case;
     // `heist-presentation-scratch/outro`): "winner 0" here is that human win.
     (0x1A, [(0, 2), (1, 3)]),
+    // War: Raptor: cutscene 2 if the cavemen (team 0) rank 1st, else 4 (V b2, b1; `raptor.md` §6).
+    (0x3F, [(0, 2), (1, 4)]),
 ];
 /// Op 5 b=1's colour table (`func_15029BB8`: 3 bytes per entry, indexed by the record's d).
 const COLOURS: usize = 0x8008_4110 - GAME_DATA;
@@ -50,7 +52,7 @@ const MP3: usize = 0x16;
 /// Each actor model's head joint (`func_15036F34`'s a0: 3 for 90, 4 for 135 and 88;
 /// `func_15036CE8`'s 0xC for the villagers) and jaw (the model's special joint 0, header words
 /// 12/13) (C, V lldb; `outros-leftovers-scratch/joints.py`).
-const HEADS: [(usize, u8, u8); 6] = [
+const HEADS: [(usize, u8, u8); 7] = [
     // Heist's Don Weaso: jaw 6 (header words 12/13); no op 0x11 turns his head (joint unknown).
     (134, u8::MAX, 6),
     (90, 3, 6),
@@ -58,6 +60,9 @@ const HEADS: [(usize, u8, u8); 6] = [
     (135, 4, 7),
     (156, 12, 15),
     (157, 12, 15),
+    // War: Raptor's cavemen: jaw 15 (header words 12/13, C); head 12, the villagers' on the same
+    // Tedi rig (I: the caveman's call is not traced).
+    (136, 12, 15),
 ];
 /// The talkers whose jaw does not skew (`func_15034860`: classes 0x69/0x7C/0x87, 135's).
 const NO_SKEW: usize = 135;
@@ -65,7 +70,7 @@ const NO_SKEW: usize = 135;
 /// records, the bank-09 entry at +0, the joint at +1, the kind at +3).
 const ACTIONS: usize = 0x8008_6CC4;
 /// A placement record's byte the kind-3 objects name it by (the prop's uid, +0x72 at run time).
-const PLACEMENT_UID: usize = 0x33;
+pub(crate) const PLACEMENT_UID: usize = 0x33;
 
 /// A script command at its time: `u8 op, u8 delay, u16 b, u8 c, u8 d, u16 e`.
 #[derive(Clone, Copy, Debug)]
@@ -258,6 +263,8 @@ fn bubbles(scene: usize, cutscene: u8) -> Vec<(Anchor, [i16; 2], Bubble)> {
             );
             vec![right, left, right, wider, right]
         }
+        // Raptor: no DLs of its bubbles yet (cs2 has two, texts b 0 and 1; cs4 one).
+        (0x3F, _) => Vec::new(),
         // cs1: right (cameras 0), left (camera 3), its tail turned (camera 8), right again.
         _ => {
             let right = (
@@ -310,7 +317,7 @@ pub fn has_outros(scene: usize) -> bool {
     OUTROS.iter().any(|o| o.0 == scene)
 }
 
-/// Scene `scene`'s outros (none but on 0x2D, 0x30 and 0x2B), each actor's clips named as in its
+/// Scene `scene`'s outros (none but on the scenes of `OUTROS`), each actor's clips named as in its
 /// character's glTF ([`characters`]).
 pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
     let Some((_, which)) = OUTROS.iter().find(|o| o.0 == scene) else {
@@ -401,7 +408,7 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         for (n, o) in of_kind(2).into_iter().enumerate() {
             let model = model_of(kind(o)?.1)?;
             if let std::collections::btree_map::Entry::Vacant(e) = loaded.entry(model) {
-                e.insert(Character::load(rom, model)?);
+                e.insert(crate::load_character(rom, model)?);
             }
             let character = &loaded[&model];
             let op2: Vec<_> = scripts[o].1.iter().filter(|c| c.op == 2).collect();
@@ -541,6 +548,9 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         // between pages, `\n` between lines.
         let carrier = (0..objects).find(|&o| scripts[o].1.iter().any(|c| c.op == 7));
         let subtitles = match carrier {
+            // No bubble places (Raptor): no subtitles. Op 7's b picks the text, entry 1 + 3 ×
+            // objects + scripts + b (C: Raptor's cs2 has b 0 and 1, two bubbles).
+            Some(_) if bubbles(scene, cutscene).is_empty() => None,
             None => None,
             Some(carrier) => {
                 let ops: Vec<_> = (scripts[carrier].1.iter()).filter(|c| c.op == 7).collect();
@@ -873,7 +883,7 @@ pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<Character>> {
     }
     (played.into_iter())
         .map(|(model, names)| {
-            let mut character = Character::load(rom, model.parse()?)?;
+            let mut character = crate::load_character(rom, model.parse()?)?;
             character.clips.retain(|c| {
                 let name = conker_assets::ClipInfo {
                     pair: c.pair,

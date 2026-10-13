@@ -21,8 +21,8 @@ pub use conker_assets::{ClipInfo, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, RootC
 use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
-    Character, DEATHMATCH_PLAYER, FPS, SQUIRREL_SOLDIER, bind_pivots, held_models, matrix_slot,
-    parse_attachment, parse_effect, parse_model,
+    Character, DEATHMATCH_PLAYER, FPS, ROUTE_BANK, SQUIRREL_SOLDIER, bind_pivots, held_models,
+    matrix_slot, parse_attachment, parse_effect, parse_model, parse_routes,
 };
 use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
 use extract_gbi::Material;
@@ -43,11 +43,13 @@ pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull, then the crossbow's and the
 /// shotgun's and the club's (0x40) draws (conker-anim's ids), and War: Total War's gas mask put on
 /// and taken off (0x151, 0x14E: bank-09 #67 in the hand, #66 on the head), then the draws of
-/// map 0x1A's bat (0x19: 0x10E) and tommy gun (0x38: 0x1DD) (C `func_15065A5C`). The held list
-/// sorts by the game's action number, not by this order (the club's model is scene 4).
-pub const HELD_CLIPS: [u16; 17] = [
+/// map 0x1A's bat (0x19: 0x10E) and tommy gun (0x38: 0x1DD) (C `func_15065A5C`), then War: Raptor's
+/// bone crossbow (0x41: 0x2C8, action 46, bank-01 #0x2F as a child object) and bone knives (0x3F:
+/// 0x2CA, action 47, bank-09 #0x7B) (V `../lab/research/mp-original/raptor.md` r9, r10). The held
+/// list sorts by the game's action number, not by this order (the club's model is scene 4).
+pub const HELD_CLIPS: [u16; 19] = [
     0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2, 0x151,
-    0x14E, 0x10E, 0x1DD,
+    0x14E, 0x10E, 0x1DD, 0x2C8, 0x2CA,
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;
@@ -77,6 +79,28 @@ pub const TANK_MAP: usize = 0x24;
 pub const TANK: usize = 119;
 /// Map 0x24's AI script, `[0x14, 0xB8]` (tank.md §4): conker-bots' `script` does not map 0x24 yet.
 const TANK_AI: usize = 0xB8;
+/// Scene 0x3F, the Temple: Deathmatch scenario 7 and War: Raptor's map (scenario 2,
+/// `../lab/research/mp-original/raptor.md`).
+pub const TEMPLE: usize = 0x3F;
+/// The raptor (class 9): every raptor player (V obj+4 = 0x53); its own 39-joint rig and 37 clips.
+pub const RAPTOR: usize = 83;
+/// Raptor's baby (scene uid 0x11), the eggs (uids 0x14-0x16) and the body a standing bite leaves
+/// in the jaws (uid 0x13): the scene's character records (`[0x0E, 0x3F]`, C script 0xBE; V r2, r3).
+pub const BABY: usize = 165;
+pub const EGG: usize = 171;
+pub const BODY: usize = 22;
+const BABY_UID: u8 = 0x11;
+const BODY_UID: u8 = 0x13;
+const EGG_UIDS: [u8; 3] = [0x14, 0x15, 0x16];
+
+/// Bank-01 model `entry` with every clip it plays: the baby's are the raptor's (its character byte
+/// +6 is 83, V r3 obj+6; its own bank-02 entry is empty), the others' their animation entry's.
+pub fn load_character(rom: &Rom, entry: usize) -> Result<Character> {
+    match entry {
+        BABY => on_tedi_rig(rom, BABY, &Character::load(rom, RAPTOR)?),
+        _ => Ok(Character::load(rom, entry)?),
+    }
+}
 
 /// War: Beach's villager class (0x11-0x20, re-rolled at every spawn, `func_151E2834`) → its model
 /// and the display lists it hides (obj+0x94, bit k = list k; `func_15083384`, C; V b1, e1, use:
@@ -501,14 +525,17 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
 /// each (`../lab/research/mp-original/visuals-scratch`, oracle runs gren4, rocket, knife, bolt2): the
 /// thrown grenade (bank 01 #0x7E, one joint), the rocket (bank 09 #0xE1), weapon 0x14's knife
 /// (#0x23) and the crossbow's bolt (#0x35, also drawn in the crossbow), and Tank's shell (#0x33,
-/// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`), at the origin with
-/// +z along the flight. A bullet has no model in flight (V twin DLs 104-110: only the muzzle flash).
-pub const PROJECTILES: [[usize; 2]; 5] = [
+/// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`), and War: Raptor's
+/// bone knife (0x3F: #0x7C, action 34, V k1 DLs 97 on, `../lab/research/mp-original/raptor-pack-scratch`;
+/// the bone crossbow's bolt is #0x35, V c1), at the origin with +z along the flight. A bullet has no
+/// model in flight (V twin DLs 104-110: only the muzzle flash).
+pub const PROJECTILES: [[usize; 2]; 6] = [
     [0x01, 0x7E],
     [0x09, 0xE1],
     [0x09, 0x23],
     [0x09, 0x35],
     [0x09, 0x33],
+    [0x09, 0x7C],
 ];
 
 /// [`PROJECTILES`] as one pseudo-level (a mesh each, a bank-01 model in its bind pose) and their
@@ -554,7 +581,8 @@ fn held_gltf(models: &Level, scenes: Value, textures: &Textures, bin_uri: &str) 
 }
 
 /// Bank-01 model `entry` (the squirrels' soldier [`SQUIRREL_SOLDIER`], the [`CAVEMAN`]) with the
-/// clips it plays: the Tedi's (`tedi`; the same 28-joint rig).
+/// clips it plays: the Tedi's (`tedi`; the same 28-joint rig), or another rig's (the [`BABY`] on the
+/// [`RAPTOR`]'s).
 pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Character> {
     Ok(Character {
         entry,
@@ -749,8 +777,10 @@ pub fn map_name(scene: usize) -> String {
 /// voice lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B,
 /// the mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
 /// [`PACK_CHARACTERS`] (with their `character.json` and its looks, [`villager_look`]); with 0x1A,
-/// the [`WISE_GUY`] after them (its team looks) and Heist's [`CASH`]; with 0x24, the [`TANK`] last
-/// (its flags, lights and parts, [`tank`]) and the map's props.
+/// the [`WISE_GUY`] after them (its team looks) and Heist's [`CASH`]; with 0x24, the [`TANK`] after
+/// them (its flags, lights and parts, [`tank`]) and the map's props; with 0x3F, the [`RAPTOR`] last,
+/// War: Raptor's [`BABY`], [`EGG`] and [`BODY`] (every clip), its props and `raptor.json`
+/// ([`raptor_mode`]).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -771,14 +801,17 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         .then(|| tank(rom, &textures))
         .transpose()?;
     let (tank, tank_looks) = tank.unzip();
+    let temple = maps.iter().any(|m| m.scene == TEMPLE);
+    let raptor = (temple.then(|| Character::load(rom, RAPTOR))).transpose()?;
     characters.extend(
         ([tedi, caveman].into_iter())
             .chain(villagers)
             .chain(wise_guy)
-            .chain(tank),
+            .chain(tank)
+            .chain(raptor),
     );
-    // `PACK_CHARACTERS`, then the villagers, the Wise Guy and the tank: each folder is its bank-01
-    // entry.
+    // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank and the raptor: each folder is
+    // its bank-01 entry.
     let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
     let names: Vec<String> = entries.iter().map(usize::to_string).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -791,9 +824,10 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         .flat_map(|(m, o)| outro::songs(o, m.song))
         .collect();
     let baked: Vec<_> = outros.concat();
-    // Beach's outros' villagers (156, 157) are packed with every clip already.
+    // Beach's outros' villagers (156, 157) and Raptor's raptor and baby are packed with every clip
+    // already.
     let mut outro_characters = outro::characters(rom, &baked)?;
-    outro_characters.retain(|c| !entries.contains(&c.entry));
+    outro_characters.retain(|c| !entries.contains(&c.entry) && c.entry != BABY);
     // War: Colors' flags on 0x30 (bank 01 #169 red, #168 green: 9 joints, the cloth's 4 clips).
     if maps.iter().any(|m| m.scene == 0x30) {
         for f in conker_rules::colors::FLAGS {
@@ -807,6 +841,13 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     // Heist's cash on 0x1A (bank 01 #87: 5 joints, its own 12 clips).
     if vault {
         outro_characters.push(Character::load(rom, CASH)?);
+    }
+    // War: Raptor's baby (the raptor's rig and clips), egg (1 joint, no clip) and body (31 joints,
+    // its own 32 clips) on 0x3F.
+    if temple {
+        for entry in [BABY, EGG, BODY] {
+            outro_characters.push(load_character(rom, entry)?);
+        }
     }
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();
@@ -851,7 +892,13 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             let json = parse(&g.json)?;
             gltfs.push((assets::effects_gltf(&name), json, g.bin, g.images));
         }
-        if matches!(map.scene, SLICE_SCENE | TANK_MAP) {
+        if map.scene == TEMPLE {
+            out.add(
+                assets::raptor::raptor_json(&name),
+                raptor_mode(rom)?.to_json(),
+            );
+        }
+        if matches!(map.scene, SLICE_SCENE | TANK_MAP | TEMPLE) {
             let (props, scenes) = props_level(rom, map.scene)?;
             let props = held_gltf(&props, scenes, &textures, "props.bin")?;
             let json = parse(&props.json)?;
@@ -1027,7 +1074,9 @@ pub fn solid_placements(scene: usize) -> Vec<usize> {
 /// A map's props (`maps/<map>/props.gltf`): on 0x2D War: Total War's, glTF scene 0
 /// [`TOTAL_WAR_PROPS`] in place (named `model@placement` as the level's nodes), scene 1 the
 /// canister's model (3/85) at the origin, for a carrier's hands (a worn mask is a held model,
-/// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place.
+/// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place; on 0x3F War: Raptor's, scene 0
+/// its [`hidden_placements`] in place (the cooked eggs 0-3, the never-shown 4-6, the bone weapons
+/// 15-22).
 pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
     let props: &[usize] = match scene_id {
         SLICE_SCENE => &TOTAL_WAR_PROPS,
@@ -1311,6 +1360,153 @@ pub fn pickup_table(rom: &Rom, scene: usize) -> Result<(Vec<weapon::Pickup>, Vec
     let (pickups, spots) = weapon::pickups(scene as u16)
         .with_context(|| format!("no pickup table for scene {scene:#x}"))?;
     Ok((pickups.to_vec(), spots.to_vec()))
+}
+
+/// War: Raptor's pickups on 0x3F in the manager's order (script 0xBE 0x3B58: `G[0xEA4]` = 10, flags
+/// 6, respawn `G[0xEAC]` = 240 VIs; C, V r9-r11): k0-k7 the bone crossbows (0x41) and knives (0x3F)
+/// on placements 15-22, k8 and k9 grenades on 23 and 24 (Deathmatch's too).
+const RAPTOR_PICKUPS: [(u16, assets::Gives); 10] = [
+    (15, assets::Gives::Weapon(0x41)),
+    (16, assets::Gives::Weapon(0x41)),
+    (17, assets::Gives::Weapon(0x3F)),
+    (18, assets::Gives::Weapon(0x3F)),
+    (19, assets::Gives::Weapon(0x41)),
+    (20, assets::Gives::Weapon(0x41)),
+    (21, assets::Gives::Weapon(0x3F)),
+    (22, assets::Gives::Weapon(0x3F)),
+    (23, assets::Gives::Grenades),
+    (24, assets::Gives::Grenades),
+];
+/// The placements a Raptor match hides (V r4: +0x6E set from read 24): 0-3 the cooked eggs till
+/// one is used, 4-6 never shown, 7-14 Deathmatch's weapons.
+const RAPTOR_HIDDEN: std::ops::Range<u16> = 0..15;
+/// Script 0xBE's trigger records (C, `raptor.md` §3.1): the delivery (the cavemen's fire), the
+/// feed (the nest's ledge, then its pit), the hazard (by the camp) and the raptor bots' jumps.
+const RAPTOR_DELIVERY: usize = 0;
+const RAPTOR_FEED: [usize; 2] = [1, 0x13];
+const RAPTOR_HAZARD: [usize; 2] = [3, 0xD];
+const RAPTOR_JUMPS: [usize; 4] = [4, 5, 6, 7];
+/// The raptor's draw scale (V obj+0x14C, `../lab/research/mp-original/raptor-pack-scratch` s1).
+const RAPTOR_SCALE: f32 = 0.7;
+/// The raptor's skull joint (I: 316 of its vertices hang on it, its lower jaw's parent).
+const RAPTOR_HEAD: usize = 5;
+/// The clip-event op that arms an attack (`func_1506BEDC`: obj+0xD0 = the low byte, +0x114 = the
+/// rest), and an attack entry's size.
+const OP_ATTACK: u32 = 7;
+const ATTACK: usize = 0x28;
+
+/// `maps/3f/raptor.json` from the ROM: the scene's placements and character records, the raptor's
+/// model header and class data (`[0x0F, 83]`: header word 1 its attack table; its route events).
+fn raptor_mode(rom: &Rom) -> Result<assets::raptor::Raptor> {
+    use assets::raptor::{Attack, Hit, Raptor, Record, Rig};
+    let placements = scene_placements(rom, TEMPLE)?;
+    let records = rom.asset(&[0x0E, TEMPLE])?;
+    let record = |uid: u8| -> Result<Record> {
+        let r = (records.as_chunks::<0x30>().0.iter())
+            .find(|r| r[0x28] == uid)
+            .with_context(|| format!("0x3F: no character record {uid:#x}"))?;
+        let h = |o: usize| i16::from_be_bytes([r[o], r[o + 1]]);
+        Ok(Record {
+            character: r[4].to_string(),
+            uid,
+            at: [h(6), h(8), h(0xA)],
+            yaw: r[0xC],
+            start: r[0xD],
+            scale: f32::from_be_bytes(r[0x20..0x24].try_into()?),
+        })
+    };
+    // A cooked egg's prop id 0xFF − k is its placement's uid byte (C).
+    let cooked = (0..4)
+        .map(|k| {
+            (placements.iter())
+                .position(|p| p.raw[outro::PLACEMENT_UID] == 0xFF - k)
+                .map(|i| i as u16)
+                .with_context(|| format!("0x3F: no cooked egg {k}"))
+        })
+        .collect::<Result<_>>()?;
+    let model = rom.asset(&[0x01, RAPTOR])?;
+    let word = |data: &[u8], at: usize| -> Result<usize> {
+        let w = data.get(at..at + 4).context("short raptor data")?;
+        Ok(u32::from_be_bytes(w.try_into()?) as usize)
+    };
+    // Its special joint 0 (model header word 12: the list's offset), the jaw (C `func_1503DA3C`).
+    let jaw = usize::from(*model.get(word(&model, 4 * 12)?).context("raptor: no jaw")?);
+    let class = rom.asset(&[ROUTE_BANK, RAPTOR])?;
+    let mut hits = Vec::new();
+    for (clip, route) in parse_routes(&class)?.iter().enumerate() {
+        if route.aux_offset == 0 {
+            continue;
+        }
+        let (mut at, mut last) = (route.aux_offset as usize + 0x10, 0.0);
+        loop {
+            let t = f32::from_bits(word(&class, at)? as u32);
+            if t >= 900.0 {
+                break;
+            }
+            let t = extract_character::due(&mut last, t);
+            let (op, arg) = (word(&class, at + 4)? as u32 & 0xFF, word(&class, at + 8)?);
+            if op == OP_ATTACK {
+                hits.push(Hit {
+                    clip: clip as u16,
+                    t,
+                    attack: (arg & 0xFF).checked_sub(1),
+                    window: (arg >> 8) as u8,
+                });
+            }
+            at += 12;
+        }
+    }
+    let table = word(&class, 4)?;
+    let entries = (hits.iter().filter_map(|h| h.attack).max()).map_or(0, |a| a + 1);
+    let attacks = (0..entries)
+        .map(|k| {
+            let e = (class.get(table + ATTACK * k..table + ATTACK * (k + 1)))
+                .context("short attack table")?;
+            Ok(Attack {
+                reaction: e[0],
+                sound: word(e, 4)? as u32,
+                angle: e[9],
+                distance: e[0xA],
+                height: e[0xC] as i8,
+                radius: e[0xE],
+                damage: e[0xF],
+                flags: word(e, 0x24)? as u32,
+                raw: hex(e),
+            })
+        })
+        .collect::<Result<_>>()?;
+    let to = |r: &[usize]| r.to_vec();
+    Ok(Raptor {
+        hidden: RAPTOR_HIDDEN.collect(),
+        cooked,
+        pickups: (RAPTOR_PICKUPS.iter())
+            .map(|&(placement, gives)| assets::Pickup {
+                placement,
+                gives,
+                position: placements[usize::from(placement)].position.map(f32::from),
+                respawn: Some(240),
+                roams: vec![],
+            })
+            .collect(),
+        spawns: conker_rules::spawn::RAPTOR_START_3F
+            .map(|t| t.iter().map(|&r| usize::from(r)).collect()),
+        delivery: RAPTOR_DELIVERY,
+        feed: to(&RAPTOR_FEED),
+        hazard: to(&RAPTOR_HAZARD),
+        jumps: to(&RAPTOR_JUMPS),
+        baby: record(BABY_UID)?,
+        body: record(BODY_UID)?,
+        eggs: EGG_UIDS.map(record).into_iter().collect::<Result<_>>()?,
+        raptor: Rig {
+            character: RAPTOR.to_string(),
+            scale: RAPTOR_SCALE,
+            head: RAPTOR_HEAD,
+            jaw,
+            carry: jaw,
+            attacks,
+            hits,
+        },
+    })
 }
 
 /// A map's AI script (`[0x14, id]`): conker-bots' `script`, 0x1A's [`VAULT_AI`] and 0x24's

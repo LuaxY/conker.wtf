@@ -1,5 +1,136 @@
 # Status after wave 6 (2026-10-10)
 
+## Heist: the client (2026-10-13)
+**Batch M4, the client half. The client draws and plays War: Heist:
+- the HUD: each team's "$" pips, the carrying team's "+1" blinking with the bag icon; skulls for empty or out teams;
+  the radar in Heist's team colours, the free bag a steady white blip, the carrier's blip blinking opposite the icon;
+  no weapon icon while carrying; the clock white;
+- the bag (character 87 at 0.4): its clip per state, in its carrier's `joint_09`, over its shadow, hidden in the
+  outro;
+- its clip events, the throw's sound 91, the bases' hum stopping on leave, and the script's voice lines, now on the
+  wire (protocol 26);
+- the outro: cs2 if a human's team won, else cs3, with cs3's REDS shirt, roll and pitch, cement shoe, light and
+  bubbles; the props' scale;
+- STATS: the header, six columns with the bags second, rows in team colours, no strip.
+
+Web: nothing (it already offers Heist).** Research: `../lab/research/mp-original/heist-presentation.md`,
+`heist-presentation-scratch/` (`hud/`, `bag/`, `outro/`).
+
+| Part | What |
+|---|---|
+| conker-client `hud.rs` | **`Shown::heist` (`Bags`: scores, limit, alive, carrying):** each team's pips (`pips.png` [14, 16, 7, 7], 7 × 7 at y 200, the team's colour or grey 404040); the carrying team's "+1" and the bag icon ([142, 3, 12, 11]) while `flag_icons(vi)`; a team with nobody in play draws its skull (atlas2 [48, 20, 16, 16], tinted). **`shown()`:** the radar's blips in `hud.heist.radar`'s colours; the free bag white (`hud.heist.cash`); the carrier's blip masked while the icon shows; weapon 0 while carrying; no kills or rank. **STATS:** `rows`/`results` with `heist` rank by `teams_places(…, 4)`, columns at 89 with the bags second, Heist's icons and label, rows in team colours |
+| `heist.rs` (new) | **`clip(state, k, carrier, slid)`:** the bag's logical clip and time per `CashView::state`. Grab: clip 6, then 5 at the hand from 10 in, held at 8; then the carrier's idle/walk/run times. Thrown: 9, held at 8; landed: 9 then 10. Let go of: 7, then 8 at 0.8. Walking: 3 at 1.3. Standing: 0 for 100 frames, then 4 once. **Logical → glTF pairs** `[0, 1, 3, 2, 4, 6, 6, 7, 8, 0, 0]` (C: the glTF's `logicalIds`). **`Bag`** (resource): state, since (this client's tick), the clip this tick and last, where it lies or whose hand. **Systems:** `advance`, `add` (model plus a shadow disc), `ready`, `draw` (free: at `CashView` over the shadow; carried: `joint_09` at the bag's own scale, its clip's root placing it, V). `BAG` debug lines on state changes |
+| `audio.rs` | **`bag_passes`:** a clip event fires when the clock passes it, from `was` up to but not `is`, round a loop. **`Sounds::heist`:** 87's events at the bag, the throw's 91 as it leaves the hand, its sounds stopped when it goes. **Voice lines:** `MatchView::voice`: the line alone, centred at its own volume for the speaker, 3D for the others. **Zones:** a `stops_on_leave` zone stops the tick after the last player leaves |
+| `outro.rs` | **`key()`:** Heist's 0 (cs2) when `human_won`, else 1 (cs3). **`team_mode`** includes Heist. **`place()`:** roll about the forward axis (channel 6) and pitch about the side axis (channel 8). **Also:** `Prop.scale`; `OutroLight` (the vault's white light from its `t`). **`wear`:** an actor's team shirt (`Actor::team`) via render's `TeamLooks`/`wear`. **`bubbles`:** one a frame while an emitter runs, as traps' `Puff` |
+| `render.rs`, `traps.rs`, `lib.rs` | `TeamLooks` and `wear` shared with the outro (`dress_teams` uses them); `Puff`, `material`, `puffs` `pub(crate)`; the carrier's walk (e/6 + 0.4) and run (e/26 + 0.5) clip rates |
+| conker-sim `net.rs`, conker-server | **`MatchView::voice: Option<(tick, slot, id)>`:** the tick's last `Event::Voice`, kept until the next. **Protocol 26** |
+| `lab/screens/heist/` | `shots.sh` (groups a-f, ports 5970-5979), `carry.txt` (slot 0: B at 290) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| hud `heist_matches_the_originals_draws` | **hud1:** DL 341 (REDS "+1" ff0000 at 24, the others 404040, the bag icon); DL 340 (neither); DL 401 (1 bag, steady); DL 296 (the free bag's blip [258, 44, 2, 2] ffffff). **hud2:** DL 300 (GREENS and YELLOWS skulls); DL 1000 (BLUES "+1" 0000ff); DL 1060 (BLUES' blip colour, 4040ff). **hud3:** DL 200 (BLUES' skull). **STATS** (`stats_cs2_dl_790`, `stats_cs3b_dl_970`): YOU WIN, GREENS WIN, the shared 2nd, the columns, the row colours |
+| heist `bag_clips_follow_the_oracle` | `bag/bag_timeline.txt` reads 328-640: arrive, stand cycle, grab, carry, throw, landing, slide, walk, let go, carried walk/run |
+| audio `bag_events_fire_as_the_oracle` | `snd_bag_calls.txt`: clip 5's t-0 at the hand (343), never its t-8; clip 9's t-0 at the release (395), its t-8 at the landing (411); clips 7 and 8 at their starts and each loop |
+| outro `heist_outros_follow_the_oracle` | `outro_cs2_*.csv`, `outro_cs3_*.csv`, `fade_cs2.csv`, `fade_cs3.csv`: the key, the clock, each actor's place, facing, scale and roll, the fade's alpha |
+| Live, `shots.sh a` (audio debug, slot 0) | voices 1130 at the take (read 237), 1131 at the retake (406), 1129 at the delivery (455), centred at 1.0; the bag's 473 at the hand (245), 473 + 91 at the release (309), 190 + 473 at the landing (325); REDS' base hum 1116 (454) |
+| Live, `shots.sh d, e` (cs3) | a bot's voices 3D at its distance; the outro's sounds 10 and 12 (reads 716, 782); results after cs3's 775 frames |
+| `bun run test` | 435 pass, 1 ignored (with the Raptor pack lane's work in the tree) |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+
+Screens (`../lab/screens/heist/`, 1280 × 720):
+- **The HUD and radar:**
+  - `hud-carrier.png`: the carrier's HUD, no bat;
+  - `hud-enemy-a.png` (BLUES, the blink's hidden phase: no icon, REDS' pip grey, the carrier's red blip) and
+    `hud-enemy-b.png` (GREENS, its shown phase: the icon and REDS' "+1", no red blip) while REDS carry;
+  - `radar-free.png`: the free bag's white blip beside REDS' red;
+  - `skulls.png`: three empty teams.
+- **The bag:** `carried.png`, `thrown.png` (in flight over its shadow), `walking.png` (walking home), `delivery.png`
+  (REDS' 1 bag).
+- **cs2:** `cs2-early.png`, `cs2-mid.png`, `cs2-late.png`, `cs2-stats.png` (REDS WIN, four rows).
+- **cs3:** `cs3-early.png`, `cs3-bubbles.png` (the sinking Wise Guy in REDS' shirt, the cement shoe), `cs3-late.png`,
+  `cs3-stats.png` (REDS WIN, the two humans' rows).
+
+**Gaps.**
+- **Pack fixes (conker-extract's lane):**
+  - `hud/bubble_particle.png` (0xC01) decodes as an opaque white square with a dark rim (CI4 read with an RGBA16 TLUT,
+    I), so cs3's bubbles draw as squares (`cs3-bubbles.png`); its TLUT is likely IA16.
+  - 87 and 134 have no `characters/<id>/character.json`, so `characters("1a")` is not extended. The client
+    hardcodes 87's clip pairs (from the glTF's `logicalIds`) and reads 87's events by id.
+- **I, the bag:**
+  - The shadow's radius (24) and constant alpha 0xA0; the oracle's changes with height (0x73, 0x6B, 0x8B).
+  - The clip clock is the client's: a state counts from the tick this client saw it, so a client joining mid-stand
+    starts the stand cycle there.
+  - One tick off at read 360: idle at (6, 0) against the oracle's (5, 8).
+  - The carried bag's events are heard as the carrier's own.
+- **I, the outro:**
+  - The roll and pitch axes and signs.
+  - The bubbles' rate (one a frame), spread and rise (1-2 a frame).
+  - cs3's 740-unit black backdrop does not fill 16:9, so the clear colour shows at the sides (V `cs3-bubbles.png`).
+- **C, the wire:** `voice` carries one line a tick (the last); two in one tick drop the first (none seen).
+- **I, the blink:** the blink's VI is 2 × the client's own tick, not the match's, so each client's phase is its own
+  (`hud-enemy-a/b`, taken 5 reads apart, are in opposite phases).
+- **Not tested at the unit level:** the radar's carrier mask and the free bag's blip are chosen in `shown()`, which
+  reads the ECS. The test checks their draws and colours; the screens show the mask.
+
+## Raptor: the pack (2026-10-13)
+**Batch M6, the pack half. War: Raptor (scenario 2) on map 0x3F is in the pack: the raptor (model 83, its own rig, 37
+clips), the baby (165, on the raptor's rig and clips), the egg (171), the carried body (22), the bone crossbow (0x41)
+and bone knives (0x3F) in the hand, as HUD icons and in flight, the cooked eggs and the bone weapons as props, the
+mode's map data (`maps/3f/raptor.json`: hidden placements, pickups, team spawns, script zones, records, the raptor's
+rig and bites), their sounds and both outros. The raptor's skull is joint 5 (I), its jaw joint 6 (C), and a carried
+body sits at joint 6's origin (V). No rules, server or client change: M6's rules and M7's client play it.** Research:
+`../lab/research/mp-original/raptor.md`, `raptor-scratch/`; this batch's `raptor-pack-scratch/` (oracle
+`ConkerRecomp.m5`: runs k1 the knives, c1 the crossbow, s1 the scales; `results.txt`).
+
+| Part | What |
+|---|---|
+| conker-extract `lib.rs` | `TEMPLE` (0x3F), `RAPTOR` (83), `BABY` (165), `EGG` (171), `BODY` (22); `load_character` (165 on 83's rig: obj+6 = 83, V r3). With 0x3F in `--map`: 83 as a player character (`character.json`, lift 0), 165, 171 and 22 as prop characters. `raptor_mode()` → `maps/3f/raptor.json`: `hidden` 0-14 (V r4), `cooked` the placements of prop ids 0xFF − k (C), `pickups` k0-k9 on placements 15-24, respawn 240 VIs (C script 0xBE, V r9-r11), `spawns` conker-rules' `RAPTOR_START_3F`, zones `delivery` 0, `feed` 1/0x13, `hazard` 3/0xD, `jumps` 4-7 (C), the records of uids 0x11, 0x13, 0x14-0x16 (`[0x0E, 0x3F]`), `raptor`: scale 0.7 (V s1), head 5 (I), jaw = the model's special joint 0 = 6 (C), carry 6 (V r2), the attack table (class word 1, 0x28-byte entries 0-7) and the 9 op-7 hit events of its routes (C `func_1506BEDC`). `props_level(0x3F)`: the cooked eggs, 4-6 and the bone weapons in place. `HELD_CLIPS` + 0x2C8 (bone crossbow: bank-01 #0x2F, a child object, V c1) and 0x2CA (bone knives: bank-09 #0x7B, V k1), both at joint 9. `PROJECTILES` + bank-09 #0x7C (the flying bone knife, 45 vertices, V k1; the bone bolt is the crossbow's #0x35, V c1) |
+| conker-extract `outro.rs` | `OUTROS` + 0x3F: cs2 if the cavemen rank first, else cs4 (C, V b2, b1). `HEADS` + 136 (jaw 15 C, head 12 I). Characters through `load_character`. `bubbles(0x3F)` empty: Raptor's outros have no subtitles (below) |
+| conker-extract `hud.rs`, `audio.rs` | Icons 0x3F = 0x14's cell, 0x41 = 0x18's (C `func_150918EC`). `MATCH_CLIPS` + the egg carrier's 0xD5-0xD8, 0x2E4 (V r4), the bite victim's 0x170 (V r2), the bone weapons' 0x2C8, 0x2C9, 0x2CA, 0x2CC (V r9, r10). `VOICED` + op 141 (the raptor's and baby's calls and steps, B, 300/3000) and 145 (the body's, A, 190/1300) (C). Every clip event of 83, 165 (83's clips) and 22 is kept. `REACTIONS` + 0x3F, 0x41 → 0x20 (I) |
+| conker-assets | `raptor.rs` (new): `Raptor`, `Record`, `Rig`, `Attack`, `Hit`, `raptor_json`; `load` refuses a hit naming an attack past the table. Two tests (round trip, the refusal) |
+| Tests | `tests/pack.rs`: a Raptor block (`raptor.json` read back and its values, 83's rig and clips, 165/171/22's joints and clips, no `character.json` but 83's, `props.gltf` nodes, the bone weapons' held entries); `pack_audio_reads_back` (83/165/22 events on their clips, the raptor's call, `voice-1c5.wav`, the manifest); `pack_hud_reads_back` (the bone weapons' icons). `tests/rom.rs`: `raptor_models_and_outros` (83's joints 4-7, 165 = 83's clips, the egg, both outros' cast, voice, heads, masks, lengths, no subtitles), `projectiles_and_undrawn_quads` (6 scenes), held 20 |
+| Pack | Re-exported (`bun run pack --force`). New: `maps/3f/raptor.json`, `props.gltf`/`.bin`, `outros.json`, `characters/83/`, `165/`, `171/`, `22/`, `audio/characters/83/` (6 WAVs), `22/` (27), `audio/maps/3f/voice-1c5.wav`. Changed: `held.*` (20 models), `projectiles.*` (scene 5), `audio/events.json`, `sounds.json`, `pack.json`, `README.md`; 1042-1044, 1055, 1056, 1060 moved from `characters/136` to `common` (the body plays 1042-1044 and 1060, the raptor 1055 and 1056; the 6 stale WAVs removed from `assets/`) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle k1, c1, s1 (`raptor-pack-scratch/results.txt`) | Hand knife #0x7B (45 vertices) and crossbow #0x2F (160) on joint 9; flying knife #0x7C, bolt #0x35; scales raptor 0.70, baby 0.45, body 0.51, egg 0.20, caveman 0.5 |
+| conker-assets, conker-extract tests | pass (`tests/pack.rs` 5, `tests/rom.rs` 14, `tests/traps.rs`) |
+| `bun run test` | 435 pass, 1 ignored, with the Heist client lane's work in the tree |
+| `bun run check` | fmt, clippy and the web check pass on every crate but conker-client, where the Heist client lane's work in progress has rustfmt diffs and one clippy `type_complexity` (`outro.rs` 466) |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1678 files |
+
+**Gaps.**
+- **No oracle CSVs for the outros:** they are exported from the tables (C) without an oracle check. The 0xFF lengths
+  are 1,530 and 830 VIs; the oracle's outros lasted 1,500 (b2) and 749 VIs (b1), ending at the table's last command.
+  `length` is left as the table's (I which rule the game uses).
+- **No subtitles (V missing):** no DLs of Raptor's bubbles. Op 7's b picks the text, entry 1 + 3 × objects + scripts
+  + b (C). cs2 has two bubbles: b 0 ("i'm stuffed. / that was very tasty.", open 120, turn 225, close 310) and b 1
+  ("ha, ha ! / look, Fred's crapped himself.", 1150/1200/1255); `Subtitles` holds one open-close run, so cs2 needs a
+  second run. cs4 has one ("i think he enjoyed that !", 211/302) and fits today's model. Both need the bubbles' places
+  (the `heist-presentation-scratch/outro/bub.py` flow).
+- **I, outros:** cs2's op 5 b 0x24 (kind-0 object 5 at 928), op 0x11 c 0 at 1500 (a head-turn off) and cs4's baby's op 6
+  0x3C7 with e 1000 are ignored; the caveman's head joint 12 is the villagers'.
+- **I:** the raptor's head joint (5, by its skull's 316 vertices); the bone weapons' hit reactions (0x20, as the other
+  blades'); the baby's sounds are the raptor's events as is (no pitch of its own checked).
+- **Not in the pack's model:** the cooked eggs are not in the collision (solid while shown not checked); the body's
+  hang is joint 6's origin turned with the raptor (V r2 fit, RMS 1.8 at 0.7), with no offset; the raptor's 0.7 is
+  the oracle's obj+0x14C (not found in the ROM). The baby stands at its record's y − 10 (V r3), not snapped.
+
+**Handoff to M6 (rules, server, bots).**
+- `maps/3f/raptor.json` (`conker_assets::raptor::Raptor::load`): pickups (only cavemen take them; respawn 240 VIs),
+  `hidden` from the start, `cooked` shown in turn at a delivery, the zones, the records, the bites (`hits` run
+  `attacks[attack]`'s area test every frame for `window` frames from `t`; reaction 0x46 kills, 0x1C knocks back).
+  The pack's `ai.bin` on 3f already is script 0xBE (Deathmatch's and the mode's), so no new AI script.
+- Raptor bots never feed (raptor.md); the idle clip plays at 0.5 tick a frame.
+
+**Handoff to M7 (client).**
+- `characters("3f")` gains 83 (a player, `character.json`) and the prop characters 165, 171, 22; draw 83 at 0.7 with
+  no lift, the baby 0.45, the body 0.51 at joint 6's origin, the eggs 0.2.
+- `held.json` has 20 entries: the bone crossbow (`01-2f`) and knives (`09-7b`) are scenes 8 and 9, so later indices
+  moved by 2. The flying knife is `projectiles.gltf#Scene5`, the bone bolt `#Scene3`.
+- `events.json` gains 83, 165 and 22 and the cavemen's new clips (egg carry, bite victim, bone weapons).
+- Outros on 3f: `winner` 0 when the cavemen rank first; no `subtitles`.
+
 ## Heist: rules, server and bots (2026-10-13)
 **Batch M3. `--mode heist` on `--map 1a` plays the original's scenario 0. Four teams (REDS, BLUES, GREENS, YELLOWS)
 of Wise Guys, each with the bat and 6 health, fetch the cash bag (character 87) from the vault's centre to their own

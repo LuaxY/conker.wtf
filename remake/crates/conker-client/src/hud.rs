@@ -34,7 +34,7 @@ use conker_assets::hud::{
     Vertical,
 };
 use conker_assets::outro::{Outro, tip};
-use conker_rules::game::{Standing, places};
+use conker_rules::game::{Standing, places, teams_places};
 use conker_rules::net::Fighting;
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
@@ -128,10 +128,24 @@ pub struct Shown {
     pub escape: Option<u32>,
     /// War: Beach: frames since the strike's blast on this player ([`strike_flash`]).
     pub strike: Option<u32>,
+    /// War: Heist: its strip ([`Hud::heist`]) in place of the kills and rank; its STATS.
+    pub heist: Option<Bags>,
 }
 
-/// A results row ([`rows`]): its colour, an index of `results.colours`, and its five columns.
-pub type Row = (usize, [u32; 5]);
+/// War: Heist's strip: each team's bags, the score limit (the pips per team), whether a team has a
+/// participant with lives (else its skull), and the carrying team while the blink shows the "+1"
+/// pip and the bag icon ([`flag_icons`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bags {
+    pub scores: [u16; 4],
+    pub limit: u8,
+    pub alive: [bool; 4],
+    pub carrying: Option<u8>,
+}
+
+/// A results row ([`rows`]): its colour, an index of `results.colours`, and its columns: place,
+/// accuracy, kills, headshots, deaths, and Heist's bags (drawn second there).
+pub type Row = (usize, [u32; 6]);
 
 /// A mounted gun's sight ([`Hud::gun`]).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -484,13 +498,15 @@ fn suffix(n: usize) -> usize {
 /// without a shot), kills, headshots, deaths (`func_151E43DC`, V: the oracle's STATS). In Total
 /// War the place is the team's (`0x800E0AC0[team]`), from the server's `winner` (`MatchView`;
 /// `None` a DRAW: both 1st). War: Beach lists no villager (`func_151EA15C` on scenario 8: only rows
-/// of a team other than 0; V cs4, cs3, cs4h).
+/// of a team other than 0; V cs4, cs3, cs4h). War: Heist's place is its team's among the four
+/// (`teams_places`, ties sharing it: V cs3b's REDS and BLUES both 2nd), then the bags delivered.
 pub fn rows(
     all: &[(bool, &Combat)],
     kill_limit: u8,
     total_war: bool,
     winner: Option<u8>,
     beach: bool,
+    heist: bool,
 ) -> Vec<Row> {
     let mut standings = vec![
         None;
@@ -502,7 +518,11 @@ pub fn rows(
     for (_, c) in all {
         standings[usize::from(c.slot)] = Some(standing(c));
     }
-    let place = if total_war {
+    let place = if heist {
+        let teams = teams_places(&standings, 4);
+        let of = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
+        standings.iter().map(|s| s.as_ref().map_or(0, of)).collect()
+    } else if total_war {
         let of = |s: &Standing| 1 + u8::from(winner.is_some_and(|w| w != s.team));
         standings.iter().map(|s| s.as_ref().map_or(0, of)).collect()
     } else {
@@ -524,6 +544,7 @@ pub fn rows(
                 u32::from(c.kills),
                 u32::from(c.headshots),
                 u32::from(c.deaths),
+                u32::from(c.bags),
             ];
             (colour, row)
         })
@@ -587,7 +608,8 @@ pub fn stick(vi: u32) -> u32 {
 
 /// The results over the frozen level: the header, the columns' icons, a row per human, the menu's
 /// choice other than `choice` and the stick at its frame (`vi`: [`stick`]); in Total War
-/// (`header`) its header over the rest, which goes `down` lower. The chosen button is
+/// (`header`) its header over the rest, which goes `down` lower; War: Heist's (`heist`) with its
+/// own icons, label and columns, the bags second ([`HeistResults`]). The chosen button is
 /// [`sprites`]'.
 fn results(
     hud: &Hud,
@@ -596,8 +618,20 @@ fn results(
     (choice, vi): (usize, u32),
     header: Option<Header>,
     beach: bool,
+    heist: bool,
 ) -> Vec<Sprite> {
-    let (r, t) = (&end.results, &end.teams);
+    let (r, t, h) = (&end.results, &end.teams, &end.heist);
+    let (icons, label_at) = if heist {
+        (&h.icons, h.label)
+    } else {
+        (&r.icons, r.label)
+    };
+    // Each column's x and its value's index in the row.
+    let columns: Vec<(i16, usize)> = if heist {
+        h.columns.into_iter().zip([0, 5, 1, 2, 3, 4]).collect()
+    } else {
+        r.columns.into_iter().zip(0..).collect()
+    };
     let white = [255; 4];
     let rect = |r: [i16; 4]| r.map(f32::from);
     let down = if header.is_some() { t.down } else { 0 };
@@ -606,6 +640,7 @@ fn results(
         Some(Header::Draw) => std::slice::from_ref(&t.draw),
         Some(Header::You(true)) => &t.won,
         Some(Header::You(false)) => &t.lost,
+        Some(Header::Team(team)) if heist => h.won.get(usize::from(team)).map_or(&[], |p| p),
         Some(Header::Team(team)) => {
             let won = if beach { &t.beach_won } else { &t.team_won };
             won.get(usize::from(team)).map_or(&[], |p| p)
@@ -619,7 +654,7 @@ fn results(
     let dx = 32.0 * stick(vi) as f32;
     (s.uv[0], s.uv[2]) = (s.uv[0] + dx, s.uv[2] + dx);
     out.push(s);
-    for p in &r.icons {
+    for p in icons {
         let [x, y, w, h] = p.rect;
         out.push(quad(
             &p.image,
@@ -646,7 +681,7 @@ fn results(
         let dy = (f32::from(r.rows[1]) * s * n as f32) as i16 + down;
         if let Some(label) = r.labels.get(n) {
             let [_, _, w, h] = label.rect;
-            let [x, y] = r.label;
+            let [x, y] = label_at;
             let at = [x, y + dy];
             let q = quad(
                 label,
@@ -658,7 +693,8 @@ fn results(
             out.extend(shrink(vec![q], at));
         }
         let colour = r.colours.get(*colour).copied().unwrap_or(white);
-        for (column, (&x, &v)) in r.columns.iter().zip(row).enumerate() {
+        for &(x, column) in &columns {
+            let v = row[column];
             let t = Text {
                 anchor: r.anchor,
                 at: [x, r.rows[0] + dy],
@@ -791,7 +827,15 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         &hud.strip
     };
     if let (Some((rows, choice, alpha, vi)), Some(end)) = (&s.results, &hud.end) {
-        let mut out = results(hud, end, rows, (*choice, *vi), s.header, s.beach);
+        let mut out = results(
+            hud,
+            end,
+            rows,
+            (*choice, *vi),
+            s.header,
+            s.beach,
+            s.heist.is_some(),
+        );
         // War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
         if let Some(n) = s.strip {
             out.extend(strip(hud, team_strip, n, heads, end.results.anchor, 5.0));
@@ -902,15 +946,15 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             }
         }
     }
-    // Kills and rank (HUD flags 0x400, 0x800), or Total War's team strip (0x200 timed, 0x100
-    // untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
+    // Kills and rank (HUD flags 0x400, 0x800; none in Heist), or Total War's team strip (0x200
+    // timed, 0x100 untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
     match s.strip {
         Some(n) => {
             // Out: over the black, its numbers' shadows too.
             let z = if s.skull.is_some() { OUT_Z + 1.0 } else { 5.0 };
             out.extend(strip(hud, team_strip, n, heads, team_strip.anchor, z));
         }
-        None if s.ending.is_none() => {
+        None if s.ending.is_none() && s.heist.is_none() => {
             out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
             out.extend(text(
                 hud,
@@ -926,6 +970,33 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     for (f, _) in s.flags.iter().flatten().enumerate().filter(|f| *f.1) {
         let p = &hud.flags[f];
         out.push(quad(&p.image, p.rect.map(f32::from), p.anchor, white, 5.0));
+    }
+    // Heist: each team's pips (the "+1" blinking while it carries) or, with no participant left,
+    // its skull; the bag's icon with the "+1" (`func_151E966C`; V hud1 DL 341, hud2 DL 300).
+    if let Some(b) = &s.heist {
+        let h = &hud.heist;
+        let size = |p: &Picture| [p.rect[2] as i16, p.rect[3] as i16];
+        let ([pw, ph], [sw, sh]) = (size(&h.pip), size(&h.skull));
+        for (t, &colour) in h.colours.iter().enumerate() {
+            let c = h.centre + h.step * t as i16;
+            if !b.alive[t] {
+                let rect = [c - sw / 2, h.y - 6, sw, sh].map(f32::from);
+                out.push(quad(&h.skull, rect, h.anchor, colour, 5.0));
+                continue;
+            }
+            let filled = b.scores[t] + u16::from(b.carrying == Some(t as u8));
+            let limit = i16::from(b.limit);
+            for i in 0..limit {
+                let x = c - h.pip_step / 2 * limit + h.pip_step * i;
+                let colour = if i < filled as i16 { colour } else { h.empty };
+                let rect = [x, h.y, pw, ph].map(f32::from);
+                out.push(quad(&h.pip, rect, h.anchor, colour, 5.0));
+            }
+        }
+        if b.carrying.is_some() {
+            let p = &h.bag;
+            out.push(quad(&p.image, p.rect.map(f32::from), p.anchor, white, 5.0));
+        }
     }
     if let Some(secs) = s.secs.filter(|_| s.ending.is_none_or(|k| k < 2)) {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
@@ -1325,10 +1396,16 @@ fn shown(
     let ahead = Vec2::new(at.x - eye.x, at.z - eye.z).normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-ahead.y, ahead.x);
     let level = |y: f32| hud.radar.levels.iter().filter(|&&l| l <= y).count();
-    // War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328).
+    // War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328); Heist's
+    // four (`0x800AB62C`).
     let r = &hud.radar;
+    let team_colours = if m.heist {
+        &hud.heist.radar[..]
+    } else {
+        &r.team_colours
+    };
     let colour = |o: &Combat| {
-        let team = r.team_colours.get(usize::from(o.team));
+        let team = team_colours.get(usize::from(o.team));
         (team.filter(|_| crate::outro::team_mode(m)).copied()).unwrap_or(r.blip_colour)
     };
     let blip = |pos: [f32; 3], colour| {
@@ -1336,16 +1413,21 @@ fn shown(
         let higher = level(pos[1]).cmp(&level(p.pos[1])) as i8;
         ([d.dot(right), d.dot(ahead)], higher, colour)
     };
-    // Colors: a carrier's blip blinks against the icons; a flag not carried is a blip.
+    // Colors: a carrier's blip blinks against the icons; a flag not carried is a blip. Heist: the
+    // bag's carrier the same, the free bag a steady blip.
     let icons = flag_icons(vi);
+    let carrier = m.cash.carrier.filter(|_| m.heist);
     let mut blips: Vec<_> = (everyone.iter())
         .filter(|(_, o, predicted)| !predicted && o.health > 0)
         .filter(|(_, o, _)| !hud.radar.hidden_with.contains(&o.weapon))
-        .filter(|(_, o, _)| o.flag.is_none() || !icons)
+        .filter(|(_, o, _)| (o.flag.is_none() && carrier != Some(o.slot)) || !icons)
         .map(|(o, oc, _)| blip(o.pos, colour(oc)))
         .collect();
     let lying = m.flags.iter().filter(|f| f.shown && f.carrier.is_none());
     blips.extend((lying.filter(|_| m.colors)).map(|f| blip(f.pos, r.flag_colour)));
+    if m.heist && m.cash.shown && carrier.is_none() {
+        blips.push(blip(m.cash.pos, hud.heist.cash));
+    }
     let scope = camera.follow.cam.scope;
     // On a mounted gun its scope is the gun's sight; the weapon is the gun's (no icon: V one-view
     // DLs).
@@ -1362,6 +1444,18 @@ fn shown(
     let combats: Vec<_> = std::iter::once(c).chain(others).collect();
     let all: Vec<_> = combats.iter().map(|o| Some(standing(o))).collect();
     let mut strip = [0; 2];
+    // Heist: a team with a participant in play shows its pips (V hud2 DL 300: an empty team's
+    // skull; hud3 DL 200: an eliminated one's).
+    let mut alive = [false; 4];
+    for o in combats.iter().filter(|o| o.out == 0) {
+        if let Some(a) = alive.get_mut(usize::from(o.team)) {
+            *a = true;
+        }
+    }
+    let carrying = (combats.iter())
+        .find(|o| carrier == Some(o.slot))
+        .map(|o| o.team)
+        .filter(|_| icons);
     for o in &combats {
         if let Some(n) = strip.get_mut(usize::from(o.team)) {
             *n += u32::from(if m.time == 0 {
@@ -1373,8 +1467,11 @@ fn shown(
     }
     Shown {
         health: c.health,
+        // Carrying the bag: no weapon icon (V hud1 DL 341; back at 401).
         weapon: if gun.is_some() {
             conker_camera::GUN
+        } else if carrier == Some(c.slot) {
+            0
         } else {
             c.weapon
         },
@@ -1406,6 +1503,12 @@ fn shown(
         escape: (m.beach && c.team == conker_rules::beach::VILLAGERS)
             .then_some(u32::from(c.deadline) / 60),
         strike: None,
+        heist: m.heist.then_some(Bags {
+            scores: m.heist_scores,
+            limit: m.score_limit,
+            alive,
+            carrying,
+        }),
     }
 }
 
@@ -1560,7 +1663,7 @@ fn draw(
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
                 let teams = crate::outro::team_mode(m);
-                let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach);
+                let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach, m.heist);
                 let alpha = stats_alpha(tick - at + 1);
                 shown.results = Some((rows, menu.choice, alpha, 2 * tick));
                 shown.header = teams.then(|| header(&all, own.1.team, m.winner));
@@ -1886,9 +1989,10 @@ mod tests {
                 0,
                 false,
                 None,
+                false,
                 false
             ),
-            [(0, [2, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])]
+            [(0, [2, 9, 2, 0, 1, 0]), (1, [3, 0, 0, 0, 1, 0])]
         );
     }
 
@@ -1907,8 +2011,8 @@ mod tests {
         let (tedi, squirrel, bot) = (c(0, 1, 0, 3), c(1, 0, 1, 1), c(2, 1, 2, 5));
         let all = [(true, &tedi), (true, &squirrel), (false, &bot)];
         assert_eq!(
-            rows(&all, 0, true, Some(1), false),
-            [(1, [1, 0, 0, 0, 0]), (0, [2, 0, 1, 0, 0])]
+            rows(&all, 0, true, Some(1), false, false),
+            [(1, [1, 0, 0, 0, 0, 0]), (0, [2, 0, 1, 0, 0, 0])]
         );
         assert_eq!(header(&all, 0, Some(1)), Header::Team(1));
         let alone = [(false, &tedi), (true, &squirrel), (false, &bot)];
@@ -1920,7 +2024,7 @@ mod tests {
         let (a, b) = (c(0, 0, 0, 0), c(1, 1, 0, 0));
         let both = [(true, &a), (true, &b)];
         assert_eq!(header(&both, 0, None), Header::Draw);
-        assert_eq!(rows(&both, 0, true, None, false)[1].1[0], 1);
+        assert_eq!(rows(&both, 0, true, None, false, false)[1].1[0], 1);
     }
 
     /// The out view's skull (V t1 425-450): its byte 4 on the out frame, +4 a frame to 52 at the
@@ -2034,7 +2138,7 @@ mod tests {
             return;
         };
         let over = Shown {
-            results: Some((vec![(0, [1, 0, 0, 0, 0])], 0, 0x80, 32)),
+            results: Some((vec![(0, [1, 0, 0, 0, 0, 0])], 0, 0x80, 32)),
             ..state()
         };
         let quads = sprites(&hud, &over);
@@ -2094,7 +2198,7 @@ mod tests {
             let all: Vec<_> = (all.iter().enumerate())
                 .map(|(n, c)| (n < humans, c))
                 .collect();
-            rows(&all, 0, false, None, false)
+            rows(&all, 0, false, None, false, false)
         };
         let four = with(4);
         assert!(four.iter().map(|r| r.0).eq(0..4));
@@ -2144,7 +2248,12 @@ mod tests {
             [144.0, 106.0, 4.0, 4.0]
         );
         let over = Shown {
-            results: Some((vec![(0, [1, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])], 1, 255, 0)),
+            results: Some((
+                vec![(0, [1, 9, 2, 0, 1, 0]), (1, [3, 0, 0, 0, 1, 0])],
+                1,
+                255,
+                0,
+            )),
             ..state()
         };
         let at = |name: &str| -> Vec<[f32; 4]> {
@@ -2186,7 +2295,7 @@ mod tests {
         let block = |n: usize| {
             let over = Shown {
                 results: Some((
-                    (0..n).map(|n| (n % 2, [1, 99, 22, 0, 11])).collect(),
+                    (0..n).map(|n| (n % 2, [1, 99, 22, 0, 11, 0])).collect(),
                     0,
                     255,
                     0,
@@ -2325,7 +2434,12 @@ mod tests {
         // Over: SQUIRRELS WIN, the columns' icons at y 89, the labels at 104, P1 (a Tedi) in blue
         // at 106, P2 (a squirrel) in red at 121; the strip in the results' anchor.
         let over = |header| Shown {
-            results: Some((vec![(1, [2, 0, 0, 0, 0]), (0, [1, 50, 1, 0, 0])], 0, 255, 0)),
+            results: Some((
+                vec![(1, [2, 0, 0, 0, 0, 0]), (0, [1, 50, 1, 0, 0, 0])],
+                0,
+                255,
+                0,
+            )),
             header: Some(header),
             ..timed.clone()
         };
@@ -2541,10 +2655,13 @@ mod tests {
         };
         let (frenchy, tedi, bot) = (c(0, 0, 3), c(1, 1, 1), c(2, 0, 3));
         let all = [(true, &frenchy), (true, &tedi), (false, &bot)];
-        assert_eq!(rows(&all, 0, true, Some(0), true), [(1, [2, 0, 0, 0, 0])]);
+        assert_eq!(
+            rows(&all, 0, true, Some(0), true, false),
+            [(1, [2, 0, 0, 0, 0, 0])]
+        );
         assert_eq!(header(&all, 1, Some(0)), Header::Team(0));
         let over = |header| Shown {
-            results: Some((rows(&all, 0, true, Some(0), true), 0, 255, 0)),
+            results: Some((rows(&all, 0, true, Some(0), true, false), 0, 255, 0)),
             header: Some(header),
             ..villager.clone()
         };
@@ -2571,6 +2688,254 @@ mod tests {
             [[116.0, 34.0, 64.0, 32.0]]
         );
         assert_eq!(rect(&won, "beach_teams").len(), 2);
+    }
+
+    /// War: Heist's strip where the original drew it (`lab/research/mp-original/
+    /// heist-presentation-scratch/hud`, 3 bags to win): hud1 DL 341 (REDS carry in the blink's
+    /// shown phase: their "+1" pip and the bag icon), 340 (its hidden phase: neither), 401 (REDS
+    /// 1 bag); hud2 DL 300 (GREENS and YELLOWS empty: their skulls), 1000 (BLUES carry); hud3 DL
+    /// 200 (BLUES out: their skull). No kills or rank, the clock white. STATS (`outro/stats_cs2_
+    /// dl_790`, `stats_cs3b_dl_970`): YOU WIN with one human, GREENS WIN with two (both 2nd, the
+    /// tie shared), the columns at 89, the rows in their team's colour, the bags second.
+    #[test]
+    fn heist_matches_the_originals_draws() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            eprintln!("no pack hud/end.json: skipping");
+            return;
+        };
+        let (grey, red, blue, green, yellow) = (
+            [64, 64, 64, 255],
+            [255, 0, 0, 255],
+            [0, 0, 255, 255],
+            [0, 255, 0, 255],
+            [255, 255, 0, 255],
+        );
+        let xs = [
+            [24.0, 32.0, 40.0],
+            [97.0, 105.0, 113.0],
+            [170.0, 178.0, 186.0],
+            [243.0, 251.0, 259.0],
+        ];
+        let colours = [red, blue, green, yellow];
+        // The DL's pips: (x, colour), each 7 x 7 at y 200 of texels [14, 16, 7, 7].
+        let pips = |s: &Shown| -> Vec<(f32, Rgba)> {
+            (sprites(&hud, s).into_iter())
+                .filter(|q| q.tex == texture("pips"))
+                .map(|q| {
+                    assert_eq!(&q.rect[1..], [200.0, 7.0, 7.0]);
+                    assert_eq!(q.uv, [14.0, 16.0, 21.0, 23.0]);
+                    (q.rect[0], q.colour)
+                })
+                .collect()
+        };
+        let expect = |filled: [usize; 4], alive: [bool; 4]| -> Vec<(f32, Rgba)> {
+            (0..4)
+                .filter(|&t| alive[t])
+                .flat_map(|t| {
+                    (xs[t].iter().enumerate())
+                        .map(move |(i, &x)| (x, if i < filled[t] { colours[t] } else { grey }))
+                })
+                .collect()
+        };
+        let skulls = |s: &Shown| -> Vec<([f32; 4], Rgba)> {
+            (sprites(&hud, s).into_iter())
+                .filter(|q| q.tex == texture("atlas2") && q.uv == [48.0, 20.0, 64.0, 36.0])
+                .map(|q| (q.rect, q.colour))
+                .collect()
+        };
+        let bag = ([142.0, 3.0, 12.0, 11.0], [50.0, 26.0, 62.0, 37.0]);
+        let carrying = Shown {
+            heist: Some(Bags {
+                limit: 3,
+                alive: [true; 4],
+                carrying: Some(0),
+                ..Bags::default()
+            }),
+            ..state()
+        };
+        assert_eq!(pips(&carrying), expect([1, 0, 0, 0], [true; 4]));
+        assert!(rects(&hud, &carrying, &texture("atlas")).contains(&bag));
+        // The clock's glyphs only: no kills, no rank.
+        let text = glyphs(&hud, &carrying);
+        assert!(!text.is_empty() && text.iter().all(|g| g[1] >= 198.0));
+        let hidden = Shown {
+            heist: Some(Bags {
+                carrying: None,
+                ..carrying.heist.unwrap()
+            }),
+            ..carrying.clone()
+        };
+        assert_eq!(pips(&hidden), expect([0; 4], [true; 4]));
+        assert!(!rects(&hud, &hidden, &texture("atlas")).contains(&bag));
+        let scored = Shown {
+            heist: Some(Bags {
+                scores: [1, 0, 0, 0],
+                ..hidden.heist.unwrap()
+            }),
+            ..hidden.clone()
+        };
+        assert_eq!(pips(&scored), expect([1, 0, 0, 0], [true; 4]));
+        let two = [true, true, false, false];
+        let hud2 = Shown {
+            heist: Some(Bags {
+                limit: 3,
+                alive: two,
+                carrying: Some(1),
+                ..Bags::default()
+            }),
+            ..state()
+        };
+        assert_eq!(pips(&hud2), expect([0, 1, 0, 0], two));
+        assert_eq!(
+            skulls(&hud2),
+            [
+                ([174.0, 194.0, 16.0, 16.0], green),
+                ([247.0, 194.0, 16.0, 16.0], yellow)
+            ]
+        );
+        let out = [true, false, true, true];
+        let hud3 = Shown {
+            heist: Some(Bags {
+                limit: 3,
+                alive: out,
+                ..Bags::default()
+            }),
+            ..state()
+        };
+        assert_eq!(pips(&hud3), expect([0; 4], out));
+        assert_eq!(skulls(&hud3), [([101.0, 194.0, 16.0, 16.0], blue)]);
+        // The radar: hud1 DL 296's free bag under P1, white [258, 44, 2, 2]; hud2 DL 1060's BLUES
+        // carrier (hidden phase) 4040ff.
+        let radar = |blips| {
+            let s = Shown {
+                blips,
+                ..carrying.clone()
+            };
+            (sprites(&hud, &s).into_iter())
+                .filter(|q| q.rect[2] == 2.0)
+                .map(|q| (q.rect, q.colour))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            radar(vec![([0.0, 0.0], 0, hud.heist.cash)]),
+            [([258.0, 44.0, 2.0, 2.0], [255; 4])]
+        );
+        assert_eq!(hud.heist.radar[1], [64, 64, 255, 255]);
+        // STATS: each row's text in its colour (x0, y0, x1, y1), its shadow 1 right and down.
+        let c = |slot, team, score| Combat {
+            slot,
+            team,
+            score,
+            bags: score,
+            ..Combat::default()
+        };
+        let row_text = |s: &Shown, colour: Rgba| -> Vec<[f32; 4]> {
+            (sprites(&hud, s).into_iter())
+                .filter(|q| q.colour == colour)
+                .filter(|q| {
+                    matches!(&q.tex, Tex::Glyph(_))
+                        || q.tex == texture("rank_st")
+                        || q.tex == texture("rank_nd")
+                })
+                .map(|q| {
+                    [
+                        q.rect[0],
+                        q.rect[1],
+                        q.rect[0] + q.rect[2],
+                        q.rect[1] + q.rect[3],
+                    ]
+                })
+                .collect()
+        };
+        let rect = |s: &Shown, name: &str| -> Vec<[f32; 4]> {
+            (rects(&hud, s, &texture(name)).into_iter())
+                .map(|r| r.0)
+                .collect()
+        };
+        let over = |all: &[(bool, &Combat)], header| Shown {
+            results: Some((rows(all, 0, true, Some(0), false, true), 0, 255, 0)),
+            header: Some(header),
+            ..hidden.clone()
+        };
+        // cs2: REDS (the one human) delivered the one bag.
+        let (p1, b1, b2, b3) = (c(0, 0, 1), c(1, 1, 0), c(2, 2, 0), c(3, 3, 0));
+        let all = [(true, &p1), (false, &b1), (false, &b2), (false, &b3)];
+        assert_eq!(header(&all, 0, Some(0)), Header::You(true));
+        let cs2 = over(&all, Header::You(true));
+        assert_eq!(
+            (rect(&cs2, "you"), rect(&cs2, "win")),
+            (
+                vec![[86.0, 34.0, 64.0, 32.0]],
+                vec![[146.0, 34.0, 64.0, 32.0]]
+            )
+        );
+        assert_eq!(
+            [
+                rect(&cs2, "stat_deaths"),
+                rect(&cs2, "stat_icons"),
+                rect(&cs2, "players")
+            ],
+            [
+                vec![[103.0, 89.0, 16.0, 16.0], [222.0, 89.0, 16.0, 15.0]],
+                vec![
+                    [133.0, 89.0, 16.0, 16.0],
+                    [162.0, 89.0, 16.0, 16.0],
+                    [181.0, 89.0, 32.0, 16.0]
+                ],
+                vec![[34.0, 104.0, 16.0, 16.0]],
+            ]
+        );
+        assert_eq!(
+            row_text(&cs2, red),
+            [
+                [76.0, 106.0, 82.0, 116.0],
+                [81.0, 102.0, 96.0, 117.0],
+                [108.0, 106.0, 114.0, 116.0],
+                [136.0, 106.0, 144.0, 117.0],
+                [143.0, 108.0, 153.0, 118.0],
+                [167.0, 106.0, 175.0, 117.0],
+                [197.0, 106.0, 205.0, 117.0],
+                [227.0, 106.0, 235.0, 117.0],
+            ]
+        );
+        assert_eq!(
+            row_text(&cs2, [0, 0, 0, 255])[0],
+            [77.0, 107.0, 83.0, 117.0]
+        );
+        assert!(rect(&cs2, "teams").is_empty(), "no strip");
+        // cs3b: REDS and BLUES humans, GREENS' bot delivered: both rows 2nd.
+        let (p1, p2, b2) = (c(0, 0, 0), c(1, 1, 0), c(2, 2, 1));
+        let all = [(true, &p1), (true, &p2), (false, &b2), (false, &b3)];
+        assert_eq!(
+            rows(&all, 0, true, Some(2), false, true),
+            [(0, [2, 0, 0, 0, 0, 0]), (1, [2, 0, 0, 0, 0, 0])]
+        );
+        assert_eq!(header(&all, 0, Some(2)), Header::Team(2));
+        let cs3b = over(&all, Header::Team(2));
+        assert_eq!(
+            (rect(&cs3b, "greens"), rect(&cs3b, "win")),
+            (
+                vec![[65.0, 34.0, 96.0, 32.0]],
+                vec![[151.0, 34.0, 64.0, 32.0]]
+            )
+        );
+        assert_eq!(rect(&cs3b, "players").len(), 2);
+        let place = |colour| row_text(&cs3b, colour)[..3].to_vec();
+        assert_eq!(
+            [place(red), place(blue)],
+            [
+                [
+                    [75.0, 106.0, 82.0, 116.0],
+                    [81.0, 102.0, 96.0, 117.0],
+                    [107.0, 106.0, 115.0, 117.0]
+                ],
+                [
+                    [75.0, 121.0, 82.0, 131.0],
+                    [81.0, 117.0, 96.0, 132.0],
+                    [107.0, 121.0, 115.0, 132.0]
+                ],
+            ]
+        );
     }
 
     /// A mounted gun's sight against the original's one view (`lab/research/mp-original/

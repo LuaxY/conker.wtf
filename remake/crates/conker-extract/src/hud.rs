@@ -161,7 +161,8 @@ fn image(texture: &str, rect: [u16; 4]) -> Image {
 /// 7; cell 1 (0x16) is a texel shorter; the club's (0x40) cell 4, 3 texels higher and 20 wide
 /// (drawn a pixel right of the others: not kept). Map 0x1A's: the bat (0x19, any item without an
 /// icon on scene 0x1A) cell 4, 4 texels lower and 2 shorter (drawn a pixel lower: not kept); the
-/// tommy gun (0x38) cell 4 of the second atlas, 3 texels lower.
+/// tommy gun (0x38) cell 4 of the second atlas, 3 texels lower. War: Raptor's bone knives (0x3F) and
+/// bone crossbow (0x41) share the knives' and the crossbow's cells (C, the function's switch).
 fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
     const TOPS: [u16; 5] = [4, 16, 25, 39, 53];
     const HEIGHTS: [u16; 5] = [12, 9, 14, 12, 10];
@@ -185,6 +186,8 @@ fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
         (0x40, image("atlas", [25, 13, 20, 9])),
         (0x19, image("atlas", [25, 20, 22, 7])),
         (0x38, cell("atlas2", 4, 3)),
+        (0x3F, cell("atlas", 3, 0)),
+        (0x41, cell("atlas", 6, 0)),
     ]
     .into()
 }

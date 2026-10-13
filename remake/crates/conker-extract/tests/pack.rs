@@ -543,6 +543,105 @@ fn pack_reads_back_as_the_rom_path() {
     let props: Value = serde_json::from_slice(files["maps/24/props.gltf"]).unwrap();
     assert_eq!(props["nodes"].as_array().unwrap().len(), 22);
     assert_eq!(props["nodes"][1]["name"], "03-50@12");
+
+    // Map 0x3F's War: Raptor (`lab/research/mp-original/raptor.md`): `raptor.json`; the raptor
+    // (83) on its own rig, 39 joints (5 the skull, 6 the jaw and the carry point), 37 clips, model
+    // lift 0; the baby (165) on the raptor's rig and clips; the egg (171) and the body (22) without
+    // character.json; the props glTF of the cooked eggs, the never-shown 4-6 and the bone weapons.
+    let raptor = conker_assets::raptor::Raptor::load("3f", read).unwrap();
+    assert_eq!(raptor.to_json(), files["maps/3f/raptor.json"]);
+    let rig = &raptor.raptor;
+    assert_eq!(
+        (
+            rig.character.as_str(),
+            rig.scale,
+            rig.head,
+            rig.jaw,
+            rig.carry
+        ),
+        ("83", 0.7, 5, 6, 6)
+    );
+    assert_eq!(raptor.hidden, (0..15).collect::<Vec<u16>>());
+    assert_eq!(raptor.cooked, [0, 1, 2, 3]);
+    let gives: Vec<_> = (raptor.pickups.iter())
+        .map(|p| (p.placement, p.gives, p.respawn))
+        .collect();
+    let (bow, knives) = (Gives::Weapon(0x41), Gives::Weapon(0x3F));
+    let order = [bow, bow, knives, knives, bow, bow, knives, knives];
+    let mut expected: Vec<_> = (15..).zip(order).map(|(k, g)| (k, g, Some(240))).collect();
+    expected.extend([
+        (23, Gives::Grenades, Some(240)),
+        (24, Gives::Grenades, Some(240)),
+    ]);
+    assert_eq!(gives, expected);
+    assert_eq!(
+        raptor.spawns,
+        [(8..16).collect(), (0..8).collect::<Vec<_>>()]
+    );
+    assert_eq!(
+        (raptor.delivery, &raptor.feed[..], &raptor.hazard[..]),
+        (0, &[1, 0x13][..], &[3, 0xD][..])
+    );
+    let records = |r: &conker_assets::raptor::Record| (r.character.clone(), r.uid, r.scale);
+    assert_eq!(records(&raptor.baby), ("165".into(), 0x11, 0.45));
+    assert_eq!(records(&raptor.body), ("22".into(), 0x13, 0.51));
+    let eggs: Vec<_> = raptor.eggs.iter().map(records).collect();
+    assert_eq!(
+        eggs,
+        [0x14, 0x15, 0x16].map(|u| ("171".to_string(), u, 0.2))
+    );
+    // The standing bite (attack 4: a kill) and the knock-back (6: 3 damage), C.
+    let bite = |a: &conker_assets::raptor::Attack| (a.reaction, a.distance, a.radius, a.damage);
+    assert_eq!(
+        (bite(&rig.attacks[4]), bite(&rig.attacks[6])),
+        ((0x46, 80, 30, 1), (0x1C, 50, 55, 3))
+    );
+    assert_eq!(rig.hits.len(), 9);
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.push("83");
+    let temple = conker_assets::Slice::load("3f", &names, PACK_WEAPONS, read).unwrap();
+    let raptor_rig = &temple.characters[3];
+    assert_eq!(
+        (
+            raptor_rig.model_lift,
+            raptor_rig.clips.len(),
+            raptor_rig.root_clips.len()
+        ),
+        (0, 37, 3)
+    );
+    for (name, joints, clips) in [
+        ("83", 39, 37),
+        ("165", 39, 37),
+        ("171", 1, 0),
+        ("22", 31, 32),
+    ] {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        let skin = gltf["skins"][0]["joints"].as_array().unwrap().len();
+        let animations = gltf["animations"].as_array().map_or(0, Vec::len);
+        assert_eq!((skin, animations), (joints, clips), "{name}");
+        let json = format!("characters/{name}/character.json");
+        assert_eq!(files.contains_key(json.as_str()), name == "83", "{name}");
+    }
+    let props: Value = serde_json::from_slice(files["maps/3f/props.gltf"]).unwrap();
+    let nodes: Vec<_> = (props["nodes"].as_array().unwrap().iter())
+        .map(|n| n["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(nodes.len(), 15);
+    assert_eq!(
+        nodes[..5],
+        [
+            "04-3f-04@0",
+            "04-3f-04@1",
+            "04-3f-04@2",
+            "04-3f-04@3",
+            "03-55@4"
+        ]
+    );
+    // The bone crossbow in the hand is bank 01 #0x2F (a child object), the bone knives #0x7B.
+    let held = |entry| pack.held.iter().find(|h| h.entry == entry).unwrap();
+    assert_eq!((held(0x2F).joint, held(0x2F).create[0]), (9, (0x2C8, 21.0)));
+    assert_eq!((held(0x7B).joint, held(0x7B).create[0]), (9, (0x2CA, 24.0)));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -625,7 +724,9 @@ fn pack_audio_reads_back() {
             "characters/136",
             "characters/156",
             "characters/157",
+            "characters/22",
             "characters/59",
+            "characters/83",
             "characters/87",
             "common",
             "maps/1a",
@@ -676,10 +777,10 @@ fn pack_audio_reads_back() {
         listed.push(file);
     }
     // The War outros' voices and song (`maps/<map>/outros.json`: Total War's on 2d, Colors' on
-    // 30, Beach's on 2b) and the maps' voice lines (Beach's escape).
+    // 30, Beach's on 2b, Raptor's on 3f) and the maps' voice lines (Beach's escape).
     let lines = audio.events.maps.values().flat_map(|m| m.lines.values());
     listed.extend(lines.map(|l| format!("audio/{}", l.file)));
-    for map in ["2d", "30", "2b", "1a"] {
+    for map in ["2d", "30", "2b", "1a", "3f"] {
         let file = format!("maps/{map}/outros.json");
         let outros: Vec<conker_assets::outro::Outro> =
             serde_json::from_slice(files[file.as_str()]).unwrap();
@@ -790,6 +891,25 @@ fn pack_audio_reads_back() {
             );
         }
     }
+    // War: Raptor's (`raptor.md`): the raptor's, the baby's (the raptor's clips, so its events)
+    // and the body's events, every one on a clip of its glTF.
+    for name in ["83", "165", "22"] {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        let clips: Vec<u64> = (gltf["animations"].as_array().unwrap().iter())
+            .flat_map(|a| a["extras"]["logicalIds"].as_array().unwrap().clone())
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        let events = &audio.events.characters[name];
+        assert!(!events.is_empty(), "{name}");
+        for e in events {
+            assert!(clips.contains(&u64::from(e.clip)), "{name} {:#x}", e.clip);
+        }
+    }
+    assert_eq!(
+        audio.events.characters["165"],
+        audio.events.characters["83"]
+    );
     // What the oracle's sound calls showed (V, ../lab/audio/README.md).
     let play_at = |character: &str, clip: u16, time: f32| {
         audio.events.characters[character]
@@ -797,6 +917,14 @@ fn pack_audio_reads_back() {
             .find(|e| e.clip == clip && e.time == time)
             .map(|e| e.action.clone())
     };
+    // The raptor's call (C: its clip 0's op-9 event, `func_1506E998` at 300-3000 on B).
+    let Some(ClipAction::Play(call)) = play_at("83", 0, 4.0) else {
+        panic!("the raptor's call")
+    };
+    assert_eq!(
+        (call.sounds, call.channel, call.near, call.far),
+        (vec![948, 949, 950, 951], Channel::B, 300, 3000)
+    );
     let Some(ClipAction::Play(death)) = play_at("117", 0x58, 21.0) else {
         panic!("the Tedi's death voice")
     };
@@ -1161,6 +1289,9 @@ fn pack_hud_reads_back() {
     assert_eq!((colon.size, colon.offset), ([4, 7], [0, 2]));
     assert_eq!(hud.weapon.icons[&0x09].rect, [0, 4, 22, 12]);
     assert_eq!(hud.weapon.icons[&0x39].texture, "atlas2");
+    // War: Raptor's bone knives and bone crossbow show the knives' and the crossbow's (C).
+    assert_eq!(hud.weapon.icons[&0x3F], hud.weapon.icons[&0x14]);
+    assert_eq!(hud.weapon.icons[&0x41], hud.weapon.icons[&0x18]);
     // The results' place, accuracy and labels are drawn with these.
     assert!(['%', 'P'].iter().all(|&c| hud.glyph(c).is_some()));
     // A mounted gun's gunner view (`mounted-gun.md` §3; its PNGs' sizes checked above).

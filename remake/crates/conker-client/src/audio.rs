@@ -151,6 +151,8 @@ struct Pack {
     zones: Vec<(conker_assets::audio::Zone, CameraVolume)>,
     /// Scene 0x34's traps ([`crate::traps::sounding`]).
     traps: Vec<conker_rules::traps::Trap>,
+    /// War: Heist's bag's clip events (character 87's, by its logical clip; [`Sounds::heist`]).
+    bag: Vec<ClipSound>,
 }
 
 impl Pack {
@@ -165,7 +167,11 @@ impl Pack {
         let mut clips: Vec<_> = (characters.iter())
             .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
             .collect();
-        for c in &mut clips {
+        let mut bag = (map == "1a")
+            .then(|| audio.events.characters.remove("87"))
+            .flatten()
+            .unwrap_or_default();
+        for c in clips.iter_mut().chain([&mut bag]) {
             c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
         }
         let traps = match map == "34" {
@@ -202,6 +208,7 @@ impl Pack {
             ready_zone,
             zones,
             traps,
+            bag,
         }
     }
 }
@@ -230,6 +237,7 @@ pub fn build(
         FixedUpdate,
         hear.after(crate::tick_anims)
             .after(crate::lights::flicker)
+            .after(crate::heist::advance)
             .run_if(not(is_in_rollback)),
     );
     if windowed {
@@ -258,6 +266,8 @@ enum Owner {
     Zone(usize),
     /// Scene 0x34's trap (an index of its `traps`).
     Trap(usize),
+    /// War: Heist's bag.
+    Cash,
     World,
 }
 
@@ -496,6 +506,11 @@ struct Sounds {
     zones: HashSet<usize>,
     /// The gun releases' replays due: tick, cue, sound id, where ([`Self::guns`]).
     replays: Vec<(u32, usize, u16, Src)>,
+    /// The tick a player was last inside each sound zone (a `stops_on_leave` zone's stop).
+    inside: HashMap<usize, u32>,
+    /// War: Heist's last voice line ([`MatchView::voice`]; `None` until the first tick with a
+    /// match: the line already there is not replayed).
+    voice: Option<Option<(u32, u16, u16)>>,
 }
 
 /// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
@@ -567,6 +582,18 @@ fn passes(was: &AnimPlayer, is: &AnimPlayer, time: f32) -> bool {
         was.time < time && time <= is.time
     } else {
         time > was.time || time <= is.time
+    }
+}
+
+/// Whether the bag's clip event at `time` fires this tick ([`crate::heist::Bag`]: its clip and time
+/// last tick and this): the clock moved past it, from `was` (0 in a new clip) up to but not
+/// including `is`, round the loop when it wrapped. V `snd_bag_calls.txt`: clip 5 starts at 1 (its
+/// t-0 sound) and holds at 8, so its t-8 events never fire; clip 9's fire as it lands, 8 to 9.
+pub fn bag_passes(was: Option<(u8, f32)>, is: (u8, f32), time: f32) -> bool {
+    let from = was.filter(|w| w.0 == is.0).map_or(0.0, |w| w.1);
+    match is.1 >= from {
+        true => from <= time && time < is.1,
+        false => time >= from || time < is.1,
     }
 }
 
@@ -1264,12 +1291,23 @@ impl Sounds {
     }
 
     /// The map's sound zones ([`Pack::zones`]): the first tick any player is inside one, its sound
-    /// starts and plays on for good (restarted whenever it ends: the record's voice), centred, at
-    /// its volume by the listener's distance ([`zone_volume`]).
+    /// starts and plays on (restarted whenever it ends: the record's voice), centred, at its volume
+    /// by the listener's distance ([`zone_volume`]); a `stops_on_leave` zone's stops the tick after
+    /// the last player left and starts again on the next entry (Heist's base hum, V snd_bag 331,
+    /// 441, 630).
     fn zones(&mut self, cx: &Cx, players: &[(Seen, Seen)]) {
         for (i, (z, zone)) in cx.pack.zones.iter().enumerate() {
-            let inside = || players.iter().any(|p| zone.contains(p.1.pos));
-            if !self.zones.contains(&i) && !inside() {
+            let inside = players.iter().any(|p| zone.contains(p.1.pos));
+            if inside {
+                self.inside.insert(i, cx.tick);
+            }
+            let owner = Owner::Zone(i);
+            let left = self.inside.get(&i).is_none_or(|&t| cx.tick > t + 1);
+            if z.stops_on_leave && left && self.zones.remove(&i) {
+                self.stop(|v| v.owner == owner);
+                debug!("ZONE t={} read={} zone={i}: left", cx.tick, cx.read);
+            }
+            if !self.zones.contains(&i) && !inside {
                 continue;
             }
             let at = z.at.map(f32::from);
@@ -1278,8 +1316,7 @@ impl Sounds {
                 false => dist2(at, cx.ear.pos).sqrt(),
             };
             let volume = zone_volume(&z.play, d);
-            let owner = Owner::Zone(i);
-            if let Some(v) = self.voices.iter_mut().find(|v| v.owner == owner) {
+            if let Some(v) = (self.voices.iter_mut()).find(|v| v.owner == owner && !v.stopped) {
                 v.volume = volume;
                 continue;
             }
@@ -1407,6 +1444,56 @@ impl Sounds {
                 }
             }
         }
+    }
+
+    /// War: Heist: the bag's clip events at it ([`bag_passes`]; heard as its carrier's own sound
+    /// while carried, I), the throw's sound at it as it leaves the hand, its sounds stopped as it
+    /// goes (delivered: `func_10010AA8`, C); and the script's voice lines ([`MatchView::voice`]):
+    /// the line's cue (`CashPickup`, `CashSteal`, `CashDelivery`) with that sound alone, at its
+    /// speaker (its own volume for the speaker: centred, V snd_bag 334).
+    fn heist(&mut self, cx: &Cx, m: &MatchView, bag: &crate::heist::Bag, players: &[(Seen, Seen)]) {
+        let src = Src {
+            owner: Owner::Cash,
+            follows: bag.hand,
+            ..Src::at(m.cash.pos)
+        };
+        if let Some(is) = bag.clip {
+            let clips = &cx.pack.bag;
+            let first = clips.partition_point(|c| c.clip < u16::from(is.0));
+            for e in clips[first..]
+                .iter()
+                .take_while(|c| c.clip == u16::from(is.0))
+            {
+                if let ClipAction::Play(p) = &e.action
+                    && bag_passes(bag.was, is, e.time)
+                {
+                    self.start(cx, p, &p.sounds, 1.0, src);
+                }
+            }
+        } else if bag.was.is_some() {
+            self.stop(|v| v.owner == Owner::Cash);
+        }
+        let cues = &cx.pack.audio.events.cues;
+        if bag.was_state == Some(1) && bag.state == Some(2) {
+            for cue in cues.iter().filter(|c| c.on == On::CashThrow) {
+                self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+            }
+        }
+        let last = self.voice.replace(m.voice);
+        let Some((_, slot, id)) = m.voice.filter(|_| last.is_some_and(|l| l != m.voice)) else {
+            return;
+        };
+        let line = |on: &On| matches!(on, On::CashPickup | On::CashSteal { .. } | On::CashDelivery);
+        let Some(cue) = cues
+            .iter()
+            .find(|c| line(&c.on) && c.play.sounds.contains(&id))
+        else {
+            return;
+        };
+        let speaker = players.iter().map(|p| &p.1).find(|p| p.slot == slot);
+        let at = speaker.map_or(Src::at(m.cash.pos), Src::player);
+        debug!("VOICE t={} read={} p={slot} id={id}", cx.tick, cx.read);
+        self.start(cx, &cue.play, &[id], 1.0, at);
     }
 
     /// A map's line ([`LINES`]), unpositioned, unless a line already plays (one MP3 stream, C
@@ -1714,7 +1801,7 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
-    flickers: Option<Res<crate::lights::Flickers>>,
+    (flickers, bag): (Option<Res<crate::lights::Flickers>>, Res<crate::heist::Bag>),
     mut commands: Commands,
 ) {
     let tick = timeline.tick().0;
@@ -1828,6 +1915,7 @@ fn hear(
     s.zones(&cx, &all);
     s.traps(&cx, m);
     s.colors(&cx, m, &all);
+    s.heist(&cx, m, &bag, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);
     s.duck_music(&cx);
@@ -2311,6 +2399,23 @@ impl Source for Playing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bag's events as the oracle played them (`heist-presentation-scratch/bag/
+    /// snd_bag_calls.txt` against `bag_timeline.txt`): clip 5's t-0 sound at the hand (343), never
+    /// its t-8 ones (held at 8); clip 9's t-0 at the release (395), its t-8 ones at the landing
+    /// (411); clips 7 and 8 at their starts (507, 508) and each loop.
+    #[test]
+    fn bag_events_fire_as_the_oracle() {
+        let fires = |was, is, t| bag_passes(Some(was), is, t);
+        assert!(fires((6, 9.0), (5, 1.0), 0.0) && !fires((6, 9.0), (5, 1.0), 8.0));
+        assert!(!fires((5, 1.0), (5, 8.0), 8.0) && !fires((5, 8.0), (5, 8.0), 8.0));
+        assert!(fires((6, 14.0), (9, 1.0), 0.0) && !fires((6, 14.0), (9, 1.0), 8.0));
+        assert!(!fires((9, 1.0), (9, 2.0), 0.0) && !fires((9, 8.0), (9, 8.0), 8.0));
+        assert!(fires((9, 8.0), (9, 9.0), 8.0) && !fires((9, 8.0), (9, 9.0), 0.0));
+        assert!(fires((6, 1.0), (7, 1.0), 0.0) && fires((7, 1.0), (8, 0.8), 0.0));
+        assert!(fires((7, 39.5), (7, 0.5), 0.0) && !fires((7, 1.0), (7, 2.0), 0.0));
+        assert!(bag_passes(None, (0, 1.0), 0.0));
+    }
 
     fn clock(id: u16, time: f32, rate: f32) -> AnimPlayer {
         AnimPlayer {
