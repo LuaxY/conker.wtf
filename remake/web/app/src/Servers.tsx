@@ -14,13 +14,14 @@ import {
   type MapId,
   MODES,
   type NewServer,
+  players,
   ROUTES,
   type Route,
   type Settings,
   settingRows,
   SKILLS,
 } from "./data";
-import { SkullIcon, StatusBadge } from "./ui";
+import { SkullIcon, StatusBadge, useRefresh } from "./ui";
 
 const route = getRouteApi("/servers");
 const LABEL = "font-stencil text-sm tracking-wider text-dust uppercase";
@@ -33,6 +34,7 @@ export function Servers() {
   const servers = route.useLoaderData();
   const router = useRouter();
   const [refreshing, setRefreshing] = useState(false);
+  useRefresh();
 
   const refresh = async () => {
     setRefreshing(true);
@@ -128,6 +130,7 @@ function ServerRow({ server: s }: { server: GameServer }) {
       </span>
       <span className="order-3 col-span-2 text-sm text-bone md:order-none md:col-span-1">
         {MAPS[s.map].name} · {MODES[s.mode].name}
+        {players(s) && <span className="block text-lime">{players(s)}</span>}
       </span>
       <span className="order-4 col-span-2 text-sm text-dust md:order-none md:col-span-1">
         {settingRows(s)
@@ -258,7 +261,7 @@ function CreateServer() {
         <Select
           label="Bots"
           value={s.bots}
-          options={range(0, MODES[form.mode].maxBots ?? 15).map((n) => [n, n ? String(n) : "None"])}
+          options={range(0, MODES[form.mode].maxBots[0]).map((n) => [n, n ? String(n) : "None"])}
           onChange={(bots) => setting({ bots })}
         />
         <Select
@@ -368,6 +371,11 @@ function CreateServer() {
           </span>
         </fieldset>
         {map.note && <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">{map.note}</p>}
+        <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">
+          Bots in {MODES[form.mode].name} with 1, 2, 3 or 4 humans: at most{" "}
+          {MODES[form.mode].maxBots.join(", ")}. The server leaves out what doesn't fit as humans
+          join (the original's bots and team screens).
+        </p>
         <div className="flex flex-wrap items-center gap-4 sm:col-span-2 lg:col-span-4">
           <button type="submit" disabled={pending} className="cta">
             <Play aria-hidden className="size-5" />

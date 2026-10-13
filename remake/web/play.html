@@ -57,6 +57,9 @@
     #sound { position: fixed; top: calc(var(--hud) * 69 + 8px); right: 8px; margin: 0; padding: 4px 6px;
       background: rgba(0, 0, 0, 0.45); font-size: 14px; pointer-events: none; }
     #sound:empty { display: none; }
+    #teams { position: fixed; top: 30%; left: 30%; margin: 0; padding: 10px; background: rgba(0, 0, 0, 0.6);
+      color: #fff; font: 20px/1.4 ui-monospace, monospace; white-space: pre; pointer-events: none; }
+    #teams:empty { display: none; }
   </style>
 </head>
 <body>
@@ -64,6 +67,7 @@
   <pre id="hud" aria-live="off"></pre>
   <p id="net" role="status" aria-live="polite"></p>
   <p id="sound" role="status" aria-live="polite"></p>
+  <pre id="teams" aria-live="polite"></pre>
   <div id="intro">
     <h1><span class="script">Conker's</span> <span class="title">Bad Fur Day</span></h1>
     <div class="choc" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
@@ -71,8 +75,9 @@
     <small>Keys: WASD or arrows to move (hold Alt to walk), Space to jump or reload, B to draw or put away a weapon,
       left mouse, F or Shift to fire (crouch when unarmed), right mouse or R to aim (the mouse then aims, or moves
       a scope's look), G for a grenade (hold to cook it), Q / E to strafe, C toggles the free debug camera, M mutes the sound,
-      H shows a text readout of the HUD.
-      Gamepad: left stick, A jump, X draw, triggers fire, right bumper aim, right stick down grenade.</small>
+      H shows a text readout of the HUD, Tab opens the team screen in the team modes (left / right: team, Q / E:
+      BALANCE).
+      Gamepad: left stick, A jump, X draw, triggers fire, right bumper aim, right stick down grenade, Select teams.</small>
   </div>
   <script type="module" src="play.js"></script>
 </body>

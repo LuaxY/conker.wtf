@@ -83,7 +83,11 @@ use serde::{Deserialize, Serialize};
 /// 31: character picks: a client asks for one when it joins ([`Join::character`]), the map's
 /// allowed picks go out in [`MatchView::characters`], and the bodies follow [`Combat::class`]
 /// (conker-rules' `characters::body`), not the side.
-pub const PROTOCOL_ID: u64 = 31;
+/// 32: the team screen: a client switches team ([`Teams::Switch`]) and the first human sets the
+/// BALANCE ([`Teams::Balance`]) mid-match; [`MatchView`]'s `teams` and `balance` (the server's
+/// `/info` also names its pack, `pack_hash`, and its humans and bots).
+/// 33: the scared run (movement state 43, predicted): `PlayerState::scared`.
+pub const PROTOCOL_ID: u64 = 33;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -363,6 +367,10 @@ pub struct MatchView {
     /// Bit k: menu pick k (conker-rules' `characters::PICKS`) may be played here, the map's set with
     /// the server's cheats (`characters::allowed`); 0: no select (the team modes, Tank).
     pub characters: u32,
+    /// The team screen: the mode's teams (0 free for all: no screen; Heist 4, the other War modes
+    /// 2) and the BALANCE the first human set (bots moved to team 0 above 0, to team 1 below).
+    pub teams: u8,
+    pub balance: i8,
 }
 
 /// Race's route, countdown, race table and missiles as the clients draw them (conker-rules'
@@ -474,7 +482,16 @@ pub struct Join {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Restart;
 
-/// The channel [`Join`] and [`Restart`] travel on: reliable.
+/// The team screen's choices: this client's player moves to team `t` (it respawns there, if the
+/// team has room for a human), or the first human sets the BALANCE (2 teams, under 3 humans: up to
+/// |b| bots move to team 0 when b > 0, to team 1 below 0).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum Teams {
+    Switch(u8),
+    Balance(i8),
+}
+
+/// The channel [`Join`], [`Restart`] and [`Teams`] travel on: reliable.
 pub struct JoinChannel;
 
 /// The channel [`Saw`] travels on, with the inputs: unreliable (a lost one falls back to
@@ -514,6 +531,27 @@ pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
         .collect();
     world.sink = Some(pack.sink);
     world
+}
+
+/// The pack files a match is built from on both sides (`map`'s data files and the sides' characters:
+/// [`scene_world`]'s and the rules' sources), which [`pack_hash`] fingerprints.
+pub fn pack_files(map: &str) -> Vec<String> {
+    let (characters, weapons) = (conker_assets::PACK_CHARACTERS, conker_assets::PACK_WEAPONS);
+    conker_assets::Slice::files(map, &characters, weapons)
+}
+
+/// FNV-1a (64 bits) over [`pack_files`]' names and bytes, in order, as 16 hex digits: the server's
+/// `/info` names its pack by it (`pack`) and a client refuses a server whose differs from its own
+/// copy's (a different export, or a hand edit to either). `None` if a file can't be read.
+pub fn pack_hash(map: &str, mut read: impl FnMut(&str) -> Option<Vec<u8>>) -> Option<String> {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for file in pack_files(map) {
+        let bytes = read(&file)?;
+        for &b in file.as_bytes().iter().chain(&[0]).chain(&bytes) {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    Some(format!("{h:016x}"))
 }
 
 /// A remote player between two server states: position and facing blend (the facing the short way
@@ -565,6 +603,8 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<Restart>()
             .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Teams>()
+            .add_direction(NetworkDirection::ClientToServer);
         app.add_channel::<SawChannel>(ChannelSettings {
             mode: ChannelMode::UnorderedUnreliable,
             ..default()
@@ -594,5 +634,29 @@ mod tests {
             (mid.state, mid.xz_speed, mid.move_angle),
             (state::RUN, 35.0, 500)
         );
+    }
+
+    /// The fingerprint covers the map's files and the sides' characters: one byte changed in any
+    /// changes it; a missing file gives none.
+    #[test]
+    fn the_pack_hash_changes_with_any_shared_file() {
+        let files = pack_files("2d");
+        assert_eq!(files[0], "pack.json");
+        assert!(files.contains(&"maps/2d/collision.json".to_string()));
+        assert!(files.contains(&"characters/117/character.json".to_string()));
+        let hash = |edit: Option<&str>| {
+            pack_hash("2d", |f| {
+                Some(match edit == Some(f) {
+                    true => b"{}!".to_vec(),
+                    false => b"{}".to_vec(),
+                })
+            })
+        };
+        let base = hash(None).unwrap();
+        assert_eq!(base.len(), 16);
+        for f in &files {
+            assert_ne!(hash(Some(f)).unwrap(), base, "{f}");
+        }
+        assert_eq!(pack_hash("2d", |_| None), None);
     }
 }

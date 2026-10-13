@@ -481,7 +481,7 @@ fn seen(m: &Match, p: usize) -> Seen {
     Seen {
         hp: f.health,
         raw: Raw {
-            anim: f.anim,
+            anim: conker_rules::characters::clip(f.class, f.anim),
             immune: f.immune,
             stun: f.stun,
             item: f.item(m.tick),
@@ -633,7 +633,7 @@ const fn probe(name: &'static str, id: u8) -> Case {
 /// Positions are printed, not asserted: their gaps are conker-sim's (player-to-player pushes in
 /// e_w14b and e_w21, C-left/right strafing in buttons, ctl_cd_cr and k6/k10, a wall-push reversal
 /// in pick87) or root motion the port does not have (dead bodies in e_w22/e_w24, 0x16's Z in k7).
-const CASES: [Case; 61] = [
+const CASES: [Case; 65] = [
     case("combat_e_gren", 745, None),
     Case {
         rng: Some("combat4_e_w09_lldb"),
@@ -786,9 +786,8 @@ const CASES: [Case; 61] = [
         rng: Some("combat5_sg_e1_lldb"),
         ..encounter("combat5_sg_e1", 0x37)
     },
-    // Player 2's back-stepping states 0x2B and 0x21 before the shot are conker-sim's gap (2 events).
+    // Player 2 runs scared from player 1's drawn shotgun (0x2B, then the skid 0x21).
     Case {
-        known: 2,
         rng: Some("combat5_sg_e2_lldb"),
         ..encounter("combat5_sg_e2", 0x37)
     },
@@ -796,12 +795,37 @@ const CASES: [Case; 61] = [
         rng: Some("combat5_sg_e3_lldb"),
         ..encounter("combat5_sg_e3", 0x37)
     },
+    // e_w39's scripts with the tommy gun (0x38, map 0x1A's) on 0x2D: the dead pose ends in 0x18A
+    // 63 frames in, which e_w39's kill by the same type 0x35 does not (not traced: 3 events).
+    Case {
+        known: 3,
+        script: Some("combat_e_w39"),
+        rng: Some("combat7_e_w38_lldb"),
+        ..encounter("combat7_e_w38", 0x38)
+    },
+    // C-down with the twin guns and with the flamethrower drawn: the C strafe back, no grenade
+    // (taps at 160 and 220, held 280-320).
+    Case {
+        script: Some("combat7_cdown"),
+        rng: Some("combat7_cd09_lldb"),
+        ..case("combat7_cd09", 30, Some((40, 0x09)))
+    },
+    Case {
+        script: Some("combat7_cdown"),
+        rng: Some("combat7_cd15_lldb"),
+        ..case("combat7_cd15", 30, Some((40, 0x15)))
+    },
+    // sg_e1 at point blank (player 1 walks to 108.5 first): the muzzle's 0x3A hits before 0x32
+    // kills, the same frame (V: the scorer's two hits at 790).
+    Case {
+        rng: Some("combat7_sgpb_lldb"),
+        ..encounter("combat7_sgpb", 0x37)
+    },
     // The caveman wave (lab/oracle/caveman_README.md): item 0x40's controls held by a Tedi and by a
-    // caveman (its grenade's pull 0x175 and throw 0x16C are the Tedi's 0x176 and 0x16B here: 4
-    // events missing, 4 extra), and its swings and second swings to a kill, Tediz and cavemen.
+    // caveman (its grenade's pull 0x175 and throw 0x16C: `characters::clip`), and its swings and
+    // second swings to a kill, Tediz and cavemen.
     club("combat6_ctlw40", 30, "combat6_ctlw40_lldb"),
     Case {
-        known: 8,
         cavemen: true,
         ..club("combat6_ctlw40c", 30, "combat6_ctlw40c_lldb")
     },
@@ -998,7 +1022,8 @@ fn replay(c: &Case) -> Option<Report> {
             }
             report.pos_err[p] = report.pos_err[p].max(err);
             report.health += usize::from(f.health != want.health);
-            report.anim += usize::from(f.anim != want.raw.anim);
+            report.anim +=
+                usize::from(conker_rules::characters::clip(f.class, f.anim) != want.raw.anim);
             let armed = (1..=40).any(|t| {
                 [
                     0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x16, 0x26, 0x18, 0x37, 0x40,

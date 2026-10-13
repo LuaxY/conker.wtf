@@ -56,9 +56,10 @@ use conker_assets::outro::{Outro, frame};
 use conker_assets::{Held, Manifest, Pickup};
 use conker_camera::volume::CameraVolume;
 use conker_rules::net::Fighting;
-use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
+use conker_rules::projectile::{BOLT_STEP, Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::{Attack, Weapon, weapon};
 use conker_rules::{Rng, beach, gun};
+use conker_sim::movement::atan2_u16;
 use conker_sim::net::{BulletView, Combat, GunView, MatchView, Player, PlayerId, RacerView};
 use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 use core::time::Duration;
@@ -126,6 +127,8 @@ const FADE: u32 = 12;
 const GRENADE: u8 = 0x26;
 const ROCKETS: u8 = 0x16;
 const SHOTS: u8 = 0x14;
+/// The crossbow, whose shots are bolts.
+const BOLTS: u8 = 0x18;
 /// The browser's hint until the first key press or click.
 #[cfg(target_family = "wasm")]
 const HINT: &str = "Press a key or click for sound";
@@ -487,12 +490,14 @@ struct Sounds {
     later: Vec<Later>,
     /// Last tick's grenades (the local fighter's: all in flight) and bullets (each with its fly-by
     /// to come: [`Self::fly_by`]), the grenades' bounces' shuffle bag (drawn, last: [`Self::shuffle`]),
-    /// rockets, shots and taken pickups; false until the first tick with a match.
+    /// rockets, shots (each: a bolt, its pass played: [`Self::match_sounds`]) and taken pickups;
+    /// false until the first tick with a match.
     grenades: Vec<(u32, Grenade)>,
     bullets: Vec<(BulletView, bool)>,
     bag: (u32, usize),
     rockets: Vec<[f32; 3]>,
     shots: Vec<[f32; 3]>,
+    bolts: Vec<(bool, bool)>,
     taken: u64,
     /// Total War's gas out last tick ([`On::Gas`]).
     gas: bool,
@@ -686,7 +691,15 @@ fn holding(held: &[Held], w: u8, p: &Seen) -> bool {
     let draw = weapon(w).map(|w| w.draw.0);
     held.iter()
         .filter(|h| h.create.iter().any(|c| Some(c.0) == draw))
-        .any(|h| held::shows(h, p.weapon, p.drawn, &p.clock))
+        .any(|h| {
+            held::shows(
+                h,
+                p.weapon,
+                p.drawn,
+                &p.clock,
+                conker_rules::beach::TEDI_CLASS,
+            )
+        })
 }
 
 fn burning(p: &Seen) -> bool {
@@ -2038,8 +2051,39 @@ impl Sounds {
             }
         }
         self.gas = m.gas;
+        // A bolt (its shooter, the player nearest where it appeared, holds the crossbow, as
+        // `projectiles::look` takes it) has no flight sound but its pass, once, the first frame a
+        // player stands within 7.5 frames of its flight ahead, 0x100 off its heading
+        // (`func_150538CC`'s type 6 → `func_1505DDA8`, C).
         let old = std::mem::take(&mut self.shots);
+        let mut was = old.iter().zip(std::mem::take(&mut self.bolts));
         for (k, &pos) in m.shots.iter().enumerate() {
+            // The shot it was last tick (`gone`'s pairing: new ones come last).
+            let from = was.find(|(o, _)| dist2(**o, pos) <= 4.0 * BOLT_STEP * BOLT_STEP);
+            let nearest =
+                (players.iter()).min_by(|a, b| dist2(a.1.pos, pos).total_cmp(&dist2(b.1.pos, pos)));
+            let (bolt, mut passed) = from
+                .map_or((nearest.is_some_and(|p| p.1.weapon == BOLTS), false), |f| {
+                    f.1
+                });
+            if let Some((&o, _)) = from.filter(|_| bolt && !passed) {
+                let v = core::array::from_fn::<f32, 3, _>(|j| pos[j] - o[j]);
+                let reach = dist2(v, [0.0; 3]).sqrt() * 7.5;
+                let heading = atan2_u16(-v[2], v[0]);
+                let ahead = |p: &&(Seen, Seen)| {
+                    let to = atan2_u16(pos[2] - p.1.pos[2], p.1.pos[0] - pos[0]);
+                    dist2(p.1.pos, pos) < reach * reach
+                        && heading.wrapping_sub(to).wrapping_add(0x100) < 0x200
+                };
+                if players.iter().any(|p| ahead(&p)) {
+                    passed = true;
+                    self.world(cx, pos, |on| *on == On::Pass { weapon: BOLTS });
+                }
+            }
+            self.bolts.push((bolt, passed));
+            if bolt {
+                continue;
+            }
             for cue in cues
                 .iter()
                 .filter(|c| matches!(c.on, On::Flight { weapon: SHOTS, .. }))
@@ -2382,6 +2426,7 @@ fn hear(
     if !s.primed {
         s.primed = true;
         (s.rockets, s.shots, s.taken) = (m.rockets.clone(), m.shots.clone(), m.taken);
+        s.bolts = vec![(false, true); m.shots.len()];
         s.grenades = grenades.to_vec();
         s.guns.clone_from(&m.guns);
     }
@@ -3329,6 +3374,37 @@ mod tests {
             s.upkeep(&cx, &[], None);
         }
         ids
+    }
+
+    /// A bolt plays no flight sound, but its pass once, the first frame a player stands ahead of
+    /// it within 7.5 frames of its flight (C `func_150538CC`'s type 6); a knife one sound a tick.
+    #[test]
+    fn a_bolt_passes_once() {
+        let Some(pack) = map_pack("2d") else { return };
+        let player = |slot, z, weapon| Seen {
+            pos: [0.0, 0.0, z],
+            ..at(slot, 0.0, weapon)
+        };
+        let fly = |weapon| {
+            let mut s = Sounds::default();
+            let (shooter, target) = (player(1, 0.0, weapon), player(2, -2000.0, 0));
+            heard(&mut s, &pack, 100..115, |s, cx| {
+                let z = -50.0 - BOLT_STEP * (cx.tick - 100) as f32;
+                let m = MatchView {
+                    shots: vec![[0.0, 0.0, z]],
+                    ..default()
+                };
+                s.match_sounds(cx, &m, &[(shooter, shooter), (target, target)], &[]);
+            })
+            .into_iter()
+            .filter(|i| matches!(i.1, 559 | 560 | 1086..=1089))
+            .collect::<Vec<_>>()
+        };
+        let bolt = fly(BOLTS);
+        assert!(matches!(bolt[..], [(109, 1086..=1089)]), "{bolt:?}");
+        let knife = fly(SHOTS);
+        assert_eq!(knife.len(), 15);
+        assert!(knife.iter().all(|i| [559, 560].contains(&i.1)), "{knife:?}");
     }
 
     /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);

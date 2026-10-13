@@ -1,5 +1,114 @@
 # Status after wave 6 (2026-10-10)
 
+## Held weapons: the leftovers (2026-10-14)
+**Batch E4, the held-weapons lane. Every gap was checked on an oracle run, and all but one are fixed. With a weapon
+drawn, C-down strafes back and pulls no grenade. A hip bolt pushes its shooter while it sits at the muzzle, and bolts
+and aimed shots first move on the original's parity. A bolt that nears a player plays its pass sound once. The
+shotgun's point-blank sphere 0x3A lands with the kill. An unarmed player near an armed enemy runs scared (0x2B, which
+were sg_e2's back-steps). A killed player keeps its weapon 3 frames. Everyone but the Tediz pulls with 0x175/0x16C and
+holds bank-09 #76. The club's icon sits a pixel right. The tommy gun draws at 1.4 and is in the hand 7 frames in. Left:
+the crossbow's string clips.** Research: `../lab/research/mp-original/held-weapons-scratch/` (`lldb.sh` on the private `ConkerRecomp.e4`; the runs
+dth, cbp2, cbgate, cd09, cd15, sgpb, sge2a, sqgren, club1, k530, with their `.out` files). Installed as replays in
+`../lab/oracle/`: combat7_cd09, combat7_cd15, combat7_sgpb, combat7_e_w38 (trajectories, events, scripts).
+`PROTOCOL_ID` 33: `PlayerState::scared` is on the wire (E11 had taken 32). One server line in E11's lane sets
+`Match::live` at the match start.
+
+| Part | What |
+|---|---|
+| conker-rules `game.rs` | **C-down** pulls a grenade only with nothing drawn (s126+0x78 = 0, `func_1504CB98` at 0x1504CF9C, C). With a weapon drawn it strafes back (V e4 cd09: the twin guns' 0x22C while held; cd15: the flamethrower's 0xED). **`Match::live`, `first_move`**: a bolt or an aimed shot first moves on the first frame after its birth that is an even number of frames from the live frame (read 23). `func_150619A8` activates a new object on even reads (V combat5_cb2-4, cb_e1: 15 bolts, all first moving on odd reads; e4 cbgate). **The bolt's push**: until it moves, a bolt is an object of radius 5, centre 0 and scale 1 with no owner, so it pushes its shooter too (`func_1505D6F0`, C; V e4 cbp2: (1.843, 2.152), then (1.577, 1.841)). **The death**: 3 frames into a lethal hurt, a pickup's weapon gives way to the start item, holstered (`func_1508DC24`; V e4 dth: the twin guns drawn through 790-792, gone at 793). A start item stays (V combat6_e40's club). **The scare** (s126+0x4A): 20 while an enemy with a weapon drawn is within 30000 (squared, on the push's metric) of an unarmed player, else one less a frame (`func_1505D6F0`, `func_1504BC38`, C). **The spread**: no sphere tests the stun (no type flag 1 in `func_1505B9C4`, C), so 0x32 lands on 0x3A's stagger in the same frame (V e4 sgpb 790: 0x3A takes 1, then 0x32 kills). **`in_hand`**: the tommy gun attaches at 7, not 10 (V combat7_e_w38: 761 → 768) |
+| conker-rules `characters.rs` | `clip()`: any model but the Tediz' (117, 177) pulls and throws as 0x175 and 0x16C (`func_15065A5C`'s case 0x26, C; V e4 sqgren: the squirrel; combat6_ctlw40c: the caveman) |
+| conker-rules `damage.rs`, `weapon.rs` | Docs only. The club's lethal first swing was already right (V e4 club1, 850-1002: 0x11B for 19 frames, 0x58 for 52, 0x59 for 81). Also the C buttons and the spread's guards |
+| conker-sim `movement.rs`, `net.rs`; conker-anim | **`state::SCARED_RUN`** 43, clip 0x2B at rate e/12: chosen when scared, unarmed and e ≥ 5 (`func_1504C0E8`, C; V sg_e2 766: 1.7833 at e 21.4). It may jump. `PlayerState::scared`, `Other::within`. Protocol 33. **`combat::TOMMY_DRAW`** 0x1DD plays at 1.4, as the pistol's draw (V combat7_e_w38 761-775; it played at 1, so the held model's draw event came at 11) |
+| conker-client `held.rs` | The grenade in the hand goes by class (`shows(.., class)`): #76 in a non-Tedi's hand |
+| conker-client `audio.rs` | **The bolt's pass**: a new shot beside a crossbow holder is a bolt. It plays `On::Pass { weapon: 0x18 }` once, when a player is within \|step\|·7.5 and within 0x100 of its heading (`func_150538CC`'s type 6 → `func_1505DDA8(obj, owner, 0x200, 15.0)`, C). Bolts drop the knife's flight cue |
+| conker-client `hud.rs` | The club's icon a pixel right, the bat's a pixel lower (`func_150918EC`, C) |
+| conker-extract, conker-assets | `HELD_CLIPS` takes 0x175: held #76, so 22 held models. The bolt's cue `On::Pass { weapon: 0x18 }`: sounds 1086-1089 (0x43E + rand & 3), volume 30000, 2000-2100 |
+| conker-server `main.rs` (E11's lane, one line) | The match's `live: (t + LIVE_READ).wrapping_sub(game.setup.first_read)` |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| Replays (`combat_traces`, 65 cases) | combat7_cd09 10/10 events, combat7_cd15 8/8, position 0.0000. combat7_sgpb 13/13 (kill 1/1). combat5_sg_e2 39/39 (was 2 known). combat6_ctlw40c 35/35 (was 8 known). combat5_cb3 55/55, position 0.0000. combat7_e_w38 30/32, 3 known (below) |
+| Unit tests | rules `c_down_with_a_weapon_drawn_steps_back`, `a_hip_bolt_pushes_its_shooter`, `a_killed_player_keeps_its_weapon_three_frames`; sim `state_choice_follows_func_1504c0e8` (the scare: e 5.88 runs scared, a creep unscared); client `draw_events_fire_on_the_attach_frame` (0x1DD's event at 8 frames); client `each_class_holds_its_own_grenade`, `a_bolt_passes_once` (the bolt plays one of 1086-1089 once, the knife only 559/560) |
+| Pack | Re-exported with `--force` twice; `verify-pack.sh`: "pack equal" |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | 538 pass, 1 ignored (with E11's work in the tree); `check` passes (fmt, clippy on all 10 packages, `web/app`); wasm clippy passes |
+
+**Left.**
+- **The crossbow's string clips** (not done). The crossbow is drawn as its child object (bank-01 0x6E) in the bind
+  pose. The string's clips are model 110's own animations, which the pack doesn't have.
+- **Item 0x3A on 0x1A and 0x3F.** There (and for model 0x3B) C-down sets s126+0x19B = 5, and the manager gives item
+  0x3A instead of 0x26: hold 0x1F9, throw 0x1FC, actions 0x86/0x9F, and the thrown object is 0xBA on 0x3F, 0x89
+  elsewhere (C). Not done.
+- **Beach.** The C-down grenade check runs only on scenes 0x2D, 0x30, 0x34, 0x1A and 0x3F (C), so 0x2B has no grenade
+  at all. The remake keeps its villager rule (item 0x3E, V beach-gunner gren).
+- **The bolt's push isn't predicted.** Bolts aren't in `Fighting`, so the server's correction moves the shooter. The
+  scare is set in the order of the match's updates: a lone player's frame can differ from the whole match's on its
+  first frame (the test masks `scared`), so a client may roll back.
+- **The bolt's wall impact** still plays the knife's sound (I: not traced).
+- **The tommy gun's kill** ends the dead pose with 0x18A, 63 frames in. V: e_w38 1003-1021; also sg_e2 1194-1212. The
+  pistol's (e_w39) lies all 81 frames. It isn't a hit on the body: `func_1505B9C4` ran only at 820, 850 and 869. The
+  trigger was not found; e_w38 keeps 3 known events.
+- **The pistol head test** stays deferred: it needs the model's head part 0xA.
+- `conker-server/src/token.rs`'s doc still says `"protocol":32` (E11's file).
+
+## Around the match (2026-10-14)
+**Batch E11, the server and web lane. The server seats its players as the original does: the humans in the first
+slots, the bots after them team by team, as many as the original's bots screen (Deathmatch, Tank, Race) or team screen
+(the War modes) allows with the humans in. A human in a team mode switches team in the match (Tab or a gamepad's
+Select: the team screen, Heist's four teams included, with the first human's BALANCE); `team=T` asks for one from the
+start (the lobby's Heist pick). The server's `/info` names its pack's fingerprint and who is playing: a client refuses a
+server whose pack differs from its own, and the server browser and the lobby show the humans and bots, reloaded every
+5 s. A pickup the mode can't give fails the server's start.** Research: the decomp (`game_20AE20.c`: the bots screen
+`func_151E1214`, `D_800AB74C`; the team screen `func_151E1744`, its rows at `0x800AB710`), no oracle run. `PROTOCOL_ID`
+31 → 32. No pack change (the fingerprint is computed from the files at runtime).
+
+The original's rules (C):
+- The bots screen's most players with 1-4 humans: Deathmatch 10, 8, 4, 4; Tank and Race 8, 4, 4, 4.
+- The team rows (teams; under 3 humans the most players and humans a team; from 3 the same; byte +7, team 1's
+  humans and size): Heist 4; 8, 2; 4, 1. Beach 2; 12, 8; 12, 8; 2. Total War and Colors 2; 12, 8; 4, 2. Raptor 2;
+  12, 8; 8, 2; 2.
+- Humans take slots 0..H−1 (default team: slot & (teams − 1)); the bots follow grouped by team, team 0's first.
+- BALANCE: controller 1's C-left/C-right, 2 teams, under 3 humans: team 0's size + b, team 1's − b, each clamped to
+  1-8 (team 1 to byte +7; the total is then not kept).
+- Beach's most is 6 villagers against 2 Tediz (7v1 and 8v1 with BALANCE; 8v2 only with two human Tediz): `beach.md`
+  line 33's "8v2" is wrong.
+
+| Part | What |
+|---|---|
+| conker-server `main.rs` | **The roster.** `TeamRow` (the four rows), `FFA_MOST`, `bots_for`: the bots with 1-4 humans are Deathmatch 9, 6, 1, 0; Tank and Race 7, 2, 1, 0; Heist 7, 6, 1, 0; Total War and Colors 11, 10, 1, 0; Beach 7, 6, 5, 4; Raptor 7, 6, 3, 2. `--bots N` is the count asked, capped at the one-human figure (the old Beach 10, Heist/Tank/Race 7 checks are gone), spread one at a time to the team with the fewest players within the row (`TeamRow::bots`, BALANCE after). `Game::wanted`, **`trim`** (the surplus bots go, the highest slot of a team first; a joining human takes the lowest bot's slot), **`top_up`** (missing bots join the lowest free slots, team 0's first), `human_team` (the team asked for if it has room for a human, else the one with the fewest humans; none: the join is refused), `join_human`, **`reseat`** (each match start: the humans in 0..H−1, the bots by team; free for all the team is the slot; Heist's start records by the team's k-th member) in the new **`seat`** system, which also took the next-match decision from `simulate`. A join asks the side's team (the Tediz 1, Raptor's raptors; Heist none); a leaver's slot refills. `ROSTER` lines log each change. **`team_requests`**: `Teams::Switch` respawns the player on the team (the bots refill around it; a team with no human room refuses), `Teams::Balance` (the first human, 2 teams, under 3 humans, ±7). **`unknown_pickup`**: Tank's pickups must be power-up bits, Race's the canister or the missile, any other a weapon the rules know or 0x3E; else the server fails at its start, naming the placement. The pack's fingerprint in the start log |
+| conker-server `token.rs` | `/info` adds `pack`, `humans` and `bots` (`Live`, set by `publish`) |
+| conker-sim `net.rs` | **`Teams`** (`Switch(t)`, `Balance(b)`; client to server on `JoinChannel`), `MatchView::teams` (0 free for all, 2, Heist 4) and `balance`, **`pack_files`** and **`pack_hash`** (FNV-1a 64 over `pack.json`, the map's data files and the three sides' characters, in order) |
+| conker-client `teams.rs` (new), `lib.rs` | The team screen: Tab or Select opens and closes it; the stick left/right switches team (wrapping), Q/E (C-left/C-right) move the BALANCE, A or B closes it; the player stands while it is open (`buffer_input`). A text node natively, the page's `#teams` in the browser. `team=T` (Heist 0-3, else 0-1) |
+| conker-client `connection.rs`, `main.rs` | `info_pack`, `check_pack`: native and browser clients hash their own pack's files and stop on a mismatch ("this asset pack (…) is not the server's (…)"). With `map=` (no `/info`) there is no check |
+| web `play.html`, `README.md` | `#teams`, the keys help; `team=`; the lobby's facts |
+| web `app` | `data.ts`: `MODES[].maxBots` per human count (1-4), `players()`. `Servers.tsx`: each row's "1 human, 3 bots"; the form's bots up to the one-human cap, a line with the caps for 1-4 humans. `Lobby.tsx`: "Playing", Heist's team select (`team=`). `ui.tsx` `useRefresh` (the route's data every 5 s). `server.ts` checks `bots` against the one-human cap. No new dependency |
+| `bots.sh` | The bots are the last `ROSTER` line's (slots and teams; humans now sit first); `TEAM=` for client 1 |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| server `bots_by_human_count` (new) | The table above for every mode. BALANCE: Total War, 1 human, 11 bots, b = 3: 8v3 (team 0's 9 clamped to 8); b = −7 with 3 bots: 1v3; Beach with two human Tediz, b = 2: 8v2 |
+| server `humans_sit_before_the_bots` (new) | Deathmatch, 9 bots: the first human takes slot 0, the bots 1-9; the second slot 1, with 6 bots; a leaver's slot refills; the next match start seats the human first (teams = slots); 1 bot with 3 humans, none with 4 |
+| server `beach_caps_the_tediz`, `heist_teams_records_and_outros`, `raptor_teams_and_outros`, `total_war_teams_are_the_sides` (rewritten) | Beach, 7 bots: 5 villagers then 2 Tediz; two human Tediz (6v2), a third asking plays a villager. Heist, 6 bots: teams 2, 2, 1, 1; the human takes REDS in slot 0; reseated: teams 0, 0, 1, 1, 2, 2, 3 on records 0, 8, 1, 11, 2, 14, 3; the 2nd human BLUES; from the 3rd 1 bot, then none, a 5th refused. Raptor, 7 bots: 5 cavemen and 2 raptors; a human raptor: 6 v 2 |
+| server `pickups_give_what_the_mode_has` (new); sim `the_pack_hash_changes_with_any_shared_file` (new); client `the_screen_toggles_switches_and_balances`, `the_screen_lists_each_team` (new), `connection` (the pack check) | Pass |
+| `bun run test` (`--no-fail-fast`) | 536 pass, 1 ignored; 2 fail in files the other lanes were editing at the time (conker-rules `combat_traces`, conker-sim `state_choice_follows_func_1504c0e8`), neither touched here |
+| `bun run check`; wasm clippy (`conker-client`, `-D warnings`); `web/app` `bun run check` (typecheck included) | Pass |
+
+| Server run (`bots.sh`) | Before | After | Oracle |
+|---|---|---|---|
+| Heist, `BOTS=3 TIME=5`, seeds 1, 2 | human in slot 3, the bots on teams 0-2: takes 14, 16 | the original's roster (`ROSTER join: humans [0] bots [1, 2, 3] teams [0, 1, 2, 3]`): takes 17 (to 9317), 14 (won at 7425) | hb3: 30 takes to read 9023; the ROM path with this roster 23-24 |
+| Total War `TEAM=1`; Heist `TEAM=2` (120 s) | | `ROSTER switch`: the human on team 1, 2v2 (bots 1 and 3 against it and bot 2); on GREENS (15 takes) | |
+| Smoke (120 s): DM 2d `BOTS=3`, Total War `BOTS=3 HUMANS=2`, Colors `BOTS=7`, Beach `BOTS=7` (twice), Tank `BOTS=3`, Raptor `BOTS=3`, Race `BOTS=3` | | Every client connected (the pack check passing) and sees every bot move; every bot moves. No fault, unknown native or panic. Rosters: Colors 4v4, Beach 6v2 (reseated at the match start), Raptor 2 cavemen v 2 raptors, Total War with 2 humans 3v2. The FAIL lines are the known ones (a bot that never hit or died in 120 s) | |
+
+**Left.**
+- **Heist's takes.** With the original's roster the server's 3 bots still take the bag about half as often as hb3
+  (14-17 against 30) and below the ROM path's 23-24 with the same roster: the roster was not the server's gap. What
+  else differs between the server and the ROM path is not traced.
+- The team screen's up/down (the original's extra team size) is not there: `--bots` sets the count. Teams change in
+  the match (the remake has no screen before it): a switch respawns the player, at no cost.
+- Race's 2 humans at most is not enforced. BALANCE is tested by units only (headless clients have no pad).
+- Mid-match, a join, leave or switch can leave the bots out of team order or a bot before a human until the next
+  match start (`reseat`).
+- `beach.md` line 33 (lab) still says 8v2.
+
 ## Bots: the follow-ups (2026-10-14)
 **Batch M6b, the bots lane. Four gaps against the original, one mode each. War: Raptor: a bolt or a knife no longer
 kills a raptor through its head (the original's raptor has no head part), and a caveman bot clubs a raptor from 160, as

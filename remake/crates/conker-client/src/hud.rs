@@ -1117,11 +1117,17 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 true => power.as_ref(),
                 false => w.icons.get(&s.weapon),
             };
-            // Race: one icon per item held.
+            // Race: one icon per item held. The club's is drawn a pixel right of the others, the
+            // bat's a pixel lower (`func_150918EC`, C).
             let n = s.race.as_ref().map_or(1, |r| r.items);
+            let nudge = match (s.tank, s.weapon) {
+                (false, 0x40) => [1.0, 0.0],
+                (false, 0x19) => [0.0, 1.0],
+                _ => [0.0; 2],
+            };
             for (k, icon) in icon.into_iter().cycle().take(n.into()).enumerate() {
                 let [_, _, iw, ih] = icon.rect.map(f32::from);
-                let [x, y] = w.at.map(f32::from);
+                let [x, y] = [0, 1].map(|j| f32::from(w.at[j]) + nudge[j]);
                 let x = x - RACE_ITEM_STEP * k as f32;
                 out.push(quad(icon, [x, y, iw, ih], w.anchor, white, 3.0));
             }

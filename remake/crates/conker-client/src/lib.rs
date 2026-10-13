@@ -32,6 +32,7 @@ pub mod results;
 pub mod segments;
 pub mod smooth;
 pub mod tank;
+pub mod teams;
 pub mod traps;
 
 /// Browser fetches: the asset pack's data files and the connect token.
@@ -174,6 +175,9 @@ pub struct Config {
     /// `map=2d|30|34|3f|2b`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
     pub map: String,
+    /// `team=T`: the team modes' team to play on (Heist 0-3: REDS, BLUES, GREENS, YELLOWS; else 0
+    /// or 1), asked for once the player is in ([`teams`]); default the server's.
+    pub team: Option<u8>,
 }
 
 impl Config {
@@ -200,6 +204,7 @@ impl Config {
             side: None,
             character: None,
             map: String::new(),
+            team: None,
         };
         for (key, value) in pairs {
             let bad = || format!("bad value for {key}: {value:?}");
@@ -239,6 +244,7 @@ impl Config {
                 "offscreen" => cfg.offscreen = true,
                 "log" => cfg.log = Some(value),
                 "map" => cfg.map = value,
+                "team" => cfg.team = Some(value.parse().ok().filter(|t| *t < 4).ok_or_else(bad)?),
                 "character" => cfg.character = Some(parse_pick(&value).ok_or_else(bad)?),
                 "side" => {
                     cfg.side = Some(match value.as_str() {
@@ -531,10 +537,11 @@ pub struct Anim(pub AnimPlayer, pub u8);
 
 /// Every animation id the movement produces (its state byte is the id, V: conker-anim). The local
 /// player shows its predicted state for these, the rules' animation for anything else.
-pub const ANIM_IDS: [u8; 13] = [
+pub const ANIM_IDS: [u8; 14] = [
     state::CREEP,
     state::WALK,
     state::RUN,
+    state::SCARED_RUN,
     state::IDLE,
     state::CROUCH,
     state::CROUCH_WALK,
@@ -995,6 +1002,7 @@ pub fn run(
     if !cfg.headless && cfg.at.is_some() {
         app.add_systems(FixedUpdate, screenshot_at_read.run_if(not(is_in_rollback)));
     }
+    teams::build(&mut app, !cfg.headless);
     app.insert_resource(cfg);
     connection::build(&mut app);
     results::build(&mut app);
@@ -1148,6 +1156,7 @@ fn buffer_input(
     free_camera: Query<&FreeCameraState>,
     game: Query<&MatchView>,
     motion: Option<Res<AccumulatedMouseMotion>>,
+    team_screen: Res<teams::Screen>,
     mut player: Query<(&mut ActionState<Input>, &FollowCamera), With<InputMarker<Input>>>,
     (sync, shown, mut senders, remotes): (
         Option<Res<LocalTimelineSync>>,
@@ -1181,6 +1190,7 @@ fn buffer_input(
             .map_or((0, 0, 0), |read| script_input(&script.0, read)),
         Some(_) => circle_input(cfg.id, tick),
         None if free_camera.iter().any(|c| c.enabled) => (0, 0, 0), // the keys fly the camera
+        None if team_screen.open => (0, 0, 0),                      // the pad picks a team
         None => {
             // The pad only drives a focused window (with two windows open, one pad drove both).
             let pad = gamepads

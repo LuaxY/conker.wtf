@@ -77,6 +77,13 @@ pub const BULLET_HEAD: f32 = 47.25;
 /// of the fade (V `menus-and-flow.md`: latch 119, phase 7 at 158; Colors e0 383/422/438).
 pub const END_DELAY: u32 = 39;
 pub const FADE: u32 = 16;
+/// The scare's reach, squared (`0x80099530`, V RAM), and how long it lasts (s126+0x4A).
+const SCARE_D2: f32 = 30000.0;
+const SCARE_FRAMES: u8 = 20;
+
+/// A bolt's push body (obj+0xE4 5, +0xE8 0, +0xEC 1; V e4 cbp2): radius, height, centre.
+const BOLT_BODY: [i16; 3] = [5, 5, 0];
+
 /// Grenade: pull and throw states, the frame of the release (the fuse is the cook timer,
 /// [`projectile::COOK`]).
 const PULL: u32 = 28;
@@ -584,7 +591,7 @@ impl Fighter {
     /// holster's or throw's first frame. `tick` is the next frame to run, as in [`Self::item`].
     pub fn in_hand(&self, tick: u32) -> bool {
         let attach = |id: u8| match id {
-            0x39 | 0x23 | 0x37 => 7,
+            0x39 | 0x38 | 0x23 | 0x37 => 7, // 0x38: V e4 combat7_e_w38 761→768
             0x15 => 8,
             0x18 => 20,
             0x14 => 11,
@@ -593,7 +600,7 @@ impl Fighter {
             0x19 => 14, // the bat: its held model's draw event (I: no s126+0x11A trace)
             0x24 => 17,
             0x26 => 18,
-            _ => 10, // 0x09, 0x16, 0x38
+            _ => 10, // 0x09, 0x16
         };
         match self.camera_weapon() {
             0 => false,
@@ -847,6 +854,10 @@ pub fn teams_result(all: &[Option<Standing>], n: u8) -> Option<u8> {
 pub struct Match {
     /// The next frame to run (= the trace row its result shows on).
     pub tick: u32,
+    /// A frame of the match's live parity: the oracle's read 23, where its match goes live (1 by
+    /// default: the replays' ticks are the reads; the server sets the tick standing for read 23).
+    /// Bolts and aimed shots first move an even number of frames after it ([`Self::first_move`]).
+    pub live: u32,
     pub players: Vec<Fighter>,
     pub bullets: Vec<(u32, Bullet)>,
     pub grenades: Vec<(u32, Grenade)>,
@@ -958,6 +969,7 @@ impl Match {
     pub fn new(arena: &Arena, players: Vec<Fighter>, rng: Rng, tick: u32) -> Self {
         Self {
             tick,
+            live: 1,
             players,
             bullets: Vec::new(),
             grenades: Vec::new(),
@@ -1927,6 +1939,20 @@ impl Match {
         if self.players[i].out > 0 {
             return;
         }
+        // A killed player lets its pickup go 3 frames after the killing hit, and the weapon
+        // manager (`func_1508DC24`) swaps its weapon for the start item (MP+0x1170), none or
+        // holstered: it takes actions 0x1D/0x1E away and clears s126+0x75, +0x78 and +0x11A (V e4
+        // dth: the twin guns held through 790-792, gone at 793; bots3's two deaths alike). A
+        // start item held is kept until the respawn (V combat6_e40: the club, 1062 → 1213).
+        let f = &mut self.players[i];
+        if let Action::Hurt {
+            lethal: true, step, ..
+        } = f.action
+            && (step > 0 || t - f.since >= 3)
+            && f.weapon != f.start
+        {
+            (f.weapon, f.drawn, f.body.armed) = (f.start, false, 0);
+        }
         if self.settings.tank {
             return self.tank_player(i, input, arena, world, ev);
         }
@@ -1949,12 +1975,29 @@ impl Match {
         // gunner and one jumping on move by their own rules) and Colors' uncarried flags.
         let flags = (self.colors.flags.iter()).filter(|f| f.shown && f.carrier.is_none());
         let cash = Some(self.heist.cash).filter(|c| c.shown && c.carrier.is_none());
+        // A bolt sitting where it was fired pushes too, its shooter included: an object of radius 5,
+        // centre 0, vertical scale 1, no owner (`func_1505D6F0`, C; V e4 cbp2: the shooter moved
+        // (1.843, 2.152) then (1.577, 1.841) by the bolt at its muzzle, cb3's drift of ~5.3 a hip
+        // shot). ponytail: the client does not predict it (its bolts are not in `Fighting`), the
+        // server's correction moves it.
+        let bolts = (self.shots.iter())
+            .filter(|(born, s)| {
+                s.step == projectile::BOLT_STEP && *born < t && t <= self.first_move(*born)
+            })
+            .map(|(_, s)| Other::new(s.pos, BOLT_BODY));
+        // An enemy with a weapon drawn (its s126+0x78) within the scare's reach on the push's
+        // distance (`func_1505D6F0`, C) scares this player below.
+        let me = self.players[i].other();
+        let scare = (self.players.iter().enumerate()).any(|(j, p)| {
+            j != i && p.body.armed != 0 && self.enemies(i, j) && me.within(&p.other(), SCARE_D2)
+        });
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i)
             .map(|(_, p)| p.other())
             .chain(self.guns.iter().map(|g| gun::body(g.place.pos)))
             .chain(flags.map(|f| colors::body(f.pos)))
             .chain(cash.map(|c| heist::body(c.pos)))
+            .chain(bolts)
             .collect();
         let melee = |f: &Fighter| {
             f.drawn
@@ -2156,10 +2199,13 @@ impl Match {
         }
         if f.action == Action::Free && !aiming && !f.carrying && f.flag.is_none() {
             // A villager's item 0x3E throws no grenade (V beach-gunner gren: C-down held 60-100, the
-            // pull never starts, 3 kept; I: where the game refuses it).
+            // pull never starts, 3 kept; I: where the game refuses it). Nor does a player with a
+            // weapon drawn (s126+0x78 ≠ 0, `func_1504CB98` at 0x1504CF9C, C): its C-down steps back
+            // with the C strafe (V e4 cd09, cd15: twin guns 0x22C, flamethrower 0xED while held;
+            // combat6_ctlw40 880: the club).
             if late_pressed(C_DOWN)
                 && f.grenades > 0
-                && armed.is_none_or(|w| w.c_button.is_none())
+                && armed.is_none()
                 && f.weapon != Some(beach::ITEM)
             {
                 f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
@@ -2510,6 +2556,12 @@ impl Match {
             (_, Some(w)) if f.drawn => w.id,
             _ => 0,
         };
+        // s126+0x4A: 20 while an armed enemy is near this unarmed player, else one less a frame
+        // (`func_1504BC38`, C; V e4 sge2a: player 2's from player 1's draw at 760 on).
+        f.body.scared = match scare && f.body.armed == 0 {
+            true => SCARE_FRAMES,
+            false => f.body.scared.saturating_sub(1),
+        };
         f.body.holding = f.flag.is_some();
         f.body.heavy = matches!(f.flag, Some(heist::CASH | raptor::EGG));
         // Beach's item 0x3E drives a villager, but for the crouch's 40 % (V spd: 14; I: its handler
@@ -2730,11 +2782,12 @@ impl Match {
                 ));
             }
             Strike::Spread(muzzle) => {
-                // Each sphere in turn (a victim of one is immune or stunned for the next), the
-                // shooter left out; the knock-back along the facing, or away from the sphere's
-                // centre with flag 0x10.
+                // Each sphere in turn (a victim one leaves immune is out of the next; none tests
+                // the stun, so 0x32 lands on the stagger of the muzzle's 0x3A, which leaves no
+                // immunity: V e4 combat7_sgpb 790), the shooter left out; the knock-back along the
+                // facing, or away from the sphere's centre with flag 0x10.
                 let (c, s) = cos_sin(me.facing);
-                for (j, (kind, d, r)) in weapon::SPREAD.into_iter().enumerate() {
+                for (kind, d, r) in weapon::SPREAD {
                     let centre = [muzzle[0] + d * c, muzzle[1], muzzle[2] - d * s];
                     for v in (0..self.players.len()).filter(|&v| v != i) {
                         let p = self.seen_pos(seen, i, v);
@@ -2748,7 +2801,7 @@ impl Match {
                         } else {
                             me.facing
                         };
-                        self.hurt(v, &kind, true, j > 0, angle, Some(i), ev);
+                        self.hurt(v, &kind, true, false, angle, Some(i), ev);
                     }
                 }
             }
@@ -3096,12 +3149,20 @@ impl Match {
         }
     }
 
-    /// Aimed shots and bolts first move on the first odd frame after the one they were fired in
-    /// (V combat5_cb2-4, cb_e1: 15 bolts fired on odd and even frames), then every frame.
+    /// The frame a bolt or an aimed shot fired in frame `born` first moves: the first after it an
+    /// even number of frames from [`Self::live`]. The game's object pass `func_150619A8` activates
+    /// a new object (obj+0x2FA) on even reads, and its update moves it from the next frame on (V
+    /// combat5_cb2-4, cb_e1: 15 bolts fired on odd and even frames, all first moving on odd reads;
+    /// e4 cbgate: +0x2FA set at 142 for a bolt of 141, its first move at 143).
+    pub fn first_move(&self, born: u32) -> u32 {
+        born + 1 + (born + 1).wrapping_sub(self.live) % 2
+    }
+
+    /// Aimed shots and bolts sit until [`Self::first_move`], then move every frame.
     fn fly_shots(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
         let t = self.tick;
         for (born, mut s) in std::mem::take(&mut self.shots) {
-            if born == t || (born + 1 == t && t.is_multiple_of(2)) {
+            if t < self.first_move(born) {
                 self.shots.push((born, s));
                 continue;
             }
@@ -3224,7 +3285,6 @@ impl Match {
         }
         let f = &mut self.players[v];
         if lethal {
-            (f.weapon, f.drawn) = (None, false);
             (f.carrying, f.masked) = (false, false);
             f.deaths = f.deaths.saturating_add(1);
             if reaction == 0x2C {
@@ -4074,6 +4134,81 @@ mod tests {
         assert!(ev.iter().any(|e| matches!(e.1, Event::Hit { .. })));
     }
 
+    /// A killed player holds its pickup's weapon 3 frames past the killing hit, then the start
+    /// item, holstered, or none (V e4 dth: the twin guns drawn through 790-792, gone at 793); a
+    /// start item drawn stays drawn (V combat6_e40, the club).
+    #[test]
+    fn a_killed_player_keeps_its_weapon_three_frames() {
+        for (start, then) in [(None, (None, false)), (Some(0x40), (Some(0x40), false))] {
+            let (arena, mut m, w) = duel();
+            m.give(1, 0x09);
+            (m.players[1].drawn, m.players[1].start, m.players[1].health) = (true, start, 1);
+            assert!(m.hurt(
+                1,
+                &damage::GUN23_BULLET,
+                false,
+                false,
+                0,
+                Some(0),
+                &mut Vec::new()
+            ));
+            let mut held = Vec::new();
+            for _ in 0..6 {
+                run(&mut m, &arena, &w, 1, |_| 0);
+                held.push((m.players[1].weapon, m.players[1].drawn));
+            }
+            let want = [(Some(0x09), true); 3].into_iter().chain([then; 3]);
+            assert_eq!(held, want.collect::<Vec<_>>(), "{start:?}");
+        }
+        let (arena, mut m, w) = duel();
+        m.give(1, 0x40);
+        (m.players[1].drawn, m.players[1].start, m.players[1].health) = (true, Some(0x40), 1);
+        assert!(m.hurt(
+            1,
+            &damage::GUN23_BULLET,
+            false,
+            false,
+            0,
+            Some(0),
+            &mut Vec::new()
+        ));
+        run(&mut m, &arena, &w, 60, |_| 0);
+        assert_eq!(
+            (m.players[1].weapon, m.players[1].drawn),
+            (Some(0x40), true)
+        );
+    }
+
+    /// C-down with the twin guns or the flamethrower drawn pulls no grenade: it steps back with the
+    /// C strafe (the move angle swings 6400 a frame toward the back), the weapon's run while held
+    /// (V e4 cd09 280-321: 0x22C, 16896 → 10496 → 4096 → 63232; cd15: 0xED). Holstered, it pulls.
+    #[test]
+    fn c_down_with_a_weapon_drawn_steps_back() {
+        for (id, run_anim) in [(0x09, anim::TWIN_RUN), (0x15, anim::FLAME_WALK)] {
+            let (arena, mut m, w) = duel();
+            m.give(0, id);
+            m.players[0].body.facing = 16896;
+            m.players[0].body.move_angle = 16896;
+            run(&mut m, &arena, &w, 1, |_| BUTTON_B);
+            run(&mut m, &arena, &w, 40, |_| 0);
+            assert!(m.players[0].drawn);
+            let mut angles = Vec::new();
+            for _ in 0..10 {
+                run(&mut m, &arena, &w, 1, |_| C_DOWN);
+                let f = m.players[0];
+                assert_eq!((f.action, f.anim, f.grenades), (Action::Free, run_anim, 3));
+                angles.push(f.body.move_angle);
+            }
+            assert_eq!(angles[..3], [10496, 4096, 63232], "{id:#x}");
+            assert_eq!(angles[9], 16896u16.wrapping_add(0x8000));
+            // Holstered (B, then the holster's frames), C-down pulls.
+            run(&mut m, &arena, &w, 1, |_| BUTTON_B);
+            run(&mut m, &arena, &w, 40, |_| 0);
+            run(&mut m, &arena, &w, 3, |_| C_DOWN);
+            assert!(matches!(m.players[0].action, Action::GrenadePull { .. }));
+        }
+    }
+
     /// The sniper: R aims a frame late, Z in aim fires 3 frames later (type 0x20 kills at 146.5),
     /// and aim or shot end 8 frames after R stops (V e_w24 1161, ctlw_k10 251).
     #[test]
@@ -4314,6 +4449,41 @@ mod tests {
         });
         let f = &m.players[0];
         assert_eq!((f.anim, f.shots), (anim::CROSSBOW_AIMED, 2));
+    }
+
+    /// A hip bolt pushes its shooter while it sits at the muzzle: fired from Z at 131 (born 141, odd
+    /// to the live frame) it first moves at 143, and the shooter moves (1.843, 2.152) in 142 and
+    /// (1.577, 1.841) in 143 (V combat5_cb3 rows 143-144, e4 cbp2: −2247, 6015 facing 16896 to
+    /// −2243.580, 6018.993); a bolt born on an even frame moves the next and pushes once.
+    #[test]
+    fn a_hip_bolt_pushes_its_shooter() {
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x18);
+        let b = &mut m.players[0].body;
+        (b.facing, b.move_angle) = (16896, 16896);
+        run(&mut m, &arena, &w, 131, |t| u16::from(t == 0) * BUTTON_B);
+        let mut at = Vec::new();
+        for _ in 0..5 {
+            run(&mut m, &arena, &w, 1, |t| u16::from(t == 131) * BUTTON_Z);
+            at.push(m.players[0].body.pos);
+        }
+        // The rows after frames 131..=135; then 141..=144.
+        assert!(at.iter().all(|p| *p == [0.0, 0.0, 0.0]), "{at:?}");
+        run(&mut m, &arena, &w, 5, |_| 0);
+        let mut at = Vec::new();
+        for _ in 0..4 {
+            run(&mut m, &arena, &w, 1, |_| 0);
+            at.push(m.players[0].body.pos);
+        }
+        let near = |p: [f32; 3], x: f32, z: f32| (p[0] - x).abs() < 1e-3 && (p[2] - z).abs() < 1e-3;
+        assert!(near(at[0], 0.0, 0.0), "{at:?}");
+        assert!(near(at[1], 1.843, 2.152), "{at:?}");
+        assert!(near(at[2], 1.843 + 1.577, 2.152 + 1.841), "{at:?}");
+        assert_eq!((at[2], at[3][1]), (at[3], 0.0));
+        // Born on an even frame (live moved by one): a single push.
+        assert_eq!((m.first_move(141), m.first_move(142)), (143, 143));
+        m.live = 0;
+        assert_eq!((m.first_move(141), m.first_move(142)), (142, 144));
     }
 
     /// A blown-up player bounces: half the landing speed, at most 28 off the first landing, keeping
@@ -4770,6 +4940,8 @@ mod tests {
                 )
             });
             if !decided {
+                // The scare goes by player 0's weapon as its update this frame left it.
+                solo.players[1].body.scared = m.players[1].body.scared;
                 assert_eq!(solo.players[1], m.players[1], "frame {t}");
                 compared += 1;
             }

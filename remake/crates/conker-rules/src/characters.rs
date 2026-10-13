@@ -118,11 +118,16 @@ pub fn scale(class: u8) -> f32 {
 /// The clip class `class` plays for the rules' `id` (C, not seen): the Sergeant and the Tediz
 /// Leader (their looks set s126+0x1B2, `func_15083384`) hold weapon 0x16 their own way, its drawn
 /// idle 0x2C5 (`func_1507F640`), its walk 0x2C6 (`func_15064B94`) and its shot 0x2C7, on 0x2B too
-/// (`func_15065A5C`), and sit the mounted gun as 0x34F and 0x350 (`func_15064A14`). The rules keep
-/// the canonical ids; the root motion and the drawing go by this one (0x2C7 has no root track:
-/// no push back).
+/// (`func_15065A5C`), and sit the mounted gun as 0x34F and 0x350 (`func_15064A14`). Everyone but
+/// the Tediz (models 117 and 177) pulls and throws the grenade as 0x175 and 0x16C (the same
+/// animations, their events putting bank-09 #76 in the hand, not #75: `func_15065A5C`'s case
+/// 0x26, C; V e4 sqgren: the squirrel, combat6_ctlw40c: the caveman). The rules keep the canonical
+/// ids; the root motion and the drawing go by this one (0x2C7 has no root track: no push back).
 pub fn clip(class: u8, id: u16) -> u16 {
+    let tedi = matches!(model(class), Some(117 | 177));
     match (class, id) {
+        (_, anim::GRENADE_PULL) if !tedi => 0x175,
+        (_, anim::GRENADE_THROW) if !tedi => 0x16C,
         (0x25 | 0x26, anim::W16_IDLE) => 0x2C5,
         (0x25 | 0x26, anim::W16_WALK) => 0x2C6,
         (0x25 | 0x26, anim::W16_FIRE | crate::beach::ROCKET_FIRE) => 0x2C7,

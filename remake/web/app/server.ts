@@ -79,7 +79,7 @@ function validate(body: unknown): NewServer | string {
   const { name: modeName, maxScore, maxBots } = MODES[mode];
   if (maxScore !== undefined && (score === "unlimited" || score > maxScore))
     return `settings.score: 1-${maxScore} in ${modeName}`;
-  if (maxBots !== undefined && bots > maxBots) return `settings.bots: 0-${maxBots} in ${modeName}`;
+  if (bots > maxBots[0]) return `settings.bots: 0-${maxBots[0]} in ${modeName}`;
   if (typeof radar !== "boolean") return "settings.radar: true or false";
   if (!int(laps, 1, 20)) return "settings.laps: 1-20";
   if (route !== 11 && route !== 12) return "settings.route: 11 or 12";

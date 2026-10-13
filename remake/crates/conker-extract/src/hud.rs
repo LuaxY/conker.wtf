@@ -178,8 +178,8 @@ fn image(texture: &str, rect: [u16; 4]) -> Image {
 /// of row `n / 3` (its top and height from the tables at 0x800873B4 and 0x800873BC), 22 wide;
 /// weapon 0x39's is cell 10 of the second atlas, 3 texels lower, and the shotgun's (0x37) its cell
 /// 7; cell 1 (0x16) is a texel shorter; the club's (0x40) cell 4, 3 texels higher and 20 wide
-/// (drawn a pixel right of the others: not kept). Map 0x1A's: the bat (0x19, any item without an
-/// icon on scene 0x1A) cell 4, 4 texels lower and 2 shorter (drawn a pixel lower: not kept); the
+/// (drawn a pixel right of the others: the client's). Map 0x1A's: the bat (0x19, any item without an
+/// icon on scene 0x1A) cell 4, 4 texels lower and 2 shorter (drawn a pixel lower: the client's); the
 /// tommy gun (0x38) cell 4 of the second atlas, 3 texels lower. War: Raptor's bone knives (0x3F) and
 /// bone crossbow (0x41) share the knives' and the crossbow's cells (C, the function's switch).
 /// Race's power-ups: the missiles (0x33) cell 11 (its last 8 texels past the atlas's edge, clamped

@@ -41,7 +41,8 @@ pub const SLICE_SCENE: usize = 0x2D;
 /// The vertical slice's character: the bank-01 model every Deathmatch participant uses.
 pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// The clips that put Deathmatch's held models in the hand: the draws of weapons 0x09, 0x39, 0x23,
-/// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull, then the crossbow's and the
+/// 0x24, 0x15, 0x21, 0x22, 0x14 and 0x16, and the grenade's pull (the Tediz' 0x176: bank-09 #75;
+/// everyone else's 0x175: #76, `conker_rules::characters::clip`), then the crossbow's and the
 /// shotgun's and the club's (0x40) draws (conker-anim's ids), and War: Total War's gas mask put on
 /// and taken off (0x151, 0x14E: bank-09 #67 in the hand, #66 on the head), then the draws of
 /// map 0x1A's bat (0x19: 0x10E) and tommy gun (0x38: 0x1DD) (C `func_15065A5C`), then War: Raptor's
@@ -49,9 +50,9 @@ pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// 0x2CA, action 47, bank-09 #0x7B) (V `../lab/research/mp-original/raptor.md` r9, r10), then Race's
 /// kick (0x354: action 0x52, bank-09 #0x34 on the hand from tick 5 to 30; V k1 DL 250). The held
 /// list sorts by the game's action number, not by this order (the club's model is scene 4).
-pub const HELD_CLIPS: [u16; 20] = [
-    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2, 0x151,
-    0x14E, 0x10E, 0x1DD, 0x2C8, 0x2CA, 0x354,
+pub const HELD_CLIPS: [u16; 21] = [
+    0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0x175, 0xFB, 0x1F7, 0x2C2,
+    0x151, 0x14E, 0x10E, 0x1DD, 0x2C8, 0x2CA, 0x354,
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;

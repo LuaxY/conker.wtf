@@ -1,26 +1,40 @@
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { ArrowLeft, Crosshair } from "lucide-react";
 import { motion } from "motion/react";
-import { allowed, MAPS, MODES, PICKS, settingRows } from "./data";
+import { useState } from "react";
+import { allowed, MAPS, MODES, PICKS, players, settingRows } from "./data";
 import { usePlayer } from "./store";
-import { Banner, PLATES, SIDES, StatusBadge } from "./ui";
+import { Banner, PLATES, SIDES, StatusBadge, useRefresh } from "./ui";
 
 const route = getRouteApi("/lobby/$serverId");
+/** Heist's teams, in the order of play.html's `team=` (the original's team screen names). */
+const HEIST_TEAMS = ["Reds", "Blues", "Greens", "Yellows"];
 
 export function Lobby() {
   const server = route.useLoaderData();
   const { side, transport, character, set } = usePlayer();
+  useRefresh();
   // The picks this server's map and mode allow with its cheats (none: no select); a pick not among
   // them is not asked for (the server would give the slot's default anyway).
   const picks = allowed(server.map, server.mode, server.settings.cheats);
   const pick = character !== null && picks & (1 << character) ? character : null;
+  // Heist's four teams (the side picks the team in the other War modes): play.html's `team=`.
+  const [team, setTeam] = useState("");
   // play.html's options (web/README.md): the client rejects any it does not know. The digest is this
   // server's own, since several run at once (dist/digest.txt names one at most).
-  const options = { server: server.address, transport, side, digest: server.digest };
-  const play = `play.html?${new URLSearchParams(pick === null ? options : { ...options, character: String(pick) })}`;
+  const options: Record<string, string> = {
+    server: server.address,
+    transport,
+    side,
+    digest: server.digest,
+  };
+  if (pick !== null) options.character = String(pick);
+  if (server.mode === "heist" && team) options.team = team;
+  const play = `play.html?${new URLSearchParams(options)}`;
   const facts = [
     ["Map", MAPS[server.map].name],
     ["Mode", MODES[server.mode].name],
+    ["Playing", players(server) ?? "not answering"],
     ...settingRows(server),
   ];
 
@@ -129,6 +143,24 @@ export function Lobby() {
                     </option>
                   ) : null,
                 )}
+              </select>
+            </label>
+          )}
+          {server.mode === "heist" && (
+            <label className="mt-6 block">
+              <span className="font-stencil text-sm tracking-wider text-dust uppercase">Team</span>
+              <select
+                name="team"
+                value={team}
+                onChange={(e) => setTeam(e.target.value)}
+                className="field mt-1"
+              >
+                <option value="">The server's choice</option>
+                {HEIST_TEAMS.map((name, k) => (
+                  <option key={name} value={k}>
+                    {name}
+                  </option>
+                ))}
               </select>
             </label>
           )}

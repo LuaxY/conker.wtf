@@ -48,6 +48,8 @@ pub mod state {
     pub const RUN_JUMP: u8 = 55;
     pub const FALL: u8 = 56;
     pub const PUSH_WALL: u8 = 122;
+    /// The run while scared ([`super::PlayerState::scared`]).
+    pub const SCARED_RUN: u8 = 43;
     /// A with Z held ([`super::HIGH_JUMP_Y_VEL`]).
     pub const HIGH_JUMP: u8 = 235;
 }
@@ -216,6 +218,10 @@ pub struct PlayerState {
     /// weapon's walk (its speed percentage, no skid, no wall-push state) and stops into idle at once
     /// (`func_15064B94`, C; V: combat_e_w22 816).
     pub armed: u8,
+    /// s126+0x4A: frames left scared by an enemy's drawn weapon. Set by the match rules; unarmed,
+    /// the gait at 5 and above is the scared run, its rate `e/12` (`func_1504C0E8`, C; V
+    /// combat5_sg_e2 766-791: 0x2B where the run would be, then the skid).
+    pub scared: u8,
     /// s126+0x37: the crouch-walk is allowed (set below speed 3 with Z held, cleared above 4 without).
     pub crouch_ok: bool,
     /// obj+0x13C ≥ 100: the player holds an object (War: Colors' flag). Set by the match rules; the
@@ -327,6 +333,7 @@ impl PlayerState {
             lock: 0,
             jumped: false,
             armed: 0,
+            scared: 0,
             crouch_ok: false,
             holding: false,
             heavy: false,
@@ -563,6 +570,12 @@ impl Other {
     pub fn overlaps(&self, o: &Other) -> bool {
         let ([dx, dy, dz], sum) = self.offset(o);
         dx * dx + dy * dy + dz * dz < sum * sum
+    }
+
+    /// Within `d2`'s square root of `o` on the same distance (the scare's test, `func_1505D6F0`).
+    pub fn within(&self, o: &Other, d2: f32) -> bool {
+        let ([dx, dy, dz], _) = self.offset(o);
+        dx * dx + dy * dy + dz * dz < d2
     }
 
     /// The offset from `o` to this body, its height difference between the centres times the mean
@@ -871,7 +884,13 @@ impl Stick {
 fn can_jump(s: u8) -> bool {
     matches!(
         s,
-        state::IDLE | state::CREEP | state::WALK | state::RUN | state::SKID | state::PUSH_WALL
+        state::IDLE
+            | state::CREEP
+            | state::WALK
+            | state::RUN
+            | state::SCARED_RUN
+            | state::SKID
+            | state::PUSH_WALL
     )
 }
 
@@ -1061,8 +1080,8 @@ fn end_frame(p: &mut PlayerState) {
 }
 
 /// The ground state for the next frame (`func_1504C0E8` with `func_15064B94`, C): a wall push, else the
-/// gait on `e = 0.4·speed + 0.6·drive` (run above 14, walk above 6 or while braking above speed 1, creep
-/// above 1, else idle), and a skid when a stop from above speed 18 has no drive left (17 frames, the
+/// gait on `e = 0.4·speed + 0.6·drive` (scared, the scared run from 5; run above 14, walk above 6 or
+/// while braking above speed 1, creep above 1, else idle), and a skid when a stop from above speed 18 has no drive left (17 frames, the
 /// first 8 locked). Most drawn weapons ([`armed_walk`]) walk while the stick asks for 1 or more, else
 /// stand, and never skid. Idle snaps the move angle to the facing (`func_1507F640`).
 fn choose(p: &mut PlayerState, drive: f32, wall: bool) {
@@ -1075,6 +1094,8 @@ fn choose(p: &mut PlayerState, drive: f32, wall: bool) {
         state::PUSH_WALL
     } else if armed.is_some() && p.target_speed < 1.0 {
         state::IDLE
+    } else if p.scared > 0 && p.armed == 0 && e >= 5.0 {
+        state::SCARED_RUN
     } else if e > 14.0 {
         state::RUN
     } else if e > 6.0 || (drive < 1.0 && p.xz_speed > 1.0) {
@@ -1674,6 +1695,14 @@ mod tests {
         assert_eq!(pick(p, 17.9, 0.0), state::WALK); // a walk at 20.4 brakes to 17.9: no skid
         assert_eq!(pick(p, 18.5, 0.0), state::SKID); // above 18 it skids, the first 8 frames locked
         assert_eq!((p.timer, p.lock), (SKID_FRAMES, 8));
+        // Scared: the scared run from e 5 (V combat5_sg_e2 766: speed 1, drive 35), the skid kept.
+        p.scared = 20;
+        assert_eq!(pick(p, 1.0, 35.0), state::SCARED_RUN);
+        assert_eq!(pick(p, 4.0, 7.8), state::SCARED_RUN);
+        assert_eq!(pick(p, 3.0, 7.8), state::SCARED_RUN); // e 5.88, a creep unscared
+        assert_eq!(pick(p, 1.5, 6.0), state::CREEP); // e 4.2
+        assert_eq!(pick(p, 26.0, 0.0), state::SKID);
+        p.scared = 0;
         // Armed: no skid, and the stick's release stands at once with the move angle on the facing
         // (combat_e_w22 816).
         p.armed = 0x22;

@@ -1,5 +1,6 @@
 import { Panda, Skull, Squirrel } from "lucide-react";
-import { type CSSProperties, type ReactNode, useState } from "react";
+import { useRouter } from "@tanstack/react-router";
+import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import type { Side, Status } from "./data";
 
 export const SIDES = {
@@ -145,4 +146,13 @@ export function Keys({ keys, pad = false }: { keys: string[]; pad?: boolean }) {
       </kbd>
     ),
   );
+}
+
+/** Reloads the route's data (the servers' /info: who is playing) every `ms` while shown. */
+export function useRefresh(ms = 5000) {
+  const router = useRouter();
+  useEffect(() => {
+    const timer = setInterval(() => void router.invalidate(), ms);
+    return () => clearInterval(timer);
+  }, [router, ms]);
 }

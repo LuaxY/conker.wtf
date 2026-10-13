@@ -354,9 +354,33 @@ pub fn info_map(body: &[u8]) -> Result<String, String> {
     Ok(map.into())
 }
 
-/// Natively: the server's map, from its `/info` (for 5 s while the server starts).
+/// The fingerprint of the server's pack its `/info` names (`pack`; conker-sim's `pack_hash`).
+pub fn info_pack(body: &[u8]) -> Option<String> {
+    let info: serde_json::Value = serde_json::from_slice(body).ok()?;
+    info["pack"].as_str().map(String::from)
+}
+
+/// This client's pack (`read`: its files) against the server's fingerprint (`server`, from
+/// [`info_pack`]): Ok if they are the same, else why the client refuses to play (the collision and
+/// the rules' data must match for the prediction to follow the server).
+pub fn check_pack(
+    map: &str,
+    server: &str,
+    read: impl FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<(), String> {
+    let own = conker_sim::net::pack_hash(map, read).ok_or("a pack file is missing")?;
+    match own == server {
+        true => Ok(()),
+        false => Err(format!(
+            "this asset pack ({own}) is not the server's ({server}): play with the same export"
+        )),
+    }
+}
+
+/// Natively: the server's map and its pack's fingerprint, from its `/info` (for 5 s while the
+/// server starts).
 #[cfg(not(target_family = "wasm"))]
-pub fn server_map(cfg: &Config) -> Result<String, String> {
+pub fn server_info(cfg: &Config) -> Result<(String, Option<String>), String> {
     let get = || fetch(&info_url(cfg), "the server's map");
     let mut body = get();
     for _ in 0..20 {
@@ -366,7 +390,8 @@ pub fn server_map(cfg: &Config) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(250));
         body = get();
     }
-    info_map(body?.as_bytes())
+    let body = body?;
+    Ok((info_map(body.as_bytes())?, info_pack(body.as_bytes())))
 }
 
 /// The browser's token fetch, in flight: [`connect`] polls it.
@@ -770,6 +795,17 @@ mod tests {
                 .contains("protocol")
         );
         assert!(info(r#"{"map":"zz","protocol":P}"#).is_err());
+        assert_eq!(
+            info_pack(br#"{"map":"30","pack":"00ff"}"#).as_deref(),
+            Some("00ff")
+        );
+        assert_eq!(info_pack(br#"{"map":"30"}"#), None);
+        // The pack check: the same files pass, any other byte refuses.
+        let read = |extra: &'static str| move |f: &str| Some(format!("{f}{extra}").into_bytes());
+        let server = conker_sim::net::pack_hash("2d", read("")).unwrap();
+        assert_eq!(check_pack("2d", &server, read("")), Ok(()));
+        let why = check_pack("2d", &server, read(" ")).unwrap_err();
+        assert!(why.contains("not the server's"), "{why}");
     }
     const PROTOCOL: u64 = conker_sim::net::PROTOCOL_ID;
 

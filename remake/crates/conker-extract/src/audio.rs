@@ -984,6 +984,11 @@ fn code_cues() -> Vec<Cue> {
             play([559, 560], 30000, None, 500, 1000, Channel::A),
             "the aimed shot in flight, one a tick (C func_150538CC; V ctlw_k4, w14)",
         ),
+        cue(
+            On::Pass { weapon: 0x18 },
+            play(range(1086, 4), 30000, None, 2000, 2100, Channel::A),
+            "the bolt nearing a player, once (C func_150538CC's type 6 → func_1505DDA8)",
+        ),
         Cue {
             play: Play {
                 pitch: [-200, 200],

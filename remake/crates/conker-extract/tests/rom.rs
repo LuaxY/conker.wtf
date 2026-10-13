@@ -112,9 +112,10 @@ fn slice_in_memory() {
         assert_eq!(e["logicalIds"], serde_json::json!(c.logical));
     }
 
-    // The weapons and the grenade in the hand: 17 models (the twin guns are two; map 0x1A's bat and
-    // tommy gun; War: Raptor's bone crossbow and knives), the gas mask in the hand and on the head,
-    // and Race's kick, one mesh each but the crossbows, child objects with a list per joint.
+    // The weapons and the grenades in the hand: 18 models (the twin guns are two; the Tediz' grenade
+    // and everyone else's; map 0x1A's bat and tommy gun; War: Raptor's bone crossbow and knives),
+    // the gas mask in the hand and on the head, and Race's kick, one mesh each but the crossbows,
+    // child objects with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -122,7 +123,19 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 21);
+    assert_eq!(slice.held.len(), 22);
+    // The grenades on the left hand from the pull's t19 to the throw's t15: the Tediz' #75 (0x176,
+    // 0x16B), everyone else's #76 (0x175, 0x16C; ROM clip events, C `func_15065A5C`).
+    let grenade = |entry| slice.held.iter().find(|h| h.entry == entry).unwrap();
+    let ends = |h: &extract_character::Held| (h.joint, h.create.clone(), h.remove.clone());
+    assert_eq!(
+        ends(grenade(75)),
+        (4, vec![(0x176, 19.0)], vec![(0x16B, 15.0)])
+    );
+    assert_eq!(
+        ends(grenade(76)),
+        (4, vec![(0x175, 19.0)], vec![(0x16C, 15.0)])
+    );
     // Race's kick (clip 0x354): bank 09 #0x34 in the right hand from tick 5 to 30 (V k1 DL 250).
     let kick = slice.held.iter().find(|h| h.entry == 0x34).unwrap();
     assert_eq!(

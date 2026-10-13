@@ -1,7 +1,9 @@
 //! Connect tokens. The server signs each client's netcode connect token with a private key that
 //! never leaves this process, and hands it out over plain HTTP: `GET /token[?id=N]` answers the
 //! token's 2048 bytes as hex (a random client id without `id=`). `GET /info` answers what a client
-//! needs before it loads anything: `{"map":"2d","protocol":11}` (the pack map, [`PROTOCOL_ID`]).
+//! needs before it loads anything, and what a server list shows:
+//! `{"map":"2d","protocol":33,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
+//! pack's fingerprint, conker-sim's `pack_hash`, and the players in the match now, [`Live`]).
 //!
 //! The endpoint lives in the game server because the server holds the key and its public
 //! addresses; production binds it to loopback and the static server (Caddy, `deploy/`) proxies the
@@ -13,6 +15,7 @@ use conker_sim::net::PROTOCOL_ID;
 use lightyear::netcode::{ConnectToken, Key, generate_key};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Seconds a token may start a connection: the page fetches it when the ROM is picked and connects
@@ -51,12 +54,18 @@ pub fn parse_key(text: &str) -> Result<Key, String> {
     Ok(key)
 }
 
+/// The humans and bots in the match now, which the server sets each tick and `/info` reads.
+#[derive(Clone, Default)]
+pub struct Live(pub Arc<Mutex<(usize, usize)>>);
+
 /// Mints tokens for this server: its key, and the addresses the tokens name (the public ones);
-/// and tells the map played.
+/// and tells the map played, the pack's fingerprint and the players in.
 pub struct Issuer {
     pub key: Key,
     pub addrs: Vec<SocketAddr>,
     pub map: String,
+    pub pack: String,
+    pub live: Live,
 }
 
 impl Issuer {
@@ -81,7 +90,11 @@ impl Issuer {
         };
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if path == "/info" {
-            let info = format!("{{\"map\":\"{}\",\"protocol\":{PROTOCOL_ID}}}", self.map);
+            let (humans, bots) = *self.live.0.lock().unwrap_or_else(|e| e.into_inner());
+            let info = format!(
+                "{{\"map\":\"{}\",\"protocol\":{PROTOCOL_ID},\"pack\":\"{}\",\"humans\":{humans},\"bots\":{bots}}}",
+                self.map, self.pack
+            );
             return ("200 OK", info);
         }
         if path != "/token" {
@@ -156,6 +169,8 @@ mod tests {
             key: [7; 32],
             addrs: vec!["[::1]:5888".parse().unwrap()],
             map: "30".into(),
+            pack: "00ff".into(),
+            live: Live::default(),
         };
         let (status, body) = issuer.answer("GET /token?id=42 HTTP/1.1\r\n");
         assert_eq!((status, body.len()), ("200 OK", 4096));
@@ -169,7 +184,10 @@ mod tests {
             "400 Bad Request"
         );
         assert_eq!(issuer.answer("GET / HTTP/1.1").0, "404 Not Found");
-        let info = format!("{{\"map\":\"30\",\"protocol\":{PROTOCOL_ID}}}");
+        *issuer.live.0.lock().unwrap() = (1, 3);
+        let info = format!(
+            "{{\"map\":\"30\",\"protocol\":{PROTOCOL_ID},\"pack\":\"00ff\",\"humans\":1,\"bots\":3}}"
+        );
         assert_eq!(issuer.answer("GET /info HTTP/1.1"), ("200 OK", info));
         assert_eq!(
             issuer.answer("POST /token HTTP/1.1").0,
@@ -189,6 +207,8 @@ mod tests {
                 key: [7; 32],
                 addrs: vec![addr],
                 map: "2d".into(),
+                pack: String::new(),
+                live: Live::default(),
             },
         );
         let mut stream = TcpStream::connect(addr).unwrap();

@@ -93,23 +93,25 @@ fn twist(players: Query<(&Player, &Twisted)>, mut joints: Query<&mut Transform>)
 /// whose animation clock is `clock`. The last of the model's events in this clip that fired (the
 /// clock reached its time; V: the oracle's attachment calls) decides. A removal while the weapon
 /// stays drawn (weapon 0x14's throws) lasts 2 frames: the game's weapon manager puts it back (V
-/// with two players; I: it visits one player a frame).
-pub fn shows(h: &Held, weapon_id: u8, drawn: bool, clock: &AnimPlayer) -> bool {
+/// with two players; I: it visits one player a frame). The grenade's clips are class `class`'s
+/// own ([`conker_rules::characters::clip`]: a Tedi's put #75 in the hand, everyone else's #76).
+pub fn shows(h: &Held, weapon_id: u8, drawn: bool, clock: &AnimPlayer, class: u8) -> bool {
     let grenade = [GRENADE_PULL, GRENADE_HOLD, GRENADE_THROW].contains(&clock.id);
-    let item = match grenade {
-        true => Some((GRENADE_PULL, GRENADE_THROW)),
-        false => weapon(weapon_id).map(|w| (w.draw.0, w.holster.0)),
+    let own = |id| conker_rules::characters::clip(class, id);
+    let (id, item) = match grenade {
+        true => (own(clock.id), Some((own(GRENADE_PULL), own(GRENADE_THROW)))),
+        false => (clock.id, weapon(weapon_id).map(|w| (w.draw.0, w.holster.0))),
     };
     let Some((_, away)) = item.filter(|i| h.create.iter().any(|c| c.0 == i.0)) else {
         return false;
     };
     let fired = (h.create.iter().map(|&e| (e, true)))
         .chain(h.remove.iter().map(|&e| (e, false)))
-        .filter(|((id, t), _)| *id == clock.id && clock.time >= *t)
+        .filter(|((e, t), _)| *e == id && clock.time >= *t)
         .max_by(|a, b| a.0.1.total_cmp(&b.0.1));
     match fired {
         Some((_, true)) => true,
-        Some(((_, t), false)) => clock.id != away && drawn && clock.time - t >= 2.0 * clock.rate,
+        Some(((_, t), false)) => id != away && drawn && clock.time - t >= 2.0 * clock.rate,
         None if grenade => clock.id == GRENADE_HOLD,
         None => drawn,
     }
@@ -291,7 +293,8 @@ fn show(
         };
         // A raptor holds nothing (its clips are not the weapons' events'); a racer (anyone in
         // Race) holds what its clip makes (the kick's fist, [`clip_shows`]).
-        let raptor = combat.is_some_and(|c| c.class == conker_rules::raptor::CLASS);
+        let class = combat.map_or(0, |c| c.class);
+        let raptor = class == conker_rules::raptor::CLASS;
         let racer = combat.is_some() && race;
         for &(i, entity) in &hands.0 {
             let h = &held.0[i];
@@ -299,7 +302,7 @@ fn show(
                 && match h.create.iter().any(|c| c.0 == MASK_ON) {
                     _ if racer => clip_shows(h, &anim.0),
                     true => mask_shows(h, masked, &anim.0),
-                    false => shows(h, weapon_id, drawn, &anim.0),
+                    false => shows(h, weapon_id, drawn, &anim.0, class),
                 };
             if let Ok(mut v) = visibility.get_mut(entity) {
                 v.set_if_neq(match shown {
@@ -316,6 +319,7 @@ mod tests {
     use super::*;
     use conker_anim::combat::{TWIN_DRAW, TWIN_FIRE, TWIN_HOLSTER, W14_ATTACK};
     use conker_anim::request_at;
+    use conker_rules::beach::TEDI_CLASS;
     use conker_rules::game::Action;
     use conker_rules::{Fighter, Placement};
 
@@ -338,7 +342,7 @@ mod tests {
             create: vec![(TWIN_DRAW, 15.0)],
             remove: vec![(TWIN_HOLSTER, 14.0)],
         };
-        let shown = |w, drawn, c: AnimPlayer| shows(&gun, w, drawn, &c);
+        let shown = |w, drawn, c: AnimPlayer| shows(&gun, w, drawn, &c, TEDI_CLASS);
         assert!(!shown(0x09, false, clock(TWIN_DRAW, 13.999998, 1.4)));
         assert!(shown(0x09, false, clock(TWIN_DRAW, 15.4, 1.4)));
         assert!(shown(0x09, true, clock(TWIN_FIRE, 3.0, 1.0)));
@@ -356,11 +360,41 @@ mod tests {
             create: vec![(0x102, 24.0)],
             remove: vec![(W14_ATTACK, 8.0), (0x103, 19.0)],
         };
-        let thrown = |time| shows(&knife, 0x14, true, &clock(W14_ATTACK, time, 1.0));
+        let thrown = |time| {
+            shows(
+                &knife,
+                0x14,
+                true,
+                &clock(W14_ATTACK, time, 1.0),
+                TEDI_CLASS,
+            )
+        };
         assert_eq!(
             [7.0, 8.0, 9.0, 10.0].map(thrown),
             [true, false, false, true]
         );
+    }
+
+    /// The grenade in the hand is the class's own: a Tedi's #75 from 0x176, a caveman's #76 from
+    /// 0x175 (events as extracted; V e4 sqgren, combat6_ctlw40c: the pull and throw ids).
+    #[test]
+    fn each_class_holds_its_own_grenade() {
+        let grenade = |entry, pull, throw| Held {
+            entry,
+            joint: 4,
+            create: vec![(pull, 19.0)],
+            remove: vec![(throw, 15.0)],
+        };
+        let (tediz, others) = (grenade(75, 0x176, 0x16B), grenade(76, 0x175, 0x16C));
+        let held = |class, c: AnimPlayer| [&tediz, &others].map(|h| shows(h, 0, false, &c, class));
+        let cave = conker_rules::raptor::CAVEMAN;
+        assert_eq!(
+            held(TEDI_CLASS, clock(GRENADE_PULL, 19.0, 1.0)),
+            [true, false]
+        );
+        assert_eq!(held(cave, clock(GRENADE_PULL, 19.0, 1.0)), [false, true]);
+        assert_eq!(held(cave, clock(GRENADE_HOLD, 3.0, 1.0)), [false, true]);
+        assert_eq!(held(cave, clock(GRENADE_THROW, 15.0, 1.0)), [false, false]);
     }
 
     /// The gas mask's models (events as extracted, ROM-tested in extract-character) at the put-on's

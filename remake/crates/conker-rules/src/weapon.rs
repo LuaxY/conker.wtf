@@ -68,8 +68,9 @@ pub enum Attack {
 }
 
 /// The shotgun's spheres in order: type, distance from the muzzle along the facing, radius
-/// (`0.5 · 4 · entry+0xE`). The muzzle's (0x3A) is the only one an immune or stunned player takes
-/// (not guarded, C); the others need a clear line from the muzzle (flag 0x2000).
+/// (`0.5 · 4 · entry+0xE`). Each needs the victim not immune (`func_1505C7D8`) but none tests the
+/// stun (no type flag 1, `func_1505B9C4`, C); all but the muzzle's (0x3A) need a clear line from
+/// the muzzle (flag 0x2000).
 pub const SPREAD: [(DamageType, f32, f32); 4] = [
     (damage::SHOTGUN_MUZZLE, 0.0, 40.0),
     (damage::SHOTGUN_KILL, 88.0, 120.0),
@@ -95,7 +96,8 @@ pub struct Weapon {
     /// A's reload (guns only), and the one after the last round when it differs.
     pub reload: Option<(u16, u16)>,
     pub empty_reload: u16,
-    /// The C buttons play this 3-frame state instead of strafing or throwing a grenade.
+    /// The C buttons play this 3-frame state (the C strafe's armed run, which conker-sim moves).
+    /// With any weapon drawn C-down strafes back and throws no grenade (V e4 cd09, cd15).
     pub c_button: Option<u16>,
 }
 
@@ -357,7 +359,8 @@ pub const BONE_KNIVES: Weapon = Weapon {
 };
 
 /// The shotgun (0x37): see [`Attack::Spread`]. One shot per Z press; a new one may cut the long
-/// 0x235 short (V combat5_sg3). R and A do nothing, C-down throws a grenade (V combat5_ctlw37).
+/// 0x235 short (V combat5_sg3). R and A do nothing; C-down throws a grenade only holstered (V
+/// combat5_ctlw37: its C-down came after the holster at 191).
 pub const SHOTGUN: Weapon = Weapon {
     id: 0x37,
     draw: (anim::SHOTGUN_DRAW, 13),
@@ -423,7 +426,7 @@ const TOMMY_MUZZLE: [[f32; 3]; 1] = [[50.0, 8.0, 45.0]];
 /// While Z is held the aim climbs ([`Climb`]).
 pub const TOMMY: Weapon = Weapon {
     id: 0x38,
-    draw: (0x1DD, 15),
+    draw: (anim::TOMMY_DRAW, 15),
     idle: 0x1DF,
     holster: (0x1DE, 15),
     fire: (0x1E0, 0),

@@ -214,8 +214,8 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
     match (reaction, lethal) {
         (0x33 | 0x25, false) => &[(anim::HIT_MELEE, 19)],
         (0x26, false) => &[(anim::HIT_CLUB, 18)],
-        // The club's lethal second swing (V combat6_e40 1062-1213); a lethal first swing never
-        // traced (I: the same fall from its own hit).
+        // The club's lethal second swing (V combat6_e40 1062-1213), and its lethal first swing
+        // (V e4 club1: 0x11B 19 frames, 0x58 52, 0x59 81 to the respawn, 850-1002).
         (0x26, true) => &[
             (anim::HIT_CLUB, 18),
             (anim::DEATH_FALL, 52),

@@ -223,6 +223,10 @@ pub enum On {
     Flight { weapon: u8, ticks: Vec<u16> },
     /// The projectile hitting a wall, at the impact.
     Impact { weapon: u8 },
+    /// The weapon's projectile nearing a player, at it: one of [`Play::sounds`], once a
+    /// projectile, the first frame a player stands within 7.5 frames of its flight and 0x100 of
+    /// its heading (the crossbow's bolt).
+    Pass { weapon: u8 },
     /// The weapon's projectile bouncing on the floor (the grenade), each bounce leaving it faster
     /// than 5 a frame upward: one of [`Play::sounds`] from a shuffle bag shared by all (each once
     /// before any again, the last played not first).

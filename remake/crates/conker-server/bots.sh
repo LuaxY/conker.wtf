@@ -4,7 +4,8 @@
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
 # Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24|33] [MODE=deathmatch|total-war|colors|beach|heist|tank|raptor|race] [SCORE=1-40|unlimited]
 #   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] [SIDE=squirrels|tediz|cavemen] [ROUTE=11|12] [LAPS=1-20]
-#   [CHARACTER=0-21] [CHEATS=code,...|all] crates/conker-server/bots.sh [seconds=150]. SIDE and CHARACTER: what client 1 asks for.
+#   [CHARACTER=0-21] [CHEATS=code,...|all] [TEAM=0-3] crates/conker-server/bots.sh [seconds=150]. SIDE, CHARACTER and TEAM: what
+#   client 1 asks for. The bots are the slots the server's last ROSTER line before the clients left names (humans sit first).
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
 # MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
 # MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
@@ -39,6 +40,7 @@ for id in $(seq 1 $humans); do
   (( id == 2 )) && script=(--script)
   (( id == 1 )) && [[ -n ${SIDE:-} ]] && script+=(--side $SIDE)
   (( id == 1 )) && [[ -n ${CHARACTER:-} ]] && script+=(--character $CHARACTER)
+  (( id == 1 )) && [[ -n ${TEAM:-} ]] && script+=(--team $TEAM)
   $bin/conker-client --headless --id $id --transport ws --server 127.0.0.1:$port --digest $digest --seconds $secs \
     $script > $logs/client$id.log 2>&1 &
   clients+=($!)
@@ -54,7 +56,11 @@ for id in $(seq 1 $humans); do
 done
 grep -oE 'client Netcode\([0-9]+\) connected via .* as [A-Za-z]+ .*class 0x[0-9a-f]+ \(asked [^)]*\)' $logs/server.log | sed -E 's/ via .* as / as /'
 grep -oE 'slot [0-9]+: pick .*' $logs/server.log
-for b in $(seq 0 $((bots - 1))); do
+roster=$(grep -E 'ROSTER (start|join|switch|balance|match start)' $logs/server.log | tail -1 | grep -oE 'ROSTER.*')
+echo $roster
+botslots=($(echo $roster | grep -oE 'bots \[[0-9, ]*\]' | grep -oE '[0-9]+'))
+teams=($(echo $roster | grep -oE 'teams \[[0-9, ]*\]' | grep -oE '[0-9]+'))
+for b in $botslots; do
   n=$(moves "player Local\\($b\\) input None" $logs/server.log)
   hits=$(grep -c "EVENT .*Hit { victim: [0-9]*, attacker: $b," $logs/server.log)
   deaths=$(grep -c "EVENT .*Hit { victim: $b, attacker: [0-9]*, damage: [0-9]*, lethal: true" $logs/server.log)
@@ -66,8 +72,7 @@ for b in $(seq 0 $((bots - 1))); do
     # read 933), before most bots' first lap.
     echo "     bot $b: $laps laps, $deaths deaths, $(grep -oE "RACE t=[0-9]+ slot $b finishes [0-9]+" $logs/server.log | grep -oE '[0-9]+$' || echo no) finish"
   elif [[ ${MODE:-} == beach ]]; then
-    side=$(grep -oE "bot in slot $b on record .*" $logs/server.log | grep -oE '[A-Za-z]+$')
-    if [[ $side == Squirrels ]]; then
+    if (( teams[b + 1] == 0 )); then
       echo "     bot $b villager: dies ($deaths), respawns ($respawns)"
     else
       report "bot $b Tedi fights ($hits hits), dies ($deaths), respawns ($respawns)" $((hits > 0))

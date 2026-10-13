@@ -17,9 +17,9 @@
 //! too); leaving frees the slot, and nobody else changes slot (`Match::remove_player`). A client
 //! joins with its first message ([`Join`]): the side it asks for (squirrels or Tediz: its base and
 //! team), else the side with fewer players (the squirrels on a tie), and its pick (`--cheats`). Bots take the squirrels in
-//! even slots, the Tediz in odd ones. In a Deathmatch every player is its own team, and only its
-//! starts and respawns keep to its side's half; in Total War its side is its team (0 the squirrels,
-//! 1 the Tediz), which the rules score and rank by.
+//! even slots, the Tediz in odd ones. In a Deathmatch every player is its own team (its slot), and
+//! only its starts and respawns keep to its side's half; in Total War its side is its team (0 the
+//! squirrels, 1 the Tediz), which the rules score and rank by.
 //! Clients get [`Player`] (predicted by the owner) with conker-rules' [`Fighting`]
 //! (the fighter, predicted by the owner: its knock-back, death and respawn; sent to the owner only,
 //! [`FightingOwner`]), [`Combat`] and one [`MatchView`]. After each step every human's camera steps with what the rules know of it
@@ -32,13 +32,20 @@
 //! sniper's ray, the flame, the melee strike and lock-on) reads the targets there, per shooter
 //! (conker-rules' `Match::step_seen`).
 //!
-//! Bots (`--bots N`, conker-bots): the original's multiplayer AI plays slots 0..N, each in its side's
-//! base, from the server's start. Humans take the slots after them (a joining
-//! human never replaces a bot; a leaving one frees its own slot, so bots keep theirs). Clients see
-//! a bot as any other player (`PlayerId(PeerId::Local(slot))`, interpolated). The match start
-//! starts the bots' AI afresh, as a new match does in the game; a join or leave mid-match keeps the
-//! level script's state (the gas, the flags, Beach's timers), only the slot's own AI memory starts
-//! over (conker-bots' `Bots::join`, `Bots::leave`).
+//! Bots (`--bots N`, conker-bots): the original's multiplayer AI plays N slots from the server's
+//! start, each in its side's base, as many as the original's bots screen allows with the humans in
+//! (Deathmatch 10, 8, 4, 4 players with 1-4 humans; Tank and Race 8, 4, 4, 4) or, in the team
+//! modes, spread evenly over the teams within the team screen's row ([`TeamRow`]: the most players
+//! and humans a team, Beach's and Raptor's 2 a team 1; the first human's BALANCE, [`Teams`]). The
+//! humans sit first, as the original seats them: a joining human takes the lowest bot's slot (the
+//! bots the roster no longer wants go, the highest of a team first), a leaver's slot fills with a
+//! bot if the roster wants one, and each match start seats the humans in slots 0..H, then the bots
+//! team by team ([`Game::reseat`]; `ROSTER` lines log each change). Clients see a bot as any other
+//! player (`PlayerId(PeerId::Local(slot))`, interpolated). The match start starts the bots' AI
+//! afresh, as a new match does in the game; a join or leave mid-match keeps the level script's state
+//! (the gas, the flags, Beach's timers), only the slot's own AI memory starts over (conker-bots'
+//! `Bots::join`, `Bots::leave`). A human in a team mode switches team with [`Teams::Switch`]
+//! (respawning on it, if it has room for a human).
 //! Each tick: the lifts, `Bots::lifted` for the slots they moved, `Bots::tick` (the bots' inputs),
 //! `Bots::scopes` (a bot aiming 0x14 or 0x24 looks through its scope), the step, `Bots::observe`.
 //!
@@ -106,12 +113,13 @@
 //!   flags (conker-rules' `colors`), and the match ends on the clock or at `--score` captures
 //!   (1-40, default 20, `unlimited`: the clock only; untimed and unlimited, never).
 //! - `--mode beach`: the original's War: Beach (scenario 8), on map 2b only and without `--cavemen`:
-//!   the villagers (the squirrels' side, item 0x3E, no attack) against at most 2 Tediz; the level's
+//!   the villagers (the squirrels' side, item 0x3E, no attack, 6 at most without BALANCE) against
+//!   at most 2 Tediz; the level's
 //!   AI script runs the escapes, the detonation, the weapon zones and the 90 s deadline (conker-rules'
 //!   `beach`); lives are never lost, and the match ends on the clock or at `--score` (as Colors').
 //! - `--mode heist`: the original's War: Heist (scenario 0), on map 1a only and without `--cavemen`:
-//!   four teams by slot (slot & 3: REDS, BLUES, GREENS, YELLOWS; at most 8 players and 2 humans a
-//!   team, 4 and 1 once 3 humans are in), the Wise Guy with the bat; the level's AI script runs the
+//!   four teams (REDS, BLUES, GREENS, YELLOWS; at most 8 players and 2 humans a team, 4 and 1 once
+//!   3 humans are in), the Wise Guy with the bat; the level's AI script runs the
 //!   bag (conker-rules' `heist`), and the match ends on the clock, at `--score` bags (1-5, default
 //!   3) or, untimed, once one team is left with lives.
 //! - `--mode tank`: the original's Tank (scenario 1), on map 24 (which plays nothing else), without
@@ -120,7 +128,7 @@
 //!   `tank`); `TANK` lines log the bomb, the power-ups and the blasts' kills.
 //! - `--mode raptor`: the original's War: Raptor (scenario 2), on map 3f only and without
 //!   `--cavemen`: the cavemen (team 0, the club, the Ugas' camp) against the raptors (team 1, class
-//!   9: a human asking for the Tediz, and bots in slots 2 and 6 of each 8), lives never lost on the
+//!   9, at most 2: a human asking for the Tediz, and bots), lives never lost on the
 //!   clock; the level's AI script runs the eggs, the baby and the hazard (conker-rules' `raptor`);
 //!   kills, fed bodies (+1) and delivered eggs (+2) score, and the match ends on the clock or at
 //!   `--score` (1-40, default 20). `RAPTOR` lines log the script's egg and nest effects.
@@ -168,7 +176,7 @@ use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
     BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
     PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, RaceView, RacerView, RaptorView,
-    Restart, Saw, TankView, map_scene, scene_world,
+    Restart, Saw, TankView, Teams, map_scene, pack_hash, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -196,6 +204,133 @@ const HISTORY: usize = 60;
 const RESTART_FADE: u32 = 17;
 /// The bot skills' names (`--skill`), as the SET-UP screen shows them.
 const SKILLS: [&str; 5] = ["inbred", "crap", "normal", "bastard", "einstein"];
+
+/// A team mode's row on the original's team screen (`0x800AB710 + 12·row`, C `func_151E1744`):
+/// its teams; under 3 humans and from 3, the most players in the match and the most humans a team;
+/// byte +7, team 1's most humans and players (0: none).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TeamRow {
+    teams: usize,
+    most: [usize; 2],
+    humans: [usize; 2],
+    cap1: usize,
+}
+
+/// War: Heist's row 0, Beach's 2, Total War's and Colors' 3, Raptor's 4 (the RAM dump).
+const HEIST_ROW: TeamRow = TeamRow {
+    teams: 4,
+    most: [8, 4],
+    humans: [2, 1],
+    cap1: 0,
+};
+const BEACH_ROW: TeamRow = TeamRow {
+    teams: 2,
+    most: [12, 12],
+    humans: [8, 8],
+    cap1: 2,
+};
+const WAR_ROW: TeamRow = TeamRow {
+    teams: 2,
+    most: [12, 4],
+    humans: [8, 2],
+    cap1: 0,
+};
+const RAPTOR_ROW: TeamRow = TeamRow {
+    teams: 2,
+    most: [12, 8],
+    humans: [8, 2],
+    cap1: 2,
+};
+/// The bots screen's most players with 1-4 humans (`D_800AB74C`, C `func_151E1214`): Deathmatch's,
+/// then Tank's and Race's (sets 5 and 7 of `D_8008FEE4`).
+const FFA_MOST: [[usize; 4]; 2] = [[10, 8, 4, 4], [8, 4, 4, 4]];
+/// A team's most players (the team screen's clamp).
+const TEAM_MOST: usize = 8;
+
+impl TeamRow {
+    /// The most humans team `t` takes with `humans` in the match (byte +7 for teams 1-3 when set).
+    fn room(&self, t: usize, humans: usize) -> usize {
+        match t > 0 && self.cap1 > 0 {
+            true => self.cap1,
+            false => self.humans[usize::from(humans >= 3)],
+        }
+    }
+
+    /// The bots each team gets with `humans` on each (the remake's `--bots`, `want`, as the
+    /// original's team size): one at a time to the team with the fewest players (the lower on a
+    /// tie) below its size, the most players over the teams (team 1's byte +7 when set). BALANCE
+    /// (2 teams, under 3 humans; C `D_8008FDC4`) then takes up to |b| bots from team 1 for team 0
+    /// (b > 0, the reverse below 0), each team keeping a player; the gainer takes them up to 8
+    /// (team 1 its byte +7; past that they go, as the original's clamped targets), and the bots
+    /// that found no room.
+    fn bots(&self, humans: &[usize], want: usize, balance: i8) -> Vec<usize> {
+        let h: usize = humans.iter().sum();
+        let size = self.most[usize::from(h >= 3)] / self.teams;
+        let most = |t: usize| match t == 1 && self.cap1 > 0 {
+            true => self.cap1,
+            false => size,
+        };
+        let mut count = humans.to_vec();
+        let mut bots = vec![0; self.teams];
+        for _ in 0..want {
+            let Some(t) = (0..self.teams)
+                .filter(|&t| count[t] < most(t))
+                .min_by_key(|&t| count[t])
+            else {
+                break;
+            };
+            (count[t], bots[t]) = (count[t] + 1, bots[t] + 1);
+        }
+        let b = if self.teams == 2 && h < 3 { balance } else { 0 };
+        let (g, l) = if b > 0 { (0, 1) } else { (1, 0) };
+        let top = match g == 1 && self.cap1 > 0 {
+            true => self.cap1,
+            false => TEAM_MOST.min(size + usize::from(b.unsigned_abs())),
+        };
+        let moved = usize::from(b.unsigned_abs())
+            .min(bots[l])
+            .min(count[l].saturating_sub(1));
+        (count[l], bots[l]) = (count[l] - moved, bots[l] - moved);
+        let gained = moved.min(top.saturating_sub(count[g]));
+        (count[g], bots[g]) = (count[g] + gained, bots[g] + gained);
+        while b != 0 && bots.iter().sum::<usize>() < want && count[g] < top {
+            (count[g], bots[g]) = (count[g] + 1, bots[g] + 1);
+        }
+        bots
+    }
+}
+
+/// The mode's team row (`None`: free for all, the bots screen's modes).
+fn team_row(s: &Settings) -> Option<TeamRow> {
+    match () {
+        _ if s.heist => Some(HEIST_ROW),
+        _ if s.beach => Some(BEACH_ROW),
+        _ if s.total_war || s.colors => Some(WAR_ROW),
+        _ if s.raptor => Some(RAPTOR_ROW),
+        _ => None,
+    }
+}
+
+/// The bots a match takes with `humans` humans, the first on team 0 and each next on the team with
+/// the fewest (the original's default teams), `want` asked for: free for all, the most players less
+/// the humans (no human: `want`); else the team row's ([`TeamRow::bots`]).
+fn bots_for(s: &Settings, humans: usize, want: usize) -> usize {
+    let Some(row) = team_row(s) else {
+        let most = FFA_MOST[usize::from(s.tank || s.race)];
+        return match humans {
+            0 => want,
+            h => want.min(most[h.min(4) - 1].saturating_sub(h)),
+        };
+    };
+    let mut on = vec![0; row.teams];
+    for _ in 0..humans {
+        let room = |t: &usize| on[*t] < row.room(*t, humans);
+        if let Some(t) = (0..row.teams).filter(room).min_by_key(|&t| on[t]) {
+            on[t] += 1;
+        }
+    }
+    row.bots(&on, want, 0).iter().sum()
+}
 
 /// Replay and test setup from the command line.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -395,9 +530,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     if setup.settings.beach && (net.map != "2b" || setup.cavemen) {
         return Err("--mode beach: map 2b only, without --cavemen".into());
     }
-    if setup.settings.beach && setup.bots > beach::MAX_VILLAGERS + beach::MAX_TEDIZ {
-        return Err("--mode beach: at most 10 bots (8 villagers, 2 Tediz)".into());
-    }
     // Heist is scenario 0, scene 0x1A's: its bag target 1-5 (opt[4], default 3), 8 players.
     let s = &mut setup.settings;
     if s.heist {
@@ -410,18 +542,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
         if !(1..=5).contains(&s.score) {
             return Err("--mode heist: --score 1-5".into());
         }
-        if setup.bots > 7 {
-            return Err("--mode heist: at most 7 bots (8 players)".into());
-        }
     }
     // Tank is scenario 1, scene 0x24's, and the map plays nothing else.
     if (net.map == "24") != s.tank || (s.tank && setup.cavemen) {
         return Err(
             "--mode tank: map 24 only (and map 24 plays Tank only), without --cavemen".into(),
         );
-    }
-    if s.tank && setup.bots > 7 {
-        return Err("--mode tank: at most 7 bots (8 players)".into());
     }
     // Raptor is scenario 2, scene 0x3F's: its score target 1-40 (opt[18], default 20).
     if s.raptor && (net.map != "3f" || setup.cavemen || s.score == 0) {
@@ -440,9 +566,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             return Err("--mode race: untimed, without --time, --kills or --score".into());
         }
         s.time = None;
-        if setup.bots > 7 {
-            return Err("--mode race: at most 7 bots (8 racers)".into());
-        }
+    }
+    // The most bots with one human (the original's bots and team screens; fewer as humans join).
+    let most = bots_for(&setup.settings, 1, usize::MAX);
+    if setup.bots > most {
+        return Err(format!(
+            "--bots: at most {most} in this mode with one human (fewer with more)"
+        ));
     }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
@@ -526,6 +656,9 @@ fn main() {
             .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())))
     });
     let pickups = raptor.as_ref().map_or(&pack.pickups, |r| &r.pickups);
+    if let Some(e) = unknown_pickup(pickups, &setup.settings) {
+        fail(format!("{}: {e}", dir.display()));
+    }
     let mut arena = arena(&pack, pickups, total_war, setup.settings.tank);
     let mut world = scene_world(&pack, scene);
     // Race: the route's lap (`race.json`), its power-ups back 10 frames on, and the barriers it
@@ -578,16 +711,16 @@ fn main() {
         .add_observer(on_disconnected)
         .add_observer(on_left)
         .add_observer(relink_evicted_session);
-    let (bots, settings) = (game.setup.bots, game.setup.settings);
+    let settings = game.setup.settings;
     app.insert_resource(game);
     app.add_systems(
         Startup,
         move |mut commands: Commands,
               server: Single<Entity, With<Server>>,
               mut game: ResMut<Game>| {
-            for slot in 0..bots {
-                commands.spawn(game.join_bot(slot));
-            }
+            add_bots(&mut game, &mut commands);
+            game.restart_bots();
+            game.log_roster("start");
             commands.trigger(Start { entity: *server });
             commands.spawn((
                 Name::new("Match"),
@@ -599,13 +732,15 @@ fn main() {
     // Every frame (lightyear drops messages a frame leaves unread), before its fixed ticks.
     app.add_systems(
         RunFixedMainLoop,
-        (join, collect_saws, restart_votes).in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+        (join, collect_saws, restart_votes, team_requests)
+            .chain()
+            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
     );
     app.add_systems(
         FixedPreUpdate,
         first_inputs.before(InputSystems::UpdateActionState),
     );
-    app.add_systems(FixedUpdate, (simulate, publish, log_players).chain());
+    app.add_systems(FixedUpdate, (seat, simulate, publish, log_players).chain());
     app.add_systems(Update, log_traffic);
     if let Some(seconds) = net.seconds {
         app.add_systems(
@@ -672,7 +807,12 @@ fn main() {
         _ if settings.race => "Race",
         _ => "Deathmatch",
     };
-    info!("map {} (scene {scene:#X}), {mode}", net.map);
+    // The pack's fingerprint, which clients check their own copy against (`/info`'s `pack`).
+    let pack = pack_hash(&net.map, |p| std::fs::read(dir.join(p)).ok())
+        .unwrap_or_else(|| fail(format!("{}: a pack file is missing", dir.display())));
+    info!("map {} (scene {scene:#X}), {mode}, pack {pack}", net.map);
+    let live = token::Live::default();
+    app.insert_resource(Players(live.clone()));
     let map = net.map.clone();
     token::serve(
         listener,
@@ -680,6 +820,8 @@ fn main() {
             key,
             addrs: named,
             map,
+            pack,
+            live,
         },
     );
     let ws = ServerConfig::builder().with_bind_address(addr);
@@ -713,6 +855,24 @@ fn main() {
         }
     );
     app.run();
+}
+
+/// A pickup whose weapon the mode can't give (`pickups.json`, Raptor's `raptor.json`): Tank's must be
+/// a power-up bit (the shield, boost, shells, scope), Race's the canister or the missile, any
+/// other a weapon the rules know or Beach's item 0x3E.
+fn unknown_pickup(pickups: &[conker_assets::Pickup], s: &Settings) -> Option<String> {
+    let known = |id: u8| match () {
+        _ if s.tank => [tank::SHIELD, tank::BOOST, tank::SHELLS, tank::SCOPE].contains(&id),
+        _ if s.race => id == race::CANISTER || id == race::MISSILE,
+        _ => weapon::weapon(id).is_some() || id == beach::ITEM,
+    };
+    pickups.iter().find_map(|p| match p.gives {
+        conker_assets::Gives::Weapon(id) if !known(id) => Some(format!(
+            "the pickup on placement {} gives weapon {id:#x}, which this mode has not",
+            p.placement
+        )),
+        _ => None,
+    })
 }
 
 /// The match's static data from the pack: the spawn records, and the pickups (what each gives, and
@@ -816,8 +976,8 @@ struct Game {
     /// The map's start records and the sides' respawn masks.
     starts: Starts,
     m: Match,
-    /// Players that ever joined (a Deathmatch's next team).
-    joins: usize,
+    /// The bots' entities by slot ([`add_bots`], [`drop_bots`]).
+    bot_entities: HashMap<usize, Entity>,
     setup: Setup,
     /// The tick the match (its clock) starts or started: the first join, or 5 s after the last
     /// `--wait` one; and whether it has.
@@ -839,6 +999,8 @@ struct Game {
     /// Scene 0x1A's Deathmatch (scenario 6, V dm6): every player the Wise Guy (class 1, model 59,
     /// the squirrels' body) holding the bat, starting on its slot's Deathmatch record.
     vault: bool,
+    /// The team screen's BALANCE (C `D_8008FDC4`, [`TeamRow::bots`]), set by the first human.
+    balance: i8,
 }
 
 impl Game {
@@ -849,7 +1011,7 @@ impl Game {
             arena,
             starts: starts(0x2D).expect("0x2D's tables"),
             m,
-            joins: 0,
+            bot_entities: HashMap::new(),
             setup,
             start: None,
             started: false,
@@ -865,6 +1027,7 @@ impl Game {
             won: None,
             cavemen: false,
             vault: false,
+            balance: 0,
         }
     }
 
@@ -895,36 +1058,6 @@ impl Game {
             (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
             (true, _) => beach::TEDI_CLASS,
         }
-    }
-
-    /// War: Beach caps the Tediz at [`beach::MAX_TEDIZ`] and the villagers at
-    /// [`beach::MAX_VILLAGERS`]: `side` full, the other; both full, none.
-    /// War: Heist's team row (C `func_151E1744`): with under 3 humans at most 8 players and 2 humans
-    /// a team, else 4 and 1; the joiner's team is its slot's (I: the set-up's sizes, checked as
-    /// players join).
-    fn capped(&self, side: Side) -> Option<Side> {
-        if self.setup.settings.heist {
-            let humans = self.humans() + 1;
-            let (most, per_team) = if humans >= 3 { (4, 1) } else { (8, 2) };
-            let team = (self.m.next_slot() & 3) as u8;
-            let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
-            let mates = (taken.clone())
-                .filter(|&i| !self.m.players[i].bot && self.m.players[i].team == team)
-                .count();
-            return (taken.count() < most && mates < per_team).then_some(side);
-        }
-        if !self.setup.settings.beach {
-            return Some(side);
-        }
-        let other = match side {
-            Side::Tediz => Side::Squirrels,
-            _ => Side::Tediz,
-        };
-        let room = |s: Side| match s {
-            Side::Tediz => self.members(s) < beach::MAX_TEDIZ,
-            _ => self.members(s) < beach::MAX_VILLAGERS,
-        };
-        [side, other].into_iter().find(|&s| room(s))
     }
 
     /// Bit k: menu pick k may be played (`MatchView::characters`): the map's set with the
@@ -958,28 +1091,17 @@ impl Game {
         characters::PICKS[usize::from(k)].0
     }
 
-    /// Humans in the match (every taken slot after the bots).
-    fn humans(&self) -> usize {
-        let taken = self.m.players.len() - self.m.free.len();
-        taken.saturating_sub(self.setup.bots)
+    /// The taken slots, and those a human or a bot plays.
+    fn taken(&self) -> impl Iterator<Item = usize> + Clone + '_ {
+        (0..self.m.players.len()).filter(|i| !self.m.free.contains(i))
     }
 
-    /// The team of the next player to join, in `slot` on `side`: its own in a Deathmatch, its
-    /// side's in Total War and Colors (`0x800E0C00`: 0 the squirrels, 1 the Tediz), its slot's in
-    /// Heist (slot & 3, as the oracle's runs set them).
-    fn team(&mut self, slot: usize, side: Side) -> u8 {
-        let s = self.setup.settings;
-        if s.heist {
-            return (slot & 3) as u8;
-        }
-        if s.total_war || s.colors || s.beach {
-            return side as u8;
-        }
-        if s.raptor {
-            return u8::from(side == Side::Tediz);
-        }
-        self.joins += 1;
-        (self.joins - 1) as u8
+    fn humans(&self) -> usize {
+        self.taken().filter(|&i| !self.m.players[i].bot).count()
+    }
+
+    fn bots(&self) -> usize {
+        self.taken().filter(|&i| self.m.players[i].bot).count()
     }
 
     /// The bots' AI afresh over the roster as it stands (the server's start, the match start): the
@@ -992,18 +1114,119 @@ impl Game {
         self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
-    /// Bot `slot` joins on its start record, with the squirrels in an even slot, else the Tediz
-    /// (all cavemen in [`Game::cavemen`]): its fighter, and the entity clients see.
-    fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
-        let side = match self.cavemen {
-            // Raptor: 2 raptors in each 8 (I: the oracle's b1 and b2 had 2).
-            true if self.setup.settings.raptor && slot % 4 == 2 => Side::Tediz,
-            true => Side::Cavemen,
-            false if self.one_side() => Side::Squirrels,
-            false => (self.capped([Side::Squirrels, Side::Tediz][slot % 2]))
-                .expect("parse_args caps Beach's bots"),
+    /// The mode's team row ([`team_row`]; `None` free for all).
+    fn row(&self) -> Option<TeamRow> {
+        team_row(&self.setup.settings)
+    }
+
+    /// Team `t`'s side: Heist's four the squirrels' (the Wise Guys); Raptor's 0 the cavemen, 1 the
+    /// raptors (the Tediz' side); the other War modes' 0 the squirrels (Beach's villagers), 1 the
+    /// Tediz.
+    fn team_side(&self, t: u8) -> Side {
+        match () {
+            _ if self.setup.settings.heist => Side::Squirrels,
+            _ if self.setup.settings.raptor && t == 0 => Side::Cavemen,
+            _ => [Side::Squirrels, Side::Tediz][usize::from(t & 1)],
+        }
+    }
+
+    /// The humans on each of `teams` teams.
+    fn team_humans(&self, teams: usize) -> Vec<usize> {
+        let mut on = vec![0; teams];
+        for i in self.taken().filter(|&i| !self.m.players[i].bot) {
+            if let Some(n) = on.get_mut(usize::from(self.m.players[i].team)) {
+                *n += 1;
+            }
+        }
+        on
+    }
+
+    /// The team a human joining or switching (`asked`) plays on: the one asked for if it has room
+    /// for one more human ([`TeamRow::room`]), else the one with the fewest humans that has (the
+    /// lower on a tie: the original's default, slot & (teams − 1)); `None` if every team is full.
+    fn human_team(&self, row: &TeamRow, asked: Option<u8>) -> Option<u8> {
+        let on = self.team_humans(row.teams);
+        let humans = self.humans() + 1;
+        let room = |t: &usize| on[*t] < row.room(*t, humans);
+        let asked = asked.map(usize::from).filter(|t| *t < row.teams && room(t));
+        let t = asked.or_else(|| (0..row.teams).filter(room).min_by_key(|&t| on[t]))?;
+        Some(t as u8)
+    }
+
+    /// The bots the roster wants now, per team (free for all: one entry), with a human about to
+    /// join on team `joining` (free for all: any) counted: [`TeamRow::bots`] with BALANCE, else the
+    /// bots screen's most players less the humans ([`bots_for`]).
+    fn wanted(&self, joining: Option<u8>) -> Vec<usize> {
+        let want = self.setup.bots;
+        let Some(row) = self.row() else {
+            let humans = self.humans() + usize::from(joining.is_some());
+            return vec![bots_for(&self.setup.settings, humans, want)];
         };
-        let (place, spawn_mask) = self.placement(slot, side);
+        let mut on = self.team_humans(row.teams);
+        if let Some(n) = joining.and_then(|t| on.get_mut(usize::from(t))) {
+            *n += 1;
+        }
+        row.bots(&on, want, self.balance)
+    }
+
+    /// The bots' slots on team `t` of the roster's (free for all: every bot), in slot order.
+    fn team_bots(&self, t: usize) -> Vec<usize> {
+        let ffa = self.row().is_none();
+        (self.taken())
+            .filter(|&i| self.m.players[i].bot && (ffa || usize::from(self.m.players[i].team) == t))
+            .collect()
+    }
+
+    /// The bots [`Game::wanted`] has too many of leave, the highest slot of each team first; then,
+    /// so a joining human sits before every bot, the lowest bot below the slot it would take. Their
+    /// slots, freed ([`Game::remove`]).
+    fn trim(&mut self, joining: Option<u8>) -> Vec<usize> {
+        let mut gone = Vec::new();
+        for (t, n) in self.wanted(joining).into_iter().enumerate() {
+            for i in self.team_bots(t).into_iter().skip(n).rev() {
+                self.remove(i);
+                gone.push(i);
+            }
+        }
+        let first = self.taken().find(|&i| self.m.players[i].bot);
+        if let Some(i) = first.filter(|&i| joining.is_some() && i < self.m.next_slot()) {
+            self.remove(i);
+            gone.push(i);
+        }
+        gone
+    }
+
+    /// The bots [`Game::wanted`] lacks join the lowest free slots, team by team (team 0's first, as
+    /// the original seats them): the entities clients see.
+    fn top_up(&mut self) -> Vec<(usize, impl Bundle + use<>)> {
+        let mut added = Vec::new();
+        for (t, n) in self.wanted(None).into_iter().enumerate() {
+            for _ in self.team_bots(t).len()..n {
+                added.push((self.m.next_slot(), self.join_bot(t as u8)));
+            }
+        }
+        added
+    }
+
+    /// A bot joins the lowest free slot on its start record (`team`: its team in a team mode, its
+    /// side's; free for all, the squirrels in an even slot, else the Tediz, all cavemen in
+    /// [`Game::cavemen`]): its fighter, the AI told if it runs, and the entity clients see.
+    fn join_bot(&mut self, team: u8) -> impl Bundle + use<> {
+        let slot = self.m.next_slot();
+        let side = match self.row() {
+            Some(_) => self.team_side(team),
+            None if self.cavemen => Side::Cavemen,
+            None if self.one_side() => Side::Squirrels,
+            None => [Side::Squirrels, Side::Tediz][slot % 2],
+        };
+        // Free for all: each player its own team, its slot (the original's: a human's controller,
+        // the bots the lowest unused).
+        let team = if self.row().is_some() {
+            team
+        } else {
+            slot as u8
+        };
+        let (place, spawn_mask) = self.placement(slot, side, team);
         let fighter = Fighter {
             side,
             spawn_mask,
@@ -1013,12 +1236,14 @@ impl Game {
                 true => race::bot_class(slot),
                 false => self.class(side),
             },
-            ..Fighter::new(&place, self.team(slot, side), 0)
+            ..Fighter::new(&place, team, self.m.tick)
         };
-        self.m.players.push(fighter);
-        self.restart_bots();
+        self.m.join(fighter);
+        if let Some(bots) = &mut self.ai.bots {
+            bots.join(slot, true);
+        }
         info!(
-            "bot in slot {slot} on record {} at {:?}, {side:?}",
+            "bot in slot {slot} on record {} at {:?}, {side:?}, team {team}",
             place.index, place.pos
         );
         (
@@ -1034,28 +1259,67 @@ impl Game {
         )
     }
 
-    /// Where slot `slot` on `side` starts, and the records it respawns on (`Fighter::spawn_mask`):
-    /// `--spawn`'s place on the slot's Deathmatch record, respawning anywhere (oracle replays). Else
-    /// its side's base, as in the original's War mode on the map (Total War on 0x2D, Colors on 0x30,
-    /// Raptor on 0x3F, Beach on 0x2B with the squirrels on the villagers' records; its Deathmatch has
-    /// no sides; 0x34 has no War mode: the Deathmatch records by slot parity, respawning anywhere):
-    /// the side's k-th player starts on `starts.sides[side][k]`, jittered (one RNG draw,
-    /// `spawn::place`), and respawns in its base (`starts.side_masks`).
-    fn placement(&mut self, slot: usize, side: Side) -> (Placement, u32) {
+    /// A human joins the lowest free slot on `side` (`team`: the team modes'; free for all, its
+    /// slot's), playing its pick ([`Game::pick`]): its slot, start place and fighter; the AI told.
+    fn join_human(
+        &mut self,
+        side: Side,
+        team: Option<u8>,
+        pick: Option<u8>,
+        tick: u32,
+    ) -> (usize, Placement, Fighter) {
+        let index = self.m.next_slot();
+        let team = team.unwrap_or(index as u8);
+        let (place, spawn_mask) = self.placement(index, side, team);
+        let fighter = Fighter {
+            side,
+            spawn_mask,
+            start: self.start_item(side),
+            class: self.pick(index, side, pick),
+            ..Fighter::new(&place, team, tick)
+        };
+        // Its first ride test runs from where it stands, not from the slot's last player.
+        self.ai.lifts.reset(index);
+        self.m.join(fighter);
+        if let Some(bots) = &mut self.ai.bots {
+            bots.join(index, false);
+        }
+        (index, place, fighter)
+    }
+
+    /// The `ROSTER` line: the humans' and bots' slots and every slot's team (255 a free slot;
+    /// `bots.sh` takes the bots' slots and teams from the last).
+    fn log_roster(&self, why: &str) {
+        let (humans, bots): (Vec<usize>, Vec<usize>) =
+            self.taken().partition(|&i| !self.m.players[i].bot);
+        let teams: Vec<u8> = self.m.players.iter().map(|f| f.team).collect();
+        info!(
+            "ROSTER {why}: humans {humans:?} bots {bots:?} teams {teams:?} balance {}",
+            self.balance
+        );
+    }
+
+    /// Where slot `slot` on `side` (on `team`) starts, and the records it respawns on
+    /// (`Fighter::spawn_mask`): `--spawn`'s place on the slot's Deathmatch record, respawning
+    /// anywhere (oracle replays). Else its side's base, as in the original's War mode on the map
+    /// (Total War on 0x2D, Colors on 0x30, Raptor on 0x3F, Beach on 0x2B with the squirrels on the
+    /// villagers' records; its Deathmatch has no sides; 0x34 has no War mode: the Deathmatch records
+    /// by slot parity, respawning anywhere): the side's k-th player starts on
+    /// `starts.sides[side][k]`, jittered (one RNG draw, `spawn::place`), and respawns in its base
+    /// (`starts.side_masks`). Heist: the team's k-th player on its k-th record, respawning on the
+    /// team's four.
+    fn placement(&mut self, slot: usize, side: Side, team: u8) -> (Placement, u32) {
         let Some(&(pos, facing)) = self.setup.spawns.get(slot) else {
             // ponytail: k counts the side's players now, so after a leave two can share a record
             // (jittered, pushed apart); keep each player's record if that ever matters.
             // The cavemen take the squirrels' base (the Ugas' on 0x3F, `spawn::starts`).
             let base = usize::from(side == Side::Tediz);
-            // Heist: the team's k-th player on its k-th record, respawning on the team's four.
-            let team = heist::RECORDS[slot & 3];
             if self.setup.settings.heist {
-                let place = place(
-                    &self.arena.spawns,
-                    usize::from(team[(slot >> 2) & 3]),
-                    &mut self.m.rng,
-                );
-                return (place, team.iter().fold(0, |m, &r| m | 1 << r));
+                let records = heist::RECORDS[usize::from(team) & 3];
+                let k = self.taken().filter(|&i| self.m.players[i].team == team);
+                let record = records[k.count() & 3];
+                let place = place(&self.arena.spawns, usize::from(record), &mut self.m.rng);
+                return (place, records.iter().fold(0, |m, &r| m | 1 << r));
             }
             let record = match self.one_side() {
                 true => self.starts.deathmatch[slot % 16],
@@ -1170,6 +1434,64 @@ impl Game {
             bots.leave(i);
         }
     }
+
+    /// The match start: the humans in the first slots, in their order, and the bots after them,
+    /// team 0's first (the original seats them so; a mid-match join takes the lowest free slot),
+    /// each moved player on its new slot's start place (free for all: its team the slot; a Race
+    /// bot's class the slot's). Every
+    /// player's old slot, new slot and place; none if every player sits so already.
+    fn reseat(&mut self) -> Vec<(usize, usize, Placement)> {
+        let ffa = self.row().is_none();
+        let mut order: Vec<usize> = self.taken().collect();
+        order.sort_by_key(|&i| {
+            let f = &self.m.players[i];
+            (f.bot, if ffa || !f.bot { 0 } else { f.team }, i)
+        });
+        if order.iter().enumerate().all(|(k, &i)| k == i) {
+            return Vec::new();
+        }
+        let old = std::mem::take(&mut self.m.players);
+        self.m.free.clear();
+        let mut moved = Vec::new();
+        for (slot, &i) in order.iter().enumerate() {
+            let f = old[i];
+            let team = if ffa { slot as u8 } else { f.team };
+            let (place, spawn_mask) = self.placement(slot, f.side, team);
+            let class = match f.bot && self.setup.settings.race {
+                true => race::bot_class(slot),
+                false => f.class,
+            };
+            self.m.players.push(Fighter {
+                team,
+                spawn_mask,
+                class,
+                ..f
+            });
+            moved.push((i, slot, place));
+        }
+        moved
+    }
+}
+
+/// [`Game::trim`] on the entities: the bots gone despawn, marked [`Gone`] (their slots are free
+/// already, maybe taken again before the despawn lands).
+fn drop_bots(game: &mut Game, joining: Option<u8>, commands: &mut Commands) {
+    for i in game.trim(joining) {
+        if let Some(e) = game.bot_entities.remove(&i) {
+            commands.entity(e).insert(Gone).despawn();
+        }
+    }
+}
+
+/// [`Game::top_up`] on the entities: the bots added spawn (a Deathmatch that had no bot gets its
+/// AI; the War modes' runs from the start, their script with it).
+fn add_bots(game: &mut Game, commands: &mut Commands) {
+    for (slot, bundle) in game.top_up() {
+        game.bot_entities.insert(slot, commands.spawn(bundle).id());
+    }
+    if game.ai.bots.is_none() && game.bots() > 0 {
+        game.restart_bots();
+    }
 }
 
 /// Every slot's position after each of the last [`HISTORY`] ticks (game units).
@@ -1209,6 +1531,10 @@ struct Slot {
 /// A slot the server's AI plays.
 #[derive(Component, Clone, Copy, Debug)]
 struct Bot;
+
+/// A bot the roster dropped ([`drop_bots`]): its slot is free already ([`on_left`] leaves it).
+#[derive(Component)]
+struct Gone;
 
 /// The client a player's [`Fighting`] goes to: its own (it predicts it); the others read its
 /// [`Combat`]. Bots' go to no one ([`Entity::PLACEHOLDER`]).
@@ -1299,7 +1625,8 @@ fn on_connected(
 struct Joined;
 
 /// A connected client's [`Join`]: its player joins on the side it asked for, else on the side with
-/// fewer players ([`Game::smaller_side`]), in the next slot, in its side's base.
+/// fewer players ([`Game::smaller_side`]; the team modes: the team, [`Game::human_team`]), in the
+/// lowest free slot (a bot's below it first: the humans sit first), in its side's base.
 #[allow(clippy::type_complexity)]
 fn join(
     mut clients: Query<
@@ -1347,41 +1674,38 @@ fn join_player(
     commands: &mut Commands,
 ) {
     let tick = timeline.tick().0;
-    let index = game.m.next_slot();
-    // The War modes have two teams: a caveman asked for takes the smaller side (Beach: at most
-    // 2 Tediz and 8 villagers).
-    let s = game.setup.settings;
-    let two_sides = s.total_war || s.colors || s.beach;
-    let side = (asked.side)
-        .filter(|&s| !two_sides || s != Side::Cavemen)
-        .filter(|_| !game.one_side())
-        .unwrap_or_else(|| game.smaller_side());
-    // Raptor: the Tediz' pick plays a raptor, any other a caveman.
-    let side = match s.raptor && side != Side::Tediz {
-        true => Side::Cavemen,
-        false => side,
+    // The team modes: the team asked for (the side's: the Tediz team 1, Raptor's raptors; Heist's
+    // by `Teams` once in) if it has room for a human, else the one with the fewest humans.
+    let (side, team) = match game.row() {
+        Some(row) => {
+            let asked_team = match asked.side {
+                _ if game.setup.settings.heist => None,
+                Some(Side::Tediz) => Some(1),
+                Some(Side::Cavemen) if !game.setup.settings.raptor => None,
+                Some(_) => Some(0),
+                None => None,
+            };
+            let Some(team) = game.human_team(&row, asked_team) else {
+                // ponytail: the client stays connected with no player; a kick needs netcode's
+                // per-client disconnect, which lightyear's server doesn't expose.
+                warn!("client {:?}: every team is full, no player", remote.0);
+                return;
+            };
+            (game.team_side(team), Some(team))
+        }
+        None => {
+            let side = (asked.side)
+                .filter(|_| !game.one_side())
+                .unwrap_or_else(|| game.smaller_side());
+            (side, None)
+        }
     };
-    let Some(side) = game.capped(side) else {
-        // ponytail: the client stays connected with no player; a kick needs netcode's per-client
-        // disconnect, which lightyear's server doesn't expose.
-        warn!("client {:?}: the match is full, no player", remote.0);
-        return;
-    };
-    let (place, spawn_mask) = game.placement(index, side);
-    let team = game.team(index, side);
-    let fighter = Fighter {
-        side,
-        spawn_mask,
-        start: game.start_item(side),
-        class: game.pick(index, side, asked.character),
-        ..Fighter::new(&place, team, tick)
-    };
-    // Its first ride test runs from where it stands, not from the slot's last player.
-    game.ai.lifts.reset(index);
-    game.m.join(fighter);
-    if let Some(bots) = &mut game.ai.bots {
-        bots.join(index, false);
-    }
+    // The humans first: the bots the roster no longer wants go, and the lowest bot below the free
+    // slot gives it up ([`Game::trim`]).
+    drop_bots(game, Some(team.unwrap_or(0)), commands);
+    let (index, place, fighter) = game.join_human(side, team, asked.character, tick);
+    add_bots(game, commands);
+    game.log_roster("join");
     // The clock starts with the first human, or 5 s after the last `--wait` one.
     if game.start.is_none() {
         match game.setup.wait {
@@ -1415,8 +1739,15 @@ fn join_player(
         },
     ));
     info!(
-        "client {:?} connected via {transport} as {side:?} (asked {:?}), class {:#x} (asked {:?}); slot {index} on record {} at {:?} facing {}",
-        remote.0, asked.side, fighter.class, asked.character, place.index, place.pos, place.facing
+        "client {:?} connected via {transport} as {side:?} (asked {:?}), team {}, class {:#x} (asked {:?}); slot {index} on record {} at {:?} facing {}",
+        remote.0,
+        asked.side,
+        fighter.team,
+        fighter.class,
+        asked.character,
+        place.index,
+        place.pos,
+        place.facing
     );
 }
 
@@ -1479,18 +1810,30 @@ fn log_traffic(
     last.retain(|e, _| sessions.contains(*e));
 }
 
-/// A player's entity went (its client left): free its slot.
-fn on_left(trigger: On<Remove, Slot>, slots: Query<&Slot>, mut game: ResMut<Game>) {
+/// A player's entity went (its client left): free its slot, and the bots fill up to the roster's
+/// count for the humans left (a dropped bot's slot is free already, [`Gone`]).
+fn on_left(
+    trigger: On<Remove, Slot>,
+    slots: Query<&Slot, Without<Gone>>,
+    mut game: ResMut<Game>,
+    mut commands: Commands,
+) {
     let Ok(&Slot { index, .. }) = slots.get(trigger.entity) else {
         return;
     };
+    let game = &mut *game;
     game.remove(index);
+    game.bot_entities.remove(&index);
     let players = game.m.players.len() - game.m.free.len();
     info!("slot {index} left; {players} players");
-    // The last human gone: the next to join starts a fresh match (`--wait` replays end as they go).
+    // The last human gone: the next to join starts a fresh match (`--wait` replays end as they go),
+    // the BALANCE back to 0.
     if game.humans() == 0 && game.setup.wait == 0 {
-        (game.start, game.started) = (None, false);
+        (game.start, game.started, game.balance) = (None, false, 0);
     }
+    drop_bots(game, None, &mut commands);
+    add_bots(game, &mut commands);
+    game.log_roster("leave");
 }
 
 /// Over, a client's RESTART: its player's vote for the next match, once the results show.
@@ -1509,6 +1852,63 @@ fn restart_votes(
         if let Some(slot) = slot.filter(|_| voted && shown) {
             game.votes.insert(slot);
             info!("slot {slot} votes to restart");
+        }
+    }
+}
+
+/// The team screen ([`Teams`], the team modes): a human moves to team `t` if it has room for one
+/// more, respawning there (`Combat::lives` cuts its camera) and the bots refilling around it; the
+/// first human (the lowest slot) sets the BALANCE (2 teams, under 3 humans; clamped to ±7).
+#[allow(clippy::type_complexity)]
+fn team_requests(
+    mut clients: Query<(Entity, &mut MessageReceiver<Teams>), With<ClientOf>>,
+    mut players: Query<(&ControlledBy, &mut Slot, &mut Cam, &mut Combat)>,
+    timeline: Res<LocalTimeline>,
+    mut game: ResMut<Game>,
+    mut commands: Commands,
+) {
+    let game = &mut *game;
+    for (client, mut asks) in &mut clients {
+        let asks: Vec<Teams> = asks.receive().collect();
+        let player = players.iter_mut().find(|p| p.0.owner == client);
+        let (Some(row), Some((_, mut slot, mut cam, mut combat))) = (game.row(), player) else {
+            continue;
+        };
+        for ask in asks {
+            let i = slot.index;
+            match ask {
+                Teams::Balance(b) => {
+                    let first = game.taken().find(|&k| !game.m.players[k].bot) == Some(i);
+                    let b = b.clamp(-7, 7);
+                    if !first || row.teams != 2 || game.humans() >= 3 || b == game.balance {
+                        continue;
+                    }
+                    game.balance = b;
+                    drop_bots(game, None, &mut commands);
+                    add_bots(game, &mut commands);
+                    game.log_roster("balance");
+                }
+                Teams::Switch(t) => {
+                    let on = game.team_humans(row.teams);
+                    let to = usize::from(t);
+                    if to >= row.teams
+                        || t == game.m.players[i].team
+                        || on[to] >= row.room(to, game.humans())
+                    {
+                        info!("slot {i}: team {t} refused");
+                        continue;
+                    }
+                    game.remove(i);
+                    drop_bots(game, Some(t), &mut commands);
+                    let side = game.team_side(t);
+                    let (index, place, f) = game.join_human(side, Some(t), None, timeline.tick().0);
+                    *slot = Slot { index, place };
+                    cam.0 = Follow::spawn(place.camera, &f.body);
+                    combat.lives += 1;
+                    add_bots(game, &mut commands);
+                    game.log_roster("switch");
+                }
+            }
         }
     }
 }
@@ -1641,6 +2041,67 @@ mod beach_g {
 #[derive(Resource, Default)]
 struct Events(Vec<Event>, Vec<(usize, u8)>);
 
+/// Before each match frame: over, the next match (the same settings) once every human in it voted,
+/// or `RESULTS` ticks on. Not in `--wait` replays (they end as the game does), nor with no human in
+/// (the next to join starts it). At a match start, the players reseated ([`Game::reseat`]): their
+/// [`Slot`]s, the bots' ids.
+#[allow(clippy::type_complexity)]
+fn seat(
+    timeline: Res<LocalTimeline>,
+    mut game: ResMut<Game>,
+    mut players: Query<(Entity, &mut Slot, &mut PlayerId, Has<Bot>), Without<Gone>>,
+) {
+    let t = timeline.tick().0;
+    let game = &mut *game;
+    game.m.tick = t;
+    let mut humans = (players.iter())
+        .filter(|p| !p.3)
+        .map(|p| p.1.index)
+        .peekable();
+    let some_human = humans.peek().is_some();
+    let voted = humans.all(|s| game.votes.contains(&s));
+    if game.m.phase() == Phase::Over
+        && game.started
+        && game.setup.wait == 0
+        && some_human
+        && (voted || game.restart_in(t) == 0)
+    {
+        // RESTART fades to black first (phase 3, `RESTART_FADE` ticks); the deadline starts the
+        // next match at once (the original's deadline quits, with no fade).
+        let fade = if voted { RESTART_FADE } else { 0 };
+        (game.start, game.started) = (Some(t + fade), false);
+        game.votes.clear();
+        // The RNG goes on from the bots' (they draw the most): a match no draw of the rules' RNG
+        // ran in (a kill limit of 1, no respawn) would otherwise replay the last one.
+        if let Some(bots) = &game.ai.bots {
+            game.m.rng = bots.rng();
+        }
+        info!("next match at tick {t}");
+    }
+    if game.started || !game.start.is_some_and(|s| s <= t) {
+        return;
+    }
+    let moved: HashMap<usize, (usize, Placement)> = (game.reseat().into_iter())
+        .map(|(old, slot, place)| (old, (slot, place)))
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+    game.bot_entities.clear();
+    for (entity, mut slot, mut id, bot) in &mut players {
+        let Some(&(index, place)) = moved.get(&slot.index) else {
+            continue;
+        };
+        *slot = Slot { index, place };
+        if bot {
+            id.0 = PeerId::Local(index as u64);
+            game.bot_entities.insert(index, entity);
+        }
+    }
+    game.history = History::default();
+    game.log_roster("match start");
+}
+
 /// One match frame: the start of a `--wait` match, `--give`s, the step, the cameras, the history.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn simulate(
@@ -1663,30 +2124,6 @@ fn simulate(
     let t = timeline.tick().0;
     let game = &mut *game;
     game.m.tick = t;
-    // Over, the results: the next match (the same settings) once every human in it voted, or
-    // `RESULTS` ticks on. Not in `--wait` replays (they end as the game does), nor with no human in
-    // (the next to join starts it).
-    let mut humans = players.iter().map(|p| p.0.index).peekable();
-    let some_human = humans.peek().is_some();
-    let voted = humans.all(|s| game.votes.contains(&s));
-    if game.m.phase() == Phase::Over
-        && game.started
-        && game.setup.wait == 0
-        && some_human
-        && (voted || game.restart_in(t) == 0)
-    {
-        // RESTART fades to black first (phase 3, `RESTART_FADE` ticks); the deadline starts the
-        // next match at once (the original's deadline quits, with no fade).
-        let fade = if voted { RESTART_FADE } else { 0 };
-        (game.start, game.started) = (Some(t + fade), false);
-        game.votes.clear();
-        // The RNG goes on from the bots' (they draw the most): a match no draw of the rules' RNG
-        // ran in (a kill limit of 1, no respawn) would otherwise replay the last one.
-        if let Some(bots) = &game.ai.bots {
-            game.m.rng = bots.rng();
-        }
-        info!("next match at tick {t}");
-    }
     if !game.started && game.start.is_some_and(|s| s <= t) {
         (game.start, game.started) = (Some(t), true);
         // Everyone back on its start place, the clock at the read it stands for.
@@ -1731,6 +2168,8 @@ fn simulate(
             free: std::mem::take(&mut game.m.free),
             guns: gun::spawn(usize::from(game.ai.scene)),
             traps: game.ai.traps(),
+            // The tick standing for read 23, where the match goes live (bolts' first moves).
+            live: (t + LIVE_READ).wrapping_sub(game.setup.first_read),
             ..Match::new(&game.arena, fighters, game.m.rng, t)
         }
         .with(game.setup.settings);
@@ -2078,6 +2517,10 @@ fn simulate(
     commands.insert_resource(Rides(rides.iter().map(|r| r.0).collect()));
 }
 
+/// The humans and bots in the match for `/info` ([`token::Live`]), set by [`publish`].
+#[derive(Resource)]
+struct Players(token::Live);
+
 /// The slots a lift moved this tick (a placement, as a respawn is: [`publish`] counts it in `lives`).
 #[derive(Resource, Default)]
 struct Rides(Vec<usize>);
@@ -2188,7 +2631,9 @@ fn publish(
     rides: Res<Rides>,
     mut players: Query<(&Slot, &mut Player, &mut Fighting, &mut Combat)>,
     mut view: Single<&mut MatchView>,
+    live: Res<Players>,
 ) {
+    *live.0.0.lock().unwrap_or_else(|e| e.into_inner()) = (game.humans(), game.bots());
     let m = &game.m;
     let standings = m.standings();
     let beach = game.ai.bots.as_ref().filter(|_| m.settings.beach);
@@ -2369,6 +2814,8 @@ fn publish(
             true => race_view(m, game.arena.track.nodes.len(), s.high, s.laps),
         },
         characters: game.characters(),
+        teams: game.row().map_or(0, |r| r.teams as u8),
+        balance: game.balance,
     });
 }
 
@@ -2660,14 +3107,15 @@ mod tests {
         assert!(settings(&["--mode", "beach", "--map", "2b", "--cavemen"]).is_err());
         let beach = |bots| parse_args(args(&["--mode", "beach", "--map", "2b", "--bots", bots]));
         assert!(
-            beach("10").is_ok() && beach("11").is_err(),
-            "8 villagers, 2 Tediz"
+            beach("7").is_ok() && beach("8").is_err(),
+            "6 villagers, 2 Tediz with a human"
         );
     }
 
-    /// War: Beach: the bots alternate sides until the Tediz are 2, then every one is a villager (a
-    /// human asking for the Tediz too), each villager with item 0x3E and the next start class,
-    /// respawning on its own record; the Tediz class 3. At 8 villagers, no one else joins.
+    /// War: Beach: the bots fill the villagers (FRENCHYS, team 0) to 6 and the Tediz to 2 (byte
+    /// +7: 6v2 without BALANCE), team 0's first; each villager with item 0x3E and the next start
+    /// class, respawning on its own record; the Tediz class 3. At most 2 human Tediz (a third
+    /// asking plays a villager), the bots giving way.
     #[test]
     fn beach_caps_the_tediz() {
         let mut g = game(Setup {
@@ -2675,44 +3123,42 @@ mod tests {
                 beach: true,
                 ..Settings::default()
             },
+            bots: 7,
             ..Setup::default()
         });
         g.starts = starts(0x2B).unwrap();
-        for slot in 0..7 {
-            let _ = g.join_bot(slot);
-        }
+        fill(&mut g);
         let (s, t) = (Side::Squirrels, Side::Tediz);
         let f = &g.m.players;
         assert_eq!(
             f.iter().map(|f| f.side).collect::<Vec<_>>(),
-            [s, t, s, t, s, s, s]
+            [s, s, s, s, s, t, t]
         );
         assert_eq!(
             f.iter().map(|f| f.team).collect::<Vec<_>>(),
-            [0, 1, 0, 1, 0, 0, 0]
+            [0, 0, 0, 0, 0, 1, 1]
         );
         let classes: Vec<u8> = f.iter().map(|f| f.class).collect();
-        assert_eq!(classes, [0x1E, 3, 0x14, 3, 0x1D, 0x1F, 0x1E]);
-        assert_eq!((f[0].start, f[1].start), (Some(beach::ITEM), None));
-        assert_eq!((f[0].spawn_mask, f[1].spawn_mask), (1 << 1, 1 << 10));
-        assert_eq!(g.capped(Side::Tediz), Some(Side::Squirrels));
-        let _ = (g.join_bot(7), g.join_bot(8));
-        assert_eq!(g.capped(Side::Tediz), Some(Side::Squirrels));
-        let _ = g.join_bot(9);
-        assert_eq!(g.members(Side::Squirrels), 8);
-        assert_eq!(
-            (g.capped(Side::Tediz), g.capped(Side::Squirrels)),
-            (None, None)
-        );
+        assert_eq!(classes, [0x1E, 0x14, 0x1D, 0x1F, 0x1E, 3, 3]);
+        assert_eq!((f[0].start, f[5].start), (Some(beach::ITEM), None));
+        assert_eq!((f[0].spawn_mask, f[5].spawn_mask), (1 << 1, 1 << 10));
+        for _ in 0..2 {
+            let slot = human(&mut g, Some(1)).unwrap();
+            assert_eq!(g.m.players[slot].side, t);
+        }
+        assert_eq!((g.members(s), g.members(t), g.bots()), (6, 2, 6));
+        let third = human(&mut g, Some(1)).unwrap();
+        assert_eq!(g.m.players[third].side, s);
+        assert_eq!((g.members(s), g.members(t), g.bots()), (6, 2, 5));
     }
 
-    /// Total War: every player's team is its side (the bots alternate); a Deathmatch gives each
-    /// its own.
+    /// The team modes: every player's team is its side, the bots even (team 0's first, then the
+    /// team with fewer players); a Deathmatch gives each its own, its slot.
     #[test]
     fn total_war_teams_are_the_sides() {
         for (total_war, colors, teams) in [
-            (true, false, [0, 1, 0]),
-            (false, true, [0, 1, 0]),
+            (true, false, [0, 0, 1]),
+            (false, true, [0, 0, 1]),
             (false, false, [0, 1, 2]),
         ] {
             let mut g = game(Setup {
@@ -2721,12 +3167,49 @@ mod tests {
                     colors,
                     ..Settings::default()
                 },
+                bots: 3,
                 ..Setup::default()
             });
-            let _ = (g.join_bot(0), g.join_bot(1), g.join_bot(2));
+            fill(&mut g);
             let got: Vec<u8> = g.m.players.iter().map(|f| f.team).collect();
             assert_eq!(got, teams);
         }
+    }
+
+    /// The bots by humans, as the original's bots screen (Deathmatch 10/8/4/4 players with 1-4
+    /// humans, Tank and Race 8/4/4/4) and team rows (the humans spread over the teams) allow; with
+    /// one human, `--bots`' cap.
+    #[test]
+    fn bots_by_human_count() {
+        let mode = |list: &[&str]| parse_args(args(list)).unwrap().0.settings;
+        for (s, most) in [
+            (mode(&[]), [9, 6, 1, 0]),
+            (mode(&["--mode", "tank", "--map", "24"]), [7, 2, 1, 0]),
+            (mode(&["--mode", "race", "--map", "33"]), [7, 2, 1, 0]),
+            (mode(&["--mode", "heist", "--map", "1a"]), [7, 6, 1, 0]),
+            (mode(&["--mode", "total-war"]), [11, 10, 1, 0]),
+            (mode(&["--mode", "colors", "--map", "30"]), [11, 10, 1, 0]),
+            (mode(&["--mode", "beach", "--map", "2b"]), [7, 6, 5, 4]),
+            (mode(&["--mode", "raptor", "--map", "3f"]), [7, 6, 3, 2]),
+        ] {
+            let got = [1, 2, 3, 4].map(|h| bots_for(&s, h, 99));
+            assert_eq!(got, most, "{s:?}");
+            assert_eq!(bots_for(&s, 2, 1), 1);
+        }
+        // BALANCE (2 teams, under 3 humans): bots move to team 0 (b > 0) or 1, each team keeping
+        // a player; Beach's Tediz never above 2.
+        let war = team_row(&mode(&["--mode", "total-war"])).unwrap();
+        assert_eq!(war.bots(&[1, 0], 11, 0), [5, 6]);
+        assert_eq!(war.bots(&[1, 0], 11, 3), [7, 3], "8v3: 9 clamped to 8");
+        assert_eq!(war.bots(&[1, 0], 3, 7), [2, 1]);
+        assert_eq!(war.bots(&[1, 0], 3, -7), [0, 3]);
+        assert_eq!(war.bots(&[1, 1], 11, 4), [7, 1]);
+        assert_eq!(BEACH_ROW.bots(&[1, 0], 7, -3), [2, 2]);
+        assert_eq!(
+            BEACH_ROW.bots(&[0, 2], 9, 2),
+            [8, 0],
+            "8v2: both Tediz human"
+        );
     }
 
     /// Over, the results last `RESULTS` ticks from the end fade's last frame; through a War outro
@@ -2833,14 +3316,36 @@ mod tests {
         )
     }
 
+    /// The roster's steps without the entities: the bots fill up ([`on_left`], the start).
+    fn fill(g: &mut Game) {
+        g.trim(None);
+        let _ = g.top_up();
+    }
+
+    /// [`join_player`]'s: a human joins (`asked`: its team, the team modes), the bots refill around
+    /// it; its slot (`None`: every team full).
+    fn human(g: &mut Game, asked: Option<u8>) -> Option<usize> {
+        let (side, team) = match g.row() {
+            Some(row) => {
+                let t = g.human_team(&row, asked)?;
+                (g.team_side(t), Some(t))
+            }
+            None => (g.smaller_side(), None),
+        };
+        g.trim(Some(team.unwrap_or(0)));
+        let (slot, ..) = g.join_human(side, team, None, 0);
+        let _ = g.top_up();
+        Some(slot)
+    }
+
     /// A side's k-th player starts on its base's k-th record (squirrels 0, 6, 7, ...; Tediz 1, 13,
     /// 14, ...) with the game's jitter and respawns in its half; `--spawn` overrides, on the slot's
     /// Deathmatch record and respawning anywhere.
     #[test]
     fn each_side_starts_in_its_base() {
         let mut g = game(Setup::default());
-        let (a, squirrels) = g.placement(0, Side::Squirrels);
-        let (b, tediz) = g.placement(0, Side::Tediz);
+        let (a, squirrels) = g.placement(0, Side::Squirrels, 0);
+        let (b, tediz) = g.placement(0, Side::Tediz, 0);
         assert_eq!((a.index, b.index), (0, 1));
         assert_eq!((squirrels, tediz), (0xFFF0_1FFD, 0xFFFF_E03E));
         // The jitter moves along the record's yaw (64: sin 1, cos 0, so along x) by at most 40.
@@ -2854,7 +3359,7 @@ mod tests {
             spawns: vec![([5.0, 6.0, 7.0], Some(9))],
             ..Setup::default()
         });
-        let (a, mask) = g.placement(0, Side::Squirrels);
+        let (a, mask) = g.placement(0, Side::Squirrels, 0);
         assert_eq!(
             (a.index, a.pos, a.facing, a.camera, mask),
             (1, [5.0, 6.0, 7.0], 9, [0.0, 100.0, 0.0], !0)
@@ -2871,7 +3376,7 @@ mod tests {
         let f = &g.m.players;
         assert_eq!([f[0].side, f[1].side], [Side::Cavemen; 2]);
         assert_eq!([f[0].start, f[1].start], [Some(0x40); 2]);
-        let (place, mask) = g.placement(2, Side::Cavemen);
+        let (place, mask) = g.placement(2, Side::Cavemen, 2);
         assert_eq!(
             (place.index, mask),
             (7, 0xFFF0_1FFD),
@@ -2903,10 +3408,10 @@ mod tests {
         assert_eq!(g.smaller_side(), Side::Squirrels);
     }
 
-    /// War: Heist on 0x1A: `--score` 1-5 (default 3), map 1a only, at most 7 bots; teams by slot
-    /// (slot & 3), the team's k-th on its k-th record, respawning on its four; at most 8 players
-    /// and 2 humans a team, 4 players from the 3rd human; the outro by whether a human's team won
-    /// (cutscene 2, else 3), GREENS's and YELLOWS's wins included.
+    /// War: Heist on 0x1A: `--score` 1-5 (default 3), map 1a only, at most 7 bots; the bots even
+    /// over the 4 teams, the team's k-th on its k-th record, respawning on its four; at most 8
+    /// players and 2 humans a team, 4 players and 1 from the 3rd human; the outro by whether a
+    /// human's team won (cutscene 2, else 3), YELLOWS's win included.
     #[test]
     fn heist_teams_records_and_outros() {
         let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
@@ -2935,28 +3440,19 @@ mod tests {
         };
         let mut g = Game::new(arena, setup);
         (g.vault, g.starts) = (true, starts(0x1A).unwrap());
-        for slot in 0..6 {
-            let _ = g.join_bot(slot);
-        }
-        let human = |g: &mut Game| {
-            let slot = g.m.next_slot();
-            let side = g.capped(Side::Squirrels)?;
-            let (place, spawn_mask) = g.placement(slot, side);
-            let team = g.team(slot, side);
-            Some(g.m.join(Fighter {
-                spawn_mask,
-                start: g.start_item(side),
-                class: g.class(side),
-                ..Fighter::new(&place, team, 0)
-            }))
-        };
-        assert_eq!(human(&mut g), Some(6));
+        fill(&mut g);
+        let teams = |g: &Game| g.m.players.iter().map(|f| f.team).collect::<Vec<_>>();
+        assert_eq!(teams(&g), [0, 0, 1, 1, 2, 3]);
+        // The first human on REDS in slot 0, the bots giving way; seated at the match start: the
+        // bots by team.
+        assert_eq!(human(&mut g, None), Some(0));
+        assert!(!g.reseat().is_empty());
+        assert!(g.reseat().is_empty(), "seated already");
+        assert_eq!(teams(&g), [0, 0, 1, 1, 2, 2, 3]);
         let f = &g.m.players;
-        assert_eq!(
-            f.iter().map(|f| f.team).collect::<Vec<_>>(),
-            [0, 1, 2, 3, 0, 1, 2]
-        );
-        for (s, record) in [0u8, 1, 2, 3, 8, 11, 14].into_iter().enumerate() {
+        assert_eq!(f.iter().filter(|f| f.bot).count(), 6);
+        assert!(!f[0].bot);
+        for (s, record) in [0u8, 8, 1, 11, 2, 14, 3].into_iter().enumerate() {
             let x = 100.0 * f32::from(record);
             assert!(
                 (f[s].body.pos[0] - x).abs() <= 40.0,
@@ -2965,24 +3461,29 @@ mod tests {
             );
             assert_eq!((f[s].start, f[s].class), (Some(0x19), 1));
         }
-        assert_eq!(f[2].spawn_mask, 1 << 2 | 1 << 14 | 1 << 15 | 1 << 16);
-        // The outros: GREENS (the human's team) won, cutscene 2; YELLOWS, cutscene 3.
+        assert_eq!(f[4].spawn_mask, 1 << 2 | 1 << 14 | 1 << 15 | 1 << 16);
+        // The outros: REDS (the human's team) won, cutscene 2; YELLOWS, cutscene 3.
         g.outros = vec![(0, 2, 325), (1, 3, 775)];
         g.m.ended_at = Some(100);
         let over = 100 + END_DELAY + FADE + 1;
-        g.m.heist.scores = [0, 0, 3, 0];
+        g.m.heist.scores = [3, 0, 0, 0];
         assert_eq!(
             (g.winner(), g.human_won(), g.results_at()),
-            (Some(2), true, Some(over + 325))
+            (Some(0), true, Some(over + 325))
         );
         g.m.heist.scores = [0, 0, 0, 3];
         assert_eq!(
             (g.winner(), g.human_won(), g.results_at()),
             (Some(3), false, Some(over + 775))
         );
-        // The second human; then, a third would make 9 players (4 at most with 3 humans).
-        assert_eq!(human(&mut g), Some(7));
-        assert_eq!(human(&mut g), None);
+        // The second human on BLUES; from the third, 4 players and a human a team.
+        assert_eq!(human(&mut g, None), Some(1));
+        assert_eq!(g.m.players[1].team, 1);
+        assert!(human(&mut g, None).is_some());
+        assert_eq!((g.humans(), g.bots()), (3, 1));
+        assert!(human(&mut g, Some(0)).is_some_and(|s| g.m.players[s].team == 3));
+        assert_eq!((g.humans(), g.bots()), (4, 0));
+        assert_eq!(human(&mut g, None), None);
     }
 
     /// Tank: map 24 only (and it plays nothing else); one side, each a tank (class 8) on its slot's
@@ -3136,9 +3637,10 @@ mod tests {
         );
     }
 
-    /// Raptor: map 3f only, `--score` 1-40 (default 20); bots in slots 2 and 6 of each 8 are
-    /// raptors (team 1, class 9, the raptors' base), the others cavemen (team 0, class 0xB, the
-    /// Ugas'), all with the club (a raptor never draws it, V); the outro by the winning team.
+    /// Raptor: map 3f only, `--score` 1-40 (default 20); the bots fill the UGAS (team 0, cavemen,
+    /// class 0xB, the Ugas' base) to 6 and the RAPTORS (team 1, class 9, the raptors' base) to 2
+    /// (byte +7), team 0's first, all with the club (a raptor never draws it, V); the outro by the
+    /// winning team.
     #[test]
     fn raptor_teams_and_outros() {
         let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
@@ -3166,12 +3668,10 @@ mod tests {
         };
         let mut g = Game::new(arena, setup);
         (g.cavemen, g.starts) = (true, starts(0x3F).unwrap());
-        for slot in 0..7 {
-            let _ = g.join_bot(slot);
-        }
+        fill(&mut g);
         let (mut cavemen, mut raptors) = (0, 0);
         for (s, f) in g.m.players.iter().enumerate() {
-            let raptor = s == 2 || s == 6;
+            let raptor = s >= 5;
             let k = if raptor { &mut raptors } else { &mut cavemen };
             let record = g.starts.sides[usize::from(raptor)][*k];
             *k += 1;
@@ -3183,6 +3683,10 @@ mod tests {
             assert_eq!((f.side, f.team, f.class), want, "slot {s}");
             assert_eq!(f.start, Some(weapon::CLUB.id));
         }
+        // A human asking for the raptors plays one; the bots give it the place (6 cavemen v 2).
+        let slot = human(&mut g, Some(1)).unwrap();
+        assert_eq!(g.m.players[slot].class, raptor::CLASS);
+        assert_eq!((g.members(Side::Cavemen), g.members(Side::Tediz)), (6, 2));
         g.outros = vec![(0, 2, 765), (1, 4, 415)];
         g.m.ended_at = Some(100);
         let over = 100 + END_DELAY + FADE + 1;
@@ -3192,9 +3696,9 @@ mod tests {
         assert_eq!((g.winner(), g.results_at()), (Some(1), Some(over + 415)));
     }
 
-    /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,
-    /// on the side with fewer players unless they ask, on their side's next record; a leaving human
-    /// never moves a bot.
+    /// With no human in, bots take slots 0..N, on alternate sides, each in its side's base; a human
+    /// on the side with fewer players unless it asks, on its side's next record; a leaving human
+    /// never moves a bot ([`humans_sit_before_the_bots`]: the slots).
     #[test]
     fn bots_take_the_first_slots_and_humans_follow() {
         let mut g = game(Setup {
@@ -3211,15 +3715,15 @@ mod tests {
             "records 0, 1: {x:?}"
         );
         assert_eq!(g.smaller_side(), Side::Squirrels, "a tie");
-        let next = [Side::Squirrels, Side::Tediz].map(|side| g.placement(2, side).0.index);
+        let next = [Side::Squirrels, Side::Tediz].map(|side| g.placement(2, side, 2).0.index);
         assert_eq!(next, [6, 13], "each side's second start record");
-        let (place, _) = g.placement(2, Side::Squirrels);
+        let (place, _) = g.placement(2, Side::Squirrels, 2);
         g.m.players.push(Fighter {
             side: Side::Squirrels,
             ..Fighter::new(&place, 2, 0)
         });
         assert_eq!((g.humans(), g.smaller_side()), (1, Side::Tediz));
-        assert_eq!(g.placement(3, Side::Squirrels).0.index, 7);
+        assert_eq!(g.placement(3, Side::Squirrels, 3).0.index, 7);
         let bot1 = g.m.players[1].body.pos;
         g.remove(2);
         assert_eq!((g.humans(), g.m.players[1].body.pos), (0, bot1));
@@ -3228,6 +3732,81 @@ mod tests {
             Side::Squirrels,
             "a free slot is on no side"
         );
+    }
+
+    /// The humans sit first: a joining human takes the lowest bot's slot, the bots fill up to the
+    /// bots screen's most players (Deathmatch: 10, 8, 4, 4 with 1-4 humans); a leaver's slot stays
+    /// free until the match start seats everyone again, each its own team, its slot.
+    #[test]
+    fn humans_sit_before_the_bots() {
+        let mut g = game(Setup {
+            bots: 9,
+            ..Setup::default()
+        });
+        fill(&mut g);
+        let bots = |g: &Game| {
+            g.taken()
+                .filter(|&i| g.m.players[i].bot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bots(&g), (0..9).collect::<Vec<_>>());
+        assert_eq!(human(&mut g, None), Some(0));
+        assert_eq!(bots(&g), (1..10).collect::<Vec<_>>());
+        assert_eq!(human(&mut g, None), Some(1));
+        assert_eq!(bots(&g), (2..8).collect::<Vec<_>>());
+        g.remove(0);
+        fill(&mut g);
+        assert_eq!((g.humans(), g.bots(), g.m.next_slot()), (1, 9, 10));
+        let moved = g.reseat();
+        assert_eq!(moved[0], (1, 0, moved[0].2), "the human first");
+        assert_eq!(bots(&g), (1..10).collect::<Vec<_>>());
+        let teams: Vec<u8> = g.m.players.iter().map(|f| f.team).collect();
+        assert_eq!(teams, (0..10).collect::<Vec<u8>>());
+        assert_eq!((human(&mut g, None), g.bots()), (Some(1), 6));
+        assert_eq!((human(&mut g, None), g.bots()), (Some(2), 1));
+        assert_eq!((human(&mut g, None), g.bots()), (Some(3), 0));
+    }
+
+    /// A pickup the mode can't give fails the server's start: an unknown weapon, a Tank power-up
+    /// outside Tank, a weapon in Tank or Race.
+    #[test]
+    fn pickups_give_what_the_mode_has() {
+        let pickup = |id| conker_assets::Pickup {
+            placement: 3,
+            gives: conker_assets::Gives::Weapon(id),
+            position: [0.0; 3],
+            respawn: None,
+            roams: Vec::new(),
+        };
+        let (dm, tank, race) = (
+            Settings::default(),
+            Settings {
+                tank: true,
+                ..Settings::default()
+            },
+            Settings {
+                race: true,
+                ..Settings::default()
+            },
+        );
+        for (id, s, ok) in [
+            (weapon::SNIPER.id, &dm, true),
+            (beach::ITEM, &dm, true),
+            (0x7F, &dm, false),
+            (tank::SHIELD, &dm, false),
+            (tank::SHIELD, &tank, true),
+            (weapon::SNIPER.id, &tank, false),
+            (race::MISSILE, &race, true),
+            (weapon::SNIPER.id, &race, false),
+        ] {
+            let got = unknown_pickup(&[pickup(id)], s);
+            assert_eq!(got.is_none(), ok, "{id:#x}: {got:?}");
+        }
+        let grenades = conker_assets::Pickup {
+            gives: conker_assets::Gives::Grenades,
+            ..pickup(0)
+        };
+        assert_eq!(unknown_pickup(&[grenades], &dm), None);
     }
 
     #[test]
@@ -3250,7 +3829,7 @@ mod tests {
     fn a_leaver_frees_its_slot_for_the_next_joiner() {
         let mut g = game(Setup::default());
         for i in 0..3 {
-            let (place, _) = g.placement(i, Side::Tediz);
+            let (place, _) = g.placement(i, Side::Tediz, i as u8);
             g.m.join(Fighter::new(&place, i as u8, 0));
         }
         let bullet = |owner| {
@@ -3291,7 +3870,7 @@ mod tests {
         assert_eq!((g.humans(), g.m.next_slot()), (2, 1));
         let next = g.m.next_slot();
         assert_eq!(
-            g.placement(next, Side::Squirrels).0.index,
+            g.placement(next, Side::Squirrels, next as u8).0.index,
             0,
             "the first squirrel's"
         );

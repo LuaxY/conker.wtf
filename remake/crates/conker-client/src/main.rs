@@ -27,15 +27,22 @@ fn main() {
              or pass --assets DIR)"
         ))
     });
-    // The server's map, unless `map=` names one.
+    // The server's map and pack, unless `map=` names one.
+    let mut pack = None;
     if cfg.map.is_empty() {
-        cfg.map = conker_client::connection::server_map(&cfg).unwrap_or_else(|e| fail(e));
+        (cfg.map, pack) = conker_client::connection::server_info(&cfg).unwrap_or_else(|e| fail(e));
     }
     let characters = conker_client::character_files(&cfg.map);
     let slice = Slice::load(&cfg.map, &characters, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    if let Some(server) = pack {
+        conker_client::connection::check_pack(&cfg.map, &server, |p| {
+            std::fs::read(dir.join(p)).ok()
+        })
+        .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    }
     let mut hud = Hud::load(|p| std::fs::read(dir.join(p)))
         .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
     let end = End::load(|p| std::fs::read(dir.join(p)))
@@ -85,12 +92,14 @@ pub async fn start() -> Result<(), String> {
         pairs.insert(0, ("server".into(), conker_client::page_server(&host)));
     }
     let mut cfg = conker_client::Config::from_pairs(pairs)?;
-    // The server's map first (its `/info`), unless `?map=` names one.
+    // The server's map and pack first (its `/info`), unless `?map=` names one.
+    let mut pack = None;
     if cfg.map.is_empty() {
         let info = conker_client::connection::info_url(&cfg);
         let body = (conker_client::web::fetch(&info).await)
             .map_err(|e| format!("could not get the server's map from {e}"))?;
         cfg.map = conker_client::connection::info_map(&body)?;
+        pack = conker_client::connection::info_pack(&body);
     }
     // Every file at once, from the folder Bevy's asset server reads the glTF models from.
     let root = bevy::asset::AssetPlugin::default().file_path;
@@ -111,6 +120,11 @@ pub async fn start() -> Result<(), String> {
     let mut bytes = std::collections::HashMap::new();
     for (file, request) in files.into_iter().zip(requests) {
         bytes.insert(file, request.await?);
+    }
+    if let Some(server) = pack {
+        let read = |p: &str| bytes.get(p).cloned();
+        conker_client::connection::check_pack(&cfg.map, &server, read)
+            .map_err(|e| format!("{root}/: {e}"))?;
     }
     let sound = conker_client::audio::has_sound(bytes.get(MANIFEST).map_or(&[][..], |m| &m[..]));
     let slice = Slice::load(&cfg.map, &characters, PACK_WEAPONS, |p| {

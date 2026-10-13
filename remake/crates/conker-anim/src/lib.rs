@@ -31,6 +31,9 @@ pub mod id {
     pub const CROUCH_WALK: u16 = 27;
     /// Stick released above speed 18: held 17 frames.
     pub const SKID: u16 = 33;
+    /// The run while an enemy's drawn weapon is near (effective speed 5 and up; conker-sim's
+    /// `PlayerState::scared`).
+    pub const SCARED_RUN: u16 = 43;
     pub const JUMP: u16 = 50;
     /// After a standing jump or a fall: held 15 frames.
     pub const LAND: u16 = 54;
@@ -62,6 +65,8 @@ pub mod combat {
     pub const PISTOL_HOLSTER: u16 = 0x1EF;
     pub const PISTOL_FIRE: u16 = 0x1EB;
     pub const PISTOL_RELOAD: u16 = 0x21E;
+    /// Tommy gun (0x38): draw 15 at 1.4 (V e4 combat7_e_w38 761-775).
+    pub const TOMMY_DRAW: u16 = 0x1DD;
     /// The one-shot gun (0x23): draw 26, idle, holster 28, fire 28 per press, a C button 3,
     /// reload 31 (A) or 79 (after the sixth shot).
     pub const GUN23_DRAW: u16 = 0x163;
@@ -273,6 +278,8 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         CREEP => (e * 0.125 + 0.1, 15.0, 0.0),
         WALK => (e * 0.125 + 0.3, 4.0, 0.0),
         RUN => (e / 23.0 + 0.8, 4.0, 0.0),
+        // `func_1504C0E8` (C; V combat5_sg_e2 766: 1.7833 at e 21.4).
+        SCARED_RUN => (e / 12.0, 4.0, 0.0),
         WALL_PUSH => (e / 15.0 + 0.6, 4.0, 0.0), // func_15064B94
         CROUCH_WALK => (target / 15.0 + 0.5, 5.0, 0.0),
         CROUCH => (1.5, 6.0, 0.0),
@@ -289,6 +296,7 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         | combat::TWIN_HOLSTER
         | combat::PISTOL_DRAW
         | combat::PISTOL_HOLSTER
+        | combat::TOMMY_DRAW
         | combat::MELEE_DRAW
         | combat::MELEE_HOLSTER
         | combat::BLADE_DRAW
