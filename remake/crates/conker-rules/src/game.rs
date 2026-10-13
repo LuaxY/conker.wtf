@@ -59,6 +59,9 @@ pub const TIMED_LIVES: u8 = 99;
 /// obj+0x104 during a hit state, and while dead from the death's second state.
 pub const STUN_HIT: u8 = 0xFE;
 pub const STUN_DEAD: u8 = 0xFF;
+/// A bullet that meets a body this high above the feet or higher hits the head, part 0xA (I:
+/// fitted to oracle ohit, 0x30: 12 head hits at +47.3 to +60.6, the living body's at +47.2 or less).
+pub const BULLET_HEAD: f32 = 47.25;
 /// Frames between the clock reaching 0 and the end fade (`func_151E53E8`), and of the fade.
 pub const END_DELAY: u32 = 40;
 pub const FADE: u32 = 16;
@@ -708,6 +711,11 @@ pub struct Match {
     /// Per slot, s126+0x1AF: how far it reaches for a pickup or canister ([`weapon::touches`]);
     /// [`weapon::REACH`] for a slot not listed. The bots' AI script sets a bot's each frame.
     pub reach: Vec<u8>,
+    /// Per slot, a bot's aim ray while it aims (s126+0x13C, its eye, and +0x130, the unit direction
+    /// of its aim's yaw +0x16C and pitch +0x170); `None` for a slot not listed. The twin guns'
+    /// bullets head from the muzzle to the first body part or wall on it, the pistol's and 0x23's
+    /// take its pitch ([`Self::strike`]).
+    pub aims: Vec<Option<([f32; 3], [f32; 3])>>,
     /// The scene's mounted guns ([`gun::spawn`]; none in a client's copy: their touch and fire are
     /// the server's, a gunner's own frame is predicted from its [`Fighter::gun`]).
     pub guns: Vec<Gun>,
@@ -789,6 +797,7 @@ impl Match {
             gas: Gas::default(),
             colors: Colors::default(),
             reach: Vec::new(),
+            aims: Vec::new(),
             guns: Vec::new(),
             plunger: Plunger::default(),
         }
@@ -2063,7 +2072,32 @@ impl Match {
         let t = self.tick;
         let me = self.players[i].body;
         match s {
-            Strike::Bullet(b) => {
+            Strike::Bullet(mut b) => {
+                // A bot's twin-gun bullet leaves the muzzle toward the first body part or wall its
+                // aim ray meets (`func_151C62D0` → `func_151D5174` for a bot, s126+0x84, then
+                // `func_151C4B0C`; C), not along its facing: V obul, the bullets' pitch lies
+                // between the muzzle's and the eye's to the aim. The pistol's and 0x23's
+                // (`func_150FE860`, `func_150FE320`) keep the facing and take the pitch byte
+                // obj+0x1D1 (`func_15145740`, C), which follows a bot's aim pitch +0x170 (V o34p:
+                // 0x23 within 3.4°, in 1.1° steps; the steps and the lag are not ported).
+                let ray = self.aims.get(i).copied().flatten();
+                if let Some((eye, dir)) = ray {
+                    let to: [f32; 3] = if b.kind == damage::TWIN_BULLET {
+                        let wall = raycast(world, eye, dir, RAY_RANGE);
+                        let d = self
+                            .first_part(i, eye, dir, wall, seen)
+                            .map_or(wall, |h| h.1);
+                        core::array::from_fn(|j| eye[j] + dir[j] * d - b.pos[j])
+                    } else {
+                        let h = (1.0 - dir[1] * dir[1]).sqrt();
+                        [b.dir[0] * h, dir[1], b.dir[2] * h]
+                    };
+                    let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                    if len > 0.0 {
+                        let dir = to.map(|c| c / len);
+                        b = Bullet::aimed(world, i, b.pos, dir, b.speed, b.kind);
+                    }
+                }
                 ev.push(Event::Shot {
                     player: i,
                     pos: b.pos,
@@ -2317,6 +2351,9 @@ impl Match {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
+    /// The first body the segment meets (crouching bodies are lower) and whether the hit is on
+    /// the head: at [`BULLET_HEAD`] or more above the feet, [`projectile::CROUCH_DROP`] less
+    /// when crouched.
     fn first_body(
         &self,
         owner: usize,
@@ -2324,19 +2361,7 @@ impl Match {
         dir: [f32; 3],
         len: f32,
         seen: Seen,
-    ) -> Option<usize> {
-        self.first_hit(owner, from, dir, len, seen).map(|h| h.0)
-    }
-
-    /// [`Self::first_body`] and how far along the segment it is hit; crouching bodies are lower.
-    fn first_hit(
-        &self,
-        owner: usize,
-        from: [f32; 3],
-        dir: [f32; 3],
-        len: f32,
-        seen: Seen,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, bool)> {
         (0..self.players.len())
             .filter(|&v| v != owner && self.players[v].anim != anim::DEAD)
             .filter_map(|v| {
@@ -2346,9 +2371,16 @@ impl Match {
                     movement::state::CROUCH | movement::state::CROUCH_WALK
                 );
                 let at = self.seen_pos(seen, owner, v);
-                hits_body(from, dir, len, at, Hitbox::of(f.side), crouched).map(|d| (v, d))
+                let drop = if crouched {
+                    projectile::CROUCH_DROP
+                } else {
+                    0.0
+                };
+                hits_body(from, dir, len, at, Hitbox::of(f.side), crouched)
+                    .map(|d| (v, d, from[1] + dir[1] * d - at[1] >= BULLET_HEAD - drop))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(v, _, head)| (v, head))
     }
 
     /// `func_15081E78` for an instant ray or an aimed shot: the first player whose head or torso
@@ -2852,7 +2884,28 @@ impl Match {
     fn fly_bullets(&mut self, seen: Seen, ev: &mut Vec<Event>) {
         for (born, mut b) in std::mem::take(&mut self.bullets) {
             // A body stops the bullet even when the hit is refused (dead, stunned or immune).
-            if let Some(v) = self.first_body(b.owner, b.pos, b.dir, b.reach(), seen) {
+            if let Some((v, head)) = self.first_body(b.owner, b.pos, b.dir, b.reach(), seen) {
+                // `func_151D4DAC`: a hit on the head (part 0xA) takes 1 health at once, stunned
+                // or not, and below 3 kills with type 0x20, which no stun or immunity refuses (C;
+                // V ohit: stunned hits at +55 take 4 → 3 → 2 → dead, at +40 nothing). Only the
+                // twin guns' bullets test body parts and so have a head; not the pistol's, 0x23's
+                // or, in multiplayer, the mounted gun's (`func_151C229C`'s flag 8, C; V e_w39: the
+                // pistol at +48.6 takes 2, e1: the gun's hit takes 2).
+                let f = &mut self.players[v];
+                let head = head && b.kind == damage::TWIN_BULLET;
+                if head && f.health > 0 && !self.waiting.contains(&v) {
+                    if f.health >= 3 {
+                        f.health -= 1;
+                    } else {
+                        let (o, k) = (b.owner, damage::SNIPER_RAY);
+                        if self.hurt(v, &k, false, false, b.angle, Some(o), ev)
+                            && self.enemies(o, v)
+                        {
+                            self.players[o].headshots = self.players[o].headshots.saturating_add(1);
+                        }
+                        continue;
+                    }
+                }
                 self.hurt(v, &b.kind, false, true, b.angle, Some(b.owner), ev);
             } else if b.advance() {
                 self.bullets.push((born, b));
@@ -3769,6 +3822,106 @@ mod tests {
         )];
         m.step(&arena, &[Input::default(); 2], &w);
         assert_eq!(m.players[1].health, 3);
+    }
+
+    /// A bot's twin-gun bullets head for what its aim ray meets (`func_151D5174`, C): a target on a
+    /// ledge 415 up and 3,600 away (2D seed 5's stand) is hit. Without the ray they fly level along
+    /// the facing and pass under the ledge. The pistol's and 0x23's take the ray's pitch on the
+    /// facing (`func_15145740`), which also reaches it.
+    #[test]
+    fn a_bots_bullets_follow_its_aim_ray() {
+        let (y, a, b, big) = (415.0, 3400.0, 3800.0, 20_000.0);
+        let quad = |y: f32, a: f32, b: f32, c: f32, d: f32| {
+            [
+                ([[a, y, c], [a, y, d], [b, y, d]], 5),
+                ([[a, y, c], [b, y, d], [b, y, c]], 5),
+            ]
+        };
+        let shoot = |weapon: u8, aimed: bool| {
+            let (arena, mut m, _) = duel();
+            let w = CollisionWorld::new(
+                quad(0.0, -big, big, -big, big)
+                    .into_iter()
+                    .chain(quad(y, a, b, -200.0, 200.0)),
+            );
+            m.players[1].body.pos = [3600.0, 415.0, 0.0];
+            m.give(0, weapon);
+            let (mut first, mut hit) = (None, None);
+            for t in 0..120 {
+                let eye = [0.0f32, 67.5, 0.0];
+                let d = [3600.0, 415.0 + 40.0 - eye[1], 0.0];
+                let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+                m.aims = vec![aimed.then_some((eye, d.map(|c| c / n))), None];
+                let buttons = match t {
+                    0 => BUTTON_B,
+                    20.. if weapon == 0x09 || t % 4 == 0 => BUTTON_Z,
+                    _ => 0,
+                };
+                let inputs = [
+                    Input {
+                        buttons,
+                        ..Input::default()
+                    },
+                    Input::default(),
+                ];
+                let ev = m.step(&arena, &inputs, &w);
+                first = first.or(m.bullets.first().map(|b| b.1.dir));
+                hit = hit.or(ev
+                    .iter()
+                    .any(|e| matches!(e, Event::Hit { victim: 1, .. }))
+                    .then_some(t));
+            }
+            (first.expect("a bullet"), hit)
+        };
+        let (dir, hit) = shoot(0x09, true);
+        assert!(dir[1] > 0.1 && hit.is_some(), "{dir:?} {hit:?}");
+        let (dir, hit) = shoot(0x09, false);
+        assert!(dir[1] == 0.0 && hit.is_none(), "{dir:?} {hit:?}");
+        let pitch = 387.5 / (3600.0f32 * 3600.0 + 387.5 * 387.5).sqrt();
+        for weapon in [0x39, 0x23] {
+            let (dir, hit) = shoot(weapon, true);
+            assert!((dir[1] - pitch).abs() < 1e-4, "{weapon:#x} {dir:?}");
+            assert!(
+                dir[2].abs() < 1e-4 && hit.is_some(),
+                "{weapon:#x} {dir:?} {hit:?}"
+            );
+        }
+    }
+
+    /// `func_151D4DAC`'s head hits, V oracle ohit (0x30): a stunned player at 4 hit on the head
+    /// (+55, +60, +61) goes 3, 2, then dead (1328-1333); body hits on it at +40 do nothing; an
+    /// unstunned head hit takes 2 (2379: 3 → 1). The pistol's bullets have no head (V e_w39).
+    #[test]
+    fn a_bullet_on_the_head_hurts_through_the_stun() {
+        let shot = |m: &mut Match, arena: &Arena, w: &CollisionWorld, h: f32| {
+            let kind = if h == 60.5 {
+                damage::PISTOL_BULLET
+            } else {
+                damage::TWIN_BULLET
+            };
+            let b = Bullet::fire(w, 0, [50.0, h, 0.0], 0, kind);
+            m.bullets = vec![(m.tick, b)];
+            m.step(arena, &[Input::default(); 2], w);
+            (m.players[1].health, m.players[1].stun)
+        };
+        let (arena, mut m, w) = duel();
+        m.players[1].health = 5;
+        assert_eq!(shot(&mut m, &arena, &w, 40.0), (4, STUN_HIT));
+        assert_eq!(shot(&mut m, &arena, &w, 40.0), (4, STUN_HIT));
+        assert_eq!(shot(&mut m, &arena, &w, 55.0).0, 3);
+        assert_eq!(shot(&mut m, &arena, &w, 60.0).0, 2);
+        assert_eq!(shot(&mut m, &arena, &w, 61.0).0, 0);
+        let reaction = 0x2E;
+        assert!(
+            matches!(m.players[1].action, Action::Hurt { reaction: r, lethal: true, .. } if r == reaction)
+        );
+        assert_eq!((m.players[0].kills, m.players[0].headshots), (1, 1));
+
+        let (arena, mut m, w) = duel();
+        m.players[1].health = 3;
+        assert_eq!(shot(&mut m, &arena, &w, 55.0), (1, STUN_HIT));
+        let (arena, mut m, w) = duel();
+        assert_eq!(shot(&mut m, &arena, &w, 60.5), (4, STUN_HIT));
     }
 
     /// `remove_player`: nobody changes slot; the leaver's projectiles, pickups and fires go, its

@@ -255,10 +255,9 @@ impl Bots {
     }
 
     /// Where the bot in match slot `slot` aims this frame, while it holds R: the game's aim point
-    /// (G+0x17A8.., with the skill's lag and jitter). The game fires a bot's shots from the muzzle
-    /// along this aim (s126+0x16C yaw, +0x170 pitch), not along its facing (V bot_bullets_lldb.txt:
-    /// facing 300.9°, aim and bullets 293.4°); conker-rules fires along the facing, so [`Bots::tick`]
-    /// turns the facing onto the aim's yaw instead, and the pitch is lost.
+    /// (G+0x17A8.., with the skill's lag and jitter). The game fires a bot's shots along this aim
+    /// (s126+0x16C yaw, +0x170 pitch), not along its facing (V bot_bullets_lldb.txt: facing 300.9°,
+    /// aim and bullets 293.4°): [`Bots::scopes`] hands conker-rules the ray from the eye through it.
     pub fn aim(&self, slot: usize) -> Option<[f32; 3]> {
         *self.aims.get(self.by_slot(slot)?)?
     }
@@ -275,7 +274,9 @@ impl Bots {
     /// bazooka Tedi, facing = aim yaw) and its shot follows the aim's yaw and pitch (s126+0x16C,
     /// +0x170; 0x16: V beach-gunner r1, 31 rockets to 0.3°), which conker-rules reads from
     /// `body.scope_yaw` and `scope_pitch`. Other weapons fire along the facing there (twin guns:
-    /// flag 0, V).
+    /// flag 0, V), but a bot's bullets follow its aim ray (s126+0x13C, +0x130: `Match::aims`, from
+    /// the eye 67.5 up through [`Self::aim`]), the twin guns' toward what it meets, the pistol's
+    /// and 0x23's along its pitch, so they reach a target above or below it.
     ///
     /// And every slot's reach for pickups (`Match::reach`, s126+0x1AF): a bot's as its script
     /// last set it (command 0x7B, [`Npc::pickup`]), a human's the default. Without it a bot took
@@ -288,6 +289,16 @@ impl Bots {
                 f.scope_pitch = scope.map_or(0.0, |s| s.1);
             }
         }
+        m.aims = (0..m.players.len())
+            .map(|s| {
+                let k = self.by_slot(s).filter(|&k| self.bot[k])?;
+                let (at, p) = (self.aims[k]?, m.players[s].body.pos);
+                let eye = [p[0], p[1] + 67.5, p[2]];
+                let d: [f32; 3] = core::array::from_fn(|j| at[j] - eye[j]);
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                (len > 0.0).then(|| (eye, d.map(|c| c / len)))
+            })
+            .collect();
         m.reach = (0..m.players.len())
             .map(|s| match self.by_slot(s) {
                 Some(k) if self.bot[k] => self.npcs[k].pickup,

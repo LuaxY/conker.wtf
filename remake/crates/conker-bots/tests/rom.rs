@@ -744,7 +744,7 @@ fn colors_keeps_its_flags_through_a_join_and_a_leave() {
 
 /// War: Colors with bots, as the server runs it (7 bots, the squirrels in the even slots, and an
 /// idle human, a Tedi): a collector takes the enemy flag within 5,400 frames (here a Tedi, the
-/// green flag, at 2,398; V bots1: a squirrel, the red flag, 1,719 frames in). The collectors' way
+/// green flag, at 2,292; V bots1: a squirrel, the red flag, 1,719 frames in). The collectors' way
 /// to each flag passes a melee pickup (7 at node 109, 6 by the green flag's ledge): a bot's reach
 /// is the script's, 0 out of state 6 (V, the oracle's s126+0x1AF), so it leaves it. Without the
 /// reach it took it, turned back to fetch its preferred weapon (state 6), and no flag was taken
@@ -1396,6 +1396,37 @@ fn no_jump_loop_in_the_0x34_corridor() {
             } else {
                 (*frames, *jumped) = (0, false);
             }
+        }
+    });
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+}
+
+/// 0x2D, seed 5: no bot stands (within 20 in x and z) over 3,000 frames, the oracle's longest
+/// being 2,975 (`bot_long3`). Its bullets once flew level along the facing, so p1, in AI state 8
+/// on the idle human 3,634 away and 415 up a ledge, stood and fired for the rest of the match
+/// (1,828 shots, 5 hits); they now follow its aim ray (`Match::aims`) and kill it.
+#[test]
+fn no_endless_stand_below_a_ledge_on_0x2d() {
+    let Some(rom) = rom() else { return };
+    let mut stay = [([0f32; 3], 0u32); 4];
+    let bots = deathmatch(&rom, 0x2D, 3, 5, 4500, |m, _| {
+        for (slot, f) in m.players.iter().enumerate().skip(1) {
+            let (at, since) = &mut stay[slot];
+            let p = f.body.pos;
+            if (p[0] - at[0]).abs() >= 20.0
+                || (p[2] - at[2]).abs() >= 20.0
+                || (p[1] - at[1]).abs() >= 60.0
+            {
+                (*at, *since) = (p, m.tick);
+            }
+            assert!(
+                m.tick - *since <= 3000,
+                "slot {slot} stands at {at:?} from {since}"
+            );
         }
     });
     assert!(
