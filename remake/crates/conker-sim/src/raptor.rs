@@ -7,7 +7,7 @@
 use crate::collision::CollisionWorld;
 use crate::movement::{
     BUTTON_A, GROUND_Y_VEL, Input, Other, PlayerState, angle_diff, cos_sin, deadzone, follow_floor,
-    push_body, rise_along, sweep_walls, target_angle,
+    push_apart, rise_along, sweep_walls, target_angle,
 };
 
 /// The raptor's clips (obj+0x84), which its state (+0x85) mirrors while it moves.
@@ -188,7 +188,7 @@ pub fn step(
             p.pos[1] += 0.5 * p.y_vel - 0.275 * p.gravity;
             (p.y_vel, p.gravity) = fall(p.y_vel, p.gravity);
         }
-        push_body(&mut p.pos, body([0.0; 3]), others);
+        push_apart(&mut p.pos, body([0.0; 3]), others);
         p.y_vel = sweep_walls(p, world, old, p.y_vel);
         let floor = world.floor(p.pos[0], p.pos[2], p.pos[1], old[1], None);
         if let Some(f) = floor.filter(|f| p.y_vel < 0.0 && p.pos[1] <= f.y) {
@@ -204,7 +204,7 @@ pub fn step(
     p.pos[1] += d * rise;
     p.pos[2] -= d * s;
     let stepped_y = p.pos[1];
-    push_body(&mut p.pos, body([0.0; 3]), others);
+    push_apart(&mut p.pos, body([0.0; 3]), others);
     let pre = p.pos;
     let y_vel = sweep_walls(p, world, old, GROUND_Y_VEL);
     let state = p.state;

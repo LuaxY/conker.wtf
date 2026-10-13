@@ -292,6 +292,9 @@ fn pack_reads_back_as_the_rom_path() {
     let textures = rom.textures().unwrap();
     let tedi = extract_character::Character::load(&rom, 117).unwrap();
     let squirrel = conker_extract::on_tedi_rig(&rom, 128, &tedi).unwrap();
+    let squirrel = conker_extract::bind_faces(&rom, squirrel, &textures)
+        .unwrap()
+        .0;
     assert_eq!(squirrel.model.joints.len(), 28);
     let squirrel_glb = squirrel.gltf(&textures, true).unwrap().glb();
     // The slice's level less 0x2D's hidden placements.
@@ -746,6 +749,68 @@ fn pack_reads_back_as_the_rom_path() {
         (dm.characters[1].hitbox, dm.characters[1].body),
         (Some([53, 87, 71]), Some([47, 91, 66]))
     );
+
+    // The faces (`lab/research/mp-original/faces.md`): no glTF draws from a face segment (each is
+    // bound to its open look); a blinker's `character.json` has both eyes, whose materials draw
+    // its open PNG; no other character has `faces`.
+    let blinkers = [
+        "128", "136", "156", "157", "83", "144", "0", "150", "176", "22",
+    ];
+    for name in &manifest.characters {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        let materials = gltf["materials"].as_array().unwrap();
+        let image = |m: &Value| m["extras"]["image"].as_str().unwrap_or("").to_string();
+        assert!(
+            materials.iter().all(|m| !image(m).starts_with("segment")),
+            "{name}"
+        );
+        let blinks = blinkers.contains(&name.as_str());
+        let Some(json) = files.get(format!("characters/{name}/character.json").as_str()) else {
+            assert!(!blinks, "{name}");
+            continue;
+        };
+        let c: conker_assets::Character = serde_json::from_slice(json).unwrap();
+        let segments: Vec<u8> = c.faces.iter().map(|f| f.segment).collect();
+        assert_eq!(segments, if blinks { vec![6, 7] } else { vec![] }, "{name}");
+        let file = |p: &str| files[format!("characters/{name}/{p}").as_str()];
+        for f in &c.faces {
+            assert!(f.textures.iter().all(|t| file(t).starts_with(b"\x89PNG")));
+            for &m in &f.materials {
+                let texture = &materials[m]["pbrMetallicRoughness"]["baseColorTexture"]["index"];
+                let source = &gltf["textures"][texture.as_u64().unwrap() as usize]["source"];
+                let uri = gltf["images"][source.as_u64().unwrap() as usize]["uri"].as_str();
+                assert_eq!(
+                    file(uri.unwrap()),
+                    file(&f.textures[0]),
+                    "{name} material {m}"
+                );
+            }
+        }
+    }
+
+    // The materials' render modes (`lab/research/mp-original/alpha-scratch`): Conker's eye (0's
+    // material 12) blends; Colors cs5's lit tank, `40-7-9`, draws its lights (4368) blended.
+    let material = |name: &str, image: &str| -> Vec<(String, bool)> {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        (gltf["materials"].as_array().unwrap().iter())
+            .filter(|m| m["extras"]["image"] == image)
+            .map(|m| {
+                (
+                    m["alphaMode"].as_str().unwrap().into(),
+                    m["doubleSided"] == true,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(material("0", "flat 1937 mode 0"), [("BLEND".into(), false)]);
+    assert_eq!(
+        material("40-7-9", "flat 4368 mode 0"),
+        [("BLEND".into(), false)]
+    );
+    assert!(material("40", "flat 4368 mode 0").is_empty());
+    assert!(manifest.characters.contains(&"40-7-9".to_string()));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

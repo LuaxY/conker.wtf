@@ -520,14 +520,12 @@ fn accelerate(speed: f32, target: f32, accel: f32) -> f32 {
     }
 }
 
-/// A multiplayer side, and the model its players are: the squirrels (the SHC soldier, bank-01 model
-/// 128) or the Tediz (117, the oracle's Deathmatch character). The game picks the model by class:
-/// War: Total War puts team 0 on class 4 (model 128) and team 1 on class 3 (117); Deathmatch gives every
-/// slot class 3, unless a human picks a character in the menu, whose first is the squirrel (V: the
-/// oracle's obj+4). Both play the same clips under the same movement and combat rules (V); only their
-/// bodies differ ([`Other::player`], conker-rules' `damage::Body`). The cavemen (class 0xB, model 136,
-/// "Uga-Buga") are the bots of the original's Deathmatch on scene 0x3F (scenario 7): no base, the
-/// squirrel's bodies, the same clips and movement (V: `../lab/oracle/caveman_README.md`).
+/// A multiplayer side: the team and the base a player starts and respawns in, the squirrels (the
+/// SHC soldier, bank-01 model 128), the Tediz (117, the oracle's Deathmatch character) or the
+/// cavemen (136, the bots of the original's Deathmatch on scene 0x3F, scenario 7: no base; V
+/// `../lab/oracle/caveman_README.md`). War: Total War puts team 0 on class 4 (model 128) and team 1
+/// on class 3 (117). The body a player pushes and is hit with is its class's (conker-rules'
+/// `characters::body`), not its side's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
 pub enum Side {
@@ -548,19 +546,15 @@ pub struct Other {
 }
 
 impl Other {
-    /// A multiplayer player of `side`, at scale 0.5: the Tedi's radius 23, centre 33 up, vertical
-    /// scale 23/45; the squirrel's and the caveman's 30, 33 and 30/66 (V: the oracle's
-    /// obj+0xE4/0xE8/0xEC; +0xE6, 45 and 66, is the height the scale divides by).
-    pub fn player(side: Side, pos: [f32; 3]) -> Self {
-        let (radius, y_scale) = match side {
-            Side::Tediz => (23, f32::from_bits(0x3F02_D82E)),
-            Side::Squirrels | Side::Cavemen => (30, f32::from_bits(0x3EE8_BA2F)),
-        };
+    /// A body at `pos` of radius `r`, height `h` and centre `c` above the feet (obj+0xE4, +0xE6,
+    /// +0xE8): its vertical scale is r / h (+0xEC; V: the Tedi's 23/45 at scale 0.5, the
+    /// squirrel's 30/66, the raptor's 124/203; conker-rules' `characters::body` gives a class's).
+    pub fn new(pos: [f32; 3], [r, h, c]: [i16; 3]) -> Self {
         Self {
             pos,
-            radius,
-            lift: 33,
-            y_scale,
+            radius: r,
+            lift: c,
+            y_scale: f32::from(r) / f32::from(h),
         }
     }
 
@@ -587,13 +581,8 @@ impl Other {
 /// as 1.2, a body straight above pushes along +x). Distances are measured from where the player stood
 /// before any of this frame's pushes; equal bodies push each other (each in its own update). Public for
 /// the bodies the match rules move themselves (hit, dead, burning); returns whether it moved `pos`, the
-/// body of a player of `side`.
-pub fn push_apart(pos: &mut [f32; 3], side: Side, others: &[Other]) -> bool {
-    push_body(pos, Other::player(side, *pos), others)
-}
-
-/// [`push_apart`] for a body `me` of any size (a tank's, [`crate::tank::body`]).
-pub fn push_body(pos: &mut [f32; 3], me: Other, others: &[Other]) -> bool {
+/// position of body `me` (a player's, its class's; a tank's, [`crate::tank::body`]).
+pub fn push_apart(pos: &mut [f32; 3], me: Other, others: &[Other]) -> bool {
     let me = Other { pos: *pos, ..me };
     let start = *pos;
     for o in others {
@@ -737,7 +726,7 @@ pub fn sit(p: &mut PlayerState, seat: [f32; 3], yaw: u16) {
 /// (the speed's update ran before the jump): 15 along `angle`, the height by the velocity (26 left),
 /// the push out of `others` (the gun's body, the player no longer its gunner) and the walls; [`step`]
 /// flies it from the next frame.
-pub fn leap(p: &mut PlayerState, angle: u16, world: &CollisionWorld, side: Side, others: &[Other]) {
+pub fn leap(p: &mut PlayerState, angle: u16, world: &CollisionWorld, me: Other, others: &[Other]) {
     p.state = state::JUMP;
     (p.airborne, p.jumped, p.jump_held, p.turning) = (true, true, true, false);
     (p.air_frames, p.lock, p.timer) = (1, 0xFF, 0);
@@ -749,23 +738,23 @@ pub fn leap(p: &mut PlayerState, angle: u16, world: &CollisionWorld, side: Side,
     p.pos[0] += 0.5 * p.xz_speed * c;
     p.pos[2] -= 0.5 * p.xz_speed * s;
     integrate_y(p);
-    push_apart(&mut p.pos, side, others);
+    push_apart(&mut p.pos, me, others);
     p.y_vel = sweep_walls(p, world, old, p.y_vel);
 }
 
 /// Advances the player by one frame (V for the rules tagged in this module).
 pub fn step(p: &mut PlayerState, input: &Input, world: &CollisionWorld) {
-    step_among(p, input, world, Side::default(), &[]);
+    step_among(p, input, world, Other::new([0.0; 3], [23, 45, 33]), &[]);
 }
 
 /// [`step`] with the other bodies around (the other players, in object order: a player updated earlier
-/// this frame at its new position): the player, of `side`, is pushed out of them before the walls
+/// this frame at its new position): the player, of body `me`, is pushed out of them before the walls
 /// ([`push_apart`]).
 pub fn step_among(
     p: &mut PlayerState,
     input: &Input,
     world: &CollisionWorld,
-    side: Side,
+    me: Other,
     others: &[Other],
 ) {
     let (x, y) = if p.aiming {
@@ -826,9 +815,9 @@ pub fn step_among(
     .then(|| deadzone(input.stick_x));
     let waiting = p.state == state::HIGH_JUMP && !p.airborne;
     let choice = if p.airborne {
-        air(p, stick, a_held, world, old, side, others)
+        air(p, stick, a_held, world, old, me, others)
     } else {
-        ground(p, input, stick, world, old, side, others, twist_x)
+        ground(p, input, stick, world, old, me, others, twist_x)
     };
     if high && !p.airborne {
         // The press frame went as the old state's (V q2s5w 112: the speed and the slide unbraked).
@@ -896,7 +885,7 @@ fn ground(
     mut stick: Stick,
     world: &CollisionWorld,
     old: [f32; 3],
-    side: Side,
+    me: Other,
     others: &[Other],
     twist_x: Option<i8>,
 ) -> Choice {
@@ -983,7 +972,7 @@ fn ground(
     let stepped_y = p.pos[1];
     let y_vel = p.y_vel - GRAVITY_FALL;
     p.pos[1] += 0.5 * y_vel;
-    push_apart(&mut p.pos, side, others);
+    push_apart(&mut p.pos, me, others);
     let pre = p.pos;
     let y_vel = sweep_walls(p, world, old, y_vel);
     p.walled = p.pos[0] != pre[0] || p.pos[2] != pre[2];
@@ -1331,7 +1320,7 @@ fn air(
     a_held: bool,
     world: &CollisionWorld,
     old: [f32; 3],
-    side: Side,
+    me: Other,
     others: &[Other],
 ) -> Choice {
     p.prev_strafe = false;
@@ -1402,7 +1391,7 @@ fn air(
     p.pos[0] += d * c;
     p.pos[2] -= d * s;
     integrate_y(p);
-    push_apart(&mut p.pos, side, others);
+    push_apart(&mut p.pos, me, others);
     p.heading = heading_from_facing(p.facing);
     let pre = p.pos;
     p.y_vel = sweep_walls(p, world, old, p.y_vel);
@@ -2139,16 +2128,25 @@ mod tests {
     }
 
     #[test]
+    fn bodies_scale_as_the_oracles() {
+        // obj+0xEC = radius / height in f32 (V: the Tedi's, the squirrel's, the raptor's RAM).
+        let y = |b| Other::new([0.0; 3], b).y_scale.to_bits();
+        assert_eq!(y([23, 45, 33]), 0x3F02_D82E);
+        assert_eq!(y([30, 66, 33]), 0x3EE8_BA2F);
+        assert_eq!(y([124, 203, 126]), 0x3F1C_5FD8);
+    }
+
+    #[test]
     fn overlapping_players_push_apart() {
         // Two player bodies 10 apart on x (radii 23 + 23): 0.4 of the 36 overlap along the line. The
         // push comes after the grounded frame's half step down (y − 4.5). Two squirrels (30 + 30):
         // 0.4 of 50.
         let w = flat();
-        for (side, x) in [(Side::Tediz, -14.4), (Side::Squirrels, -20.0)] {
+        for (body, x) in [([23, 45, 33], -14.4), ([30, 66, 33], -20.0)] {
             let mut p = PlayerState::spawn([0.0; 3], NORTH);
-            let other = Other::player(side, [10.0, -4.5, 0.0]);
-            step_among(&mut p, &Input::default(), &w, side, &[other]);
-            assert!((p.pos[0] - x).abs() < 1e-4, "{side:?}: {:?}", p.pos);
+            let other = Other::new([10.0, -4.5, 0.0], body);
+            step_among(&mut p, &Input::default(), &w, other, &[other]);
+            assert!((p.pos[0] - x).abs() < 1e-4, "{body:?}: {:?}", p.pos);
             assert_eq!(p.pos[2], 0.0);
         }
     }

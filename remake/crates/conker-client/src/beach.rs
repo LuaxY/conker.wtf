@@ -236,10 +236,10 @@ pub struct Strike {
 /// The puffs' quad and texture, the strike's glow and streak textures.
 #[derive(Resource)]
 pub(crate) struct Sprites {
-    quad: Handle<Mesh>,
+    pub(crate) quad: Handle<Mesh>,
     texture: Handle<Image>,
     glow: Handle<Image>,
-    streak: Handle<Image>,
+    pub(crate) streak: Handle<Image>,
 }
 
 /// A detonation ring: its first tick, alpha a and L ([`ring`]), and its own material once its scene

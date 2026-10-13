@@ -15,8 +15,8 @@
 //! (conker-sim's [`Follow`]): R's aim camera holds the player's stick. Joining players take the
 //! lowest free slot, else a new one, and start in their side's base ([`Game::placement`], mid-match
 //! too); leaving frees the slot, and nobody else changes slot (`Match::remove_player`). A client
-//! joins with its first message ([`Join`]): the side it asks for (squirrels or Tediz: the model and
-//! its body), else the side with fewer players (the squirrels on a tie). Bots take the squirrels in
+//! joins with its first message ([`Join`]): the side it asks for (squirrels or Tediz: its base and
+//! team), else the side with fewer players (the squirrels on a tie), and its pick (`--cheats`). Bots take the squirrels in
 //! even slots, the Tediz in odd ones. In a Deathmatch every player is its own team, and only its
 //! starts and respawns keep to its side's half; in Total War its side is its team (0 the squirrels,
 //! 1 the Tediz), which the rules score and rank by.
@@ -65,7 +65,7 @@
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
 //!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor|race] [--score 1-40|unlimited]
-//!   [--route 11|12] [--laps 1-20] [--seed N]
+//!   [--route 11|12] [--laps 1-20] [--seed N] [--cheats CODE,...|all]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
@@ -129,6 +129,13 @@
 //!   elevated one), `--laps 1-20` (default 5); untimed, 3 lives (`--lives`), no kill limit or score.
 //!   Every player a racer on a hoverboard (class 0xB, bots 0xC-0xF), the level's AI script drives
 //!   the bots (conker-rules' `race`); `RACE` lines log the laps, finishes, power-ups and the end.
+//! - `--cheats CODE,...|all`: the original's cheat codes that add characters to the select
+//!   (conker-rules' `characters::CHEATS`: WELLYTOP Conker, EASTEREGGSRUS Neo Conker, ...). A client
+//!   joins with a menu pick ([`Join::character`]): in a Deathmatch (on 2d, 34, 30, 1a, 3f) and in
+//!   Race its class is the pick's if the map's set (with the cheats) allows it, else the set's
+//!   default for its slot; no pick, or in the team modes and Tank, the scenario's class (the side's
+//!   in a Deathmatch: the squirrel's 4, the Tedi's 3, the caveman's 0xB). Bots keep the scenario's.
+//!   The allowed picks go out in `MatchView::characters`.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -153,7 +160,7 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors, heist, race, raptor, tank, traps};
+use conker_rules::{beach, characters, colors, heist, race, raptor, tank, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
@@ -206,6 +213,8 @@ struct Setup {
     cavemen: bool,
     /// `--seed N`: the match RNG starts at the game's seed ^ N (0 the game's; runs to compare).
     seed: u64,
+    /// `--cheats`: the cheat bits on (`D_800E9D00`), which add picks ([`characters::CHEATS`]).
+    cheats: u32,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), String> {
@@ -346,6 +355,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
                     .ok_or_else(|| bad(&v))?;
             }
             "--seed" => setup.seed = value()?.parse().map_err(|_| bad("seed"))?,
+            "--cheats" => setup.cheats = cheats(&value()?).map_err(|v| bad(&v))?,
             "--time" | "--lives" | "--kills" | "--skill" | "--radar" | "--score" => {
                 let v = value()?;
                 score_given |= flag == "--score";
@@ -444,6 +454,20 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     Ok((setup, net))
 }
 
+/// `--cheats`: `all`, or cheat codes (any case) joined by commas ([`characters::CHEATS`]); the
+/// bits they set, or the code not found.
+fn cheats(list: &str) -> Result<u32, String> {
+    if list == "all" {
+        return Ok(characters::CHEATS.iter().fold(0, |m, c| m | c.1));
+    }
+    list.split(',').try_fold(0, |m, code| {
+        let c = characters::CHEATS
+            .iter()
+            .find(|c| c.0.eq_ignore_ascii_case(code));
+        c.map(|c| m | c.1).ok_or_else(|| code.to_string())
+    })
+}
+
 struct Net {
     port: u16,
     digest_file: Option<String>,
@@ -471,7 +495,7 @@ fn main() {
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
              [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor|race] [--score 1-40|unlimited] \
-             [--route 11|12] [--laps 1-20] [--seed N] \
+             [--route 11|12] [--laps 1-20] [--seed N] [--cheats CODE,...|all] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -845,7 +869,9 @@ impl Game {
     }
 
     /// The item a player on `side` starts holding (War: Beach's villagers: 0x3E), and its class
-    /// (Beach's: the next villager's of [`beach::CLASSES`], the Tediz' 3; else 0).
+    /// (Beach's: the next villager's of [`beach::CLASSES`], the Tediz' 3; on 0x1A the Wise Guy's
+    /// 1; else the side's: the squirrel's 4, the Tedi's 3, the caveman's 0xB, as the original's War
+    /// modes and 0x3F's Deathmatch bots).
     fn start_item(&self, side: Side) -> Option<u8> {
         match self.setup.settings.beach {
             true => (side == Side::Squirrels).then_some(beach::ITEM),
@@ -862,7 +888,10 @@ impl Game {
                 Side::Tediz => raptor::CLASS,
                 _ => raptor::CAVEMAN,
             },
-            (false, _) => u8::from(self.vault),
+            (false, _) if self.vault => 1,
+            (false, Side::Squirrels) => 4,
+            (false, Side::Tediz) => 3,
+            (false, Side::Cavemen) => raptor::CAVEMAN,
             (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
             (true, _) => beach::TEDI_CLASS,
         }
@@ -896,6 +925,37 @@ impl Game {
             _ => self.members(s) < beach::MAX_VILLAGERS,
         };
         [side, other].into_iter().find(|&s| room(s))
+    }
+
+    /// Bit k: menu pick k may be played (`MatchView::characters`): the map's set with the
+    /// cheats, in its Deathmatch and Race; 0 in the team modes and Tank (no select, C).
+    fn characters(&self) -> u32 {
+        let s = self.setup.settings;
+        match s.total_war || s.colors || s.beach || s.heist || s.raptor {
+            true => 0,
+            false => characters::allowed(u16::from(self.ai.scene), self.setup.cheats),
+        }
+    }
+
+    /// The class a human joining in `slot` on `side` plays: its pick's when it asked for one where
+    /// the map has a select (one not allowed: the set's default for the slot, logged), else the
+    /// scenario's ([`Game::class`]).
+    fn pick(&self, slot: usize, side: Side, asked: Option<u8>) -> u8 {
+        let scene = u16::from(self.ai.scene);
+        let Some(asked) = asked else {
+            return self.class(side);
+        };
+        let Some(k) = (self.characters() != 0)
+            .then(|| characters::pick(scene, self.setup.cheats, slot, asked))
+            .flatten()
+        else {
+            info!("slot {slot}: pick {asked:#x} ignored, no character select here");
+            return self.class(side);
+        };
+        if k != asked {
+            info!("slot {slot}: pick {asked:#x} not allowed here, the slot's default {k:#x}");
+        }
+        characters::PICKS[usize::from(k)].0
     }
 
     /// Humans in the match (every taken slot after the bots).
@@ -1313,7 +1373,7 @@ fn join_player(
         side,
         spawn_mask,
         start: game.start_item(side),
-        class: game.class(side),
+        class: game.pick(index, side, asked.character),
         ..Fighter::new(&place, team, tick)
     };
     // Its first ride test runs from where it stands, not from the slot's last player.
@@ -1355,8 +1415,8 @@ fn join_player(
         },
     ));
     info!(
-        "client {:?} connected via {transport} as {side:?} (asked {:?}); slot {index} on record {} at {:?} facing {}",
-        remote.0, asked.side, place.index, place.pos, place.facing
+        "client {:?} connected via {transport} as {side:?} (asked {:?}), class {:#x} (asked {:?}); slot {index} on record {} at {:?} facing {}",
+        remote.0, asked.side, fighter.class, asked.character, place.index, place.pos, place.facing
     );
 }
 
@@ -1761,9 +1821,15 @@ fn simulate(
     if !game.m.traps.list.is_empty() {
         traps::seat(&mut world.0, game.m.traps.offsets());
     }
+    // Race does not run before its first match: the original's race starts with its humans in, the
+    // participants humans first, so script 0xBC counts them (G+0x1EC8) from its first frame, as
+    // the match start's `restart_bots` has them here. Before the first human joins (the server's
+    // start) the bots would race alone, the script counting no human to hold them back, and all 7
+    // crashed at node 21's corner about 60 frames after the go (the warm-up, not the match).
+    let warm_up = game.m.settings.race && !game.started;
     // The AI script's effects (Total War's gas) go in before the step, its hits' events first.
     let mut events = Vec::new();
-    if let Some(bots) = &mut game.ai.bots {
+    if let Some(bots) = game.ai.bots.as_mut().filter(|_| !warm_up) {
         for &(p, _) in &rides {
             bots.lifted(p);
         }
@@ -1864,10 +1930,10 @@ fn simulate(
         history.at(v, view.tick, view.overstep)
     };
     let pre = game.m.clone();
-    events.extend(if game.setup.lagcomp {
-        game.m.step_seen(&game.arena, &inputs, &world, &seen)
-    } else {
-        game.m.step(&game.arena, &inputs, &world)
+    events.extend(match () {
+        _ if warm_up => Vec::new(),
+        _ if game.setup.lagcomp => game.m.step_seen(&game.arena, &inputs, &world, &seen),
+        _ => game.m.step(&game.arena, &inputs, &world),
     });
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
     for (p, (was, f)) in pre.players.iter().zip(&game.m.players).enumerate() {
@@ -2302,6 +2368,7 @@ fn publish(
             false => RaceView::default(),
             true => race_view(m, game.arena.track.nodes.len(), s.high, s.laps),
         },
+        characters: game.characters(),
     });
 }
 
@@ -3008,6 +3075,67 @@ mod tests {
         assert_eq!(g.class(Side::Squirrels), race::HUMAN);
     }
 
+    /// Character picks: `--cheats` (codes in any case, or `all`); the map's set in its Deathmatch and
+    /// Race, none in the team modes; a pick not allowed plays the set's default for the slot (two
+    /// humans may play the same); no pick, the side's class (the squirrel's 4, the Tedi's 3, the
+    /// caveman's 0xB).
+    #[test]
+    fn picks_by_map_mode_and_cheats() {
+        let setup = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s);
+        let all = setup(&["--cheats", "all"]).unwrap().cheats;
+        assert_eq!(all, 0x3_01F0);
+        let two = setup(&["--cheats", "wellytop,EATBOX"]).unwrap().cheats;
+        assert_eq!(two, 0xA0);
+        assert!(setup(&["--cheats", "wellytop,bovrilbullethole"]).is_err());
+        let mut g = game(Setup::default());
+        assert_eq!(g.characters(), 0x815);
+        let (s, t) = (Side::Squirrels, Side::Tediz);
+        assert_eq!([g.pick(7, s, None), g.pick(7, t, None)], [4, 3]);
+        assert_eq!([g.pick(7, s, Some(2)), g.pick(8, t, Some(2))], [3, 3]);
+        assert_eq!(
+            g.pick(7, t, Some(0xF)),
+            1,
+            "Conker refused: slot 7's default, the Wise Guy"
+        );
+        assert_eq!(
+            g.pick(4, t, Some(0xA)),
+            4,
+            "the raptor refused: slot 4's, the squirrel"
+        );
+        // 0x3F with every cheat: Conker and the raptor; the cavemen's 0xB without a pick.
+        g.ai.scene = 0x3F;
+        g.setup.cheats = all;
+        assert_eq!(g.characters(), 0x3F_CFFA);
+        assert_eq!([g.pick(7, t, Some(0xF)), g.pick(8, t, Some(0xA))], [0, 9]);
+        assert_eq!(g.pick(9, Side::Cavemen, None), 0xB);
+        // No select in the team modes and Tank.
+        g.setup.settings.raptor = true;
+        assert_eq!(
+            (g.characters(), g.pick(7, t, Some(0xF))),
+            (0, raptor::CLASS)
+        );
+        g.setup.settings = Settings {
+            tank: true,
+            ..Settings::default()
+        };
+        g.ai.scene = 0x24;
+        assert_eq!((g.characters(), g.pick(7, s, Some(0))), (0, tank::CLASS));
+        // Race: the racers; with no pick the scenario's human class.
+        g.setup = Setup {
+            settings: Settings {
+                race: true,
+                ..Settings::default()
+            },
+            ..Setup::default()
+        };
+        g.ai.scene = 0x33;
+        assert_eq!(g.characters(), 0x4380);
+        assert_eq!(
+            [g.pick(7, s, Some(9)), g.pick(7, s, None)],
+            [0xE, race::HUMAN]
+        );
+    }
+
     /// Raptor: map 3f only, `--score` 1-40 (default 20); bots in slots 2 and 6 of each 8 are
     /// raptors (team 1, class 9, the raptors' base), the others cavemen (team 0, class 0xB, the
     /// Ugas'), all with the club (a raptor never draws it, V); the outro by the winning team.
@@ -3202,7 +3330,7 @@ mod tests {
             Some([150.0, 0.0, 0.0]),
             Some([250.0, 0.0, 0.0]),
         ];
-        let tedi = [Hitbox::of(Side::Tediz); 3];
+        let tedi = [characters::body(3).hitbox; 3];
         assert_eq!(first_hit(&b, &now, &tedi), Some(2));
         assert_eq!(first_hit(&b, &seen, &tedi), Some(1));
         assert_eq!(first_hit(&b, &[Some([0.0; 3]), None, None], &tedi), None);

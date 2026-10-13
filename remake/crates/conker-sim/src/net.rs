@@ -3,7 +3,7 @@
 //! Each crate adds its own lightyear role (`client`/`server`) and transports; this module only
 //! registers what both sides must agree on: the input type ([`Input`], one per tick, its camera yaw
 //! included), the replicated player state ([`Player`], predicted by its owner), each player's
-//! combat state ([`Combat`]), the match ([`MatchView`]), the side a client asks for when it joins
+//! combat state ([`Combat`]), the match ([`MatchView`]), the side and pick a client asks for when it joins
 //! ([`Join`]) and what a client showed when it took an input ([`Saw`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
 //! the player): the server runs the match, each client predicts its own player with the same rules.
 
@@ -80,7 +80,10 @@ use serde::{Deserialize, Serialize};
 /// [`Combat::class`], its bites and drops in `anim`).
 /// 30: Race ([`MatchView::race`], [`RaceView`]; the racer's board and race-table entry in the
 /// fighter, conker-rules' `Fighter::ride`: the board is predicted).
-pub const PROTOCOL_ID: u64 = 30;
+/// 31: character picks: a client asks for one when it joins ([`Join::character`]), the map's
+/// allowed picks go out in [`MatchView::characters`], and the bodies follow [`Combat::class`]
+/// (conker-rules' `characters::body`), not the side.
+pub const PROTOCOL_ID: u64 = 31;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -113,7 +116,7 @@ pub struct Combat {
     pub slot: u16,
     pub team: u8,
     pub stun: u8,
-    /// The player's side: its model, and the body the others' frames push against and hit.
+    /// The player's side (its team in the War modes, its base), and before the picks its model.
     pub side: Side,
     pub health: u8,
     /// The held weapon's id (0: none), whether it is drawn, and the rounds left in its clip.
@@ -157,8 +160,10 @@ pub struct Combat {
     /// War: Colors: the player's team's score (what its place ranks by first: conker-rules'
     /// `Standing::score`). War: Beach's too.
     pub score: u16,
-    /// War: Beach: the record's class (conker-rules' `beach::model`: 156 below 0x1D, 157 from it, the
-    /// Tediz' 3 is 117), re-rolled at each respawn; frames left of the escape's freeze (G+0x224C: the
+    /// The record's class: its model, scale and bodies (conker-rules' `characters`: `model`,
+    /// `scale`, `body`; the others' frames push against and hit its body), the scenario's or a
+    /// human's pick's (War: Beach's villager looks re-rolled at each respawn, `beach::model`: 156
+    /// below 0x1D, 157 from it, the Tediz' 3 is 117); frames left of the escape's freeze (G+0x224C: the
     /// script's 150 for a human, 30 for a bot, from the frame after it stepped into a tunnel; the
     /// player respawns on the next villager record as it ends); the 90 s deadline in VIs (G+0x1574,
     /// human villagers only: the HUD's countdown is `deadline / 60`; 0 struck).
@@ -355,6 +360,9 @@ pub struct MatchView {
     /// `rounds` how many); no clock (`time` 0), the lives count.
     pub race: bool,
     pub racing: RaceView,
+    /// Bit k: menu pick k (conker-rules' `characters::PICKS`) may be played here, the map's set with
+    /// the server's cheats (`characters::allowed`); 0: no select (the team modes, Tank).
+    pub characters: u32,
 }
 
 /// Race's route, countdown, race table and missiles as the clients draw them (conker-rules'
@@ -453,10 +461,13 @@ pub struct Saw {
 }
 
 /// A client's first message: the side it asks for (`None`: the server's pick, the side with fewer
-/// players). The server puts the player in the match when it arrives.
+/// players) and the menu pick it plays (conker-rules' `characters::PICKS`; `None`: the scenario's
+/// class, by the side; one the map does not allow plays the set's default for the slot). The server
+/// puts the player in the match when it arrives.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Join {
     pub side: Option<Side>,
+    pub character: Option<u8>,
 }
 
 /// Over, the results' RESTART: this client's player wants the next match now.

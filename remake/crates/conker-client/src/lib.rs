@@ -24,6 +24,7 @@ pub mod hud;
 pub mod lights;
 pub mod outro;
 pub mod projectiles;
+pub mod race;
 pub mod raptor;
 pub mod render;
 pub mod results;
@@ -165,6 +166,9 @@ pub struct Config {
     /// `side=squirrels|tediz|cavemen`: the side to play on (its model), sent when joining; default
     /// the server's pick, the side with fewer players (the Tediz against caveman bots).
     pub side: Option<Side>,
+    /// `character=N`: the menu pick to play (conker-rules' `characters::PICKS`, 0-21), sent when
+    /// joining; default none, the scenario's class.
+    pub character: Option<u8>,
     /// `map=2d|30|34|3f|2b`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
     pub map: String,
@@ -192,6 +196,7 @@ impl Config {
             offscreen: false,
             log: None,
             side: None,
+            character: None,
             map: String::new(),
         };
         for (key, value) in pairs {
@@ -232,6 +237,7 @@ impl Config {
                 "offscreen" => cfg.offscreen = true,
                 "log" => cfg.log = Some(value),
                 "map" => cfg.map = value,
+                "character" => cfg.character = Some(value.parse().map_err(|_| bad())?),
                 "side" => {
                     cfg.side = Some(match value.as_str() {
                         "squirrels" => Side::Squirrels,
@@ -588,30 +594,36 @@ pub const DON_WEASO: &str = "134";
 /// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
 /// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`], the [`CASH`]
 /// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them), on 24 the tank
-/// ([`tank::MODEL`]), on 3f the raptor ([`raptor::MODEL`]).
+/// ([`tank::MODEL`]), on 3f the raptor ([`raptor::MODEL`]), on 33 the bot racers ([`race::MODEL`]).
 pub fn characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
     let vault = (map == "1a").then_some([WISE_GUY, CASH, DON_WEASO]);
     let tank = (map == "24").then_some(tank::MODEL);
     let raptor = (map == "3f").then_some(raptor::MODEL);
+    let racers = (map == "33").then_some(race::MODEL);
     PACK_CHARACTERS
         .into_iter()
         .chain(villagers)
         .chain(vault.into_iter().flatten())
         .chain(tank)
         .chain(raptor)
+        .chain(racers)
         .collect()
 }
 
 /// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
 /// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], a tank (24's)
-/// the tank, a raptor (3f's) the raptor, anyone else is its side's.
+/// the tank, a raptor (3f's) the raptor, a caveman or Race's human (class 0xB) 136 whatever its
+/// side, a bot racer (33's 0xC-0xF) 144; anyone else is its side's.
 pub fn body(c: &Combat) -> usize {
     match c.class {
         0x11..=0x20 => {
             PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
         }
-        1 | conker_rules::tank::CLASS | conker_rules::raptor::CLASS => PACK_CHARACTERS.len(),
+        1 | conker_rules::tank::CLASS | conker_rules::raptor::CLASS | 0xC..=0xF => {
+            PACK_CHARACTERS.len()
+        }
+        conker_rules::race::HUMAN => Side::Cavemen as usize,
         _ => c.side as usize,
     }
 }
@@ -774,7 +786,8 @@ fn spawn_eye(spawns: &[SpawnPoint], pos: [f32; 3]) -> [f32; 3] {
 /// Runs the client on the asset pack's data and the world built from it, as the server builds it
 /// ([`scene_world`]; headless uses the world, spawns and clip lengths; windowed draws the pack's
 /// glTF models too, and the HUD, [`hud`]), with its sound if it has some ([`audio`]; headless only
-/// logs it). `script`: the lines of `script=PATH`; `raptor`: on 3f, its `raptor.json` ([`raptor`]).
+/// logs it). `script`: the lines of `script=PATH`; `raptor`: on 3f, its `raptor.json` ([`raptor`]);
+/// `race`: on 33, its `race.json` ([`race`]).
 pub fn run(
     cfg: Config,
     slice: Slice,
@@ -782,6 +795,7 @@ pub fn run(
     sound: Option<Audio>,
     script: Vec<ScriptLine>,
     raptor: Option<conker_assets::raptor::Raptor>,
+    race: Option<conker_assets::race::Race>,
 ) {
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
@@ -811,6 +825,7 @@ pub fn run(
         raptor,
         raptor_clips.unwrap_or_default(),
     );
+    race::build(&mut app, !cfg.headless, race, slice.nav.clone());
     lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     let triggers = slice.triggers.clone();
@@ -974,7 +989,11 @@ fn attach(
     for (p, combat, mut cam) in &mut cameras {
         if combat.lives > cam.lives {
             cam.lives = combat.lives;
-            cam.follow = Follow::spawn(spawn_eye(&spawns.0, p.pos), p);
+            // A racer comes back on the track, not on a spawn record: its camera cuts behind it.
+            match race::racer(combat.class) {
+                true => cam.tank = None,
+                false => cam.follow = Follow::spawn(spawn_eye(&spawns.0, p.pos), p),
+            }
             info!("respawned at {:?}: the camera cuts", p.pos);
         }
     }
@@ -1145,6 +1164,7 @@ pub fn rival(c: &Combat, body: PlayerState) -> Fighter {
         weapon: (c.weapon != 0).then_some(c.weapon),
         drawn: c.drawn,
         side: c.side,
+        class: c.class,
         deaths: c.deaths,
         out: c.out,
         ..Fighter::new(&place, c.team, 0)
@@ -1285,7 +1305,8 @@ fn predict(
     mut shows: ResMut<Shows>,
 ) {
     let tick = timeline.tick().0;
-    let over = game.iter().any(|m| m.phase >= 2) || !sync.is_none_or(|s| s.is_synced());
+    let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
+        || !sync.is_none_or(|s| s.is_synced());
     let settings = game
         .iter()
         .next()
@@ -1320,7 +1341,7 @@ fn predict(
             }
             let cam = &mut *camera;
             let raptor = f.class == conker_rules::raptor::CLASS;
-            if (settings.tank || raptor) && cam.tank.is_none() {
+            if (settings.tank || raptor || settings.race) && cam.tank.is_none() {
                 cam.tank = Some((cam.follow, tank::Cam::default()));
             }
             let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
@@ -1328,12 +1349,15 @@ fn predict(
             f.take_camera(foot);
             match &mut cam.tank {
                 Some((_, state)) if raptor => raptor::camera(&mut cam.follow, state, f, &world),
+                Some((_, state)) if settings.race => {
+                    race::camera(&mut cam.follow, state, f, m.tick)
+                }
                 Some((_, state)) => tank::camera(&mut cam.follow, state, f, &input.0, &world),
                 None => {}
             }
             cam.aims[tick as usize % AIMS] = Aim::of(f);
             cam.drawn.step(f, m.tick, &cam.follow, &input.0, &world);
-            // A tank's (a raptor's) view follows the predicted body through a correction.
+            // A tank's (a raptor's, a racer's) view follows the predicted body through a correction.
             if cam.tank.is_some() {
                 cam.drawn.camera = None;
             }
@@ -1378,7 +1402,8 @@ fn predict_again(
     shows: Res<Shows>,
 ) {
     let tick = timeline.tick().0;
-    let over = game.iter().any(|m| m.phase >= 2) || !sync.is_none_or(|s| s.is_synced());
+    let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
+        || !sync.is_none_or(|s| s.is_synced());
     let settings = game
         .iter()
         .next()
@@ -1428,6 +1453,20 @@ fn tick_anims(
             Some(f) if predicted => f.state.anim,
             _ => shown_anim(p, combat, predicted),
         };
+        // A racer's board states show their clips (the kick's while it runs: the local racer's
+        // predicted board, the others' race table).
+        let racing = combat.is_some_and(|c| race::racer(c.class)) && game.iter().any(|m| m.race);
+        let id = match (racing, combat) {
+            (true, Some(c)) => {
+                let kicking = match fighting {
+                    Some(f) if predicted => f.state.ride.board.kick > 0,
+                    _ => (game.iter().flat_map(|m| &m.racing.racers))
+                        .any(|r| r.slot == c.slot && r.kick > 0),
+                };
+                race::clip(id, kicking)
+            }
+            _ => id,
+        };
         let percent = if p.prev_strafe {
             STRAFE_PERCENT
         } else {
@@ -1437,6 +1476,9 @@ fn tick_anims(
         // A tank's clips (idle, fire) play at 1 (I: `func_150ED638` sets no rate).
         if combat.is_some_and(|c| c.class == conker_rules::tank::CLASS) {
             (req.rate, req.blend) = (1.0, 4.0);
+        }
+        if racing {
+            req.rate = combat.map_or(1.0, |c| race::rate(id, c.class));
         }
         if anim.0.id == NONE {
             req.blend = 0.0;

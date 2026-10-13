@@ -543,7 +543,7 @@ impl Grenade {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conker_sim::movement::Side;
+    use crate::characters;
 
     fn flat() -> CollisionWorld {
         let big = 10_000.0;
@@ -657,7 +657,7 @@ mod tests {
             [-0.757_27, 0.0, -0.653_1],
             [-219.11353, -290.90234, 5.3149147],
         );
-        let h = Hitbox::of(Side::Tediz);
+        let h = characters::body(3).hitbox;
         let t = hits_ellipsoid(p, dir, 200.0, body, h).unwrap();
         assert!((t - 119.05).abs() < 0.1, "{t}");
         assert_eq!(hits_ellipsoid(p, dir, 100.0, body, h), None);
@@ -668,7 +668,7 @@ mod tests {
     fn cylinder() {
         let dir = [1.0, 0.0, 0.0];
         let tedi = |from: [f32; 3], dir, len, at| {
-            hits_body(from, dir, len, at, Hitbox::of(Side::Tediz), false)
+            hits_body(from, dir, len, at, characters::body(3).hitbox, false)
         };
         assert_eq!(
             tedi([0.0, 40.0, 0.0], dir, 300.0, [146.0, 0.0, 20.0]),
@@ -688,7 +688,7 @@ mod tests {
                 dir,
                 300.0,
                 [146.0, 0.0, 30.0],
-                Hitbox::of(Side::Squirrels),
+                characters::body(4).hitbox,
                 crouched,
             )
         };

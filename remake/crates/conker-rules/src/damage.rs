@@ -6,7 +6,6 @@
 //! attacker's class table (melee, class 117 at `0x8020E380`).
 
 use conker_anim::combat as anim;
-use conker_sim::movement::Side;
 
 /// One damage-type entry.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -336,35 +335,13 @@ pub fn facing(reaction: u8) -> Facing {
 }
 
 /// A player's body for the area tests and the bullets' sweep: obj+0xD2 radius, +0xD4 half height
-/// and +0xD6 centre above the feet, at scale 0.5 (V: the oracle's RAM; they are half the model's
-/// bank-0x11 record's values, C).
+/// and +0xD6 centre above the feet (V: the oracle's RAM; the model's bank-0x11 record × the class's
+/// scale, C: [`crate::characters::body`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hitbox {
     pub radius: f32,
     pub half: f32,
     pub centre: f32,
-}
-
-impl Hitbox {
-    /// War: Raptor's raptor (class 9, model 83 at 0.7): 125, 202 and 125 (V, the oracle's RAM).
-    pub const RAPTOR: Self = Self {
-        radius: 125.0,
-        half: 202.0,
-        centre: 125.0,
-    };
-
-    /// The Tedi's 26, 43 and 35; the squirrel soldier's and the caveman's 36, 64 and 44.
-    pub fn of(side: Side) -> Self {
-        let [radius, half, centre] = match side {
-            Side::Tediz => [26.0, 43.0, 35.0],
-            Side::Squirrels | Side::Cavemen => [36.0, 64.0, 44.0],
-        };
-        Self {
-            radius,
-            half,
-            centre,
-        }
-    }
 }
 
 /// Explosion and melee reach (`func_1505C7D8` with the victim's ellipsoid [`Hitbox`]; C, V on
@@ -416,7 +393,7 @@ mod tests {
     fn grenade_reach() {
         let blast = [-577.993, -279.645, -238.12];
         let victim = [-219.113_5, -290.902_3, 5.314_9];
-        let tedi = Hitbox::of(Side::Tediz);
+        let tedi = crate::characters::body(3).hitbox;
         assert!(in_reach(blast, GRENADE_OUTER_R, victim, tedi));
         assert!(!in_reach(blast, GRENADE_INNER_R, victim, tedi));
         let at = [GRENADE_OUTER_R + 26.0 + 5.0, -35.0, 0.0];
@@ -425,7 +402,7 @@ mod tests {
             [0.0; 3],
             GRENADE_OUTER_R,
             at,
-            Hitbox::of(Side::Squirrels)
+            crate::characters::body(4).hitbox
         ));
     }
 }

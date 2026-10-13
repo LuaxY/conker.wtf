@@ -143,6 +143,10 @@ pub struct Shown {
     /// War: Raptor: its strip ([`raptor_strip`]); the carried egg's and the held body's icons
     /// ([`RAPTOR_ICONS`]) shown this frame.
     pub raptor: Option<[bool; 2]>,
+    /// Race: its HUD ([`RaceHud`]) in place of the kills and rank; its STATS' rows (each human's
+    /// place, total and best lap in VIs, −1 none) in place of the results' columns.
+    pub race: Option<RaceHud>,
+    pub race_rows: Option<Vec<[i32; 3]>>,
 }
 
 /// War: Raptor's icons (HUD flag 0x4000, C `func_151E89A0`): the carried egg's (`atlas2`) while a
@@ -175,6 +179,51 @@ pub const TANK_ICONS: [(u8, [u16; 4]); 4] = [
     (conker_rules::tank::SHELLS, [0, 39, 22, 12]),
     (conker_rules::tank::SHIELD, [0, 4, 22, 12]),
 ];
+
+/// Race's HUD (flags 0x1096: the lives, the item, the health, the place and lap, the overview map;
+/// C `func_150918EC`'s 0x80 and 0x1000 branches; V race-pack-scratch hud-k250, hud-b2, hud-h230).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RaceHud {
+    /// The place (1 the first), the lap on (0 the first) and the laps: the place, "LAP l/n" and
+    /// the race clock while racing (`laps ≥ lap + 1`).
+    pub place: u8,
+    pub lap: i16,
+    pub laps: u8,
+    /// The race clock and the last lap (VIs; the last shown once > 0).
+    pub time: i32,
+    pub last: i32,
+    /// How many of the item (`Shown::weapon`) are held: one icon each, [`RACE_ITEM_STEP`] apart.
+    pub items: u8,
+    /// The overview map's texture and its dots: centre (frame px) and colour.
+    pub map: Option<String>,
+    pub dots: Vec<([f32; 2], Rgba)>,
+}
+
+/// Race's item icons go left from the weapon icon's place this far apart (V hud-h230: three
+/// missiles at 232, 214, 196 in the split view).
+pub const RACE_ITEM_STEP: f32 = 18.0;
+/// The place, centred on the view (`func_15042D94(centre, top + 5, 0xC1, "%d", …)` with its
+/// suffix), "LAP l/n" (left + 0x1D, top + 0x13), the race clock (`func_150916B4(centre, bottom −
+/// 12)`) and the last lap (left + 0x17, top + 0x1E): V hud-b2's "1st", "LAP 1/1", "0:00:00".
+const RACE_PLACE: [i16; 2] = [146, 5];
+const RACE_LAP: [i16; 2] = [31, 19];
+const RACE_CLOCK: [i16; 2] = [146, 204];
+const RACE_LAST: [i16; 2] = [25, 30];
+/// The overview map: 64 × 64 at the view's top right, its texels × (255, 255, 255, 0x80) (V
+/// hud-b2 [226, 13]); the dots 2 × 2 around a point off its centre (right − 32, top + 45).
+const RACE_MAP: [f32; 4] = [226.0, 13.0, 64.0, 64.0];
+const RACE_DOT: f32 = 2.0;
+const RACE_MAP_CENTRE: [f32; 2] = [258.0, 45.0];
+/// The overview map's transform: f32 `0x8009DE78` and `0x8009DE74` (quarter pixels), f32
+/// `0x8009DE6C` (quarter pixels a unit) (V cd 600: 3.6, 3.4, 0.013; the own dot to the quarter
+/// pixel at cd 600 and res 225).
+const RACE_MAP_OFFSET: [f32; 2] = [3.6, 3.4];
+const RACE_MAP_SCALE: f32 = 0.013;
+/// Race's STATS (phase 6, in the level; `func_151EA15C`, C; V res 320): each human's label at
+/// (72, 70 + 18k), ": place" centred on x 88 and its times on the label's top + 2: the total at
+/// 138, the best lap at 188 between "(" at 168 and ")" at 214.
+const RACE_LABEL: [i16; 2] = [72, 70];
+const RACE_ROW: i16 = 18;
 
 /// War: Heist's strip: each team's bags, the score limit (the pips per team), whether a team has a
 /// participant with lives (else its skull), and the carrying team while the blink shows the "+1"
@@ -470,6 +519,36 @@ fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<S
     out
 }
 
+/// A race time (`func_150916B4`, C): `vis` VIs (capped at 0x57030) as minutes, ":ss" and ":cc"
+/// (hundredths: the VIs past the second × 100 / 60), each left-aligned, at x − 16 (5 more left from
+/// 10 minutes), x − 8 and x + 8, white over a black shadow (V hud-b2's "0:00:00" at 130, 138, 154);
+/// none (negative) "--", ": --", ": --".
+fn race_time(hud: &Hud, vis: i32, [x, y]: [i16; 2], anchor: Anchor, z: f32) -> Vec<Sprite> {
+    let vis = vis.min(0x57030);
+    let (secs, cc) = (vis / 60, (vis % 60 * 100 / 60).min(99));
+    let wide = if secs / 60 >= 10 { 5 } else { 0 };
+    let parts = match vis {
+        0.. => [
+            (secs / 60).to_string(),
+            format!(":{:02}", secs % 60),
+            format!(":{cc:02}"),
+        ],
+        _ => ["--".into(), ": --".into(), ": --".into()],
+    };
+    let mut out = Vec::new();
+    for (part, at) in parts.iter().zip([x - 16 - wide, x - 8, x + 8]) {
+        let t = Text {
+            anchor,
+            at: [at, y],
+            align: Align::Left,
+            colour: [255; 4],
+            shadow: Some([0, 0, 0, 255]),
+        };
+        out.extend(text(hud, part, None, &t, z));
+    }
+    out
+}
+
 /// A picture drawn four times around `centre`, mirrored: `p` is the top-left quarter (its centre
 /// at its bottom-right corner), each quarter `size` wide.
 fn quarters(
@@ -655,6 +734,7 @@ pub fn stick(vi: u32) -> u32 {
 /// (`header`) its header over the rest, which goes `down` lower; War: Heist's (`heist`) with its
 /// own icons, label and columns, the bags second ([`HeistResults`]). The chosen button is
 /// [`sprites`]'.
+#[allow(clippy::too_many_arguments)]
 fn results(
     hud: &Hud,
     end: &End,
@@ -663,6 +743,7 @@ fn results(
     header: Option<Header>,
     beach: bool,
     heist: bool,
+    race: Option<&[[i32; 3]]>,
 ) -> Vec<Sprite> {
     let (r, t, h) = (&end.results, &end.teams, &end.heist);
     let (icons, label_at) = if heist {
@@ -698,7 +779,7 @@ fn results(
     let dx = 32.0 * stick(vi) as f32;
     (s.uv[0], s.uv[2]) = (s.uv[0] + dx, s.uv[2] + dx);
     out.push(s);
-    for p in icons {
+    for p in icons.iter().filter(|_| race.is_none()) {
         let [x, y, w, h] = p.rect;
         out.push(quad(
             &p.image,
@@ -721,6 +802,49 @@ fn results(
             sp
         })
     };
+    if let Some(race) = race {
+        let s = (4.0 / race.len() as f32).min(1.0);
+        for (n, &[place, total, best]) in race.iter().enumerate() {
+            let [x, y] = RACE_LABEL;
+            let at = [x, y + (f32::from(RACE_ROW) * s * n as f32) as i16];
+            let scale = |sprites: Vec<Sprite>| {
+                sprites.into_iter().map(move |mut sp| {
+                    let [px, py] = at.map(f32::from);
+                    let [x, y, w, h] = sp.rect;
+                    sp.rect = [px + (x - px) * s, py + (y - py) * s, w * s, h * s];
+                    sp
+                })
+            };
+            if let Some(label) = r.labels.get(n) {
+                let [_, _, w, h] = label.rect;
+                let q = quad(
+                    label,
+                    rect([at[0], at[1], w as i16, h as i16]),
+                    r.anchor,
+                    white,
+                    5.0,
+                );
+                out.extend(scale(vec![q]));
+            }
+            let top = at[1] + 2;
+            let t = |x: i16, align: Align| Text {
+                anchor: r.anchor,
+                at: [x, top],
+                align,
+                colour: white,
+                shadow: Some(r.shadow),
+            };
+            let place = usize::try_from(place).unwrap_or(0);
+            let line = format!("       : {place}");
+            let mut row = text(hud, &line, Some(suffix(place)), &t(88, Align::Centre), 5.0);
+            row.extend(race_time(hud, total, [138, top], r.anchor, 5.0));
+            row.extend(text(hud, "(", None, &t(168, Align::Left), 5.0));
+            row.extend(race_time(hud, best, [188, top], r.anchor, 5.0));
+            row.extend(text(hud, ")", None, &t(214, Align::Left), 5.0));
+            out.extend(scale(row));
+        }
+        return out;
+    }
     for (n, (colour, row)) in rows.iter().enumerate() {
         let dy = (f32::from(r.rows[1]) * s * n as f32) as i16 + down;
         if let Some(label) = r.labels.get(n) {
@@ -880,6 +1004,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             s.header,
             s.beach,
             s.heist.is_some(),
+            s.race_rows.as_deref(),
         );
         // War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
         if let Some(n) = s.strip {
@@ -992,9 +1117,12 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 true => power.as_ref(),
                 false => w.icons.get(&s.weapon),
             };
-            if let Some(icon) = icon {
+            // Race: one icon per item held.
+            let n = s.race.as_ref().map_or(1, |r| r.items);
+            for (k, icon) in icon.into_iter().cycle().take(n.into()).enumerate() {
                 let [_, _, iw, ih] = icon.rect.map(f32::from);
                 let [x, y] = w.at.map(f32::from);
+                let x = x - RACE_ITEM_STEP * k as f32;
                 out.push(quad(icon, [x, y, iw, ih], w.anchor, white, 3.0));
             }
         }
@@ -1007,7 +1135,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             let z = if s.skull.is_some() { OUT_Z + 1.0 } else { 5.0 };
             out.extend(strip(hud, team_strip, n, heads, team_strip.anchor, z));
         }
-        None if s.ending.is_none() && s.heist.is_none() => {
+        None if s.ending.is_none() && s.heist.is_none() && s.race.is_none() => {
             out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
             out.extend(text(
                 hud,
@@ -1063,6 +1191,51 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             rect,
         };
         out.push(quad(&p, at.map(f32::from), top, white, 5.0));
+    }
+    // Race: the overview map and its dots; while racing, the place, the lap and the race clock;
+    // the last lap.
+    if let Some(r) = &s.race {
+        let right = Anchor(Horizontal::Right, Vertical::Top);
+        let left = Anchor(Horizontal::Left, Vertical::Top);
+        if let Some(map) = &r.map {
+            let p = Picture {
+                texture: map.clone(),
+                rect: [0, 0, 64, 64],
+            };
+            out.push(quad(&p, RACE_MAP, right, [255, 255, 255, 0x80], 4.0));
+            let d = RACE_DOT / 2.0;
+            for &([x, y], colour) in &r.dots {
+                out.push(solid(
+                    [x - d, y - d, RACE_DOT, RACE_DOT],
+                    right,
+                    colour,
+                    4.5,
+                ));
+            }
+        }
+        if i16::from(r.laps) > r.lap {
+            let place = usize::from(r.place.max(1));
+            let t = Text {
+                anchor: top,
+                at: RACE_PLACE,
+                align: Align::Centre,
+                colour: white,
+                shadow: Some([0, 0, 0, 255]),
+            };
+            out.extend(text(hud, &place.to_string(), Some(suffix(place)), &t, 5.0));
+            let lap = format!("LAP {}/{}", r.lap.max(0) + 1, r.laps);
+            let t = Text {
+                anchor: left,
+                at: RACE_LAP,
+                ..t
+            };
+            out.extend(text(hud, &lap, None, &t, 5.0));
+            let bottom = Anchor(Horizontal::Centre, Vertical::Bottom);
+            out.extend(race_time(hud, r.time, RACE_CLOCK, bottom, 5.0));
+        }
+        if r.last > 0 {
+            out.extend(race_time(hud, r.last, RACE_LAST, left, 5.0));
+        }
     }
     if let Some(secs) = s.secs.filter(|_| s.ending.is_none_or(|k| k < 2)) {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
@@ -1489,6 +1662,7 @@ fn shown(
     everyone: &Query<(&Player, &Combat, Has<Predicted>), Or<(With<Predicted>, With<Interpolated>)>>,
     m: &MatchView,
     vi: u32,
+    race_map: Option<&str>,
 ) -> Shown {
     let (p, c, camera, anim) = own;
     let clock = &anim.0;
@@ -1537,6 +1711,11 @@ fn shown(
     if m.heist && m.cash.shown && carrier.is_none() {
         blips.push(blip(m.cash.pos, hud.heist.cash));
     }
+    // Race: the other racers in play on the overview map (C: `func_150859AC(i, 3) > 0`).
+    let dots: Vec<[f32; 3]> = (everyone.iter())
+        .filter(|(_, o, predicted)| !predicted && o.out == 0 && m.race)
+        .map(|(o, _, _)| o.pos)
+        .collect();
     let scope = camera.follow.cam.scope;
     // On a mounted gun its scope is the gun's sight; the weapon is the gun's (no icon: V one-view
     // DLs).
@@ -1594,7 +1773,7 @@ fn shown(
         kills: c.kills,
         rank: usize::from(places(&all, m.kill_limit)[0]),
         secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
-        radar: m.radar && !m.beach,
+        radar: m.radar && !m.beach && !m.race,
         blips,
         reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
         scope: (scope.on && gun.is_none()).then(|| {
@@ -1633,7 +1812,62 @@ fn shown(
         raptor: m
             .raptor
             .then(|| [!eggs.is_empty(), m.raptors.prey != 0].map(|carried| carried && icons)),
+        race: (m.race.then(|| race_hud(m, c, p.pos, &dots, race_map))).flatten(),
+        race_rows: None,
     }
+}
+
+/// Race's STATS rows: each human (by slot) its place, total and best lap. The total is the race
+/// clock, which stopped the frame after the last lap's; −1 for a racer the end rule finished short
+/// of the laps (`completed`: whether each finished racer had its laps when this client first saw
+/// it finished; I: [`MatchView`] sends no total).
+pub fn race_rows(m: &MatchView, humans: &[u16], completed: &HashMap<u16, bool>) -> Vec<[i32; 3]> {
+    let mut rows: Vec<_> = (m.racing.racers.iter())
+        .filter(|r| humans.contains(&r.slot))
+        .map(|r| {
+            let total = match completed.get(&r.slot) {
+                Some(true) => (r.time - 2).min(conker_rules::race::TOTAL_CAP),
+                _ => -1,
+            };
+            (r.slot, [i32::from(r.place), total, r.best])
+        })
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    rows.into_iter().map(|r| r.1).collect()
+}
+
+/// Race's HUD for the racer `c` at `pos`, the others' at `others` (`dots`).
+fn race_hud(
+    m: &MatchView,
+    c: &Combat,
+    pos: [f32; 3],
+    others: &[[f32; 3]],
+    map: Option<&str>,
+) -> Option<RaceHud> {
+    let r = m.racing.racers.iter().find(|r| r.slot == c.slot)?;
+    let mut dots = vec![(race_dot(pos), [0, 255, 0, 255])];
+    dots.extend(others.iter().map(|&o| (race_dot(o), [255, 0, 0, 255])));
+    Some(RaceHud {
+        place: r.place,
+        lap: r.lap,
+        laps: m.racing.laps,
+        time: r.time,
+        last: r.last,
+        items: c.rounds,
+        map: map.filter(|_| c.out == 0).map(str::to_owned),
+        dots,
+    })
+}
+
+/// A racer's dot on the overview map (`func_150918EC`, C): its centre in quarter pixels,
+/// [`RACE_MAP_CENTRE`] plus [`RACE_MAP_OFFSET`] plus x (across) and z (down) ×
+/// [`RACE_MAP_SCALE`], truncated.
+pub fn race_dot([x, _, z]: [f32; 3]) -> [f32; 2] {
+    let q = |c: f32, off: f32, v: f32| (c * 4.0 + off + (v * RACE_MAP_SCALE).trunc()).trunc() / 4.0;
+    [
+        q(RACE_MAP_CENTRE[0], RACE_MAP_OFFSET[0], x),
+        q(RACE_MAP_CENTRE[1], RACE_MAP_OFFSET[1], z),
+    ]
 }
 
 /// This frame's HUD: the quads of [`sprites`] for the local player while connected, placed in the
@@ -1648,7 +1882,7 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros, blasts, fighting, view, heads, joints): (
+    (playing, outros, blasts, fighting, view, heads, joints, course): (
         Res<crate::outro::Playing>,
         Res<crate::outro::Outros>,
         Option<Res<crate::beach::Blasts>>,
@@ -1656,6 +1890,7 @@ fn draw(
         Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<HudCamera>)>,
         Query<&crate::held::Twisted, With<FollowCamera>>,
         Query<&GlobalTransform>,
+        Option<Res<crate::race::Course>>,
     ),
     timeline: Res<LocalTimeline>,
     (mut fading, mut escaped, mut ended): (
@@ -1663,12 +1898,13 @@ fn draw(
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
     ),
-    (mut fired, mut zoomed, mut stats, mut skull, mut opened): (
+    (mut fired, mut zoomed, mut stats, mut skull, mut opened, mut completed): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
         Local<(u32, f32, bool, Option<u32>)>,
         Local<Option<u32>>,
         Local<(u32, u8)>,
         Local<Option<u32>>,
+        Local<HashMap<u16, bool>>,
     ),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1696,7 +1932,10 @@ fn draw(
         }
         (None, None) => {
             let tick = timeline.tick().0;
-            let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick);
+            let map = (course.as_ref())
+                .and_then(|c| c.route(m.racing.route))
+                .map(|r| r.map.as_str());
+            let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick, map);
             // Weapon 0x16's R view: its tint from the frame the scope opened.
             let scope = own.2.follow.cam.scope;
             *opened = (scope.on && scope.weapon == 0x16).then(|| opened.unwrap_or(tick));
@@ -1803,15 +2042,35 @@ fn draw(
             } else {
                 *zoomed = Default::default();
             }
-            *stats = (m.phase == 2).then(|| stats.unwrap_or(tick));
+            // Race: whether each finished racer had its laps when first seen finished.
+            for r in (m.racing.racers.iter()).filter(|_| m.race) {
+                match r.order {
+                    0 => completed.remove(&r.slot),
+                    _ => Some(
+                        *completed
+                            .entry(r.slot)
+                            .or_insert(r.lap >= i16::from(m.racing.laps)),
+                    ),
+                };
+            }
+            // Race: its STATS in the level from the results (phase 6: no HUD); a human out ends it
+            // as Deathmatch's (result 2, V b1).
+            let raced = m.race && m.racing.results.is_some() && m.racing.result == 1;
+            let in_level = raced && m.phase == 0 && m.racing.results.is_some_and(|r| tick >= r);
+            *stats = (m.phase == 2 || in_level).then(|| stats.unwrap_or(tick));
             if let Some(at) = *stats {
                 let all: Vec<_> = (roster.iter())
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
                 let teams = crate::outro::team_mode(m);
                 let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach, m.heist);
-                let alpha = stats_alpha(tick - at + 1);
+                // Race's fade in from 0x10 (V res 271-320).
+                let alpha = stats_alpha(tick - at + 1 + u32::from(raced));
                 shown.results = Some((rows, menu.choice, alpha, 2 * tick));
+                if raced {
+                    let humans: Vec<u16> = (all.iter()).filter(|p| p.0).map(|p| p.1.slot).collect();
+                    shown.race_rows = Some(race_rows(m, &humans, &completed));
+                }
                 // Raptor's team headers are not in the pack: "YOU WIN" or "YOU LOSE" (I).
                 shown.header = teams.then(|| match header(&all, own.1.team, m.winner) {
                     Header::Team(t) if m.raptor => Header::You(t == own.1.team),
@@ -2652,6 +2911,108 @@ mod tests {
             "{bar:?}"
         );
         assert_eq!(alpha, 0x82);
+    }
+
+    /// Race's HUD where the original drew it (race-pack-scratch/runs: hud-b2, one view, the grid
+    /// of a 1-lap race: "1st", "LAP 1/1", "0:00:00", the map; hud-h230's three missiles, at the
+    /// split view's 232 + 28, one more pixel up); no kills, rank or clock.
+    #[test]
+    fn race_matches_the_originals_draws() {
+        let Some(hud) = pack_hud() else { return };
+        let race = |r: RaceHud| Shown {
+            secs: None,
+            radar: false,
+            weapon: conker_rules::race::MISSILE,
+            race: Some(r),
+            ..state()
+        };
+        let grid = RaceHud {
+            place: 1,
+            lap: 0,
+            laps: 1,
+            items: 3,
+            map: Some("race_map_low".into()),
+            ..RaceHud::default()
+        };
+        assert_eq!(
+            glyphs(&hud, &race(grid.clone())),
+            [
+                [136.0, 5.0, 142.0, 15.0],
+                [141.0, 1.0, 156.0, 16.0],
+                [10.0, 20.0, 18.0, 30.0],
+                [17.0, 20.0, 27.0, 30.0],
+                [26.0, 20.0, 35.0, 30.0],
+                [38.0, 19.0, 44.0, 29.0],
+                [43.0, 19.0, 48.0, 29.0],
+                [47.0, 19.0, 53.0, 29.0],
+                [130.0, 204.0, 138.0, 215.0],
+                [138.0, 206.0, 142.0, 213.0],
+                [141.0, 204.0, 149.0, 215.0],
+                [148.0, 204.0, 156.0, 215.0],
+                [154.0, 206.0, 158.0, 213.0],
+                [157.0, 204.0, 165.0, 215.0],
+                [164.0, 204.0, 172.0, 215.0],
+            ]
+        );
+        let s = race(grid.clone());
+        assert_eq!(
+            rects(&hud, &s, &texture("race_map_low")),
+            [([226.0, 13.0, 64.0, 64.0], [0.0, 0.0, 64.0, 64.0])]
+        );
+        let icons = rects(&hud, &s, &texture("atlas")).into_iter().map(|r| r.0);
+        let icons: Vec<_> = icons.filter(|r| r[2] == 14.0).collect();
+        assert_eq!(
+            icons,
+            [
+                [260.0, 5.0, 14.0, 12.0],
+                [242.0, 5.0, 14.0, 12.0],
+                [224.0, 5.0, 14.0, 12.0]
+            ]
+        );
+        // The race clock past 10 minutes 5 more to the left; the last lap at (25, 30); finished,
+        // no place, lap or clock.
+        let late = RaceHud {
+            time: 10 * 3600 + 61 * 60 + 59,
+            ..grid.clone()
+        };
+        let g = glyphs(&hud, &race(late));
+        assert_eq!(g[8][0], 125.0);
+        let last = RaceHud {
+            lap: 1,
+            last: 61 * 60 + 30,
+            ..grid
+        };
+        assert_eq!(glyphs(&hud, &race(last))[0], [9.0, 30.0, 15.0, 40.0]);
+        // The STATS in the level (V res 320): "STATS", the label at (72, 70), ':' at 88, the 1 and
+        // its suffix at (100, 68), the total from 122, "(" at 168, the best from 172, ")" at 214.
+        if hud.end.is_none() {
+            return;
+        }
+        let stats = Shown {
+            results: Some((Vec::new(), 0, 255, 0)),
+            race_rows: Some(vec![[1, 56, 110]]),
+            ..race(RaceHud::default())
+        };
+        assert_eq!(
+            rects(&hud, &stats, &texture("stats"))[0].0,
+            [116.0, 4.0, 64.0, 32.0]
+        );
+        assert_eq!(
+            rects(&hud, &stats, &texture("players"))[0].0,
+            [72.0, 70.0, 16.0, 16.0]
+        );
+        assert!(rects(&hud, &stats, &texture("stat_icons")).is_empty());
+        let x: Vec<f32> = glyphs(&hud, &stats).iter().map(|g| g[0]).collect();
+        assert_eq!(
+            x,
+            [
+                88.0, 95.0, 100.0, 122.0, 130.0, 133.0, 140.0, 146.0, 149.0, 156.0, 168.0, 172.0
+            ]
+            .into_iter()
+            .chain([180.0, 183.0, 190.0, 196.0, 199.0, 206.0, 214.0])
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(glyphs(&hud, &stats)[2], [100.0, 68.0, 115.0, 83.0]);
     }
 
     /// Total War's strip where the original drew it (the gas run's DL 3000: timed, Tediz 4,

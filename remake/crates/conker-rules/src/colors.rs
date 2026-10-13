@@ -10,7 +10,7 @@
 
 use conker_anim::combat as anim;
 use conker_sim::collision::CollisionWorld;
-use conker_sim::movement::{self, Other, PlayerState, Side};
+use conker_sim::movement::{self, Other, PlayerState};
 use conker_sim::raptor::clip as raptor;
 
 /// A flag: the handle the script names it by (its object index, `0x20nn`), the scene uid its
@@ -65,19 +65,22 @@ pub fn takes(f: usize, team: u8) -> bool {
 /// A flag's body, a squirrel's: radius 30, centre 33 up, scale 0x3EE8BA2F (V e1 RAM). It pushes
 /// the players out of it as theirs do (V e0 403-421: to 60 from a squirrel, e1 to 53 from a Tedi).
 pub fn body(pos: [f32; 3]) -> Other {
-    Other::player(Side::Squirrels, pos)
+    crate::characters::body(4).at(pos)
 }
 
 /// The touch test, before the player moves that frame: the overlap the engine's push finds
 /// (`func_1505D408`'s touch bits, C), with the player where the push measures it, a ground frame's
 /// fall step below its floor, and both on the floor (+0x28 = 0). So the push's own rest, 59.97 out,
 /// takes nothing (V e0: held at 60.0 off the red flag once touchable, no grab).
-pub fn touches(flag: &Flag, player: &PlayerState, side: Side) -> bool {
+pub fn touches(flag: &Flag, player: &PlayerState, me: Other) -> bool {
     let [x, y, z] = player.pos;
     let low = y + 0.5 * (movement::GROUND_Y_VEL - movement::GRAVITY_FALL);
     flag.fall.is_none()
         && !player.airborne
-        && body(flag.pos).overlaps(&Other::player(side, [x, low, z]))
+        && body(flag.pos).overlaps(&Other {
+            pos: [x, low, z],
+            ..me
+        })
 }
 
 /// Where a carrier at `pos` facing `facing` holds its flag ([`HELD`]).

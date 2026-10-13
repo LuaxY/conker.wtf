@@ -315,7 +315,10 @@ fn sound_bank_decodes() {
 fn outros_follow_the_oracle() {
     let Some(rom) = rom() else { return };
     let outros = conker_extract::outro::outros(&rom, 0x2D).unwrap();
-    let characters = conker_extract::outro::characters(&rom, &outros).unwrap();
+    let characters: Vec<_> = (conker_extract::outro::characters(&rom, &outros).unwrap())
+        .into_iter()
+        .map(|c| c.1)
+        .collect();
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../lab/research/mp-original/total-war-outro-scratch"
@@ -426,8 +429,8 @@ fn colors_outros_follow_the_oracle() {
     };
     assert_eq!((cs1.winner, cs1.cutscene, cs1.length), (0, 1, 1110));
     assert_eq!((cs5.winner, cs5.cutscene, cs5.length), (1, 5, 1100));
-    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
-    assert_eq!(entries, [135, 40, 88, 90]);
+    let entries: Vec<_> = characters.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(entries, ["135", "40", "40-7-9", "88", "90"]);
     let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
         std::iter::once(&o.camera)
             .chain(&o.cuts)
@@ -531,7 +534,7 @@ fn colors_outros_follow_the_oracle() {
             let logical: u16 = row[10].parse().unwrap();
             assert!(
                 name.ends_with(&format!("_anim_{logical:04}"))
-                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                    || characters.iter().any(|(folder, c)| *folder == a.character
                         && c.clips.iter().any(|x| x.logical.contains(&logical)
                             && name.starts_with(&format!("pair_{:04}", x.pair)))),
                 "cs{n} read {read} object {obj}: clip {name}, want {logical}"
@@ -572,8 +575,8 @@ fn beach_outros_follow_the_oracle() {
     };
     assert_eq!((cs4.winner, cs4.cutscene, cs4.length), (0, 4, 650));
     assert_eq!((cs3.winner, cs3.cutscene, cs3.length), (1, 3, 1150));
-    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
-    assert_eq!(entries, [156, 157, 90]);
+    let entries: Vec<_> = characters.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(entries, ["156", "157", "90"]);
     let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
         std::iter::once(&o.camera)
             .chain(&o.cuts)
@@ -688,7 +691,7 @@ fn beach_outros_follow_the_oracle() {
             let logical: u16 = row[10].parse().unwrap();
             assert!(
                 name.ends_with(&format!("_anim_{logical:04}"))
-                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                    || characters.iter().any(|(folder, c)| *folder == a.character
                         && c.clips.iter().any(|x| x.logical.contains(&logical)
                             && name.starts_with(&format!("pair_{:04}", x.pair)))),
                 "cs{n} read {read} object {obj}: clip {name}, want {logical}"
@@ -736,8 +739,8 @@ fn heist_outros_follow_the_oracle() {
     };
     assert_eq!((cs2.winner, cs2.cutscene, cs2.length), (0, 2, 650));
     assert_eq!((cs3.winner, cs3.cutscene, cs3.length), (1, 3, 1550));
-    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
-    assert_eq!(entries, [134, 59]);
+    let entries: Vec<_> = characters.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(entries, ["134", "59"]);
     let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
         std::iter::once(&o.camera)
             .chain(&o.cuts)
@@ -911,7 +914,7 @@ fn heist_outros_follow_the_oracle() {
             let (name, ticks) = a.clips().nth(clip).unwrap();
             assert!(
                 name.ends_with(&format!("_anim_{logical:04}"))
-                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                    || characters.iter().any(|(folder, c)| *folder == a.character
                         && c.clips.iter().any(|x| x.logical.contains(&logical)
                             && name.starts_with(&format!("pair_{:04}", x.pair)))),
                 "cs{n} read {read} object {obj}: clip {name}, want {logical}"
@@ -963,7 +966,7 @@ fn villager_looks_hide_their_lists() {
     let textures = rom.textures().unwrap();
     let tedi = extract_character::Character::load(&rom, 117).unwrap();
     let mut drawn = Vec::new();
-    for (model, per_list) in [(156, &[11, 1, 1, 1, 1, 1][..]), (157, &[15, 1, 1, 1, 1])] {
+    for (model, per_list) in [(156, &[11, 1, 1, 1, 1, 1][..]), (157, &[14, 1, 1, 1, 1])] {
         let c = conker_extract::on_tedi_rig(&rom, model, &tedi).unwrap();
         assert_eq!(c.model.lists.len(), per_list.len());
         let g = c.gltf(&textures, false).unwrap();
@@ -995,7 +998,7 @@ fn villager_looks_hide_their_lists() {
     assert_eq!(
         drawn,
         [
-            12, 13, 13, 14, 12, 13, 13, 14, 12, 13, 13, 14, 17, 17, 17, 17
+            12, 13, 13, 14, 12, 13, 13, 14, 12, 13, 13, 14, 16, 16, 16, 16
         ]
     );
     let shown = |mask: u8, n: u8| (0..n).filter(|k| mask >> k & 1 == 0).collect::<Vec<_>>();
@@ -1664,4 +1667,160 @@ fn pick_characters() {
     assert!(voices(1).is_empty());
     let own = [117, 128, 59, 136, 156, 157, 0, 159, 160].map(voices);
     assert!((0..own.len()).all(|i| (i + 1..own.len()).all(|j| own[i] != own[j])));
+}
+
+/// The faces (`../lab/research/mp-original/faces.md`): each model's bank-0x11 entries for the eye
+/// segments 6 and 7 (open, half shut, shut) and the mouth's 0x0A and 0x0B, and the texture ids its
+/// table gives them (V: the oracle's RAM at those entries equals these ROM textures, `texcheck.py`
+/// on runs c4, c2 and b1). `bind_faces` binds each face material to the open look (no segment left
+/// in the glTF) and gives the blinkers' eyes; Conker draws model 1's table.
+#[test]
+fn faces_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let ids = |model: usize, entries: &[usize]| -> Vec<u32> {
+        let asset = rom.asset(&[1, model]).unwrap();
+        let word = |at: usize| u32::from_be_bytes(asset[at..at + 4].try_into().unwrap());
+        (entries.iter())
+            .map(|&e| word(word(0x18) as usize + 12 * e))
+            .collect()
+    };
+    // (drawn model, segment 6's and 7's entries, 0x0A's and 0x0B's, the eyes' texture ids).
+    let soldier = [4200, 4203, 4201];
+    let caveman = [4730, 4732, 4731];
+    let table: [(usize, [usize; 3], [usize; 3], [usize; 2], [u32; 3]); 14] = [
+        (1, [25, 26, 27], [25, 26, 27], [14, 14], [1937, 1939, 1940]),
+        (150, [16, 17, 1], [16, 17, 1], [15, 15], [1937, 1939, 1946]),
+        (128, [1, 6, 6], [1, 6, 6], [0, 0], [4200, 4201, 4201]),
+        (176, [0, 14, 14], [0, 14, 14], [0, 0], [4200, 4203, 4203]),
+        (156, [0, 8, 4], [0, 8, 4], [0, 0], soldier),
+        (157, [0, 10, 9], [0, 10, 9], [0, 0], soldier),
+        (135, [0, 16, 10], [0, 16, 10], [0, 0], soldier),
+        (88, [1, 10, 12], [1, 10, 12], [0, 0], soldier),
+        (136, [0, 2, 5], [0, 2, 5], [0, 0], caveman),
+        (144, [0, 4, 7], [0, 4, 7], [0, 0], caveman),
+        (83, [1, 4, 5], [1, 4, 5], [0, 0], [3694, 3692, 3690]),
+        (165, [8, 9, 10], [8, 9, 10], [0, 0], [3695, 3693, 3691]),
+        (134, [4, 10, 10], [4, 10, 10], [0, 0], [3271, 3272, 3272]),
+        (22, [2, 9, 9], [0, 5, 8], [0, 0], [4734, 4735, 4735]),
+    ];
+    let entries = |m, s| conker_extract::face_entries(&rom, m, s).unwrap();
+    for (model, six, seven, mouth, eyes) in table {
+        assert_eq!(
+            (entries(model, 6), entries(model, 7)),
+            (six.to_vec(), seven.to_vec())
+        );
+        assert_eq!(
+            [entries(model, 0x0A), entries(model, 0x0B)],
+            mouth.map(|e| vec![e])
+        );
+        assert_eq!(ids(model, &six), eyes, "{model}");
+    }
+    assert_eq!(ids(22, &[0, 5, 8]), caveman);
+    assert_eq!(ids(1, &[14]), ids(150, &[15]));
+    assert_eq!(ids(1, &[14]), [3649]);
+    // Conker's record is model 0's too, and the tank in the outros (40) keeps its entry 0.
+    assert_eq!(entries(0, 6), entries(1, 6));
+    assert_eq!((entries(40, 6), entries(40, 7)), (vec![0; 3], vec![0; 3]));
+
+    let textures = rom.textures().unwrap();
+    let images = |c: &extract_character::Character| -> BTreeSet<String> {
+        (c.model.lists.iter().flat_map(|l| &l.draws))
+            .filter_map(|d| d.material.texture.and_then(|t| t.image))
+            .map(|i| format!("{i:?}"))
+            .collect()
+    };
+    let bind = |c| conker_extract::bind_faces(&rom, c, &textures).unwrap();
+    let face = |e: [usize; 3]| e.map(|e| format!("textures/face-{e:02}.png"));
+    // Conker: both eyes on one material (12), open 1937; the mouth 3649 on 9-11.
+    let (conker, faces, pngs) = bind(conker_extract::mesh_only(&rom, 0).unwrap());
+    assert!(images(&conker).iter().all(|i| !i.contains("Segment")));
+    assert!(images(&conker).contains("Flat { index: 1937, mode: 0 }"));
+    let segments: Vec<_> = faces
+        .iter()
+        .map(|f| (f.segment, f.materials.clone()))
+        .collect();
+    assert_eq!(segments, [(6, vec![12]), (7, vec![12])]);
+    assert!(faces.iter().all(|f| f.textures == face([25, 26, 27])));
+    assert_eq!(pngs.len(), 3);
+    // The body (22) blinks with its two eyes apart; the baby (165) and Don Weaso (134) never.
+    let (_, faces, pngs) = bind(conker_extract::load_character(&rom, 22).unwrap());
+    let segments: Vec<_> = faces
+        .iter()
+        .map(|f| (f.segment, f.textures.clone()))
+        .collect();
+    assert_eq!(segments, [(6, face([2, 9, 9])), (7, face([0, 5, 8]))]);
+    assert_eq!(pngs.len(), 5);
+    for (model, open) in [(165, 3695), (134, 3271), (40, 4216)] {
+        let (c, faces, pngs) = bind(conker_extract::load_character(&rom, model).unwrap());
+        assert!(faces.is_empty() && pngs.is_empty(), "{model}");
+        assert!(images(&c).iter().all(|i| !i.contains("Segment")), "{model}");
+        assert!(images(&c).contains(&format!("Flat {{ index: {open}, mode: 0 }}")));
+    }
+}
+
+/// The characters' materials draw as the oracle draws them (`../lab/research/mp-original/
+/// alpha-scratch`, `check.py`: the render mode and culling at each texture's draws, V runs a1, r1,
+/// and cs5b, c1b, x1): (model, texture, its glTF materials' (alphaMode, doubleSided)). Segment 8
+/// is the renderer's render-state table, the lists start culling back faces. Colors cs5's lit tank
+/// (40-7-9) draws segment 7 from entry 9 (4368), the other tank (40) from entry 0 (4216).
+#[test]
+fn character_materials_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let textures = rom.textures().unwrap();
+    let modes = |g: &Value, id: u32| -> BTreeSet<(String, bool)> {
+        (g["materials"].as_array().unwrap().iter())
+            .filter(|m| m["extras"]["image"] == format!("flat {id} mode 0"))
+            .map(|m| {
+                let alpha = m["alphaMode"].as_str().unwrap();
+                assert_eq!(m["alphaCutoff"].as_f64(), (alpha == "MASK").then_some(0.5));
+                (alpha.to_string(), m["doubleSided"].as_bool().unwrap())
+            })
+            .collect()
+    };
+    let (o, b, m) = ("OPAQUE", "BLEND", "MASK");
+    let table: [(usize, u32, &[(&str, bool)]); 14] = [
+        (0, 1937, &[(b, false)]), // the eyes
+        (0, 3095, &[(o, false)]),
+        (150, 1937, &[(b, false)]),
+        (150, 3763, &[(b, false)]),
+        (117, 4402, &[(o, false)]),
+        (90, 4545, &[(m, false)]),
+        (40, 4364, &[(m, true)]),
+        (40, 4216, &[(o, false), (b, false)]), // the lights (segments 6, 7) and a flat use
+        (136, 4730, &[(o, false), (m, false)]), // the eyes (V the half look 4732)
+        (136, 4725, &[(o, false), (m, false), (m, true)]),
+        (169, 2293, &[(b, true)]), // the cloth
+        (169, 1637, &[(m, true)]),
+        (138, 988, &[(m, true)]), // the belt
+        (157, 1356, &[(o, false), (o, true), (b, false)]),
+    ];
+    for (model, id, want) in table {
+        let c = match model {
+            0 | 150 => conker_extract::mesh_only(&rom, model).unwrap(),
+            _ => conker_extract::load_character(&rom, model).unwrap(),
+        };
+        let c = conker_extract::bind_faces(&rom, c, &textures).unwrap().0;
+        let g = c.gltf(&textures, false).unwrap().json;
+        let want: BTreeSet<_> = want.iter().map(|&(a, d)| (a.to_string(), d)).collect();
+        assert_eq!(modes(&g, id), want, "{model}: {id}");
+    }
+    let outros = conker_extract::outro::outros(&rom, 0x30).unwrap();
+    let tanks: Vec<_> = (conker_extract::outro::characters(&rom, &outros).unwrap())
+        .into_iter()
+        .filter(|c| c.1.entry == 40)
+        .map(|(folder, c)| {
+            let c = conker_extract::bind_faces(&rom, c, &textures).unwrap().0;
+            (folder, c.gltf(&textures, false).unwrap().json)
+        })
+        .collect();
+    let [(plain, g40), (lit, g_lit)] = &tanks[..] else {
+        panic!("two tanks")
+    };
+    assert_eq!((plain.as_str(), lit.as_str()), ("40", "40-7-9"));
+    let blend: BTreeSet<_> = [(b.to_string(), false)].into();
+    assert_eq!(
+        (modes(g40, 4368).len(), modes(g_lit, 4368)),
+        (0, blend.clone())
+    );
+    assert!(modes(g_lit, 4216).is_superset(&blend));
 }

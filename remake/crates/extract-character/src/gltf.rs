@@ -199,7 +199,8 @@ impl Character {
             }
         }
 
-        // Materials, textures (deduplicated by PNG bytes) and samplers (by wrap modes).
+        // Materials (alpha mode and culling as the level writer reads them), textures (deduplicated
+        // by PNG bytes) and samplers (by wrap modes).
         let (mut images, mut gl_textures, mut samplers, mut gl_materials) =
             (vec![], vec![], vec![], vec![]);
         let mut image_of: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -228,9 +229,10 @@ impl Character {
                 Image::Flat { index, mode } => format!("flat {index} mode {mode}"),
                 Image::Segment(a) => format!("segment {a:#010x}"),
             });
-            gl_materials.push(json!({
+            let mut material = json!({
                 "name": format!("material_{:02}", gl_materials.len()),
                 "pbrMetallicRoughness": pbr,
+                "alphaMode": m.alpha_mode(),
                 "doubleSided": m.geometry_mode & G_CULL_BACK == 0,
                 "extras": {
                     "image": image,
@@ -240,7 +242,11 @@ impl Character {
                     "primColor": format!("{:08x}", m.prim_color),
                     "envColor": format!("{:08x}", m.env_color),
                 },
-            }));
+            });
+            if m.alpha_mode() == "MASK" {
+                material["alphaCutoff"] = json!(0.5);
+            }
+            gl_materials.push(material);
         }
 
         let mut primitives = Vec::new();

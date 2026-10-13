@@ -9,7 +9,7 @@
 //! bots1, unt1: `../lab/research/mp-original/heist.md`, `heist-presentation.md`.
 
 use conker_sim::collision::CollisionWorld;
-use conker_sim::movement::{self, Other, PlayerState, Side};
+use conker_sim::movement::{self, Other, PlayerState};
 
 /// REDS, BLUES, GREENS, YELLOWS (team row 0, C).
 pub const TEAMS: usize = 4;
@@ -205,15 +205,19 @@ impl Cash {
 pub fn body(pos: [f32; 3]) -> Other {
     Other {
         radius: 29,
-        ..Other::player(Side::Squirrels, pos)
+        ..crate::characters::body(4).at(pos)
     }
 }
 
 /// The touch test, as Colors' flag's ([`crate::colors::touches`]).
-pub fn touches(cash: &Cash, player: &PlayerState, side: Side) -> bool {
+pub fn touches(cash: &Cash, player: &PlayerState, me: Other) -> bool {
     let [x, y, z] = player.pos;
     let low = y + 0.5 * (movement::GROUND_Y_VEL - movement::GRAVITY_FALL);
-    !player.airborne && body(cash.pos).overlaps(&Other::player(side, [x, low, z]))
+    !player.airborne
+        && body(cash.pos).overlaps(&Other {
+            pos: [x, low, z],
+            ..me
+        })
 }
 
 /// The carrier's clip by its ground speed (as the flag's, [`crate::colors::carry_clip`]).

@@ -6,7 +6,7 @@
 use crate::collision::CollisionWorld;
 use crate::movement::{
     BUTTON_A, BUTTON_C_LEFT, BUTTON_C_RIGHT, GROUND_Y_VEL, Input, Other, PlayerState, cos_sin,
-    deadzone, follow_floor, integrate_y, push_body, rise_along, sweep_walls,
+    deadzone, follow_floor, integrate_y, push_apart, rise_along, sweep_walls,
 };
 
 /// `0x800A15AC`: the target speed per stick unit (48 at the full stick's 75; V t1).
@@ -153,7 +153,7 @@ pub fn step(
         p.pos[2] -= 0.5 * dist * s;
         p.gravity = GRAVITY;
         integrate_y(p);
-        push_body(&mut p.pos, body([0.0; 3]), others);
+        push_apart(&mut p.pos, body([0.0; 3]), others);
         p.y_vel = sweep_walls(p, world, old, p.y_vel);
         let floor = world.floor(p.pos[0], p.pos[2], p.pos[1], old[1], None);
         if let Some(f) = floor.filter(|f| p.y_vel < 0.0 && p.pos[1] <= f.y) {
@@ -171,7 +171,7 @@ pub fn step(
     let stepped_y = p.pos[1];
     let y_vel = p.y_vel - GRAVITY;
     p.pos[1] += 0.5 * y_vel;
-    push_body(&mut p.pos, body([0.0; 3]), others);
+    push_apart(&mut p.pos, body([0.0; 3]), others);
     let pre = p.pos;
     let y_vel = sweep_walls(p, world, old, y_vel);
     follow_floor(p, world, old, stepped_y, pre, y_vel);

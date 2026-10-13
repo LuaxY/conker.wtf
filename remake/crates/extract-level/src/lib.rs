@@ -275,18 +275,6 @@ pub fn primitive(ir: &Ir, draw: &Draw) -> Primitive {
     out
 }
 
-/// glTF alpha mode from the othermode low word (DOS `decode_other_mode`): forced blending or the
-/// translucent z-mode blend, alpha compare or coverage-times-alpha masks.
-fn alpha_mode(other_low: u32) -> &'static str {
-    if other_low & 0x4000 != 0 || other_low >> 10 & 3 == 2 {
-        "BLEND"
-    } else if other_low & 3 != 0 || other_low & 0x1000 != 0 {
-        "MASK"
-    } else {
-        "OPAQUE"
-    }
-}
-
 /// glTF wrap mode of a tile axis's clamp/mirror bits.
 fn wrap(cm: u8) -> u32 {
     match cm {
@@ -511,7 +499,7 @@ pub fn to_gltf(level: &Level, textures: &Textures, bin_uri: &str) -> Result<Gltf
                         Some(Image::Segment(a)) => format!("m{n}-seg{a:08x}"),
                         None => format!("m{n}-untextured"),
                     };
-                    let alpha = alpha_mode(m.other_mode[1]);
+                    let alpha = m.alpha_mode();
                     let mut material = json!({
                         "name": name,
                         "pbrMetallicRoughness": pbr,
@@ -785,6 +773,13 @@ mod tests {
 
     #[test]
     fn alpha_modes() {
+        let alpha_mode = |low| {
+            Material {
+                other_mode: [0, low],
+                ..Material::default()
+            }
+            .alpha_mode()
+        };
         assert_eq!(alpha_mode(0x0055_2078), "OPAQUE");
         assert_eq!(alpha_mode(0x0055_2079), "MASK"); // alpha compare threshold
         assert_eq!(alpha_mode(0x0055_3078), "MASK"); // coverage x alpha

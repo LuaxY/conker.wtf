@@ -146,6 +146,19 @@ pub struct Material {
 }
 
 impl Material {
+    /// glTF alpha mode from the othermode low word (DOS `decode_other_mode`): forced blending or
+    /// the translucent z-mode blend, alpha compare or coverage-times-alpha masks.
+    pub fn alpha_mode(&self) -> &'static str {
+        let low = self.other_mode[1];
+        if low & 0x4000 != 0 || low >> 10 & 3 == 2 {
+            "BLEND"
+        } else if low & 3 != 0 || low & 0x1000 != 0 {
+            "MASK"
+        } else {
+            "OPAQUE"
+        }
+    }
+
     /// Texel format of the texture. A 4- or 8-bit RGBA tile is colour-indexed: Conker loads
     /// indexed pixels through an RGBA16 transfer image and samples them through a TLUT.
     pub fn texture_format(&self) -> Option<Format> {
@@ -352,8 +365,18 @@ fn tri4(w0: u32, w1: u32) -> [[usize; 3]; 4] {
 /// the bytes from there to the end of its buffer. An unresolved G_DL is recorded and skipped (an
 /// unresolved branch ends its list); an unresolved G_VTX is an error.
 pub fn walk<'a>(start: u32, resolve: impl Fn(u32) -> Option<&'a [u8]>) -> Result<Ir> {
+    walk_from(start, 0, resolve)
+}
+
+/// [`walk`] from the geometry mode the list inherits from its caller.
+pub fn walk_from<'a>(
+    start: u32,
+    geometry_mode: u32,
+    resolve: impl Fn(u32) -> Option<&'a [u8]>,
+) -> Result<Ir> {
     let mut ir = Ir::default();
     let mut st = State::default();
+    st.material.geometry_mode = geometry_mode;
     let mut stack: Vec<(u32, &'a [u8])> = Vec::new();
     let (mut pc, mut dl) = (start, resolve(start).ok_or(Error::Unresolved(start))?);
     for _ in 0..MAX_COMMANDS {

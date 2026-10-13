@@ -59,7 +59,7 @@ use conker_rules::net::Fighting;
 use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::{Attack, Weapon, weapon};
 use conker_rules::{Rng, beach, gun};
-use conker_sim::net::{BulletView, Combat, GunView, MatchView, Player, PlayerId};
+use conker_sim::net::{BulletView, Combat, GunView, MatchView, Player, PlayerId, RacerView};
 use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 use core::time::Duration;
 use lightyear::core::timeline::is_in_rollback;
@@ -282,6 +282,8 @@ enum Owner {
     /// War: Raptor's baby and the body it is fed.
     Baby,
     Body,
+    /// Race: a missile in flight (its birth tick and index in that tick's new ones).
+    Missile(u32, usize),
     World,
 }
 
@@ -363,6 +365,8 @@ struct Seen {
     deadline: u16,
     /// Wearing a gas mask ([`Combat::masked`]; the local player's prediction).
     masked: bool,
+    /// The height above its floor (Race's hum; none: 0).
+    above: f32,
 }
 
 /// A player as the last tick saw it.
@@ -536,6 +540,54 @@ struct Sounds {
     engines: HashMap<u16, u8>,
     tank_shells: Vec<[f32; 3]>,
     bomb: Option<(Option<u16>, i32)>,
+    /// Race: last tick's countdown stage and racers (None before the first tick with a match), the
+    /// missiles in flight (owner, where).
+    race: Option<(u8, Vec<RacerView>)>,
+    missiles: Vec<(Owner, [f32; 3])>,
+}
+
+/// Race's hum `hum` (0-2) on a racer in state `s` (0 fast, 1, 2 slow: [`hum_state`]) `above` its
+/// floor among `racers`: the volume it moves to and whether it jumps there at once ([`On::RaceHum`],
+/// C `func_150D5124`).
+pub fn hum_target(hum: u8, s: u8, above: f32, racers: usize) -> (f32, bool) {
+    match hum {
+        0 => {
+            let v = (25.0 * above).min(5000.0);
+            let v = if v < 500.0 { 0.0 } else { v };
+            match s {
+                0 => (v, v != 0.0),
+                _ => (v + 7000.0, false),
+            }
+        }
+        1 => match s {
+            _ if racers >= 5 => (12000.0, false),
+            0 => (16000.0, true),
+            1 => (12000.0, false),
+            _ => (0.0, false),
+        },
+        _ => match s {
+            0 => (24000.0, true),
+            _ => (400.0, false),
+        },
+    }
+}
+
+/// A racer's state for its hum by its speed (C `func_150D3A68`'s bot rule; the original reads a
+/// human's stick, I here): above 6 → 0, above 3 → 1, else 2.
+pub fn hum_state(speed: f32) -> u8 {
+    match speed {
+        v if v > 6.0 => 0,
+        v if v > 3.0 => 1,
+        _ => 2,
+    }
+}
+
+/// A hum's volume a tick on toward `target`: 512 a tick, or there at once.
+pub fn hum_step(volume: f32, (target, at_once): (f32, bool)) -> f32 {
+    match at_once {
+        true => target,
+        false => volume + (target - volume).clamp(-512.0, 512.0),
+    }
 }
 
 /// A tank's engine (`func_151BB0E0`, C; V s1): 1 speeding up (the stick's speed past the speed,
@@ -1740,6 +1792,181 @@ impl Sounds {
         }
     }
 
+    /// Race's sounds: each racer's hums (loops at it from its spawn to its death, their volumes by
+    /// [`hum_target`]; I: their pitch kept), the countdown's beeps for everyone, a canister used
+    /// (its boost going up), a missile fired (a new one: at the racer nearest it), each missile in
+    /// flight from its 15th tick, a missile's hit (gone by a racer knocked up), a kick's (a racer
+    /// knocked up with no missile gone near it: at the kicking racer nearest it), a wall's scrape
+    /// (1 hp lost) and a racer blowing up (its last).
+    fn race(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        if !m.race {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        let r = &m.racing;
+        let n = r.racers.len();
+        let hums: Vec<(usize, u8)> = (cues.iter().enumerate())
+            .filter_map(|(i, c)| match c.on {
+                On::RaceHum { hum } => Some((i, hum)),
+                _ => None,
+            })
+            .collect();
+        let hum = |v: &Voice| {
+            (v.tag)
+                .and_then(|t| hums.iter().find(|h| h.0 == t))
+                .map(|h| h.1)
+        };
+        let (stage, last) = self.race.take().unwrap_or((r.stage, r.racers.clone()));
+        if r.stage != stage && r.stage > 0 {
+            let flat = Src {
+                flat: true,
+                ..Src::at(cx.ear.pos)
+            };
+            self.world_from(cx, flat, |on| *on == On::RaceCountdown { stage: r.stage });
+        }
+        let was = |slot: u16| last.iter().find(|v| v.slot == slot).copied();
+        // The missiles: kept ones in order, new ones last.
+        let old = std::mem::take(&mut self.missiles);
+        let mut next = old.iter().peekable();
+        // ponytail: matched in order within 8 frames' flight (updates come in bunches); a missile
+        // gone with a newer one that close behind it swaps identities.
+        let step = 4.0 * conker_rules::race::MISSILE_SPEED;
+        let mut now = Vec::new();
+        let mut kept = Vec::new();
+        for (k, &(pos, _)) in r.missiles.iter().enumerate() {
+            while let Some(o) = next.next_if(|o| dist2(o.1, pos) > step * step) {
+                kept.push((o.0, false));
+            }
+            match next.next() {
+                Some(o) => {
+                    kept.push((o.0, true));
+                    now.push((o.0, pos));
+                }
+                None => {
+                    let owner = Owner::Missile(cx.tick, k);
+                    let d = |p: &&(Seen, Seen)| dist2(p.1.pos, pos);
+                    if let Some(p) = players.iter().min_by(|a, b| d(a).total_cmp(&d(b))) {
+                        let src = Src {
+                            owner,
+                            follows: None,
+                            ..Src::player(&p.1)
+                        };
+                        let shot = |on: &On| {
+                            *on == On::Shot {
+                                weapon: conker_rules::race::MISSILE,
+                            }
+                        };
+                        self.world_from(cx, src, shot);
+                    }
+                    now.push((owner, pos));
+                }
+            }
+        }
+        kept.extend(next.map(|o| (o.0, false)));
+        let mut hits = Vec::new();
+        for (owner, stays) in kept {
+            let Some(&(_, at)) = old.iter().find(|o| o.0 == owner) else {
+                continue;
+            };
+            if !stays {
+                self.stop(|v| v.owner == owner);
+                hits.push(at);
+            }
+        }
+        for &(owner, pos) in &now {
+            for v in self.voices.iter_mut().filter(|v| v.owner == owner) {
+                v.pos = pos;
+            }
+            if let Owner::Missile(born, _) = owner
+                && cx.tick >= born + 15
+            {
+                self.world_from(
+                    cx,
+                    Src {
+                        owner,
+                        ..Src::at(pos)
+                    },
+                    |on| *on == On::RaceMissile,
+                );
+            }
+        }
+        self.missiles = now;
+        for (old_seen, is) in players {
+            let me = Src::player(is);
+            let Some(v) = r.racers.iter().find(|v| v.slot == is.slot) else {
+                continue;
+            };
+            let before = was(is.slot).unwrap_or(*v);
+            // The hums.
+            let mine = |x: &Voice| x.owner == me.owner && !x.stopped && hum(x).is_some();
+            if is.health == 0 {
+                self.stop(mine);
+            } else if !self.voices.iter().any(mine) {
+                for &(i, h) in &hums {
+                    let on = match h {
+                        0 => n < 5,
+                        2 => n < 7 || is.slot == cx.ear.slot,
+                        _ => true,
+                    };
+                    if on {
+                        let play = &cues[i].play;
+                        self.start(cx, play, &play.sounds, 1.0, Src { tag: Some(i), ..me });
+                    }
+                }
+            }
+            let s = hum_state(is.speed);
+            for x in self.voices.iter_mut().filter(|x| mine(x)) {
+                if let Some(h) = hum(x) {
+                    x.volume = hum_step(x.volume, hum_target(h, s, is.above, n));
+                }
+            }
+            // A canister used.
+            if v.boost > before.boost {
+                let used = |on: &On| {
+                    *on == On::Shot {
+                        weapon: conker_rules::race::CANISTER,
+                    }
+                };
+                self.cues(cx, is, me, used);
+            }
+            // Knocked up (again while knocked up): a missile's hit near it, else a kick's.
+            if v.knock > before.knock {
+                let near = |at: &[f32; 3]| dist2(*at, is.pos) < 600.0 * 600.0;
+                if let Some(k) = hits.iter().position(near) {
+                    let at = hits.swap_remove(k);
+                    self.world(cx, at, |on| {
+                        *on == On::Hit {
+                            weapon: conker_rules::race::MISSILE,
+                            lethal: None,
+                        }
+                    });
+                } else {
+                    let kicking = (players.iter())
+                        .filter(|p| p.1.slot != is.slot)
+                        .filter(|p| r.racers.iter().any(|v| v.slot == p.1.slot && v.kick > 0))
+                        .min_by(|a, b| dist2(a.1.pos, is.pos).total_cmp(&dist2(b.1.pos, is.pos)));
+                    if let Some(k) = kicking {
+                        self.cues(cx, &k.1, Src::player(&k.1), |on| *on == On::RaceKick);
+                    }
+                }
+            }
+            // A wall's scrape, or the blow-up.
+            if is.health < old_seen.health {
+                match is.health {
+                    0 => {
+                        let e = is.floor == Some(0xE);
+                        let at = Src::at(is.pos);
+                        self.world_from(cx, at, |on| {
+                            matches!(*on, On::RaceDeath { kind_e } if kind_e.is_none_or(|k| k == e))
+                        });
+                    }
+                    _ => self.cues(cx, is, me, |on| *on == On::RaceWall),
+                }
+            }
+        }
+        self.race = Some((r.stage, r.racers.clone()));
+    }
+
     /// A map's line ([`LINES`]), unpositioned, unless a line already plays (one MP3 stream, C
     /// `func_1509E640`).
     fn line(&mut self, cx: &Cx, (id, name): (u16, &str)) {
@@ -1775,8 +2002,13 @@ impl Sounds {
 
     /// Plays every cue `matches` picks at `pos`, nobody's.
     fn world(&mut self, cx: &Cx, pos: [f32; 3], matches: impl Fn(&On) -> bool) {
+        self.world_from(cx, Src::at(pos), matches);
+    }
+
+    /// Plays every cue `matches` picks (any character's) from `src`.
+    fn world_from(&mut self, cx: &Cx, src: Src, matches: impl Fn(&On) -> bool) {
         for cue in (cx.pack.audio.events.cues.iter()).filter(|c| matches(&c.on)) {
-            self.start(cx, &cue.play, &cue.play.sounds, 1.0, Src::at(pos));
+            self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
         }
     }
 
@@ -2109,6 +2341,7 @@ fn hear(
             freeze: c.freeze,
             deadline: c.deadline,
             masked,
+            above: p.floor.map_or(0.0, |f| p.pos[1] - f.y),
         };
         match heard {
             Some(mut h) => {
@@ -2179,6 +2412,7 @@ fn hear(
         s.raptor(&cx, nest);
     }
     s.tank(&cx, m, &all);
+    s.race(&cx, m, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);
     s.duck_music(&cx);
@@ -2806,6 +3040,7 @@ mod tests {
             freeze: 0,
             deadline: 0,
             masked: false,
+            above: 0.0,
         }
     }
 
@@ -3331,5 +3566,81 @@ mod tests {
                 .iter()
                 .all(|v| v.0 == 42 && (0x662..=0x664).contains(&v.1))
         );
+    }
+
+    /// Race: the countdown's beeps (0x687 twice, 0x688), a missile fired (0x237 at the racer), in
+    /// flight from its 15th tick (0x2EE-0x2F0), its hit on the racer it knocks up (0x107), a kick's
+    /// (0x3F7 at the kicker), a scrape (778-785) and a blow-up (0x4C8 or 0x434, a blast, debris);
+    /// each racer's hums from its spawn, hum 0 with fewer than 5 racers.
+    #[test]
+    fn race_plays_its_events() {
+        let Some(pack) = map_pack("33") else { return };
+        let mut s = Sounds::default();
+        let racer = |slot| RacerView {
+            slot,
+            ..RacerView::default()
+        };
+        let mut m = MatchView {
+            race: true,
+            ..Default::default()
+        };
+        m.racing.racers = vec![racer(0), racer(1)];
+        let mut all = vec![
+            (at(0, 0.0, 0), at(0, 0.0, 0)),
+            (at(1, 300.0, 0), at(1, 300.0, 0)),
+        ];
+        let calls = heard(&mut s, &pack, 1..60, |s, cx| {
+            let t = cx.tick;
+            m.racing.stage = match t {
+                10 => 1,
+                20 => 2,
+                30 => 3,
+                _ => 0,
+            };
+            // Fired at 31, flying 155 a tick, gone at 50 knocking up racer 1 (moved ahead of it).
+            m.racing.missiles = (31..50)
+                .contains(&t)
+                .then(|| ([155.0 * (t - 31) as f32, 100.0, 0.0], None))
+                .into_iter()
+                .collect();
+            // Racer 0 kicks at 55 (racer 1 down at 54, knocked again), scrapes at 56, blows up at
+            // 58.
+            let knocked = (50..54).contains(&t) || t >= 55;
+            m.racing.racers[1].knock = u8::from(knocked) * 20;
+            m.racing.racers[0].kick = u8::from(t >= 55) * 10;
+            all[1].1.pos[0] = if t < 54 { 2900.0 } else { 200.0 };
+            all[0].0.health = all[0].1.health;
+            all[0].1.health = match t {
+                56 => 5,
+                57 => 5,
+                58.. => 0,
+                _ => 6,
+            };
+            s.race(cx, &m, &all);
+        });
+        let ids = |set: &[u16]| -> Vec<u32> {
+            calls
+                .iter()
+                .filter(|c| set.contains(&c.1))
+                .map(|c| c.0)
+                .collect()
+        };
+        assert_eq!(ids(&[1459]), [1, 1], "{calls:?}");
+        assert_eq!(ids(&[1460]), [1, 1]);
+        assert_eq!(ids(&[1671, 1672]), [10, 20, 30]);
+        assert_eq!(ids(&[567]), [31]);
+        let flight = ids(&[750, 751, 752]);
+        assert_eq!(flight.first(), Some(&46), "{calls:?}");
+        assert_eq!(ids(&[263]), [50]);
+        assert_eq!(ids(&[1015]), [55]);
+        assert_eq!(ids(&(778..=785).collect::<Vec<_>>()), [56]);
+        assert_eq!(ids(&[1224, 1076]), [58]);
+        assert_eq!(ids(&[694, 695]), [58]);
+        // The hums' volumes: hum 0 by the height, hum 1 steady with 5 racers, 512 a tick.
+        assert_eq!(hum_target(0, 0, 40.0, 4), (1000.0, true));
+        assert_eq!(hum_target(0, 2, 10.0, 4), (7000.0, false));
+        assert_eq!(hum_target(1, 2, 0.0, 5), (12000.0, false));
+        assert_eq!(hum_step(1000.0, (24000.0, false)), 1512.0);
+        assert_eq!(hum_state(150.0), 0);
     }
 }

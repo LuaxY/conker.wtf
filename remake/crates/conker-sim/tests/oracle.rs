@@ -23,12 +23,15 @@ use conker_camera::math::yaw_of;
 use conker_camera::volume::CameraLevel;
 use conker_sim::collision::{Body, CollisionWorld, Layer, Sweep};
 use conker_sim::follow::Follow;
-use conker_sim::movement::{self, Input, Other, PlayerState, Side};
+use conker_sim::movement::{self, Input, Other, PlayerState};
 use conker_sim::root::RootTrack;
 use conker_sim::trig::AcosTable;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+/// The Tedi's push body at scale 0.5: radius 23, height 45, centre 33 (V obj+0xE4/0xE6/0xE8).
+const TEDI: [i16; 3] = [23, 45, 33];
 
 const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../lab/oracle");
 /// The match goes live at read 23; from read 30 the player has stood still for a while.
@@ -374,7 +377,7 @@ fn second_feed(name: &str) -> Option<Feed> {
     let feed = raw_feed_of(name, 1)?;
     let other = trace(name)?
         .iter()
-        .map(|r| (r.read - 1, vec![Other::player(Side::Tediz, r.state.pos)]))
+        .map(|r| (r.read - 1, vec![Other::new(r.state.pos, TEDI)]))
         .collect();
     Some(Feed { other, ..feed })
 }
@@ -444,7 +447,7 @@ fn replay_fed(name: &str, closed_loop: bool, feed: &Feed) -> Option<Report> {
             p.scope_yaw = yaw;
         }
         let others = feed.other.get(&row.read).map_or(&[][..], Vec::as_slice);
-        movement::step_among(&mut p, &input, world, Side::Tediz, others);
+        movement::step_among(&mut p, &input, world, Other::new([0.0; 3], TEDI), others);
         // The clip the player plays this frame: the rules' action (fed, at its traced rate), else the
         // movement state's at conker-anim's rate, as server and client run it.
         let (id, rate, start) = match feed.anim.get(&next.read).filter(|a| !MOVEMENT.contains(a)) {
@@ -1167,7 +1170,7 @@ fn combat_feed(name: &str) -> Option<Feed> {
     let mut other: HashMap<u32, Vec<Other>> = trace_of(name, "1")
         .map(|rows| {
             rows.iter()
-                .map(|r| (r.read, vec![Other::player(Side::Tediz, r.state.pos)]))
+                .map(|r| (r.read, vec![Other::new(r.state.pos, TEDI)]))
                 .collect()
         })
         .unwrap_or_default();

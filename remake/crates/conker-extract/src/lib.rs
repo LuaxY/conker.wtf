@@ -401,12 +401,13 @@ pub fn textures(rom: &Rom) -> Result<Export> {
             }
         }
     }
+    let game_data = rom.game_data()?;
     for e in 0..rom.bank(0x01)?.entries.len() {
         let data = rom.asset(&[0x01, e])?;
         if data.is_empty() {
             continue;
         }
-        match parse_model(&data) {
+        match parse_model(&data, &game_data) {
             Ok(m) => level
                 .meshes
                 .extend(m.lists.into_iter().enumerate().map(|(k, ir)| Mesh {
@@ -538,7 +539,7 @@ fn attached_level(rom: &Rom, held: &[Held]) -> Result<(Level, Value)> {
     for h in held {
         let (bank, parts) = match h.object {
             true => {
-                let model = parse_model(&rom.asset(&[0x01, h.entry])?)?;
+                let model = parse_model(&rom.asset(&[0x01, h.entry])?, &game_data)?;
                 let pivots = bind_pivots(&model.joints)?;
                 let mut lists = model.lists;
                 for v in lists.iter_mut().flat_map(|ir| &mut ir.vertices) {
@@ -598,7 +599,7 @@ pub fn projectiles_level(rom: &Rom) -> Result<(Level, Value)> {
     for path in PROJECTILES {
         let ir = match path[0] {
             0x01 => {
-                let model = parse_model(&rom.asset(&path)?)?;
+                let model = parse_model(&rom.asset(&path)?, &game_data)?;
                 let pivots = bind_pivots(&model.joints)?;
                 let mut ir = (model.lists.into_iter().next()).context("projectile: no list")?;
                 for v in &mut ir.vertices {
@@ -639,7 +640,7 @@ pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Characte
     Ok(Character {
         entry,
         anim_entry: tedi.anim_entry,
-        model: parse_model(&rom.asset(&[0x01, entry])?)?,
+        model: parse_model(&rom.asset(&[0x01, entry])?, &rom.game_data()?)?,
         clips: tedi.clips.clone(),
     })
 }
@@ -652,7 +653,7 @@ pub fn mesh_only(rom: &Rom, entry: usize) -> Result<Character> {
     Ok(Character {
         entry,
         anim_entry: 0,
-        model: parse_model(&rom.asset(&[0x01, drawn])?)?,
+        model: parse_model(&rom.asset(&[0x01, drawn])?, &rom.game_data()?)?,
         clips: vec![],
     })
 }
@@ -819,6 +820,115 @@ fn tank_parts(rom: &Rom, tank: &Character) -> Result<assets::Tank> {
     })
 }
 
+/// The segments a character's face draws from (`func_1502F01C`, C; V
+/// `../lab/research/mp-original/faces.md`): 6 and 7 the eyes, 0x0A and 0x0B Conker's mouth.
+const FACE_SEGMENTS: [u32; 4] = [6, 7, 0x0A, 0x0B];
+
+/// Model `entry`'s texture-table entries on face `segment`, from its bank-0x11 record: on 6 and 7
+/// the eyes open, half shut and shut (eye codes 0-2: +8..+0xA, +0xB..+0xD), on 0x0A and 0x0B the
+/// one a match keeps (+0x3B, +0x3C, `func_1507E5C8`).
+pub fn face_entries(rom: &Rom, entry: usize, segment: u32) -> Result<Vec<usize>> {
+    let asset = rom.asset(&[0x11, entry])?;
+    let record = (asset.get(..4))
+        .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize)
+        .and_then(|at| asset.get(at..at + 0x3D))
+        .context("short bank-0x11 record")?;
+    let at = match segment {
+        6 => 8..0xB,
+        7 => 0xB..0xE,
+        s => 0x31 + s as usize..0x32 + s as usize,
+    };
+    Ok(record[at].iter().map(|&e| usize::from(e)).collect())
+}
+
+/// Whether a character blinks in a match (`func_1507E2B0`): every player model, bots too, and
+/// Raptor's body (V faces runs n1, v1, k1, b1). Not the baby (its blink never runs, V b1) nor
+/// those only outros draw (their flag 0x800C35EA stops it, V h3).
+fn blinks(entry: usize) -> bool {
+    PLAYERS.contains(&entry) || PICKS.contains(&entry) || entry == BODY
+}
+
+/// `character` as a match draws it outside a blink (`func_1502F01C`): each material still on a
+/// face segment bound to the drawn model's ([`CONKER_DRAWN`] for Conker) entry for it, the eyes
+/// open and Conker's mouth; and if it [`blinks`], its eyes' `faces` and their PNGs
+/// (`textures/face-<entry>.png`).
+pub fn bind_faces(
+    rom: &Rom,
+    mut character: Character,
+    textures: &Textures,
+) -> Result<(Character, Vec<assets::FaceSegment>, Images)> {
+    use extract_gbi::Image;
+    let drawn = if character.entry == 0 {
+        CONKER_DRAWN
+    } else {
+        character.entry
+    };
+    let draws = |c: &Character| -> Vec<Material> {
+        (c.model.lists.iter().flat_map(|l| &l.draws))
+            .map(|d| d.material)
+            .collect()
+    };
+    let face = |m: &Material| {
+        let image = m.texture.and_then(|t| t.image);
+        (FACE_SEGMENTS.into_iter())
+            .find(|&s| matches!(image, Some(Image::Segment(a)) if a >> 24 == s))
+    };
+    let before = draws(&character);
+    let segments: BTreeSet<u32> = before.iter().filter_map(face).collect();
+    let (mut eyes, mut images): (Vec<_>, Images) = (vec![], vec![]);
+    for s in segments {
+        let entries = face_entries(rom, drawn, s)?;
+        let ids: Vec<u32> = (entries.iter())
+            .map(|&e| texture_id(rom, drawn, e))
+            .collect::<Result<_>>()?;
+        if s < 0x0A && blinks(character.entry) {
+            for (e, &id) in entries.iter().zip(&ids) {
+                let file = format!("textures/face-{e:02}.png");
+                let png = segment_png(&character, s, id, textures)?;
+                match images.iter().find(|i| i.0 == file) {
+                    Some(i) => anyhow::ensure!(i.1 == png, "{}: two {file}", character.entry),
+                    None => images.push((file, png)),
+                }
+            }
+            eyes.push((s, entries));
+        }
+        character = bind_segment(character, s, ids[0]);
+    }
+    // Each draw's glTF material (the writer's: distinct, in first-use order).
+    let mut distinct: Vec<Material> = vec![];
+    let index: Vec<usize> = (draws(&character).into_iter())
+        .map(|m| match distinct.iter().position(|d| *d == m) {
+            Some(i) => i,
+            None => {
+                distinct.push(m);
+                distinct.len() - 1
+            }
+        })
+        .collect();
+    let drawing = |s: Option<u32>| -> BTreeSet<usize> {
+        (before.iter().zip(&index))
+            .filter(|(m, _)| face(m) == s)
+            .map(|(_, &i)| i)
+            .collect()
+    };
+    let faces = (eyes.into_iter())
+        .map(|(s, e)| {
+            let materials = drawing(Some(s));
+            anyhow::ensure!(
+                materials.is_disjoint(&drawing(None)),
+                "{}: segment {s}'s material draws more",
+                character.entry
+            );
+            Ok(assets::FaceSegment {
+                segment: s as u8,
+                materials: materials.into_iter().collect(),
+                textures: std::array::from_fn(|k| format!("textures/face-{:02}.png", e[k])),
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok((character, faces, images))
+}
+
 /// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any, of
 /// the song its outro starts ([`outro::songs`]) or on 0x24 its bomb's countdown starts (song 50),
 /// and of its song's positional channels (a raw recording, [`audio::stem`]).
@@ -883,6 +993,12 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             .chain(racer)
             .chain(picks),
     );
+    // Their faces bound to the match's look (after the Wise Guy's team and the tank's lights).
+    let (characters, faces): (Vec<_>, Vec<_>) = (characters.into_iter())
+        .map(|c| bind_faces(rom, c, &textures).map(|(c, f, i)| (c, (f, i))))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .unzip();
     // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank, the raptor, the racer and the
     // picks: each folder is its bank-01 entry (Conker's, 0, draws #1).
     let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
@@ -900,35 +1016,39 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     // Beach's outros' villagers (156, 157) and Raptor's raptor and baby are packed with every clip
     // already.
     let mut outro_characters = outro::characters(rom, &baked)?;
-    outro_characters.retain(|c| !entries.contains(&c.entry) && c.entry != BABY);
+    outro_characters.retain(|(_, c)| !entries.contains(&c.entry) && c.entry != BABY);
+    let named = |c: Character| (c.entry.to_string(), c);
     // War: Colors' flags on 0x30 (bank 01 #169 red, #168 green: 9 joints, the cloth's 4 clips).
     if maps.iter().any(|m| m.scene == 0x30) {
         for f in conker_rules::colors::FLAGS {
-            outro_characters.push(Character::load(rom, usize::from(f.model))?);
+            outro_characters.push(named(Character::load(rom, usize::from(f.model))?));
         }
     }
     // The mounted guns on 0x30, 0x34 and 0x2B (bank 01 #138: 12 joints, clip 1 the fire loop).
     if maps.iter().any(|m| matches!(m.scene, 0x30 | 0x34 | BEACH)) {
-        outro_characters.push(Character::load(rom, MOUNTED_GUN)?);
+        outro_characters.push(named(Character::load(rom, MOUNTED_GUN)?));
     }
     // Heist's cash on 0x1A (bank 01 #87: 5 joints, its own 12 clips).
     if vault {
-        outro_characters.push(Character::load(rom, CASH)?);
+        outro_characters.push(named(Character::load(rom, CASH)?));
     }
     // War: Raptor's baby (the raptor's rig and clips), egg (1 joint, no clip) and body (31 joints,
     // its own 32 clips) on 0x3F.
     if temple {
         for entry in [BABY, EGG, BODY] {
-            outro_characters.push(load_character(rom, entry)?);
+            outro_characters.push(named(load_character(rom, entry)?));
         }
     }
+    let outro_characters: Vec<_> = (outro_characters.into_iter())
+        .map(|(name, c)| Ok((name, bind_faces(rom, c, &textures)?)))
+        .collect::<Result<_>>()?;
     let parse = |text: &str| serde_json::from_str::<Value>(text);
     let mut out = Export::default();
     let (mut gltfs, mut surfaces, mut summary) = (Vec::new(), BTreeSet::new(), Vec::new());
     let mut data = None;
     for (i, map) in maps.iter().enumerate() {
         let name = map_name(map.scene);
-        let d = pack_data(rom, map.scene, &characters, &held, &outros[i])?;
+        let d = pack_data(rom, map.scene, &characters, &faces, &held, &outros[i])?;
         for (path, bytes) in d.write(&name, &names, PACK_WEAPONS)? {
             if i == 0 || path.starts_with("maps/") {
                 out.add(path, bytes);
@@ -993,10 +1113,11 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     }
     let data = data.context("pack: no map")?;
     let held_models = held_gltf(&models, scenes, &textures, "held.bin")?;
-    for (name, c) in names.iter().zip(&characters) {
+    for ((name, c), (_, face_images)) in names.iter().zip(&characters).zip(&faces) {
         let g = c.gltf(&textures, true)?;
         let (json, bin, mut images) =
             external_images(g.with_uri("character.bin"), &g.bin, "character");
+        images.extend(face_images.iter().cloned());
         if let Some(t) = teams.as_ref().filter(|_| c.entry == WISE_GUY) {
             images.extend(t.files.iter().cloned().zip(t.pngs.iter().cloned()));
         }
@@ -1005,17 +1126,18 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         }
         gltfs.push((assets::character_gltf(name), json, bin, images));
     }
-    for c in &outro_characters {
+    for (name, (c, faces, face_images)) in &outro_characters {
         let g = c.gltf(&textures, true)?;
-        let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
-        let name = c.entry.to_string();
+        let (json, bin, mut images) =
+            external_images(g.with_uri("character.bin"), &g.bin, "character");
+        images.extend(face_images.iter().cloned());
         // Heist's bag and cs2's Don Weaso are 0x1A's characters too (the client's `characters`);
-        // Raptor's baby and body carry their `hidden`.
+        // Raptor's baby and body carry their `hidden` (the body its `faces`).
         if [CASH, DON_WEASO, BABY, BODY].contains(&c.entry) {
             let path = format!("characters/{name}/character.json");
-            out.add(path, assets::to_json(&character_file(rom, c)?, 2));
+            out.add(path, assets::to_json(&character_file(rom, c, faces)?, 2));
         }
-        gltfs.push((assets::character_gltf(&name), json, bin, images));
+        gltfs.push((assets::character_gltf(name), json, bin, images));
     }
     gltfs.push((
         assets::held_gltf(PACK_WEAPONS),
@@ -1072,7 +1194,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     if maps.iter().any(|m| m.scene == traps::SCENE) {
         out.files.extend(traps::textures(rom)?);
     }
-    let outro_characters = outro_characters.iter().map(|c| c.entry.to_string());
+    let outro_characters = outro_characters.into_iter().map(|c| c.0);
     let manifest = Manifest {
         format: FORMAT,
         source_rom_sha1: US_SHA1.into(),
@@ -1759,6 +1881,7 @@ fn pack_data(
     rom: &Rom,
     scene: usize,
     characters: &[Character],
+    faces: &[(Vec<assets::FaceSegment>, Images)],
     held: &[Held],
     outros: &[assets::outro::Outro],
 ) -> Result<assets::Slice> {
@@ -1829,8 +1952,8 @@ fn pack_data(
         outros: outros.to_vec(),
         ai: rom.asset(&[0x14, ai_script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, conker_bots::class(scene)])?.into_owned(),
-        characters: (characters.iter())
-            .map(|c| character_file(rom, c))
+        characters: (characters.iter().zip(faces))
+            .map(|(c, f)| character_file(rom, c, &f.0))
             .collect::<Result<_>>()?,
         held: (held.iter())
             .map(|h| assets::Held {
@@ -1848,7 +1971,11 @@ fn pack_data(
 }
 
 /// `characters/<entry>/character.json` of a packed character.
-fn character_file(rom: &Rom, c: &Character) -> Result<assets::Character> {
+fn character_file(
+    rom: &Rom,
+    c: &Character,
+    faces: &[assets::FaceSegment],
+) -> Result<assets::Character> {
     let (clips, root_clips) = clips(c);
     let pick = PICKS.contains(&c.entry);
     let player = (pick || PLAYERS.contains(&c.entry))
@@ -1874,6 +2001,7 @@ fn character_file(rom: &Rom, c: &Character) -> Result<assets::Character> {
             .then(|| team_material(c, &team_ids(rom, c.entry)?))
             .transpose()?,
         tank: (c.entry == TANK).then(|| tank_parts(rom, c)).transpose()?,
+        faces: faces.to_vec(),
     })
 }
 

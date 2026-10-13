@@ -157,7 +157,7 @@ pub fn camera(
         return;
     }
     c.scope.on = false;
-    behind(follow, cam, b, &CAM, world);
+    behind(follow, cam, b, &CAM, Some(world));
 }
 
 /// A follow camera behind a heading ([`camera`]'s, the raptor's): back, up and the look-at's
@@ -172,13 +172,14 @@ pub struct Behind {
     pub follow: [f32; 3],
 }
 
-/// One frame of a [`Behind`] camera into `follow`'s eye and look-at, pulled in front of a wall.
+/// One frame of a [`Behind`] camera into `follow`'s eye and look-at, pulled in front of a wall of
+/// `world` (none: through walls).
 pub fn behind(
     follow: &mut Follow,
     cam: &mut Cam,
     b: &PlayerState,
     k: &Behind,
-    world: &CollisionWorld,
+    world: Option<&CollisionWorld>,
 ) {
     let c = &mut follow.cam;
     c.look_offset = 0.0;
@@ -199,7 +200,7 @@ pub fn behind(
     let at = Vec3::new(b.pos[0], b.pos[1] + look, b.pos[2]);
     let mut eye = Vec3::new(b.pos[0] - back * cy, b.pos[1] + up, b.pos[2] + back * sy);
     let (dir, len) = (eye - at).normalize_and_length();
-    if let Some(hit) = world.ray(at.to_array(), dir.to_array(), len) {
+    if let Some(hit) = world.and_then(|w| w.ray(at.to_array(), dir.to_array(), len)) {
         eye = at + dir * (hit.dist - CAM_WALL).max(0.0);
     }
     (c.eye, c.at) = (eye.to_array(), at.to_array());

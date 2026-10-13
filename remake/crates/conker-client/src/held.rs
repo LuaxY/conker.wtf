@@ -115,6 +115,17 @@ pub fn shows(h: &Held, weapon_id: u8, drawn: bool, clock: &AnimPlayer) -> bool {
     }
 }
 
+/// Whether held model `h` is in the hand by its own clip's events alone (Race's kick: the fist,
+/// #0x34, made at t5 and gone at t30 of clip 0x354): the last of its events in the playing clip
+/// that fired is a create.
+pub fn clip_shows(h: &Held, clock: &AnimPlayer) -> bool {
+    (h.create.iter().map(|&e| (e, true)))
+        .chain(h.remove.iter().map(|&e| (e, false)))
+        .filter(|((id, t), _)| *id == clock.id && clock.time >= *t)
+        .max_by(|a, b| a.0.1.total_cmp(&b.0.1))
+        .is_some_and(|(_, create)| create)
+}
+
 /// Whether gas-mask model `h` (its create events are in the put-on clip [`MASK_ON`]) shows on a
 /// player wearing a mask or not (`masked`) whose animation clock is `clock`. In the put-on the last
 /// of its put-on events that fired decides (the hand's create at t26: frame 9); in the take-off
@@ -276,12 +287,15 @@ fn show(
             (_, Some(c)) => (c.weapon, c.drawn, c.masked),
             _ => (0, false, false),
         };
-        // A raptor holds nothing (its clips are not the weapons' events').
+        // A raptor holds nothing (its clips are not the weapons' events'); a racer holds what its
+        // clip makes (the kick's fist, [`clip_shows`]).
         let raptor = combat.is_some_and(|c| c.class == conker_rules::raptor::CLASS);
+        let racer = combat.is_some_and(|c| crate::race::racer(c.class));
         for &(i, entity) in &hands.0 {
             let h = &held.0[i];
             let shown = !raptor
                 && match h.create.iter().any(|c| c.0 == MASK_ON) {
+                    _ if racer => clip_shows(h, &anim.0),
                     true => mask_shows(h, masked, &anim.0),
                     false => shows(h, weapon_id, drawn, &anim.0),
                 };

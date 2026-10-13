@@ -545,10 +545,13 @@ fn on_connected(
 ) {
     if let Ok(mut joins) = clients.get_mut(trigger.entity) {
         info!(
-            "client {} connected over {:?}; joins on side {:?}",
-            cfg.id, cfg.transport, cfg.side
+            "client {} connected over {:?}; joins on side {:?} with pick {:?}",
+            cfg.id, cfg.transport, cfg.side, cfg.character
         );
-        joins.send::<JoinChannel>(Join { side: cfg.side });
+        joins.send::<JoinChannel>(Join {
+            side: cfg.side,
+            character: cfg.character,
+        });
         *status = NetStatus::Connected;
     }
 }

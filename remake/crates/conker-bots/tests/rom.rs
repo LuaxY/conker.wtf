@@ -921,6 +921,7 @@ fn colors_bots_take_a_flag() {
             let place = spawn::place(&arena.spawns, usize::from(record), &mut rng);
             Fighter {
                 side: [Side::Squirrels, Side::Tediz][team],
+                class: [4, 3][team],
                 spawn_mask: starts.side_masks[team],
                 bot: slot < 7,
                 ..Fighter::new(&place, team as u8, 0)
@@ -1606,7 +1607,7 @@ fn play(
             };
             Fighter {
                 start: vault.then_some(weapon::BAT.id),
-                class: u8::from(vault),
+                class: if vault { 1 } else { 3 },
                 spawn_mask: mask,
                 ..Fighter::new(&spawn::place(&arena.spawns, at, &mut r), team, 23)
             }

@@ -346,6 +346,22 @@ pub struct Character {
     /// The tank's moving parts and light swaps (model 119); absent for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tank: Option<Tank>,
+    /// The eyes that blink (segments 6 and 7, `func_1502F01C`); empty (absent) for a character
+    /// that never does. Its glTF draws every face segment's default (eyes open; Conker's mouth).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<FaceSegment>,
+}
+
+/// One eye segment of a blinking character: the materials the game draws from it and its three
+/// looks, swapped together on both eyes (`../lab/research/mp-original/faces.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceSegment {
+    /// The game's segment: 6 or 7.
+    pub segment: u8,
+    /// The glTF materials that draw it (their own texture is `textures[0]`).
+    pub materials: Vec<usize>,
+    /// Open, half shut and shut, relative to the character's folder.
+    pub textures: [String; 3],
 }
 
 /// A character's look per team: one material's texture swapped (the game binds it to segment 0x0A
@@ -1086,6 +1102,12 @@ mod tests {
                         treads: 13,
                         tread_joints: [13, 12],
                     }),
+                    faces: vec![FaceSegment {
+                        segment: 6,
+                        materials: vec![12, 13],
+                        textures: ["open", "half", "shut"]
+                            .map(|t| format!("textures/face-{t}.png")),
+                    }],
                 },
                 Character {
                     model_lift: 43,
@@ -1109,6 +1131,7 @@ mod tests {
                     looks: Default::default(),
                     teams: None,
                     tank: None,
+                    faces: vec![],
                 },
             ],
             held: vec![Held {
@@ -1352,6 +1375,9 @@ mod tests {
         assert!(
             !tedi.contains("hitbox") && !tedi.contains("clips_from") && !tedi.contains("hidden")
         );
+        // `faces` only when the character blinks.
+        assert!(!tedi.contains("faces"), "{tedi}");
+        assert!(squirrel.contains("\"faces\": [\n    {\"segment\":6,\"materials\":[12,13],\"textures\":[\"textures/face-open.png\""), "{squirrel}");
         assert_eq!(bits(&back), bits(&slice));
         // Integers stay integers, -0.0 keeps its sign, and one triangle per line.
         let collision = String::from_utf8(files["maps/2d/collision.json"].clone()).unwrap();

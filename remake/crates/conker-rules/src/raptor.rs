@@ -10,9 +10,7 @@
 //! raptor in the nest with a body feeds the baby (+1). Every kill is +1 for the killer's team.
 
 use conker_sim::collision::CollisionWorld;
-use conker_sim::movement::{
-    self, BUTTON_Z, Input, Other, PlayerState, Side, angle_diff, atan2_u16,
-};
+use conker_sim::movement::{self, BUTTON_Z, Input, Other, PlayerState, angle_diff, atan2_u16};
 use conker_sim::raptor::{self as gait, Drive, clip};
 
 use crate::colors::Pose;
@@ -109,10 +107,14 @@ pub enum Op {
 }
 
 /// The egg's touch: a living caveman's body over it, on the ground (as the bag's, radius 29; I).
-pub fn touches(egg: [f32; 3], player: &PlayerState, side: Side) -> bool {
+pub fn touches(egg: [f32; 3], player: &PlayerState, me: Other) -> bool {
     let [x, y, z] = player.pos;
     let low = y + 0.5 * (movement::GROUND_Y_VEL - movement::GRAVITY_FALL);
-    !player.airborne && crate::heist::body(egg).overlaps(&Other::player(side, [x, low, z]))
+    !player.airborne
+        && crate::heist::body(egg).overlaps(&Other {
+            pos: [x, low, z],
+            ..me
+        })
 }
 
 /// Where a carried egg is.
@@ -352,7 +354,7 @@ impl Match {
                             | Action::Aim { .. }
                             | Action::Reload { .. }
                     )
-                    && touches(egg.pos, &f.body, f.side)
+                    && touches(egg.pos, &f.body, f.other())
             });
             if let Some(i) = toucher {
                 let f = &mut self.players[i];
@@ -453,7 +455,7 @@ mod tests {
     use crate::game::{Fighter, Settings};
     use crate::gas::Effect;
     use crate::spawn::{Placement, Spawn};
-    use conker_sim::movement::BUTTON_A;
+    use conker_sim::movement::{BUTTON_A, Side};
 
     fn flat() -> CollisionWorld {
         let big = 20_000.0;
@@ -550,6 +552,53 @@ mod tests {
             assert_eq!((m.players[0].anim, m.players[0].prey), (clip::DROP, false));
             assert_eq!(m.raptor.drops.len(), 1);
         }
+    }
+
+    /// A raptor picked on 0x3F's Deathmatch (characters.md §1.3, V: its movement on any map) runs
+    /// its own frame there: A jumps at 70 (a Tedi's jump is the on-foot one), its bite kills, and
+    /// the kill scores as a Deathmatch's, no team point.
+    #[test]
+    fn a_picked_raptor_plays_in_a_deathmatch() {
+        let world = flat();
+        let (m, arena) = hunt([200.0, 0.0, 0.0], 0);
+        let mut m = m.with(Settings::default());
+        m.step(&arena, &[Input::default(); 2], &world);
+        m.step(&arena, &[pad(0, 0, BUTTON_A), Input::default()], &world);
+        let b = m.players[0].body;
+        assert_eq!((b.y_vel, b.state), (gait::JUMP_Y_VEL, clip::JUMP as u8));
+        let (mut m, arena) = hunt([200.0, 0.0, 0.0], 0);
+        m.players[0].class = 3;
+        let mut m = m.with(Settings::default());
+        m.step(&arena, &[Input::default(); 2], &world);
+        m.step(&arena, &[pad(0, 0, BUTTON_A), Input::default()], &world);
+        assert!(
+            m.players[0].body.y_vel < gait::JUMP_Y_VEL,
+            "a Tedi's own jump"
+        );
+        let (m, arena) = hunt([200.0, 0.0, 0.0], 0);
+        let mut m = m.with(Settings::default());
+        m.step(&arena, &[pad(0, 0, BUTTON_Z), Input::default()], &world);
+        for _ in 1..=BITE_AT {
+            m.step(&arena, &[Input::default(); 2], &world);
+        }
+        assert_eq!((m.players[1].health, m.players[0].kills), (0, 1));
+        assert_eq!(m.colors.scores, [0, 0]);
+        // Clubbed down, it comes back a raptor on r7's frames; the kill is the caveman's own.
+        let (m, arena) = hunt([3000.0, 0.0, 0.0], 0);
+        let mut m = m.with(Settings::default());
+        let mut ev = Vec::new();
+        for k in 1..=6 {
+            assert!(m.hurt(0, &damage::CLUB_SWING, false, false, 0, Some(1), &mut ev));
+            for _ in 0..15 * u8::from(k < 6) {
+                m.step(&arena, &[Input::default(); 2], &world);
+            }
+        }
+        for _ in 0..DOWN_AT {
+            m.step(&arena, &[Input::default(); 2], &world);
+        }
+        let f = &m.players[0];
+        assert_eq!((f.anim, f.health, f.class), (clip::RESPAWN, 6, CLASS));
+        assert_eq!((m.players[1].kills, m.colors.scores), (1, [0, 0]));
     }
 
     /// V r8: Z at full speed plays clip 53 for 11 frames, braking 2.5 a frame; 10 frames in, the

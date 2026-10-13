@@ -36,7 +36,7 @@ const REMOVE: u32 = 106;
 const VERTICES: usize = 0x18;
 /// Segment 8 while an attachment draws opaque: the renderer's render-state lists in `.game` data
 /// (`func_150311C4`; 0x80082FC0 while it fades). V: RAM, EF + DF lists at +0x40, +0x50, +0x100.
-const RENDER_STATES: usize = 0x8008_3140;
+pub(crate) const RENDER_STATES: usize = 0x8008_3140;
 
 /// A model a character holds: drawn with the character's joint matrix while the last of its events
 /// that fired created it.

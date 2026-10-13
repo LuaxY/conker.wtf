@@ -83,8 +83,8 @@ pub struct Character {
 
 impl Character {
     pub fn load(rom: &Rom, entry: usize) -> Result<Self> {
-        let model = parse_model(&rom.asset(&[1, entry])?)?;
         let game_data = rom.game_data()?;
+        let model = parse_model(&rom.asset(&[1, entry])?, &game_data)?;
         let anim_entry = animation_entry(&game_data, entry)?;
         let clips = load_clips(rom, &game_data, anim_entry)?;
         Ok(Self {

@@ -113,7 +113,7 @@ pub const CAM: Behind = Behind {
 /// camera's (`target_angle` adds the input's camera yaw, [`Follow::yaw`]): its yaw is the heading's.
 pub fn camera(follow: &mut Follow, cam: &mut Cam, f: &Fighter, world: &CollisionWorld) {
     follow.cam.scope.on = false;
-    crate::tank::behind(follow, cam, &f.body, &CAM, world);
+    crate::tank::behind(follow, cam, &f.body, &CAM, Some(world));
     if let Some((heading, _)) = cam.0 {
         follow.cam.yaw = (heading - 90.0).rem_euclid(360.0);
         follow.cam.stick_override = conker_camera::NO_OVERRIDE;

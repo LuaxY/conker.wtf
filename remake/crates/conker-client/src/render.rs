@@ -785,9 +785,10 @@ fn show_pickups(
     let tick = timeline.tick().0;
     for (placement, entity, base, at) in nodes.iter_mut() {
         // Tank's doors, bomb and wrecks are its own ([`crate::tank`]), Raptor's cooked eggs and
-        // hidden ones its ([`crate::raptor`]).
+        // hidden ones its ([`crate::raptor`]), Race's barriers and power-ups its ([`crate::race`]).
         if m.tank && crate::tank::owns(*placement)
             || m.raptor && nest.as_ref().is_some_and(|n| n.owns(*placement))
+            || m.race && crate::race::owns(*placement)
         {
             continue;
         }

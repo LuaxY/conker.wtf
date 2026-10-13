@@ -859,6 +859,7 @@ fn replay(c: &Case) -> Option<Report> {
             (f.start, f.weapon) = (c.start_item, c.start_item);
             if c.cavemen {
                 f.side = conker_sim::movement::Side::Cavemen;
+                f.class = conker_rules::raptor::CAVEMAN;
             }
             (f.health, f.immune, f.stun, f.anim, f.grenades) = (
                 r.health,

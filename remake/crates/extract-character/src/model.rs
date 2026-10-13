@@ -5,9 +5,15 @@
 //! §"Rigged character-model geometry" and `scripts/model_assets.py`
 //! (`parse_character_model_geometry`, `character_global_bind_pivots`).
 
-use extract_gbi::{Ir, walk};
+use extract_gbi::{Ir, walk_from};
 
+use crate::held::RENDER_STATES;
 use crate::{Error, Result, be32, get};
+
+/// The geometry mode a model's lists start from: the renderer's culls back faces (V
+/// `../lab/research/mp-original/alpha-scratch`: 0x620405 at every draw of 0, 150 and 90, whose
+/// lists never set it; only G_CULL_BACK reaches the glTF).
+const INHERITED: u32 = 0x400;
 
 /// One 16-byte joint record (`func_150A81D0`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,7 +115,11 @@ pub fn bind_pivots(joints: &[Joint]) -> Result<Vec<[f64; 3]>> {
 /// Parses a bank-01 model: a 0x38-byte header of seven `(offset, size)` pairs (`func_1503CF20`;
 /// vertices follow it; pair 2 is the joint table). Display lists use segment 0 for model offsets
 /// (normal streams, list calls) and segment 1 for vertices, both relative to the model start.
-pub fn parse_model(model: &[u8]) -> Result<Model> {
+/// Segment 8 is the renderer's render-state lists in `game_data` (the `.game` data), as for the
+/// held models ([`RENDER_STATES`]; V the same address at every character draw); the lists start
+/// from [`INHERITED`].
+pub fn parse_model(model: &[u8], game_data: &[u8]) -> Result<Model> {
+    let states = game_data.get(RENDER_STATES - crate::GAME_DATA_VRAM..);
     let w: Vec<usize> = (0..14)
         .map(|k| be32(model, k * 4).map(|v| v as usize))
         .collect::<Result<_>>()?;
@@ -121,10 +131,11 @@ pub fn parse_model(model: &[u8]) -> Result<Model> {
         }
         for k in (0..size).step_by(4) {
             let start = be32(model, table + k)?;
-            lists.push(walk(start, |a| {
+            lists.push(walk_from(start, INHERITED, |a| {
                 let off = (a & 0xFF_FFFF) as usize;
                 match a >> 24 {
                     0 | 1 => model.get(off..),
+                    8 => states?.get(off..),
                     _ => None,
                 }
             })?);
@@ -229,7 +240,7 @@ mod tests {
             m[at..at + 4].copy_from_slice(&w0.to_be_bytes());
             m[at + 4..at + 8].copy_from_slice(&w1.to_be_bytes());
         }
-        let model = parse_model(&m).unwrap();
+        let model = parse_model(&m, &[]).unwrap();
         assert_eq!(model.lists.len(), 2);
         assert_eq!(model.lists[0].vertices[0].position[0], 7);
         assert_eq!(model.lists[0].vertices[0].matrix, Some(0x0300_0000));

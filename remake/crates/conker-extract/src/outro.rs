@@ -473,7 +473,7 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
             let turns = |k: &[Key]| k.windows(2).any(|w| w[0].value != w[1].value);
             let moving = |channel| Some(keys(curve, channel)).filter(|k| turns(k));
             actors.push(Actor {
-                character: model.to_string(),
+                character: folder(model, &scripts[o].1)?,
                 animation: first.animation,
                 ticks: first.ticks,
                 rate: first.rate,
@@ -669,6 +669,20 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
 }
 
 /// Op 5 b=0x6F (`func_1502460C`): obj+0x68 + c = d; c 0 (every use) selects the team look d − 1.
+/// The actor's character folder: its model, or `<model>-<segment>-<entry>` when op 9 draws a face
+/// segment from a texture-table entry (obj+0x6C+c = b + 10, a code ≥ 10: segment 6 + c on entry
+/// b; `outros-leftovers.md` §6). Colors cs5's lit tank is 40-7-9 (V cs5b: its segment 7 draws
+/// 4368 and the other tank's 4216, both translucent); [`characters`] binds it. Its op is at t 1:
+/// the folder draws it from t 0, a tick early.
+fn folder(model: usize, script: &[Command]) -> Result<String> {
+    let ops: Vec<_> = script.iter().filter(|c| c.op == 9).collect();
+    Ok(match ops[..] {
+        [] => model.to_string(),
+        [c] if c.c < 2 => format!("{model}-{}-{}", 6 + c.c, c.b),
+        _ => anyhow::bail!("model {model}: op 9 {ops:?}"),
+    })
+}
+
 fn team(script: &[Command]) -> Result<Option<u8>> {
     let Some(c) = script.iter().find(|c| c.op == 5 && c.b == 0x6F) else {
         return Ok(None);
@@ -874,8 +888,9 @@ pub fn models(rom: &Rom, scene: usize, outros: &[Outro]) -> Result<Option<(Level
     Ok(Some((level, scenes.into())))
 }
 
-/// The outros' characters, each once with only the clips they play.
-pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<Character>> {
+/// The outros' characters, each once with only the clips they play, by folder (an actor's
+/// `character`: a `<model>-<segment>-<entry>` has that face segment bound to that entry).
+pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<(String, Character)>> {
     let mut played: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for a in outros.iter().flat_map(Outro::actors) {
         played
@@ -884,8 +899,14 @@ pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<Character>> {
             .extend(a.clips().map(|c| c.0));
     }
     (played.into_iter())
-        .map(|(model, names)| {
-            let mut character = crate::load_character(rom, model.parse()?)?;
+        .map(|(folder, names)| {
+            let mut parts = folder.split('-').map(str::parse::<usize>);
+            let model = parts.next().context("a model")??;
+            let mut character = crate::load_character(rom, model)?;
+            if let (Some(segment), Some(entry)) = (parts.next(), parts.next()) {
+                let id = crate::texture_id(rom, model, entry?)?;
+                character = crate::bind_segment(character, segment? as u32, id);
+            }
             character.clips.retain(|c| {
                 let name = conker_assets::ClipInfo {
                     pair: c.pair,
@@ -896,7 +917,7 @@ pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<Character>> {
                 .animation();
                 names.contains(name.as_str())
             });
-            Ok(character)
+            Ok((folder.to_string(), character))
         })
         .collect()
 }

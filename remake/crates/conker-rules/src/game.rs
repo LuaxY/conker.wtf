@@ -31,6 +31,7 @@ use conker_sim::movement::{
 
 use crate::Rng;
 use crate::beach::{self, Plunger};
+use crate::characters;
 use crate::colors::{self, Colors, Pose};
 use crate::damage::{self, DamageType, Facing, Hitbox, in_reach};
 use crate::fidget::{self, Fidget};
@@ -281,8 +282,8 @@ pub struct Fighter {
     pub body: PlayerState,
     /// obj+0x128: Deathmatch gives every player its own team.
     pub team: u8,
-    /// The side, which picks the model and so the body ([`Hitbox`], conker-sim's `Other::player`):
-    /// the Tediz unless a match puts the player with the squirrels.
+    /// The side: the team and base the server keys (conker-sim's `Side`), the Tediz unless a match
+    /// puts the player with the squirrels or the cavemen. The body is the class's ([`Self::class`]).
     pub side: Side,
     /// The records this player respawns on ([`spawn::respawn`]'s `eligible`): every one, as in the
     /// original's Deathmatch, unless the match keeps it in its side's half ([`spawn::TOTAL_WAR_MASKS`]).
@@ -388,9 +389,11 @@ pub struct Fighter {
     /// On a mounted gun ([`gun`]): jumping onto it, then seated, until A, its death or a hit that
     /// throws it off.
     pub gun: Option<Mount>,
-    /// War: Beach: the record's class (+0, [`beach::model`]: a villager's look, re-rolled at each
-    /// respawn; 0 in the other modes), and s126+0x12C, a bottle's boost in VIs ([`beach::drive`];
-    /// Tank's power-up timer in VIs, or 0x10's shells left).
+    /// The record's class (+0; [`characters`]: its model, scale and bodies): the scenario's (the Tedi's
+    /// 3 by default, the squirrel's 4, the caveman's 0xB, the Wise Guy's 1 on 0x1A, the tank's 8, the
+    /// raptor's 9, Race's 0xB-0xF) or a human's pick's; War: Beach's villager looks re-rolled at each
+    /// respawn ([`beach::model`]). And s126+0x12C, a bottle's boost in VIs ([`beach::drive`]; Tank's
+    /// power-up timer in VIs, or 0x10's shells left).
     pub class: u8,
     pub boost: u16,
     /// The tommy gun's climb while firing (s126+0x1A2/0x1A4, [`weapon::Climb`]).
@@ -456,7 +459,7 @@ impl Fighter {
             bags: 0,
             scope_pitch: 0.0,
             gun: None,
-            class: 0,
+            class: beach::TEDI_CLASS,
             boost: 0,
             climb: weapon::Climb::default(),
             power: 0,
@@ -465,20 +468,14 @@ impl Fighter {
         }
     }
 
-    /// The body the area tests and the bullets' sweep take ([`Hitbox`]): the raptor's own.
+    /// The body the area tests and the bullets' sweep take ([`Hitbox`]): its class's.
     pub fn hitbox(&self) -> Hitbox {
-        match self.class {
-            raptor::CLASS => Hitbox::RAPTOR,
-            _ => Hitbox::of(self.side),
-        }
+        characters::body(self.class).hitbox
     }
 
-    /// The body it pushes the others with (conker-sim's `Other`): the raptor's own.
+    /// The body it pushes the others with (conker-sim's `Other`): its class's.
     pub fn other(&self) -> Other {
-        match self.class {
-            raptor::CLASS => conker_sim::raptor::body(self.body.pos),
-            _ => Other::player(self.side, self.body.pos),
-        }
+        characters::body(self.class).at(self.body.pos)
     }
 
     /// This slot's player in `body`'s object (`func_15062800` swaps the two objects and puts each
@@ -1590,7 +1587,7 @@ impl Match {
                             | Action::Reload { .. }
                     )
                     && colors::takes(k, f.team)
-                    && colors::touches(&flag, &f.body, f.side)
+                    && colors::touches(&flag, &f.body, f.other())
             });
             if let Some(i) = toucher {
                 let f = &mut self.players[i];
@@ -1618,7 +1615,7 @@ impl Match {
                             | Action::Aim { .. }
                             | Action::Reload { .. }
                     )
-                    && heist::touches(&cash, &f.body, f.side)
+                    && heist::touches(&cash, &f.body, f.other())
             });
             if let Some(i) = toucher {
                 let f = &mut self.players[i];
@@ -1931,8 +1928,9 @@ impl Match {
         if let (None, Some(id)) = (self.players[i].weapon, self.players[i].start) {
             self.give(i, id);
         }
-        // War: Raptor's raptors keep the club in the slot but never draw it (V: 0xC0).
-        if self.settings.raptor && self.players[i].class == raptor::CLASS {
+        // The raptor (War: Raptor's, a pick on 0x3F) keeps the club in the slot but never draws
+        // it (V: 0xC0); its frame is its own in any mode (V: its movement on every map).
+        if self.players[i].class == raptor::CLASS {
             return self.raptor_player(i, input, arena, world, seen, ev);
         }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
@@ -2035,7 +2033,8 @@ impl Match {
             if held(BUTTON_A) && late & BUTTON_A == 0 {
                 let facing: u16 = if f.body.pos[2] > 0.0 { 0xB000 } else { 0x3000 };
                 let angle = facing.wrapping_add(0x1200);
-                movement::leap(&mut f.body, angle, world, f.side, &others);
+                let me = f.other();
+                movement::leap(&mut f.body, angle, world, me, &others);
                 (f.gun, f.immune) = (None, 20);
                 f.set(Action::Free, id::JUMP, t);
                 if let Some(g) = self.guns.get_mut(usize::from(m.gun)) {
@@ -2517,7 +2516,8 @@ impl Match {
             burn_run(f, world, t, &others);
         } else {
             f.bump = 0;
-            movement::step_among(&mut f.body, &mv, world, f.side, &others);
+            let me = f.other();
+            movement::step_among(&mut f.body, &mv, world, me, &others);
         }
         if let Some((facing, angle)) = keep {
             f.body.prev_buttons |= input.buttons & BUTTON_A;
@@ -3479,7 +3479,7 @@ impl Match {
                                 | Action::Aim { .. }
                                 | Action::Reload { .. }
                         )
-                        && gun::touches(at, &Other::player(f.side, f.body.pos))
+                        && gun::touches(at, &f.other())
                 });
                 if let (Some(i), 0) = (toucher, g.leave) {
                     // The jump keeps the speed the player came with, along the gun's yaw, and homes
@@ -3674,7 +3674,7 @@ fn away_from(world: &CollisionWorld, source: [f32; 3], p: [f32; 3]) -> u16 {
 /// for 11 frames (0x28E), after which it goes on along the wall (I: the game's steering of the run,
 /// `func_150599C8`, and its bounce direction are not ported, nor the stick and A/B patting it out).
 fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
-    let side = f.side;
+    let me = f.other();
     let b = &mut f.body;
     if f.bump > 0 {
         f.bump -= 1;
@@ -3689,7 +3689,7 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
     let (c, s) = cos_sin(b.move_angle);
     let d = 0.5 * b.xz_speed;
     let mut new = [old[0] + d * c, old[1] - 4.5, old[2] - d * s];
-    movement::push_apart(&mut new, side, others);
+    movement::push_apart(&mut new, me, others);
     let swept = world.sweep(
         old,
         new,
@@ -3744,7 +3744,8 @@ fn dir_angle(world: &CollisionWorld, d: [f32; 3]) -> u16 {
 /// Advances the root-motion clock with the clip the player shows this frame (conker-sim's
 /// `animate`, at conker-anim's rate): the next frame's step goes by the root when the clip has one.
 fn animate(f: &mut Fighter, world: &CollisionWorld) {
-    let r = conker_anim::request(f.anim, f.body.xz_speed, f.body.target_speed);
+    let id = characters::clip(f.class, f.anim);
+    let r = conker_anim::request(id, f.body.xz_speed, f.body.target_speed);
     movement::animate(&mut f.body, r.id, r.rate, r.start, world);
 }
 
@@ -3786,7 +3787,7 @@ fn clear(world: &CollisionWorld, source: [f32; 3], victim: [f32; 3]) -> bool {
 /// velocity; the frame after a landing follows the floor's plane. Once a bounce would be below 5
 /// (I: 4.56 stopped, 5.875 bounced) the player stays down and slides with the hit's friction.
 fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others: &[Other]) {
-    let side = f.side;
+    let me = f.other();
     let b = &mut f.body;
     // The facing turns first: a root step goes along the turned facing (V e_w22 851-858).
     let turn = |to: u16, facing: u16| {
@@ -3816,7 +3817,7 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             old[1] + d * rise + 0.5 * b.y_vel - 0.275 * b.gravity,
             old[2] - d * s,
         ];
-        movement::push_apart(&mut new, side, others);
+        movement::push_apart(&mut new, me, others);
         b.y_vel -= b.gravity;
         let swept = world.sweep(
             old,
@@ -3873,7 +3874,7 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
         let y_vel = b.y_vel - movement::GRAVITY_FALL;
         let mut fell = b.pos;
         fell[1] += 0.5 * y_vel;
-        let shoved = movement::push_apart(&mut fell, side, others);
+        let shoved = movement::push_apart(&mut fell, me, others);
         if rooted || d > 0.0 || shoved {
             b.pos = fell;
             let pre = b.pos;
@@ -4006,7 +4007,7 @@ mod tests {
             let (arena, mut m, w) = duel();
             m.give(0, 0x39);
             m.players[1].health = 2;
-            m.players[1].side = Side::Squirrels;
+            (m.players[1].side, m.players[1].class) = (Side::Squirrels, 4);
             m.players[1].spawn_mask = mask;
             let ev = run(&mut m, &arena, &w, 200, |t| match t {
                 0 => BUTTON_B,
@@ -5227,7 +5228,7 @@ mod tests {
             ..Settings::default()
         });
         m.players[1].body.pos = [0.0, 0.0, 3000.0];
-        m.players[0].side = Side::Squirrels;
+        (m.players[0].side, m.players[0].class) = (Side::Squirrels, 4);
         // The green flag (team 1's to take), e0's: 31 off and 43.4 up.
         m.colors.flags[1] = flag([31.0, 43.4, -3.8]);
         run(&mut m, &arena, &w, 1, |_| 0);
@@ -5236,13 +5237,13 @@ mod tests {
             (p[0] + 7.1).abs() < 0.7 && (p[2] - 0.8).abs() < 0.2,
             "{p:?}"
         );
-        for (side, sum) in [(Side::Tediz, 53.0), (Side::Squirrels, 60.0)] {
-            m.players[0].side = side;
+        for (class, sum) in [(3, 53.0), (4, 60.0)] {
+            m.players[0].class = class;
             m.players[0].body.pos = [0.0; 3];
             m.colors.flags[1] = flag([31.0, 0.0, 0.0]);
             run(&mut m, &arena, &w, 40, |_| 0);
             let p = m.players[0].body.pos;
-            assert!((p[0] + sum - 31.0).abs() < 0.06, "{side:?} {p:?}");
+            assert!((p[0] + sum - 31.0).abs() < 0.06, "{class} {p:?}");
             assert_eq!(m.players[0].flag, None);
         }
         // Pushed to its rest off the red flag, team 0's to take, it takes nothing (e0).

@@ -4,7 +4,7 @@
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
 # Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24|33] [MODE=deathmatch|total-war|colors|beach|heist|tank|raptor|race] [SCORE=1-40|unlimited]
 #   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] [SIDE=squirrels|tediz|cavemen] [ROUTE=11|12] [LAPS=1-20]
-#   crates/conker-server/bots.sh [seconds=150]. SIDE: the side client 1 asks for.
+#   [CHARACTER=0-21] [CHEATS=code,...|all] crates/conker-server/bots.sh [seconds=150]. SIDE and CHARACTER: what client 1 asks for.
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
 # MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
 # MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
@@ -27,6 +27,7 @@ mode=(); [[ -n ${MODE:-} ]] && mode=(--mode $MODE)
 [[ -n ${SEED:-} ]] && mode+=(--seed $SEED)
 [[ -n ${ROUTE:-} ]] && mode+=(--route $ROUTE)
 [[ -n ${LAPS:-} ]] && mode+=(--laps $LAPS)
+[[ -n ${CHEATS:-} ]] && mode+=(--cheats $CHEATS)
 $bin/conker-server --port $port --map ${MAP:-2d} $mode --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!
@@ -37,6 +38,7 @@ for id in $(seq 1 $humans); do
   script=()
   (( id == 2 )) && script=(--script)
   (( id == 1 )) && [[ -n ${SIDE:-} ]] && script+=(--side $SIDE)
+  (( id == 1 )) && [[ -n ${CHARACTER:-} ]] && script+=(--character $CHARACTER)
   $bin/conker-client --headless --id $id --transport ws --server 127.0.0.1:$port --digest $digest --seconds $secs \
     $script > $logs/client$id.log 2>&1 &
   clients+=($!)
@@ -50,6 +52,8 @@ moves() { grep -E "$1" $2 | grep -oE 'pos \([^)]*\)' | sort -u | wc -l | tr -d '
 for id in $(seq 1 $humans); do
   report "client $id connected" $(grep -c "client $id connected over" $logs/client$id.log)
 done
+grep -oE 'client Netcode\([0-9]+\) connected via .* as [A-Za-z]+ .*class 0x[0-9a-f]+ \(asked [^)]*\)' $logs/server.log | sed -E 's/ via .* as / as /'
+grep -oE 'slot [0-9]+: pick .*' $logs/server.log
 for b in $(seq 0 $((bots - 1))); do
   n=$(moves "player Local\\($b\\) input None" $logs/server.log)
   hits=$(grep -c "EVENT .*Hit { victim: [0-9]*, attacker: $b," $logs/server.log)

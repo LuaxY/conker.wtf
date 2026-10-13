@@ -10,6 +10,7 @@ mod texture;
 
 pub use dl::{
     Draw, Image, Ir, Material, Palette, Texture, Tile, VERTEX_CACHE, Vertex, flat_data, walk,
+    walk_from,
 };
 pub use texture::{Format, Tlut, decode, png};
 
