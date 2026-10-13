@@ -37,6 +37,7 @@ use crate::fidget::{self, Fidget};
 use crate::flame::{self, Burn};
 use crate::gas::{self, Effect, Gas};
 use crate::gun::{self, Gun, Mount};
+use crate::heist::{self, Heist};
 use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
@@ -159,6 +160,11 @@ pub struct Settings {
     /// the team scores ([`Colors::scores`]) go up for an escape, the detonation and each villager's
     /// death, and the match ends on the clock or at [`Self::score`]; teams rank as Colors' do.
     pub beach: bool,
+    /// War: Heist (scenario 0, scene 0x1A; [`crate::heist`]): four teams (REDS, BLUES, GREENS,
+    /// YELLOWS) fetch the bag home. Lives as Deathmatch's; the match ends on the clock, at
+    /// [`Self::score`] bags (1-5, default [`heist::SCORE`]) or, untimed, once fewer than 2 teams
+    /// are in play; teams rank by bags, kills, fewer shots ([`teams_places`]).
+    pub heist: bool,
 }
 
 impl Default for Settings {
@@ -173,6 +179,7 @@ impl Default for Settings {
             colors: false,
             score: colors::SCORE,
             beach: false,
+            heist: false,
         }
     }
 }
@@ -346,6 +353,8 @@ pub struct Fighter {
     /// no weapon drawn or used, A and Z do nothing, B puts it down, 0.8 of the speed
     /// (`PlayerState::holding`), until the script makes it let go ([`colors::Flag`]).
     pub flag: Option<u8>,
+    /// War: Heist: the bags this player delivered (the STATS' column).
+    pub bags: u16,
     /// s126+0x170: the scope's pitch in degrees (`conker_camera::Scope::pitch`, positive looks
     /// down). Set with `body.scope_yaw` after each camera step; the sniper's ray and weapon 0x14's
     /// shot look along the scope's yaw and pitch while `body.scope_yaw` is set, else along the
@@ -410,6 +419,7 @@ impl Fighter {
             masked: false,
             gassed: None,
             flag: None,
+            bags: 0,
             scope_pitch: 0.0,
             gun: None,
             class: 0,
@@ -443,6 +453,7 @@ impl Fighter {
             start: self.start,
             gassed: self.gassed,
             class: self.class,
+            bags: self.bags,
             ..*body
         }
     }
@@ -575,6 +586,7 @@ impl Fighter {
     fn idle_anim(&self) -> u16 {
         match self.weapon() {
             _ if self.seated() => anim::GUN_SEATED,
+            _ if self.flag == Some(heist::CASH) => heist::IDLE,
             _ if self.flag.is_some() => anim::FLAG_IDLE,
             _ if self.carrying => anim::CARRY_IDLE,
             Some(w) if self.drawn => w.idle,
@@ -605,12 +617,17 @@ impl Fighter {
 
 /// A pickup's state: frames until it is back, and who touched it in which frame (delivered on
 /// the next frame for grenades, the one after for a weapon; V pick87, pick57).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PickupState {
     pub timer: u16,
     pub taken: Option<(usize, u32)>,
     /// A roaming pickup's spot ([`weapon::Roaming`]; `None`: not yet placed, or not roaming).
     pub spot: Option<u8>,
+    /// War: Heist with at most 4 players (flag 1, [`Match::unique`]): who holds its weapon (it is
+    /// gone while held), and where it lies after its holder's death, for `stay` more frames.
+    pub holder: Option<usize>,
+    pub drop: Option<[f32; 3]>,
+    pub stay: u16,
 }
 
 /// What happened in a frame (for HUD, sounds, the client's camera on respawn, and the tests).
@@ -643,6 +660,11 @@ pub enum Event {
     TakeOver {
         player: usize,
         from: usize,
+    },
+    /// War: Heist: the script's voice line `id` (a sound id) at `player` ([`Effect::Voice`]).
+    Voice {
+        player: usize,
+        id: u16,
     },
 }
 
@@ -718,6 +740,15 @@ pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
 /// the one whose last member went out first is 2nd (on one frame team 0's, which the game checks
 /// first: [`Match::step_seen`], C).
 pub fn team_places(all: &[Option<Standing>]) -> [u8; 2] {
+    let p = teams_places(all, 2);
+    [p[0], p[1]]
+}
+
+/// [`team_places`] for `n` teams (Heist's 4, `func_151E565C` metric case 0): the teams in play
+/// rank by score (bags), kills, fewer shots, ties sharing a place; below them the out ones, the
+/// later out the better (V unt1: [2, 3, 1, 4]; bots1 timed: [4, 1, 2, 3], GREENS's 13 kills over
+/// YELLOWS's 10 on 1 bag each).
+pub fn teams_places(all: &[Option<Standing>], n: u8) -> Vec<u8> {
     let members = |t: u8| all.iter().flatten().filter(move |s| s.team == t);
     let sum = |t, f: fn(&Standing) -> u16| members(t).map(|s| u32::from(f(s))).sum::<u32>();
     // A member's `out` is the players' place it went out on: the larger, the earlier.
@@ -730,20 +761,28 @@ pub fn team_places(all: &[Option<Standing>]) -> [u8; 2] {
         let tie = ka == kb && sum(a, |s| s.shots) < sum(b, |s| s.shots);
         score(a) > score(b) || (score(a) == score(b) && (ka > kb || tie))
     };
-    [0, 1].map(|t| match (out(t), out(1 - t)) {
-        (Some(a), Some(b)) => 1 + u8::from(a > b),
-        (Some(_), None) => 2,
-        (None, Some(_)) => 1,
-        (None, None) => 1 + u8::from(ahead(1 - t, t)),
-    })
+    let count = |f: &dyn Fn(u8) -> bool| (0..n).filter(|&u| f(u)).count() as u8;
+    let in_play = count(&|u| out(u).is_none());
+    (0..n)
+        .map(|t| match out(t) {
+            Some(a) => in_play + 1 + count(&|u| out(u).is_some_and(|b| b < a)),
+            None => 1 + count(&|u| u != t && out(u).is_none() && ahead(u, t)),
+        })
+        .collect()
 }
 
 /// The winning team of [`team_places`] (0 squirrels, 1 Tediz); `None`: a DRAW, both 1st (the STATS'
 /// header `func_151E43DC`; V `to_draw`: 0-0 kills and shots).
 pub fn team_result(all: &[Option<Standing>]) -> Option<u8> {
-    match team_places(all) {
-        [1, 1] => None,
-        p => p.iter().position(|&r| r == 1).map(|t| t as u8),
+    teams_result(all, 2)
+}
+
+/// [`team_result`] for `n` teams: the one team 1st, `None` when several share it.
+pub fn teams_result(all: &[Option<Standing>], n: u8) -> Option<u8> {
+    let p = teams_places(all, n);
+    match p.iter().filter(|&&r| r == 1).count() {
+        1 => p.iter().position(|&r| r == 1).map(|t| t as u8),
+        _ => None,
     }
 }
 
@@ -777,6 +816,8 @@ pub struct Match {
     pub gas: Gas,
     /// War: Colors' flags and scores ([`Self::apply`]).
     pub colors: Colors,
+    /// War: Heist's bag and scores ([`Self::apply`]).
+    pub heist: Heist,
     /// Per slot, s126+0x1AF: how far it reaches for a pickup or canister ([`weapon::touches`]);
     /// [`weapon::REACH`] for a slot not listed. The bots' AI script sets a bot's each frame.
     pub reach: Vec<u8>,
@@ -868,6 +909,7 @@ impl Match {
             waiting: BTreeSet::new(),
             gas: Gas::default(),
             colors: Colors::default(),
+            heist: Heist::default(),
             reach: Vec::new(),
             aims: Vec::new(),
             guns: Vec::new(),
@@ -994,6 +1036,7 @@ impl Match {
         // frame (V Colors e0 383, Beach end1 212), Beach's death points (scored in the step) in the
         // next with everything else the step brings (V bots1 8126; [`Self::ended_at`]).
         let scores = self.colors.scores;
+        let bags = self.heist.scores;
         let was_in: Vec<bool> = (0..self.players.len()).map(|i| self.in_play(i)).collect();
         // Colors: the script's respawns (command 0x82), the flags' fall, then their touch.
         for i in 0..self.players.len().min(32) {
@@ -1007,6 +1050,7 @@ impl Match {
                 f.fall(world);
             }
         }
+        self.heist.cash.step(world, self.tick);
         self.pickups(arena, &mut ev);
         self.gas.step();
         self.trap_hits(&mut ev);
@@ -1077,6 +1121,9 @@ impl Match {
                 f.pos = colors::held(c.body.pos, c.body.facing);
             }
         }
+        if let Some(c) = (self.heist.cash.carrier).and_then(|c| self.players.get(c)) {
+            self.heist.cash.held(c.body.pos, c.body.facing);
+        }
         // Total War, out on one frame: the game places the teams at the frame's end, team 0 first
         // (`func_151E565C`'s loop at 0x151E5DD0, C), so of two teams out together the Tediz win
         // whatever the slots: the frame's places go to team 0's first, the worst first.
@@ -1093,7 +1140,7 @@ impl Match {
         }
         self.timer = (self.timer - 2).max(0);
         if self.ended_at.is_none() {
-            if self.score_end(scores) {
+            if self.score_end(&scores) || (self.settings.heist && self.score_end(&bags)) {
                 self.ended_at = Some(self.tick);
             } else if self.ends() {
                 self.ended_at = Some(self.tick + 1);
@@ -1155,11 +1202,14 @@ impl Match {
         // V e0 383; no score end at 0, and untimed then nothing ends it, I). Beach's the same
         // (`func_151E565C`'s metric for scenario 8, C; V end1, end2, bots1).
         if s.colors || s.beach {
-            return time_up || self.score_end(self.colors.scores);
+            return time_up || self.score_end(&self.colors.scores);
         }
-        if s.total_war {
-            let teams = [0, 1].iter().filter(|&&t| in_play().any(|f| f.team == t));
-            return time_up || (out().next().is_some() && teams.count() < 2);
+        // Heist's: Total War's with its bags (untimed: fewer than 2 teams with a participant left,
+        // V unt1).
+        if s.total_war || s.heist {
+            let teams = (0..heist::TEAMS as u8).filter(|&t| in_play().any(|f| f.team == t));
+            let bags = s.heist && self.score_end(&self.heist.scores);
+            return time_up || bags || (out().next().is_some() && teams.count() < 2);
         }
         let kills = s.kills > 0 && taken().any(|i| self.players[i].kills >= u16::from(s.kills));
         let alone = out().next().is_some() && in_play().count() < 2;
@@ -1167,18 +1217,28 @@ impl Match {
         time_up || kills || alone || no_human
     }
 
-    /// Colors and Beach: a team's score `scores` reaches the target (none at 0).
-    fn score_end(&self, scores: [u16; 2]) -> bool {
+    /// Colors, Beach and Heist: a team's score `scores` reaches the target (none at 0).
+    fn score_end(&self, scores: &[u16]) -> bool {
         let (s, target) = (&self.settings, u16::from(self.settings.score));
-        (s.colors || s.beach) && target > 0 && scores.iter().any(|&n| n >= target)
+        (s.colors || s.beach || s.heist) && target > 0 && scores.iter().any(|&n| n >= target)
+    }
+
+    /// The teams the match ranks by: Heist's 4, the other War modes' 2, none in Deathmatch.
+    pub fn teams(&self) -> u8 {
+        let s = &self.settings;
+        match () {
+            _ if s.heist => heist::TEAMS as u8,
+            _ if s.total_war || s.colors || s.beach => 2,
+            _ => 0,
+        }
     }
 
     /// Every slot's place, 1 the best ([`places`]; in the War modes its team's,
     /// [`team_places`]; free slots 0).
     pub fn places(&self) -> Vec<u8> {
         let all = self.standings();
-        if self.settings.total_war || self.settings.colors || self.settings.beach {
-            let teams = team_places(&all);
+        if self.teams() > 0 {
+            let teams = teams_places(&all, self.teams());
             let place = |s: &Standing| teams.get(usize::from(s.team)).copied().unwrap_or(0);
             return all.iter().map(|s| s.as_ref().map_or(0, place)).collect();
         }
@@ -1187,14 +1247,17 @@ impl Match {
 
     /// Every slot's [`Standing`] (`None` for a free one), Colors' and Beach's with its team's score.
     pub fn standings(&self) -> Vec<Option<Standing>> {
-        let score = |f: &Fighter| match self.settings.colors || self.settings.beach {
-            true => (self.colors.scores.get(usize::from(f.team)).copied()).unwrap_or(0),
-            false => 0,
+        let score = |f: &Fighter| match () {
+            _ if self.settings.heist => self.heist.scores.get(usize::from(f.team)).copied(),
+            _ if self.settings.colors || self.settings.beach => {
+                self.colors.scores.get(usize::from(f.team)).copied()
+            }
+            _ => None,
         };
         (self.players.iter().enumerate())
             .map(|(i, f)| {
                 (!self.free.contains(&i)).then(|| Standing {
-                    score: score(f),
+                    score: score(f).unwrap_or(0),
                     ..Standing::of(f)
                 })
             })
@@ -1210,6 +1273,14 @@ impl Match {
         let Some(k) = f.flag.take() else {
             return;
         };
+        // Heist: the throw's release (B), else a drop.
+        if k == heist::CASH {
+            let thrown = f.action == Action::Pose(Pose::Throw);
+            if self.heist.cash.carrier == Some(i) {
+                (self.heist.cash).let_go(f.body.pos, f.body.facing, thrown, t);
+            }
+            return;
+        }
         let at = colors::held(f.body.pos, f.body.facing);
         if let Some(flag) =
             (self.colors.flags.get_mut(usize::from(k))).filter(|g| g.carrier == Some(i))
@@ -1220,16 +1291,26 @@ impl Match {
         }
     }
 
-    /// Where pickup k stands: its roaming spot, else its place.
+    /// Where pickup k stands: where its holder died, its roaming spot, else its place.
     pub fn pickup_at(&self, arena: &Arena, k: usize) -> [f32; 3] {
-        match self.pickups.get(k).and_then(|p| p.spot) {
-            Some(s) => arena.roaming.spots[usize::from(s)],
-            None => arena.pickups[k].1,
+        let p = self.pickups.get(k);
+        match (p.and_then(|p| p.drop), p.and_then(|p| p.spot)) {
+            (Some(at), _) => at,
+            (_, Some(s)) => arena.roaming.spots[usize::from(s)],
+            _ => arena.pickups[k].1,
         }
+    }
+
+    /// The roaming pickups are unique (flag 1, `G[0x11F4]`): War: Heist with at most 4 players
+    /// (0xB7's init, C; V h4a). Else (flag 3) one respawns 150 frames after its take, whoever holds
+    /// it.
+    pub fn unique(&self) -> bool {
+        self.settings.heist && self.players.len() - self.free.len() <= 4
     }
 
     fn pickups(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
         let t = self.tick;
+        let unique = self.unique();
         for (k, (def, _)) in arena.pickups.iter().enumerate() {
             let p = &mut self.pickups[k];
             if let Some((who, at)) = p.taken {
@@ -1262,14 +1343,50 @@ impl Match {
                     _ => {}
                 }
             }
+            let respawn = arena.respawn.unwrap_or(weapon::PICKUP_RESPAWN);
+            // Flag 1: gone while its holder holds the weapon (delivered or not); the holder's death
+            // drops it where it died, 50 up, 4 VIs on, for 300 VIs; any other loss brings it back
+            // after 300 VIs on a random spot (`func_1508DAEC`, C).
+            if let Some(h) = self.pickups[k].holder.filter(|_| k < arena.roaming.count) {
+                let f = &self.players[h];
+                let id = match def.gives {
+                    Gives::Weapon(id) => Some(id),
+                    _ => None,
+                };
+                let gone = self.free.contains(&h);
+                let p = &mut self.pickups[k];
+                if p.taken.is_some() || (!gone && f.health > 0 && f.weapon == id) {
+                    continue;
+                }
+                p.holder = None;
+                (p.drop, p.timer) = match !gone && f.health == 0 {
+                    true => (
+                        Some([f.body.pos[0], f.body.pos[1] + 50.0, f.body.pos[2]]),
+                        2,
+                    ),
+                    false => (None, respawn),
+                };
+            }
             let p = &mut self.pickups[k];
             let back = p.timer == 1;
             p.timer = p.timer.saturating_sub(1);
             if p.timer > 0 {
                 continue;
             }
+            // Where the holder died, it stays its 300 VIs, then moves on.
+            let mut moves = false;
+            if p.drop.is_some() {
+                if back {
+                    p.stay = respawn;
+                } else if p.stay <= 1 {
+                    (p.drop, p.stay, moves) = (None, 0, true);
+                } else {
+                    p.stay -= 1;
+                }
+            }
             // A roaming pickup moves at each appearance: the first frame, then each return.
-            if k < arena.roaming.count && (back || p.spot.is_none()) {
+            let p = self.pickups[k];
+            if k < arena.roaming.count && p.drop.is_none() && (back || moves || p.spot.is_none()) {
                 let held: Vec<_> = self.pickups.iter().map(|p| p.spot).collect();
                 self.pickups[k].spot = arena.roaming.pick(&held, &mut self.rng);
             }
@@ -1287,10 +1404,12 @@ impl Match {
                 *p = PickupState {
                     timer: match self.settings.beach {
                         true => beach::BOTTLE_RESPAWN,
-                        false => arena.respawn.unwrap_or(weapon::PICKUP_RESPAWN),
+                        false => respawn,
                     },
                     taken: Some((i, t)),
                     spot: p.spot,
+                    holder: (unique && k < arena.roaming.count).then_some(i),
+                    ..PickupState::default()
                 };
                 ev.push(Event::Pickup {
                     player: i,
@@ -1348,6 +1467,33 @@ impl Match {
                 f.set(Action::Pose(Pose::Grab), clip, t);
                 let flag = &mut self.colors.flags[k];
                 (flag.carrier, flag.fall) = (Some(i), None);
+            }
+        }
+        // Heist: the bag is touched as a flag is, by anyone (V h1 334: the grab 0x114 at once, the
+        // bat put away; the script hears of it next frame).
+        if self.settings.heist && self.heist.cash.touchable(t) {
+            let cash = self.heist.cash;
+            let toucher = self.players.iter().enumerate().position(|(i, f)| {
+                !self.free.contains(&i)
+                    && f.health > 0
+                    && f.flag.is_none()
+                    && f.stun == 0
+                    && f.body.lock == 0
+                    && matches!(
+                        f.action,
+                        Action::Free
+                            | Action::Fire { .. }
+                            | Action::Aim { .. }
+                            | Action::Reload { .. }
+                    )
+                    && heist::touches(&cash, &f.body, f.side)
+            });
+            if let Some(i) = toucher {
+                let f = &mut self.players[i];
+                (f.flag, f.drawn) = (Some(heist::CASH), false);
+                let (clip, ..) = Pose::Snatch.clip();
+                f.set(Action::Pose(Pose::Snatch), clip, t);
+                self.heist.cash.take(i, t);
             }
         }
     }
@@ -1430,14 +1576,33 @@ impl Match {
                         ..colors::Flag::default()
                     };
                 }
+                Effect::LetGo(k) if k == usize::from(heist::CASH) => {
+                    if let Some(c) = self.heist.cash.carrier {
+                        self.let_go(c);
+                    }
+                }
                 Effect::LetGo(k) => {
                     if let Some(c) = self.colors.flags.get(k).and_then(|f| f.carrier) {
                         self.let_go(c);
                     }
                 }
+                Effect::Settle(k) if k == usize::from(heist::CASH) => {
+                    self.heist.cash.thrown = false
+                }
                 Effect::Settle(k) => {
                     if let Some(f) = self.colors.flags.get_mut(k) {
                         f.dropped = false;
+                    }
+                }
+                // Heist: a bag delivered; its last carrier, on the team, delivered it (the script
+                // let it go first, command 7).
+                Effect::Score(team, n) if self.settings.heist => {
+                    if let Some(s) = self.heist.scores.get_mut(usize::from(team)) {
+                        *s = s.saturating_add(n);
+                    }
+                    let last = self.heist.cash.last.and_then(|c| self.players.get_mut(c));
+                    if let Some(f) = last.filter(|f| f.team == team) {
+                        f.bags = f.bags.saturating_add(n);
                     }
                 }
                 Effect::Score(team, n) => {
@@ -1445,6 +1610,29 @@ impl Match {
                         *s = s.saturating_add(n);
                     }
                 }
+                Effect::Cash(shown) => {
+                    if let Some(f) = (self.heist.cash.carrier).and_then(|c| self.players.get_mut(c))
+                    {
+                        f.flag = None;
+                    }
+                    self.heist.cash = match shown {
+                        true => heist::Cash::new(t),
+                        false => heist::Cash::default(),
+                    };
+                }
+                Effect::CashAt(pos, yaw, walking) if self.heist.cash.walks(t) => {
+                    let c = &mut self.heist.cash;
+                    let state = if walking {
+                        heist::State::Walk
+                    } else {
+                        heist::State::Stand
+                    };
+                    if c.state != state {
+                        c.since = t;
+                    }
+                    (c.pos, c.yaw, c.state) = (pos, yaw, state);
+                }
+                Effect::Voice(player, id) => ev.push(Event::Voice { player, id }),
                 // The capture's poses take over whatever the player was doing, a hit's included
                 // (I; nobody is hurt through them: the script keeps everyone immune).
                 Effect::Pose(i, pose) => {
@@ -1521,6 +1709,10 @@ impl Match {
                         out_at: t,
                         ..b.in_body(&h)
                     };
+                    // Heist: the bag goes with the body (0x40E2 makes the human the carrier).
+                    if self.heist.cash.carrier == Some(j) {
+                        self.heist.cash.carrier = Some(i);
+                    }
                     ev.push(Event::TakeOver { player: i, from: j });
                 }
                 _ => {}
@@ -1578,11 +1770,13 @@ impl Match {
         // earlier in the slot order where they moved to this frame, and so do the mounted guns (a
         // gunner and one jumping on move by their own rules) and Colors' uncarried flags.
         let flags = (self.colors.flags.iter()).filter(|f| f.shown && f.carrier.is_none());
+        let cash = Some(self.heist.cash).filter(|c| c.shown && c.carrier.is_none());
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i)
             .map(|(_, p)| Other::player(p.side, p.body.pos))
             .chain(self.guns.iter().map(|g| gun::body(g.place.pos)))
             .chain(flags.map(|f| colors::body(f.pos)))
+            .chain(cash.map(|c| heist::body(c.pos)))
             .collect();
         let melee = |f: &Fighter| {
             f.drawn
@@ -1771,9 +1965,14 @@ impl Match {
             f.action = Action::Free;
         }
         // Colors: holding a flag, B puts it down and nothing else starts (V b1, h2, e1).
+        // Heist: B throws the bag (V h2: clip 0x118 from 381, B on 380).
         if f.flag.is_some() && f.action == Action::Free && pressed(BUTTON_B) {
-            let (clip, ..) = Pose::PutDown.clip();
-            f.set(Action::Pose(Pose::PutDown), clip, t);
+            let pose = match f.flag == Some(heist::CASH) {
+                true => Pose::Throw,
+                false => Pose::PutDown,
+            };
+            let (clip, ..) = pose.clip();
+            f.set(Action::Pose(pose), clip, t);
         }
         if f.action == Action::Free && !aiming && !f.carrying && f.flag.is_none() {
             // A villager's item 0x3E throws no grenade (V beach-gunner gren: C-down held 60-100, the
@@ -2132,6 +2331,7 @@ impl Match {
             _ => 0,
         };
         f.body.holding = f.flag.is_some();
+        f.body.heavy = f.flag == Some(heist::CASH);
         // Beach's item 0x3E drives a villager, but for the crouch's 40 % (V spd: 14; I: its handler
         // skipped in the crouch states, the boost kept).
         use movement::state::{CROUCH, CROUCH_WALK};
@@ -2184,6 +2384,7 @@ impl Match {
                 (_, state @ (JUMP | RUN_JUMP | FALL | LAND)) if f.flag.is_some() => {
                     u16::from(state)
                 }
+                _ if f.flag == Some(heist::CASH) => heist::carry_clip(f.body.xz_speed),
                 _ if f.flag.is_some() => colors::carry_clip(f.body.xz_speed),
                 // The canister's run and stand (V d1: 215 from the frame after the carry, 216
                 // standing; I: the jumps' plain states).
@@ -3038,7 +3239,8 @@ impl Match {
         self.rng.next_u32();
         self.rng.next_u32();
         let (kills, suicides, deaths, shots, bot) = (f.kills, f.suicides, f.deaths, f.shots, f.bot);
-        let (hits, headshots, gassed, extra) = (f.hits, f.headshots, f.gassed, f.extra);
+        let (hits, headshots, gassed, extra, bags) =
+            (f.hits, f.headshots, f.gassed, f.extra, f.bags);
         let (buttons, late, side, spawn_mask, start) =
             (f.buttons, f.late, f.side, f.spawn_mask, f.start);
         // Beach re-rolls a villager's class (I: after the pick's draws); the boost goes (V wz).
@@ -3064,6 +3266,7 @@ impl Match {
             gassed,
             extra,
             class,
+            bags,
             last_spawn: Some(at.index),
             ..Fighter::new(&at, team, self.tick)
         };
@@ -5633,5 +5836,204 @@ mod tests {
         assert_eq!(m.pickups[2].timer, 0);
         assert!(!first.contains(&back[2]), "{first:?} {back:?}");
         assert_eq!((back[0], back[1], back[3]), (first[0], first[1], first[3]));
+    }
+
+    /// Heist with at most 4 players (flag 1, V h4a): a roaming pickup is gone while its holder
+    /// holds the weapon; the holder's death drops it 50 above where it died, 2 frames on, for 150
+    /// frames, then it moves to a spot.
+    #[test]
+    fn heist_pickups_are_unique() {
+        let (_, m, w) = duel();
+        let arena = Arena {
+            pickups: (weapon::PICKUPS_1A.iter().zip(weapon::SPOTS_1A))
+                .map(|(p, s)| (*p, s.map(f32::from)))
+                .collect(),
+            roaming: weapon::Roaming::vault(),
+            respawn: Some(weapon::VAULT_RESPAWN),
+            ..Default::default()
+        };
+        let mut m = Match::new(&arena, m.players, Rng::new(1), 0).with(Settings {
+            heist: true,
+            ..Settings::default()
+        });
+        assert!(m.unique());
+        m.players[1].body.pos = [-9000.0, 0.0, -9000.0];
+        run(&mut m, &arena, &w, 1, |_| 0);
+        m.players[0].body.pos = m.pickup_at(&arena, 2);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.pickups[2].holder, Some(0));
+        m.players[0].body.pos = [9000.0, 0.0, 9000.0];
+        run(&mut m, &arena, &w, 300, |_| 0);
+        assert!(m.pickups[2].timer > 0, "gone while held");
+        m.players[0].health = 0;
+        run(&mut m, &arena, &w, 2, |_| 0);
+        let at = [9000.0, 50.0, 9000.0];
+        assert_eq!((m.pickups[2].timer, m.pickup_at(&arena, 2)), (0, at));
+        run(&mut m, &arena, &w, 149, |_| 0);
+        assert_eq!(m.pickup_at(&arena, 2), at);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert!(m.pickups[2].drop.is_none() && m.pickup_at(&arena, 2) != at);
+    }
+
+    /// Heist (V h1, h2, h3): the bag is grabbed on the touch (0x114, 26 frames), carried at 0.75 a
+    /// frame up to 25.2 with no weapon; B throws it 15 frames in, untouchable for 58 frames; a
+    /// script let-go drops it, touchable 3 frames on; a delivery scores the team and its carrier.
+    #[test]
+    fn heist_grabs_carries_throws_and_scores() {
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            heist: true,
+            score: 2,
+            ..Settings::default()
+        });
+        m.players[1].body.pos = [0.0, 0.0, 3000.0];
+        m.apply(&[Effect::Cash(true)]);
+        m.heist.cash.pos = [40.0, 0.0, 0.0];
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let f = m.players[0];
+        assert_eq!(
+            (f.flag, f.anim, f.item(m.tick)),
+            (Some(heist::CASH), heist::GRAB, 0)
+        );
+        assert_eq!(m.heist.cash.carrier, Some(0));
+        let mut speeds = Vec::new();
+        for _ in 0..60 {
+            let stick = Input {
+                stick_y: 80,
+                buttons: BUTTON_Z,
+                ..Input::default()
+            };
+            m.step(&arena, &[stick, Input::default()], &w);
+            speeds.push(m.players[0].body.xz_speed);
+        }
+        assert_eq!(
+            speeds[24..27],
+            [0.0, 0.75, 1.5],
+            "26 frames held, then +0.75"
+        );
+        let top = speeds.iter().copied().fold(0.0, f32::max);
+        assert!(top > 24.75 && top <= 25.2 + 1e-4, "{top}");
+        assert_eq!((m.players[0].shots, m.players[0].anim), (0, heist::RUN));
+        // B: the throw, the bag away 15 frames on, flying along the facing.
+        let b = m.tick;
+        run(
+            &mut m,
+            &arena,
+            &w,
+            16,
+            |t| if t == b { BUTTON_B } else { 0 },
+        );
+        let c = m.heist.cash;
+        assert_eq!(
+            (c.carrier, c.state, c.thrown),
+            (None, heist::State::Flight, true)
+        );
+        assert_eq!((c.since, c.touchable_at), (b + 15, b + 15 + heist::THROWN));
+        assert_eq!(m.players[0].flag, None);
+        m.apply(&[Effect::Settle(usize::from(heist::CASH))]);
+        assert!(!m.heist.cash.thrown);
+        // Taken again once the throw's clip is over, then let go of by the script (a hit):
+        // touchable 3 frames on.
+        run(&mut m, &arena, &w, 6, |_| 0);
+        let t = m.tick;
+        m.heist.cash = heist::Cash::new(t);
+        m.heist.cash.pos = m.players[0].body.pos;
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.heist.cash.carrier, Some(0));
+        m.apply(&[Effect::LetGo(usize::from(heist::CASH))]);
+        let c = m.heist.cash;
+        assert_eq!(
+            (c.state, c.touchable_at),
+            (heist::State::Fall, m.tick + heist::DROPPED)
+        );
+        // A delivery: the script lets go, scores team 0, destroys the bag.
+        let t = m.tick;
+        m.apply(&[Effect::Score(0, 1), Effect::Cash(false)]);
+        assert_eq!((m.heist.scores, m.players[0].bags), ([1, 0, 0, 0], 1));
+        assert!(!m.heist.cash.shown);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.ended_at, None);
+        m.apply(&[Effect::Score(0, 1)]);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.ended_at, Some(t + 1), "latched on the second bag's frame");
+        assert_eq!(m.places(), [1, 2]);
+    }
+
+    /// Heist's four teams (V bots1 time-out: S [0, 2, 1, 1], GREENS's 13 kills over YELLOWS's 10,
+    /// ranks [4, 1, 2, 3]; unt1 elimination: YELLOWS, BLUES, REDS out in that order, [2, 3, 1, 4]).
+    #[test]
+    fn heist_ranks_four_teams() {
+        let st = |team, score, kills, out| {
+            Some(Standing {
+                team,
+                score,
+                kills,
+                out,
+                ..Standing::default()
+            })
+        };
+        let bots1 = [
+            st(0, 0, 9, 0),
+            st(1, 2, 5, 0),
+            st(2, 1, 13, 0),
+            st(3, 1, 10, 0),
+        ];
+        assert_eq!(teams_places(&bots1, 4), [4, 1, 2, 3]);
+        assert_eq!(teams_result(&bots1, 4), Some(1));
+        let unt1 = [
+            st(0, 0, 0, 2),
+            st(1, 0, 0, 3),
+            st(2, 0, 0, 0),
+            st(3, 0, 0, 4),
+        ];
+        assert_eq!(teams_places(&unt1, 4), [2, 3, 1, 4]);
+        // Two teams equal on everything share 1st: no winner.
+        let tie = [
+            st(0, 1, 0, 0),
+            st(1, 1, 0, 0),
+            st(2, 0, 0, 0),
+            st(3, 0, 0, 0),
+        ];
+        assert_eq!(
+            (teams_places(&tie, 4), teams_result(&tie, 4)),
+            (vec![1, 1, 3, 3], None)
+        );
+    }
+
+    /// Heist untimed: once a player is out and fewer than 2 teams have someone in play, the match
+    /// latches the next frame (V unt1 2526 → 2527); the takeover hands the bag to the human.
+    #[test]
+    fn heist_eliminates_and_hands_the_bag_over() {
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            heist: true,
+            time: None,
+            lives: 1,
+            ..Settings::default()
+        });
+        m.players[1].out = 2;
+        let t = m.tick;
+        run(&mut m, &arena, &w, 1, |_| 0);
+        assert_eq!(m.ended_at, Some(t + 1));
+        // The takeover: human 0 out, its team-mate bot 1 carries the bag.
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            heist: true,
+            time: None,
+            ..Settings::default()
+        });
+        m.players[1].team = 0;
+        m.players[1].bot = true;
+        (m.players[0].out, m.players[0].out_at) = (2, 0);
+        m.players[1].flag = Some(heist::CASH);
+        m.heist.cash.take(1, 0);
+        m.tick = TAKEOVER_DELAY;
+        let ev = m.apply(&[Effect::TakeOver(0, 1)]);
+        assert_eq!(ev, [Event::TakeOver { player: 0, from: 1 }]);
+        assert_eq!(
+            (m.heist.cash.carrier, m.players[0].flag),
+            (Some(0), Some(heist::CASH))
+        );
+        let _ = (arena, w);
     }
 }

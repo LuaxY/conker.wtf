@@ -71,6 +71,12 @@ pub const CASH: usize = 87;
 /// Map 0x1A's AI script, `[0x14, 0xB7]` (G+0x16BC; heist.md §2.4): conker-bots' `script` does not
 /// map 0x1A yet.
 const VAULT_AI: usize = 0xB7;
+/// Scene 0x24: Tank's map (scenario 1, `../lab/research/mp-original/tank.md`).
+pub const TANK_MAP: usize = 0x24;
+/// The tank (class 8): every player on 0x24 (V b1); its own 14-joint rig and 8 clips.
+pub const TANK: usize = 119;
+/// Map 0x24's AI script, `[0x14, 0xB8]` (tank.md §4): conker-bots' `script` does not map 0x24 yet.
+const TANK_AI: usize = 0xB8;
 
 /// War: Beach's villager class (0x11-0x20, re-rolled at every spawn, `func_151E2834`) → its model
 /// and the display lists it hides (obj+0x94, bit k = list k; `func_15083384`, C; V b1, e1, use:
@@ -494,9 +500,16 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
 /// The models the original draws for the projectiles in flight, glTF scene `i` of `projectiles.gltf`
 /// each (`../lab/research/mp-original/visuals-scratch`, oracle runs gren4, rocket, knife, bolt2): the
 /// thrown grenade (bank 01 #0x7E, one joint), the rocket (bank 09 #0xE1), weapon 0x14's knife
-/// (#0x23) and the crossbow's bolt (#0x35, also drawn in the crossbow), at the origin with +z
-/// along the flight. A bullet has no model in flight (V twin DLs 104-110: only the muzzle flash).
-pub const PROJECTILES: [[usize; 2]; 4] = [[0x01, 0x7E], [0x09, 0xE1], [0x09, 0x23], [0x09, 0x35]];
+/// (#0x23) and the crossbow's bolt (#0x35, also drawn in the crossbow), and Tank's shell (#0x33,
+/// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`), at the origin with
+/// +z along the flight. A bullet has no model in flight (V twin DLs 104-110: only the muzzle flash).
+pub const PROJECTILES: [[usize; 2]; 5] = [
+    [0x01, 0x7E],
+    [0x09, 0xE1],
+    [0x09, 0x23],
+    [0x09, 0x35],
+    [0x09, 0x33],
+];
 
 /// [`PROJECTILES`] as one pseudo-level (a mesh each, a bank-01 model in its bind pose) and their
 /// glTF scenes.
@@ -558,17 +571,24 @@ pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Characte
 /// differs between the teams (V: the model's commands, prim and env are the same).
 const TEAM_SEGMENT: u32 = 0x0A;
 
-/// The texture ids of a model's team looks ([`TEAM_SEGMENT`]): its texture table's entries 1-4.
-fn team_ids(rom: &Rom, entry: usize) -> Result<[u32; 4]> {
+/// The texture id of entry `k` of bank-01 model `entry`'s texture table (header word 6: 12-byte
+/// entries, the texture id first; C).
+fn texture_id(rom: &Rom, entry: usize, k: usize) -> Result<u32> {
     let model = rom.asset(&[0x01, entry])?;
     let word = |at: usize| {
         (model.get(at..at + 4))
             .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
             .context("short bank-01 model")
     };
-    let table = word(0x18)? as usize;
-    let ids: Vec<u32> = (1..=4)
-        .map(|k| word(table + 12 * k))
+    word(word(0x18)? as usize + 12 * k)
+}
+
+/// The texture ids of a model's team looks ([`TEAM_SEGMENT`]): its texture table's entries 1-4,
+/// the tank's flags 16-19 ([`TANK_FLAGS`]).
+fn team_ids(rom: &Rom, entry: usize) -> Result<[u32; 4]> {
+    let first = if entry == TANK { TANK_FLAGS } else { 1 };
+    let ids: Vec<u32> = (first..first + 4)
+        .map(|k| texture_id(rom, entry, k))
         .collect::<Result<_>>()?;
     Ok(ids.try_into().expect("four teams"))
 }
@@ -606,51 +626,109 @@ struct TeamLooks {
 
 fn team_looks(rom: &Rom, character: &Character, textures: &Textures) -> Result<TeamLooks> {
     let ids = team_ids(rom, character.entry)?;
-    let segment = |m: &Material| {
-        let t = m.texture.and_then(|t| t.image);
-        matches!(t, Some(extract_gbi::Image::Segment(a)) if a >> 24 == TEAM_SEGMENT)
-    };
-    let material = (character.model.lists.iter().flat_map(|l| &l.draws))
-        .map(|d| d.material)
-        .find(segment)
-        .with_context(|| format!("{}: no segment-0x0A material", character.entry))?;
     let pngs = (ids.iter())
-        .map(|&id| {
-            (bind_material(material, TEAM_SEGMENT, id))
-                .texture_png(|i| textures.get(i as usize).ok())
-                .with_context(|| format!("team texture {id}"))?
-                .map_err(Into::into)
-        })
+        .map(|&id| segment_png(character, TEAM_SEGMENT, id, textures))
         .collect::<Result<_>>()?;
     let files = (0..4).map(|t| format!("textures/team-{t}.png")).collect();
     Ok(TeamLooks { ids, files, pngs })
 }
 
-/// `character.json`'s teams of a character bound to team 0's look: the glTF material drawing it
-/// (the glTF writer's materials, distinct, in first-use order).
-fn team_material(character: &Character, ids: &[u32; 4]) -> Result<assets::Teams> {
+/// The PNG of `character`'s material drawing from `segment`, bound to texture `id`.
+fn segment_png(
+    character: &Character,
+    segment: u32,
+    id: u32,
+    textures: &Textures,
+) -> Result<Vec<u8>> {
+    let drawn = |m: &Material| {
+        let t = m.texture.and_then(|t| t.image);
+        matches!(t, Some(extract_gbi::Image::Segment(a)) if a >> 24 == segment)
+    };
+    let material = (character.model.lists.iter().flat_map(|l| &l.draws))
+        .map(|d| d.material)
+        .find(drawn)
+        .with_context(|| format!("{}: no segment-{segment:#x} material", character.entry))?;
+    (bind_material(material, segment, id))
+        .texture_png(|i| textures.get(i as usize).ok())
+        .with_context(|| format!("texture {id}"))?
+        .map_err(Into::into)
+}
+
+/// The glTF material of `character` drawing texture `id` (the glTF writer's materials, distinct, in
+/// first-use order).
+fn material_of(character: &Character, id: u32) -> Result<usize> {
     let mut materials = Vec::new();
     for d in character.model.lists.iter().flat_map(|l| &l.draws) {
         if !materials.contains(&d.material) {
             materials.push(d.material);
         }
     }
-    let team_0 = Some(extract_gbi::Image::Flat {
-        index: ids[0],
-        mode: 0,
-    });
-    let material = (materials.iter())
-        .position(|m| m.texture.and_then(|t| t.image) == team_0)
-        .context("no team material")?;
+    let image = Some(extract_gbi::Image::Flat { index: id, mode: 0 });
+    (materials.iter())
+        .position(|m| m.texture.and_then(|t| t.image) == image)
+        .with_context(|| format!("{}: no material draws texture {id}", character.entry))
+}
+
+/// `character.json`'s teams of a character bound to team 0's look: the glTF material drawing it.
+fn team_material(character: &Character, ids: &[u32; 4]) -> Result<assets::Teams> {
     Ok(assets::Teams {
-        material,
+        material: material_of(character, ids[0])?,
         textures: (0..4).map(|t| format!("textures/team-{t}.png")).collect(),
     })
 }
 
+/// The tank's texture table entries (C `func_1502F01C`: a light code c ≥ 10 binds entry c − 10;
+/// V b1, j1): segment 6 the brake lights (code 25 → entry 15 unlit, 22 → entry 12 while braking),
+/// segment 7 the headlights (19 → entry 9, lit: the match's, and Colors cs5's op 9 on its tanks),
+/// segment 0x0A the flag ([`TANK_FLAGS`]); entry 4 the treads (drawn directly).
+const TANK_BRAKE: [usize; 2] = [15, 12];
+const TANK_HEADLIGHTS: usize = 9;
+/// The tank's flags, entries 16-19 (red, blue, green, yellow; a star on each): obj+0x68 = 16-19
+/// by slot, the slots from 3 up yellow (V b1).
+const TANK_FLAGS: usize = 16;
+const TANK_TREADS: usize = 4;
+/// The tank's joints: the turret (2) and the gun (3) (C `func_15033FE0` → `func_150344A0` on
+/// models 0x28 and 0x77: joint 2 turned about y by −obj+0x2E4·65536/18000, joint 3 about x by
+/// obj+0x2E6·65536/18000; V j1 DL 60: a turret yaw of 90° and a pitch of 36° on joints 2 and 3 only),
+/// the muzzle (4, 110 along joint 3's z: I), the treads (13 then 12: the vertices of the game's
+/// scroll lists 0 and 1, `0x800C4020[119]` = 187 and 215, 28 each; `func_150ED638` scrolls list 0
+/// by its first speed argument, list 1 by its second; which side is the left: I).
+const TANK_JOINTS: [usize; 5] = [2, 3, 4, 13, 12];
+/// The lit brake lights' PNG in the tank's folder.
+const BRAKE_LIT: &str = "textures/brake-lit.png";
+
+/// The tank as the match draws it (brake lights unlit, headlights lit, flag 0) and its other
+/// looks' PNGs: the flags (`textures/team-<k>.png`) and the lit brake lights ([`BRAKE_LIT`]).
+fn tank(rom: &Rom, textures: &Textures) -> Result<(Character, Images)> {
+    let tank = Character::load(rom, TANK)?;
+    let id = |k| texture_id(rom, TANK, k);
+    let flags = team_looks(rom, &tank, textures)?;
+    let mut images: Images = flags.files.into_iter().zip(flags.pngs).collect();
+    let lit = segment_png(&tank, 6, id(TANK_BRAKE[1])?, textures)?;
+    images.push((BRAKE_LIT.into(), lit));
+    let tank = bind_segment(tank, 6, id(TANK_BRAKE[0])?);
+    let tank = bind_segment(tank, 7, id(TANK_HEADLIGHTS)?);
+    Ok((bind_segment(tank, TEAM_SEGMENT, flags.ids[0]), images))
+}
+
+/// `character.json`'s tank parts of the tank as [`tank`] binds it.
+fn tank_parts(rom: &Rom, tank: &Character) -> Result<assets::Tank> {
+    let material = |k| material_of(tank, texture_id(rom, TANK, k)?);
+    let [turret, gun, muzzle, list_0, list_1] = TANK_JOINTS;
+    Ok(assets::Tank {
+        turret,
+        gun,
+        muzzle,
+        brake: material(TANK_BRAKE[0])?,
+        brake_lit: BRAKE_LIT.into(),
+        treads: material(TANK_TREADS)?,
+        tread_joints: [list_0, list_1],
+    })
+}
+
 /// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any, of
-/// the song its outro starts ([`outro::songs`]), and of its song's positional channels (a raw
-/// recording, [`audio::stem`]).
+/// the song its outro starts ([`outro::songs`]) or on 0x24 its bomb's countdown starts (song 50),
+/// and of its song's positional channels (a raw recording, [`audio::stem`]).
 pub struct PackMap<'a> {
     pub scene: usize,
     pub background: Option<&'a [u8]>,
@@ -670,7 +748,9 @@ pub fn map_name(scene: usize) -> String {
 /// 0x2B, War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and
 /// voice lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B,
 /// the mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
-/// [`PACK_CHARACTERS`] (with their `character.json` and its looks, [`villager_look`]).
+/// [`PACK_CHARACTERS`] (with their `character.json` and its looks, [`villager_look`]); with 0x1A,
+/// the [`WISE_GUY`] after them (its team looks) and Heist's [`CASH`]; with 0x24, the [`TANK`] last
+/// (its flags, lights and parts, [`tank`]) and the map's props.
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -687,8 +767,18 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         .transpose()?;
     // The Wise Guy's glTF draws team 0's look.
     let wise_guy = wise_guy.map(|c| bind_segment(c, TEAM_SEGMENT, teams.as_ref().unwrap().ids[0]));
-    characters.extend([tedi, caveman].into_iter().chain(villagers).chain(wise_guy));
-    // `PACK_CHARACTERS`, then the villagers, then the Wise Guy: each folder is its bank-01 entry.
+    let tank = (maps.iter().any(|m| m.scene == TANK_MAP))
+        .then(|| tank(rom, &textures))
+        .transpose()?;
+    let (tank, tank_looks) = tank.unzip();
+    characters.extend(
+        ([tedi, caveman].into_iter())
+            .chain(villagers)
+            .chain(wise_guy)
+            .chain(tank),
+    );
+    // `PACK_CHARACTERS`, then the villagers, the Wise Guy and the tank: each folder is its bank-01
+    // entry.
     let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
     let names: Vec<String> = entries.iter().map(usize::to_string).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -761,8 +851,8 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             let json = parse(&g.json)?;
             gltfs.push((assets::effects_gltf(&name), json, g.bin, g.images));
         }
-        if map.scene == SLICE_SCENE {
-            let (props, scenes) = props_level(rom)?;
+        if matches!(map.scene, SLICE_SCENE | TANK_MAP) {
+            let (props, scenes) = props_level(rom, map.scene)?;
             let props = held_gltf(&props, scenes, &textures, "props.bin")?;
             let json = parse(&props.json)?;
             gltfs.push((assets::props_gltf(&name), json, props.bin, props.images));
@@ -786,6 +876,9 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             external_images(g.with_uri("character.bin"), &g.bin, "character");
         if let Some(t) = teams.as_ref().filter(|_| c.entry == WISE_GUY) {
             images.extend(t.files.iter().cloned().zip(t.pngs.iter().cloned()));
+        }
+        if c.entry == TANK {
+            images.extend(tank_looks.iter().flatten().cloned());
         }
         gltfs.push((assets::character_gltf(name), json, bin, images));
     }
@@ -834,7 +927,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         }
     }
     let backgrounds: Vec<_> = (maps.iter())
-        .map(|m| (map_name(m.scene), m.background, m.stem))
+        .map(|m| (map_name(m.scene), m.background, m.stem, m.song))
         .collect();
     let outro_sounds: Vec<(String, BTreeSet<u16>)> = (maps.iter().zip(&outros))
         .map(|(m, o)| {
@@ -896,7 +989,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
 /// props of its Raptor mode, the bone weapons on the weapon spots (15-22), three at the west nest
 /// (4-6) and four scene objects at (6026, 156, 2188) (0-3); none on 0x34; 0x2B's segments 6 and 7
 /// (placements 2, 3; War: Beach, scenario 8); 0x1A's 4-7 (V dm3, dm15, hs7: `../lab/oracle/map1a/
-/// props_pickups_lights.md` §1; its 13 is drawn). The pack leaves them out
+/// props_pickups_lights.md` §1; its 13 is drawn); 0x24's ([`TANK_PROPS`]). The pack leaves them out
 /// of the level; the collision keeps only [`solid_placements`].
 pub fn hidden_placements(scene: usize) -> &'static [usize] {
     match scene {
@@ -905,9 +998,19 @@ pub fn hidden_placements(scene: usize) -> &'static [usize] {
         0x3F => &[0, 1, 2, 3, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 22],
         BEACH => &[2, 3],
         VAULT => &[4, 5, 6, 7],
+        TANK_MAP => &TANK_PROPS,
         _ => &[],
     }
 }
+
+/// Map 0x24's hidden placements (V b1: +0x6E set at the start; `../lab/research/mp-original/
+/// tank.md` §2): `[3, 72]` (9, 13), the gas bomb `[3, 80]` (12, shown on the centre post by the
+/// match; 14 a second one, never shown), a second canisters `[3, 71]` (15), and the wrecks
+/// `[3, 95]` (17-33: 18 + slot shown at a death for 330 frames, 17 at scale 1 never). They are
+/// `maps/24/props.gltf`'s ([`props_level`]).
+pub const TANK_PROPS: [usize; 22] = [
+    9, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+];
 
 /// 0x2D's War: Total War props among its [`hidden_placements`]: the shelter's doors (0, 1), the gas
 /// masks (21-26) and the canisters (27, 28), which the client shows by the match.
@@ -921,11 +1024,16 @@ pub fn solid_placements(scene: usize) -> Vec<usize> {
     [doors, deathmatch_solid(scene)].concat()
 }
 
-/// 0x2D's Total War props (`maps/2d/props.gltf`): glTF scene 0 [`TOTAL_WAR_PROPS`] in place (named
-/// `model@placement` as the level's nodes), scene 1 the canister's model (3/85) at the origin, for
-/// a carrier's hands (a worn mask is a held model, bank-09 #66).
-pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
-    let scene = scene_level(rom, SLICE_SCENE)?;
+/// A map's props (`maps/<map>/props.gltf`): on 0x2D War: Total War's, glTF scene 0
+/// [`TOTAL_WAR_PROPS`] in place (named `model@placement` as the level's nodes), scene 1 the
+/// canister's model (3/85) at the origin, for a carrier's hands (a worn mask is a held model,
+/// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place.
+pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
+    let props: &[usize] = match scene_id {
+        SLICE_SCENE => &TOTAL_WAR_PROPS,
+        _ => hidden_placements(scene_id),
+    };
+    let scene = scene_level(rom, scene_id)?;
     let mut level = Level::default();
     let mut add = |mesh: &Mesh, placement, matrix| {
         let mesh = match level.meshes.iter().position(|m| m.path == mesh.path) {
@@ -941,10 +1049,14 @@ pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
             matrix,
         });
     };
-    let placed = (scene.instances.iter())
-        .filter(|i| i.placement.is_some_and(|p| TOTAL_WAR_PROPS.contains(&p)));
+    let placed =
+        (scene.instances.iter()).filter(|i| i.placement.is_some_and(|p| props.contains(&p)));
     for i in placed {
         add(&scene.meshes[i.mesh], i.placement, i.matrix);
+    }
+    if scene_id != SLICE_SCENE {
+        let n = level.instances.len();
+        return Ok((level, json!([{ "nodes": (0..n).collect::<Vec<_>>() }])));
     }
     let canister = (scene.meshes.iter())
         .find(|m| m.path == [0x03, 0x55])
@@ -972,7 +1084,10 @@ pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
 /// position, of its +0x1B, +0x1A, +0x19 (B, G, R stored), by its command (+0x20): 0 static of size
 /// +0x1E; 1 the bases' pulse (behaviour 1: 50 + 40 sin φ, φ += 0.1021, from a random phase; the
 /// size byte unused); 0x14 a flickering lamp of size 70 (behaviour 4, the byte unused); 8-0xC
-/// switching on and off at random (behaviour 255, of size +0x1E, `switching`).
+/// switching on and off at random (behaviour 255, of size +0x1E, `switching`). On 0x24 (V j1 DL 60,
+/// `../lab/research/mp-original/tank-pack-scratch/lit24.py`) as on 0x1A: its 16 type-9 triggers
+/// (0x01-0x10, all static), the level drawn lit with ambient (19, 68, 219); the tanks' own two
+/// lights (white ahead, red behind while braking) are the client's (M10).
 fn map_lights(rom: &Rom, scene: usize) -> Result<assets::Lights> {
     use assets::{Light, When};
     let light = |at, rgb, (size, swing, step), when| Light {
@@ -988,10 +1103,14 @@ fn map_lights(rom: &Rom, scene: usize) -> Result<assets::Lights> {
         flicker: true,
         ..light(at, [255; 3], (size, 0.0, 0.0), When::Calm)
     };
-    if scene == VAULT {
+    if matches!(scene, VAULT | TANK_MAP) {
         let triggers = rom.asset(&[0x0C, scene, 5])?;
         let mut out = assets::Lights {
-            ambient: [94, 94, 96],
+            ambient: if scene == VAULT {
+                [94, 94, 96]
+            } else {
+                [19, 68, 219]
+            },
             ..Default::default()
         };
         let lights = (triggers.as_chunks::<0x34>().0.iter()).filter(|r| r[0x15] >> 2 == 9);
@@ -1011,7 +1130,7 @@ fn map_lights(rom: &Rom, scene: usize) -> Result<assets::Lights> {
                         out.switching.push(out.lights.len());
                         fixed
                     }
-                    c => anyhow::bail!("0x1A: light command {c:#x}"),
+                    c => anyhow::bail!("{scene:#x}: light command {c:#x}"),
                 },
             );
         }
@@ -1086,7 +1205,7 @@ pub fn map_level(rom: &Rom, scene: usize) -> Result<Level> {
 
 /// Map 0x1A's 8 pickups in the manager's order (script 0xB7's items `G[0x1174..]` and handles
 /// 0x3001-4, 0x3009-C, C; V dm6): k0-k3 the tommy gun, the bazooka, the knives and the crossbow,
-/// which roam ([`VAULT_ROAMING`]); k4-k7 two sniper rifles and two grenade packs on fixed spots.
+/// which roam (spots 0-7); k4-k7 two sniper rifles and two grenade packs on fixed spots.
 /// Not in conker-rules' `weapon::pickups` yet.
 const VAULT_PICKUPS: [weapon::Pickup; 8] = [
     pick(10, Gives::Weapon(0x38)),
@@ -1112,46 +1231,94 @@ const VAULT_SPOTS: [u8; 12] = [
 /// one of 0-7 at the start, V: dm3 [3, 5, 6, 0], dm15 [6, 7, 4, 2], hs7 [0, 2, 7, 3]), k4-k7 spots
 /// 8-11 (V; 11 and 12 each take the spot near the other's placement).
 const VAULT_START: [usize; 8] = [0, 2, 3, 1, 8, 9, 10, 11];
-/// The spots k0-k3 roam among.
-const VAULT_ROAMING: std::ops::Range<usize> = 0..8;
-/// Map 0x1A's pickup respawn: 300 VIs (MP+0xEAC, V dm6), not the other maps' 240.
-const VAULT_RESPAWN: u16 = 300;
 
-/// Spot `k` of map 0x1A: the node of the navigation graph `nav` with [`VAULT_SPOTS`]' id, 60
-/// higher.
-fn vault_spot(nav: &[u8], k: usize) -> Result<[i16; 3]> {
+/// Map 0x24's 4 power-ups in the manager's order (script 0xB8's handles 0x3001-0x3004, their bits
+/// `G[0x1174..]`; tank.md §3, C): the shield `[3, 88]` (0x80, placement 16), the boost's
+/// canisters `[3, 71]` (0x01, 8), the one-shot shells' container `[3, 81]` (0x10, 10) and the
+/// scope's launcher `[3, 70]` (0x02, 11). `Gives::Weapon` holds the power-up's bit until
+/// conker-rules has power-ups (M9).
+const TANK_PICKUPS: [weapon::Pickup; 4] = [
+    pick(16, Gives::Weapon(0x80)),
+    pick(8, Gives::Weapon(0x01)),
+    pick(10, Gives::Weapon(0x10)),
+    pick(11, Gives::Weapon(0x02)),
+];
+/// Map 0x24's 6 power-up spots (`G[0xEA8]` = 6), ids of nodes of `[0x19, 0x24]`, the props 60
+/// above (V p1, c1).
+const TANK_SPOTS: [u8; 6] = [0x7B, 0x17, 0x40, 0x7C, 0x7D, 0x7E];
+/// The spots the power-ups start on: random free ones (V with 2 humans: [1, 3, 2, 4]).
+const TANK_START: [usize; 4] = [1, 3, 2, 4];
+
+/// A map whose pickups the manager moves among spots (nodes of its navigation graph): its
+/// pickups, the node ids of its spots, the spot each pickup starts on, how many (the first ones)
+/// roam and among which spots, and the respawn in VIs.
+struct Roaming {
+    pickups: &'static [weapon::Pickup],
+    spots: &'static [u8],
+    start: &'static [usize],
+    roamers: usize,
+    roam: std::ops::Range<usize>,
+    respawn: u16,
+}
+
+/// 0x1A's (respawn 300 VIs, MP+0xEAC, V dm6, not the other maps' 240) and 0x24's (300 VIs, 150
+/// frames: `G[0xEAC]`, C, V p1).
+fn roaming(scene: usize) -> Option<Roaming> {
+    match scene {
+        VAULT => Some(Roaming {
+            pickups: &VAULT_PICKUPS,
+            spots: &VAULT_SPOTS,
+            start: &VAULT_START,
+            roamers: 4,
+            roam: 0..8,
+            respawn: 300,
+        }),
+        TANK_MAP => Some(Roaming {
+            pickups: &TANK_PICKUPS,
+            spots: &TANK_SPOTS,
+            start: &TANK_START,
+            roamers: 4,
+            roam: 0..6,
+            respawn: 300,
+        }),
+        _ => None,
+    }
+}
+
+/// The pickup spot on the node of navigation graph `nav` with id `id` (byte 7): 60 above it.
+fn node_spot(nav: &[u8], id: u8) -> Result<[i16; 3]> {
     let count = usize::from(u16::from_be_bytes([nav[0], nav[1]]));
     let nodes = (nav
         .get(4..4 + 16 * count)
-        .context("0x1A: short navigation graph")?)
+        .context("short navigation graph")?)
     .as_chunks::<16>()
     .0;
-    let node = (nodes.iter().find(|r| r[7] == VAULT_SPOTS[k]))
-        .with_context(|| format!("0x1A: no node {:#x}", VAULT_SPOTS[k]))?;
+    let node = (nodes.iter().find(|r| r[7] == id)).with_context(|| format!("no node {id:#x}"))?;
     let [x, y, z] = [0, 2, 4].map(|o| i16::from_be_bytes([node[o], node[o + 1]]));
     Ok([x, y + 60, z])
 }
 
 /// A map's pickups and, when the game moves them off their placements, their spots (conker-rules'
-/// `weapon::pickups`, and 0x1A's from its navigation graph).
+/// `weapon::pickups`, and [`roaming`]'s from the navigation graph).
 pub fn pickup_table(rom: &Rom, scene: usize) -> Result<(Vec<weapon::Pickup>, Vec<[i16; 3]>)> {
-    if scene == VAULT {
+    if let Some(r) = roaming(scene) {
         let nav = rom.asset(&[0x19, scene])?;
-        let spots = VAULT_START.map(|k| vault_spot(&nav, k));
-        return Ok((
-            VAULT_PICKUPS.to_vec(),
-            spots.into_iter().collect::<Result<_>>()?,
-        ));
+        let spots = (r.start.iter())
+            .map(|&k| node_spot(&nav, r.spots[k]))
+            .collect::<Result<_>>()?;
+        return Ok((r.pickups.to_vec(), spots));
     }
     let (pickups, spots) = weapon::pickups(scene as u16)
         .with_context(|| format!("no pickup table for scene {scene:#x}"))?;
     Ok((pickups.to_vec(), spots.to_vec()))
 }
 
-/// A map's AI script (`[0x14, id]`): conker-bots' `script`, and 0x1A's [`VAULT_AI`].
+/// A map's AI script (`[0x14, id]`): conker-bots' `script`, 0x1A's [`VAULT_AI`] and 0x24's
+/// [`TANK_AI`].
 pub fn ai_script(scene: usize) -> usize {
     match scene {
         VAULT => VAULT_AI,
+        TANK_MAP => TANK_AI,
         _ => conker_bots::script(scene),
     }
 }
@@ -1170,11 +1337,13 @@ fn pack_data(
     let placements = scene_placements(rom, scene)?;
     let (pickups, spots) = pickup_table(rom, scene)?;
     let nav = rom.asset(&[0x19, scene])?.into_owned();
-    // 0x1A's roaming pickups (k0-k3) and its respawn.
-    let roams: Vec<[f32; 3]> = match scene {
-        VAULT => (VAULT_ROAMING.map(|k| Ok(vault_spot(&nav, k)?.map(f32::from))))
+    // The roaming pickups' spots (0x1A's k0-k3, 0x24's four) and their respawn.
+    let roaming = roaming(scene);
+    let roams: Vec<[f32; 3]> = match &roaming {
+        Some(r) => (r.roam.clone())
+            .map(|k| Ok(node_spot(&nav, r.spots[k])?.map(f32::from)))
             .collect::<Result<_>>()?,
-        _ => vec![],
+        None => vec![],
     };
     let game_data = rom.game_data()?;
     let table = |at: usize, n: usize| game_data.get(at..at + n).context(".game data too short");
@@ -1215,8 +1384,8 @@ fn pack_data(
                 position: (spots.get(k).copied())
                     .unwrap_or(placements[usize::from(p.placement)].position)
                     .map(f32::from),
-                respawn: (scene == VAULT).then_some(VAULT_RESPAWN),
-                roams: match k < 4 {
+                respawn: roaming.as_ref().map(|r| r.respawn),
+                roams: match roaming.as_ref().is_some_and(|r| k < r.roamers) {
                     true => roams.clone(),
                     false => vec![],
                 },
@@ -1243,9 +1412,10 @@ fn pack_data(
                                 .map(|l| (k, l.1))
                         })
                         .collect(),
-                    teams: (c.entry == WISE_GUY)
+                    teams: (matches!(c.entry, WISE_GUY | TANK))
                         .then(|| team_material(c, &team_ids(rom, c.entry)?))
                         .transpose()?,
+                    tank: (c.entry == TANK).then(|| tank_parts(rom, c)).transpose()?,
                 })
             })
             .collect::<Result<_>>()?,

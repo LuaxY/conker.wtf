@@ -1504,6 +1504,20 @@ fn deathmatch(
     bots: usize,
     seed: u64,
     frames: u32,
+    each: impl FnMut(&conker_rules::Match, &[usize]),
+) -> conker_bots::Bots {
+    play(rom, scene, bots, seed, frames, false, each)
+}
+
+/// [`deathmatch`], or War: Heist on 0x1A (`heist`: slot i on team i & 3, its team's start
+/// records and respawn mask, the script's effects applied, as the server has them).
+fn play(
+    rom: &extract_core::Rom,
+    scene: usize,
+    bots: usize,
+    seed: u64,
+    frames: u32,
+    heist: bool,
     mut each: impl FnMut(&conker_rules::Match, &[usize]),
 ) -> conker_bots::Bots {
     use conker_bots::lift::Lifts;
@@ -1558,15 +1572,31 @@ fn deathmatch(
     spawn::place(&arena.spawns, 0, &mut r);
     let fighters = (0..=bots)
         .map(|i| {
-            let at = usize::from(starts.deathmatch[i % 16]);
+            let records = conker_rules::heist::RECORDS[i & 3];
+            let (at, team, mask) = match heist {
+                true => (
+                    usize::from(records[i / 4]),
+                    (i & 3) as u8,
+                    records.iter().fold(0, |m, &r| m | 1 << r),
+                ),
+                false => (usize::from(starts.deathmatch[i % 16]), i as u8, !0),
+            };
             Fighter {
                 start: vault.then_some(weapon::BAT.id),
                 class: u8::from(vault),
-                ..Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, 23)
+                spawn_mask: mask,
+                ..Fighter::new(&spawn::place(&arena.spawns, at, &mut r), team, 23)
             }
         })
         .collect();
     let mut m = Match::new(&arena, fighters, r, 23);
+    if heist {
+        m = m.with(conker_rules::Settings {
+            heist: true,
+            score: conker_rules::heist::SCORE,
+            ..Default::default()
+        });
+    }
     // 0x34's plates and traps, as the server has them.
     m.traps = conker_rules::traps::Traps::new(scene as u16, assets.triggers);
     let slots: Vec<usize> = (1..=bots).collect();
@@ -1583,9 +1613,10 @@ fn deathmatch(
         if !m.traps.list.is_empty() {
             conker_rules::traps::seat(&mut world, m.traps.offsets());
         }
-        ai.tick(&m, &arena, &world, &mut inputs);
+        let fx = ai.tick(&m, &arena, &world, &mut inputs);
+        let mut ev = m.apply(&fx);
         ai.scopes(&mut m);
-        let ev = m.step(&arena, &inputs, &world);
+        ev.extend(m.step(&arena, &inputs, &world));
         ai.observe(&ev, &m);
         each(&m, &lifted);
     }
@@ -1784,4 +1815,48 @@ fn vault_deathmatch_bots_fight() {
         assert_eq!(node, NODES[spot], "k{k}");
         assert_eq!(gl.get(g::HOLDER, k), -1, "k{k}");
     }
+}
+
+/// War: Heist on 0x1A with the real 0xB7 (7 bots, 1 idle human, two teams of 2): the script
+/// creates the bag 210-299 frames in, bots fetch it and carry it at 25.2 at most, the voices and
+/// the scores come as effects and events, and no native is unknown (V bots1: the bag at 257, ~30
+/// pickups and 2 deliveries in 300 s).
+#[test]
+fn heist_bots_fetch_and_deliver() {
+    use conker_rules::heist::{CASH, State};
+    let Some(rom) = rom() else { return };
+    let (mut created, mut pickups, mut carrier) = (None, 0, None);
+    let (mut top, mut walked, mut scores) = (0f32, 0, [0u16; 4]);
+    let bots = play(&rom, 0x1A, 7, 1, 9000, true, |m, _| {
+        let c = m.heist.cash;
+        if c.shown && created.is_none() {
+            created = Some(m.tick);
+        }
+        if c.carrier.is_some() && c.carrier != carrier {
+            pickups += 1;
+        }
+        carrier = c.carrier;
+        // Past the grab (26 frames), the carry's own speed (a hit's knock-back drops the bag next).
+        if let Some(f) = c.carrier.map(|i| &m.players[i]) {
+            assert_eq!(f.flag, Some(CASH));
+            let hit = matches!(f.action, conker_rules::game::Action::Hurt { .. });
+            if m.tick > c.since + 30 && !hit {
+                top = top.max(f.body.xz_speed);
+            }
+        }
+        walked += u32::from(c.state == State::Walk);
+        scores = m.heist.scores;
+    });
+    eprintln!(
+        "heist: bag at {created:?}, {pickups} pickups, carried at {top} at most, {walked} frames \
+         walking, scores {scores:?}; unknown {:?}",
+        bots.unknown
+    );
+    let t = created.expect("the bag is created") - 23;
+    assert!((210..300).contains(&t), "{t}");
+    assert!(pickups >= 5, "{pickups}");
+    assert!(top <= 25.2 + 1e-3, "{top}");
+    assert!(walked > 0);
+    assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
+    assert_eq!(bots.faults, 0);
 }

@@ -18,7 +18,8 @@ commands:
                         --map <name>: a map, the scene in hex as its folder (repeatable; default 2d);
                         --background [<name>=]<wav>: a map's background recording (lab/audio), the
                         first map's without a name (repeatable); --song [<name>=]<wav>: the same for
-                        the song its outro starts (op 8); --stem [<name>=]<wav>: the same for a raw
+                        the song its outro starts (op 8), 0x24's bomb countdown (song 50);
+                        --stem [<name>=]<wav>: the same for a raw
                         recording of its song's positional channels (0x2B's 13/14), cut as its loop
 ids are decimal or 0x-prefixed hex (scene 0x2D = scene 45); character names: deathmatch (117), conker (0)
 --rom defaults to env CONKER_ROM; --out defaults to <repo>/lab/extract/slice (outside the source tree)";

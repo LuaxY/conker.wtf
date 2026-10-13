@@ -13,6 +13,7 @@ pub mod flame;
 pub mod game;
 pub mod gas;
 pub mod gun;
+pub mod heist;
 pub mod lift;
 #[cfg(feature = "net")]
 pub mod net;

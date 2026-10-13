@@ -56,6 +56,10 @@ pub struct Outro {
     /// The camera's near plane (op 5 b=0x25, `func_1510B458`; V Beach cs3's 30), else the view's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<Light>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub particles: Vec<Particles>,
 }
 
 /// A camera (object kind 1, look mode 0): its eye on its path ([`path_at`], channel 10 the share of
@@ -124,6 +128,18 @@ pub struct Actor {
     pub mask: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attach: Vec<Attach>,
+    /// Its team look (op 5 b=0x6F c 0: obj+0x68 = d, the model's segment-0x0A texture selector, d
+    /// − 1 the team; `character.json` `teams.textures[team]`): Heist cs3's Wise Guy wears REDS'
+    /// shirt (d 1, V obj+0x68), whoever lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<u8>,
+    /// Channel 6 (degrees) when it changes: Heist cs3's Wise Guy rolls 0 → −16 → 13 → 0 as he sinks
+    /// (V the keys' values; I: about his facing's forward axis, the game's use not traced).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roll: Vec<Key>,
+    /// Channel 8 (degrees) when it changes (I: about the side axis); none in these outros.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pitch: Vec<Key>,
 }
 
 /// Op 0x11 (`func_150265CC`, `func_15021DB8`, `func_15038620`): from `t` the head `joint`'s own
@@ -171,12 +187,41 @@ pub struct Attach {
 }
 
 /// A kind-3 object: the map's hidden placement `placement` shown for the outro (`func_150226BC`)
-/// and posed by it (`func_15020EC4`): at `at`, turned `rotation` degrees about x, then y.
+/// and posed by it (`func_15020EC4`): at `at`, turned `rotation` degrees about x, then y, its model
+/// scaled `scale` (x, y, z) when its channels set one (absent: model units, as before).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prop {
     pub placement: u16,
     pub at: [i16; 3],
     pub rotation: [f32; 2],
+    /// x = channel 5 / 100, y = channel 4 / 100 (V Heist cs3's backdrop: (37, 37.01) for 3700,
+    /// 3701), z the placement's own (+0x28; I: the oracle's 2.2 fits it and its x alike).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<[f32; 3]>,
+}
+
+/// Op 5 b=0x65 d 6 on a kind-0 object (`func_150265CC` case 6 → `func_151619A0`): a point light at
+/// the object's path point `at` from `t`, its colour channels 0-2 and size channel 5 (V Heist's:
+/// white, size 8, at (−644, 180, 4728); its c 1 at t 500 leaves it on, V).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Light {
+    pub t: u16,
+    pub at: [i16; 3],
+    pub rgb: [u8; 3],
+    pub size: f32,
+}
+
+/// Op 5 b=0x50 / 0x51 on actor `actor` (an index of [`Outro::actors`]): `func_150E9FE0` /
+/// `func_150EA500` start particle emitter 41 / 40 there (`emitter`: the op's b), from `t` to `until`
+/// (its c 1): Heist cs3's bubbles off the sinking Wise Guy. Each particle is a type-0x47 sprite of
+/// texture 0xC01 (`hud/bubble_particle.png`, C `func_150EA11C`), sizes 31-118 and lives 50-156
+/// frames (V, `heist-presentation.md` §4.2), rising (I).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Particles {
+    pub actor: u8,
+    pub emitter: u16,
+    pub t: u16,
+    pub until: u16,
 }
 
 /// A script sound (op 6 once, op 0x0A a loop; `func_15029BB8`, callback `func_150238D8`): bank sound
@@ -636,6 +681,7 @@ mod tests {
             talk: None,
             mask: None,
             attach: vec![],
+            ..Actor::default()
         };
         assert_eq!(a.clip(0), (0, 0.0));
         assert_eq!(a.clip(1), (0, 1.0));

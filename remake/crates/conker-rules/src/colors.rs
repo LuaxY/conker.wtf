@@ -164,6 +164,10 @@ pub enum Pose {
     Cheer,
     /// 0x45 0xC: the other team's, through the freeze to the respawn (V e0 413; I its end).
     Lose,
+    /// War: Heist: the bag's grab (V h1 334-359).
+    Snatch,
+    /// Heist: B throws the bag (V h2 381-400, the release on 395).
+    Throw,
 }
 
 impl Pose {
@@ -174,6 +178,8 @@ impl Pose {
             Pose::Plant => (anim::FLAG_PLANT, 30, Some(19)),
             Pose::Cheer => (anim::CHEER, 49, None),
             Pose::Lose => (anim::LOSE, 60, None),
+            Pose::Snatch => (crate::heist::GRAB, 26, None),
+            Pose::Throw => (crate::heist::THROW, 20, Some(15)),
         }
     }
 

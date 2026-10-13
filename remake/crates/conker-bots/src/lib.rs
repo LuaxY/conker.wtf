@@ -32,12 +32,14 @@ use conker_camera::Scope;
 use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::game::{Action, Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
+use conker_rules::heist::{self, Cash};
 use conker_rules::weapon::Gives;
 use conker_rules::{Rng, beach, colors};
 use conker_sim::collision::CollisionWorld;
-use conker_sim::movement::{Input, atan2_u16, deadzone, stick_angle};
+use conker_sim::movement::{Input, angle_diff, atan2_u16, cos_sin, deadzone, stick_angle};
 use nav::Graph;
-use npc::{Npc, Scripts, View};
+use nav::NONE;
+use npc::{AT_GOAL, Npc, Scripts, View};
 use script::{Globals, Machine, Script};
 
 /// The game's skill byte (`0x800E0BD0`) in the oracle's matches, the menu's default (NORMAL).
@@ -121,6 +123,8 @@ pub struct Bots {
     rng: Rng,
     skill: usize,
     started: bool,
+    /// War: Heist's bag walker ([`walk`]).
+    walker: Npc,
     pub unknown: Unknown,
     pub faults: u32,
 }
@@ -171,6 +175,7 @@ impl Bots {
             rng,
             skill: usize::from(skill.min(4)),
             started: false,
+            walker: Npc::default(),
             unknown: Unknown::new(),
             faults: 0,
         })
@@ -349,7 +354,7 @@ impl Bots {
                         self.hit_by[v] = 0x80 | a as u8;
                     }
                 }
-                Event::Shot { .. } | Event::Explosion { .. } => {}
+                Event::Shot { .. } | Event::Explosion { .. } | Event::Voice { .. } => {}
                 Event::Respawn { player, .. } => {
                     if let Some(p) = k(player) {
                         self.npcs[p].placed = true;
@@ -380,7 +385,8 @@ impl Bots {
     ) -> Vec<Effect> {
         let bodies = self.bodies(m);
         self.mirror(m, arena);
-        let ffa = !m.settings.total_war && !m.settings.colors && !m.settings.beach;
+        let st = &m.settings;
+        let ffa = !st.total_war && !st.colors && !st.beach && !st.heist;
         // The joiners: their team as the script's start writes it (`team << 1` in Total War's
         // 0xBA at 0x734, the team in Colors' and Beach's, the participant in a Deathmatch), and
         // a fresh start in the frame helper's eyes. War: Beach's appear on this frame (0x1D leaves
@@ -432,6 +438,14 @@ impl Bots {
                 gunners: (0..m.guns.len()).map(|k| m.gunner(k)).collect(),
                 plunger: m.plunger,
                 appear,
+                cash: match m.settings.heist {
+                    true => Some(brain::Heist {
+                        cash: m.heist.cash,
+                        scores: m.heist.scores,
+                        walker: &mut self.walker,
+                    }),
+                    false => None,
+                },
             };
             if !self.started {
                 self.started = true;
@@ -481,11 +495,23 @@ impl Bots {
                     effects.push(Effect::Carry(slot, carries));
                 }
             }
-        } else if !m.settings.colors && !m.settings.beach {
+        } else if !m.settings.colors && !m.settings.beach && !m.settings.heist {
             effects.clear();
         }
+        // Heist: the bag walks home on its own, once on its feet (class 0x57's scripts).
+        if m.settings.heist && m.heist.cash.walks(m.tick) {
+            effects.extend(walk(&mut self.walker, &m.heist.cash, &self.graph, world));
+        }
         let mut players: Vec<[f32; 3]> = bodies.iter().map(|b| b.pos).collect();
-        // Colors' collectors run at a flag by its handle (command 0x19, [`Npc::target`]).
+        // Colors' collectors run at a flag by its handle (command 0x19, [`Npc::target`]); Heist's
+        // at the bag.
+        if m.settings.heist {
+            let i = usize::from(heist::HANDLE);
+            if players.len() <= i {
+                players.resize(i + 1, [0.0; 3]);
+            }
+            players[i] = m.heist.cash.pos;
+        }
         if m.settings.colors {
             for (f, def) in m.colors.flags.iter().zip(&colors::FLAGS) {
                 let i = usize::from(def.handle);
@@ -633,9 +659,11 @@ impl Bots {
                 Gives::Mask => i32::from(gas::MASK),
             };
             g.set(g::GIVES, k, gives);
-            // 0x1A's: 3 the roaming ones, 2 the fixed (V dm6); 6 elsewhere.
+            // 0x1A's: 3 the roaming ones (1 in a Heist of at most 4 players, `Match::unique`), 2 the
+            // fixed (V dm6, h4a); 6 elsewhere.
             let flags = match roams {
                 0 => 6,
+                _ if k < roams && m.unique() => 1,
                 _ if k < roams => 3,
                 _ => 2,
             };
@@ -645,7 +673,9 @@ impl Bots {
             // C): 0xB7 goes for the pickups whose holder is -1 and timer 0.
             g.set(g::PLACE, k, k as i32);
             g.set(g::SPOT, k, k as i32);
-            g.set(g::HOLDER, k, -1);
+            let holder = (m.pickups.get(k).and_then(|p| p.holder))
+                .and_then(|s| self.slots.iter().position(|&x| x == Some(s)));
+            g.set(g::HOLDER, k, holder.map_or(-1, |p| p as i32));
             g.set(g::PROP, k, 0x3001 + k as i32);
             let node = (self.graph).nearest(m.pickup_at(arena, k), Some(0), None).0;
             g.set(
@@ -698,6 +728,56 @@ impl Bots {
 /// `func_150FC614`). ponytail: two sources are not ported, the flame stream's (`func_1519A9A4`, V
 /// q3s5b3: at the stream's middle, half its length around, to 352) and 0x34's particle emitters'
 /// (`func_151A6600`, V o34emit: 500 around, 121 frames, their trigger untraced).
+/// The bag's walker reaches a node this near it, across (I: the game's NPC mover, `func_1504A730`
+/// on obj+0x25C, is unported; this clears the bag's turning circle at 17.5 a frame).
+const ARRIVE: f32 = 60.0;
+
+/// War: Heist's bag walking home: class 0x57's script 5 (`0xD2` the next node, `0x57` at speed 35,
+/// `0xD3` until at the goal) from node to node toward its goal, avoiding the node 0x5D named,
+/// turning at most [`heist::TURN`] a frame, from 5 a frame up to 17.5, on the floor; at the goal it
+/// stands (AT_GOAL, script 4). Its step for the match, if it walks or just stopped.
+/// ponytail: no wall test (the nav graph's lines keep it off walls); I the speeds' shape.
+fn walk(n: &mut Npc, c: &Cash, graph: &Graph, world: &CollisionWorld) -> Option<Effect> {
+    let walking = c.state == heist::State::Walk;
+    let stop = Effect::CashAt(c.pos, c.yaw, false);
+    if n.script != 5 || n.flags & AT_GOAL != 0 || n.goal == NONE {
+        return walking.then_some(stop);
+    }
+    let avoid: Vec<u8> = (n.avoid != NONE).then_some(n.avoid).into_iter().collect();
+    if n.cur == NONE {
+        n.cur = graph.approach(c.pos, &[n.goal], &avoid);
+    }
+    let across = |p: [f32; 3]| (p[0] - c.pos[0]).hypot(p[2] - c.pos[2]);
+    while n.cur != NONE && across(graph.at(n.cur)) < ARRIVE {
+        if n.cur == n.goal {
+            n.flags |= AT_GOAL;
+            n.script = 4;
+            return walking.then_some(stop);
+        }
+        let next = graph.next_toward(n.cur, &[n.goal], &avoid).0;
+        if next == n.cur {
+            break;
+        }
+        n.cur = next;
+    }
+    if n.cur == NONE {
+        return walking.then_some(stop);
+    }
+    n.length = graph.next_toward(n.cur, &[n.goal], &avoid).1;
+    let to = graph.at(n.cur);
+    let want = atan2_u16(-(to[2] - c.pos[2]), to[0] - c.pos[0]);
+    let turn = angle_diff(want, c.yaw).clamp(-i32::from(heist::TURN), i32::from(heist::TURN));
+    let yaw = c.yaw.wrapping_add(turn as u16);
+    n.speed = match walking {
+        true => (n.speed + heist::WALK_GAIN).min(heist::WALK_TOP),
+        false => heist::WALK_FROM,
+    };
+    let (cs, sn) = cos_sin(yaw);
+    let (x, z) = (c.pos[0] + n.speed * cs, c.pos[2] - n.speed * sn);
+    let y = (world.floor(x, z, c.pos[1], c.pos[1], None)).map_or(c.pos[1], |f| f.y);
+    Some(Effect::CashAt([x, y, z], yaw, true))
+}
+
 fn noises(m: &Match) -> Vec<([f32; 3], f32)> {
     /// The throw's release, frames into it (conker-rules' `RELEASE`).
     const RELEASE: u32 = 14;

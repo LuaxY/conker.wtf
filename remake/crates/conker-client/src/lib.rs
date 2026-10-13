@@ -1121,6 +1121,7 @@ pub fn match_settings(m: &MatchView) -> Settings {
         colors: m.colors,
         score: m.score_limit,
         beach: m.beach,
+        heist: m.heist,
         ..Settings::default()
     }
 }

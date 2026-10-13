@@ -15,7 +15,7 @@ fn pack_has_the_traps() {
         return;
     };
     let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
-    let maps = [("34".to_string(), None, None)];
+    let maps = [("34".to_string(), None, None, None)];
     let (files, folders) =
         conker_extract::audio::pack_audio(&rom, &BTreeSet::new(), &maps, &[], &[]).unwrap();
     let files: BTreeMap<&str, &[u8]> = (files.iter())

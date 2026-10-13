@@ -712,6 +712,231 @@ fn beach_outros_follow_the_oracle() {
     }
 }
 
+/// Heist's outros (scene 0x1A's cutscenes 2 and 3, `heist-presentation.md` §4) against the oracle's
+/// frames (`../lab/research/mp-original/heist-presentation-scratch/outro/outro_cs{2,3}_{camera,
+/// actors}.csv`, `fade_cs{2,3}.csv`, runs cs2/cs3: read 459 (cs2) or 157 (cs3) is the outro's frame
+/// 0), every frame from 1 to the STATS: camera, actors (place, facing, scale, clip, clip time),
+/// fade. cs3's Wise Guy plays no clip before t 530 (its t-0 op 2 is c 2): the decoder holds its
+/// first clip at frame 0 there, and those rows (anim 0) are not compared. Also what the decoder
+/// adds for 0x1A: Don Weaso (134) at 0.74 with no head turn, the voices, the Wise Guy's red shirt,
+/// roll, cement shoe and bubbles, the white light and the black backdrop.
+#[test]
+fn heist_outros_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let outros = conker_extract::outro::outros(&rom, 0x1A).unwrap();
+    let characters = conker_extract::outro::characters(&rom, &outros).unwrap();
+    let [cs2, cs3] = &outros[..] else {
+        panic!("two outros")
+    };
+    assert_eq!((cs2.winner, cs2.cutscene, cs2.length), (0, 2, 650));
+    assert_eq!((cs3.winner, cs3.cutscene, cs3.length), (1, 3, 1550));
+    let entries: Vec<_> = characters.iter().map(|c| c.entry).collect();
+    assert_eq!(entries, [134, 59]);
+    let from = |o: &conker_assets::outro::Outro| -> Vec<u16> {
+        std::iter::once(&o.camera)
+            .chain(&o.cuts)
+            .map(|c| c.from)
+            .collect()
+    };
+    assert_eq!(
+        (from(cs2), from(cs3)),
+        (vec![0], vec![0, 530, 800, 1300, 1400])
+    );
+    let voice = |o: &conker_assets::outro::Outro| {
+        let v = o.voice.as_ref().unwrap();
+        (v.t, v.entry, v.file.clone())
+    };
+    assert_eq!(voice(cs2), (30, 0xB5, "maps/1a/voice-b5.wav".into()));
+    assert_eq!(voice(cs3), (30, 0xCE, "maps/1a/voice-ce.wav".into()));
+    let don = &cs3.actor;
+    assert_eq!((don.character.as_str(), don.scale), ("134", 0.74));
+    assert!(don.head.is_none() && don.talk.as_ref().is_some_and(|t| t.jaw == 6));
+    // The light (obj 2: op 5 b=0x65 d 6, channels 0-2 and 5), in both.
+    let light = conker_assets::outro::Light {
+        t: 0,
+        at: [-644, 180, 4728],
+        rgb: [255; 3],
+        size: 8.0,
+    };
+    assert!(cs2.light == Some(light.clone()) && cs3.light == Some(light));
+    // cs3's Wise Guy (actor 1): REDS' shirt, the cement shoe (action 0x69: bank-09 0x51 on joint
+    // 19) from t 400, the roll's 4 keys, sounds 10 and 12, the bubbles' five windows.
+    let wise_guy = &cs3.cast[0];
+    assert_eq!(
+        (wise_guy.character.as_str(), wise_guy.team),
+        ("59", Some(0))
+    );
+    let shoe = conker_assets::outro::Attach {
+        t: 400,
+        entry: 0x51,
+        joint: 19,
+        on: true,
+    };
+    assert_eq!(wise_guy.attach, [shoe]);
+    let roll: Vec<_> = wise_guy.roll.iter().map(|k| (k.t, k.value)).collect();
+    assert_eq!(roll, [(530, 0.0), (601, -16.0), (700, 13.0), (800, 0.0)]);
+    assert!(wise_guy.pitch.is_empty() && don.team.is_none() && don.roll.is_empty());
+    let sounds: Vec<_> = cs3.sounds.iter().map(|s| (s.id, s.actor, s.t)).collect();
+    assert_eq!(sounds, [(0x0A, 1, 594), (0x0C, 1, 726)]);
+    let particles: Vec<_> = (cs3.particles.iter())
+        .map(|p| (p.actor, p.emitter, p.t, p.until))
+        .collect();
+    assert_eq!(
+        particles,
+        [
+            (1, 0x50, 530, 566),
+            (1, 0x51, 552, 605),
+            (1, 0x50, 624, 653),
+            (1, 0x51, 700, 738),
+            (1, 0x51, 1296, 1321)
+        ]
+    );
+    // The black backdrop: placement 13 (uid 0xD) at (−1503, 20, 4345), turned 117° (ch7), scaled
+    // (37, 37.01) by channels 5 and 4, its own z (2.195).
+    let [backdrop] = &cs3.props[..] else {
+        panic!("one prop")
+    };
+    assert_eq!(
+        (backdrop.placement, backdrop.at, backdrop.rotation),
+        (13, [-1503, 20, 4345], [0.0, 117.0])
+    );
+    let scale = backdrop.scale.unwrap();
+    assert!((0..3).all(|i| (scale[i] - [37.0, 37.01, 2.195][i]).abs() < 1e-4));
+    assert!(cs2.props.is_empty() && cs2.particles.is_empty() && cs2.sounds.is_empty());
+    let (_, scenes) = conker_extract::outro::models(&rom, 0x1A, &outros)
+        .unwrap()
+        .unwrap();
+    let names: Vec<_> = (scenes.as_array().unwrap().iter())
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["09-51", "prop-13"]);
+
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/heist-presentation-scratch/outro"
+    );
+    let rows = |file: &str| -> Option<Vec<Vec<String>>> {
+        let text = std::fs::read_to_string(format!("{dir}/{file}")).ok()?;
+        Some(
+            text.lines()
+                .skip(1)
+                .map(|l| l.split(',').map(String::from).collect())
+                .collect(),
+        )
+    };
+    let Some(..) = rows("outro_cs2_camera.csv") else {
+        eprintln!("{dir}: no oracle CSVs, skipping the frames");
+        return;
+    };
+    for (o, n, first) in [(cs2, 2, 459), (cs3, 3, 157)] {
+        let mut compared = 0;
+        for row in &rows(&format!("outro_cs{n}_camera.csv")).unwrap() {
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 || k > o.frames() {
+                continue;
+            }
+            compared += 1;
+            let t = o.t(k);
+            assert_eq!(t, f(1), "cs{n} read {read}");
+            let (eye, at) = o.camera(t);
+            for i in 0..3 {
+                assert!(
+                    (eye[i] - f(4 + i)).abs() < 0.05,
+                    "cs{n} read {read}: eye {eye:?}"
+                );
+                assert!(
+                    (at[i] - f(7 + i)).abs() < 0.05,
+                    "cs{n} read {read}: at {at:?}"
+                );
+            }
+            let yaw = conker_assets::outro::value(&o.view(t).yaw, t) + 90.0;
+            assert!(
+                ((yaw - f(10) + 180.0).rem_euclid(360.0) - 180.0).abs() < 1e-3,
+                "cs{n} read {read}: yaw {yaw}"
+            );
+        }
+        assert_eq!(compared, o.frames(), "cs{n} camera rows");
+        let actors: Vec<_> = o.actors().collect();
+        let (mut objects, mut held, mut compared) = (Vec::new(), 0, 0);
+        for row in &rows(&format!("outro_cs{n}_actors.csv")).unwrap() {
+            let obj: u32 = row[2].parse().unwrap();
+            if !objects.contains(&obj) {
+                objects.push(obj);
+            }
+            let a = actors[objects.iter().position(|&x| x == obj).unwrap()];
+            let f = |c: usize| row[c].parse::<f32>().unwrap();
+            let read: u32 = row[0].parse().unwrap();
+            let k = read - first;
+            if k == 0 || k > o.frames() {
+                continue;
+            }
+            let t = o.t(k);
+            let place = a.place(t);
+            for i in 0..3 {
+                assert!(
+                    (place[i] - f(6 + i)).abs() < 0.05,
+                    "cs{n} read {read} object {obj}: place {place:?}"
+                );
+            }
+            let facing: u16 = row[9].parse().unwrap();
+            assert!(
+                a.facing(t).abs_diff(facing) <= 1,
+                "cs{n} read {read} object {obj}: facing {}",
+                a.facing(t)
+            );
+            assert!((a.scale - f(22)).abs() < 1e-6, "cs{n} object {obj} scale");
+            // obj+0x68, the team look's selector: the Wise Guy's 1 (op 5 b=0x6F), else 0.
+            let selector: u8 = row[28].parse().unwrap();
+            assert_eq!(a.team.map_or(0, |t| t + 1), selector, "cs{n} {obj}");
+            let roll = conker_assets::outro::value(&a.roll, t);
+            assert!(
+                (roll - f(24)).abs() < 1e-3,
+                "cs{n} read {read}: roll {roll}"
+            );
+            let logical: u16 = row[10].parse().unwrap();
+            if logical == 0 {
+                held += 1;
+                continue;
+            }
+            compared += 1;
+            let (clip, time) = a.clip(k);
+            let (name, ticks) = a.clips().nth(clip).unwrap();
+            assert!(
+                name.ends_with(&format!("_anim_{logical:04}"))
+                    || characters.iter().any(|c| c.entry.to_string() == a.character
+                        && c.clips.iter().any(|x| x.logical.contains(&logical)
+                            && name.starts_with(&format!("pair_{:04}", x.pair)))),
+                "cs{n} read {read} object {obj}: clip {name}, want {logical}"
+            );
+            let off = (time - f(12)).abs();
+            assert!(
+                off.min(f32::from(ticks) - off) < 0.01,
+                "cs{n} read {read} object {obj}: clip time {time}, want {}",
+                f(12)
+            );
+        }
+        assert_eq!(objects.len(), actors.len());
+        // The Wise Guy's held frames, t 2 to 528 (V: anim 0 till its op 2 at 530).
+        assert_eq!(
+            (compared, held),
+            [(325, 0), (2 * 775 - 264, 264)][n - 2],
+            "cs{n} rows"
+        );
+        let mut fades = 0;
+        for row in rows(&format!("fade_cs{n}.csv")).unwrap() {
+            let read: u32 = row[0].parse().unwrap();
+            if read > first && read - first <= o.frames() {
+                let want: u8 = row[6].parse().unwrap();
+                assert_eq!(o.fade(o.t(read - first)), want, "cs{n} read {read}");
+                fades += 1;
+            }
+        }
+        assert_eq!(fades, o.frames(), "cs{n} fade rows");
+    }
+}
+
 /// War: Beach's villagers (`beach-presentation.md` §5): classes 0x11-0x20 give 12 looks of model
 /// 156 and 2 of 157, each hiding display lists by its mask; the glTF keeps each list in its own
 /// primitives (`extras.list`), so a look draws what the original's mask leaves (V: e1 DL 270, 156
@@ -808,13 +1033,18 @@ fn projectiles_and_undrawn_quads() {
     let Some(rom) = rom() else { return };
     let (level, scenes) = conker_extract::projectiles_level(&rom).unwrap();
     let counts: Vec<_> = (level.meshes.iter()).map(|m| m.ir.vertices.len()).collect();
-    assert_eq!(counts, [28, 16, 34, 23]);
+    assert_eq!(counts, [28, 16, 34, 23, 16]);
     let z: Vec<_> = (level.meshes[1].ir.vertices.iter())
         .map(|v| v.position[2])
         .collect();
     assert_eq!((z.iter().min(), z.iter().max()), (Some(&-316), Some(&484)));
     assert!(level.meshes.iter().all(|m| m.ir.unresolved.len() <= 1));
-    assert_eq!(scenes.as_array().unwrap().len(), 4);
+    assert_eq!(scenes.as_array().unwrap().len(), 5);
+    // Tank's shell: a five-sided prism with its nose at +48 (V sh1 DL 42, drawn at 1.5).
+    let z: Vec<_> = (level.meshes[4].ir.vertices.iter())
+        .map(|v| v.position[2])
+        .collect();
+    assert_eq!((z.iter().min(), z.iter().max()), (Some(&-32), Some(&48)));
     for (scene, quads) in [(0x2D, 6), (0x34, 2)] {
         let all = extract_level::scene_level(&rom, scene).unwrap();
         let undrawn = |l: &extract_level::Level| {
@@ -934,6 +1164,7 @@ fn outro_commands_follow_the_research() {
         placement,
         at,
         rotation,
+        scale: None,
     };
     assert_eq!(beach[0].props, [prop(3, [1076, -29, 257], [7.0, 174.0])]);
     assert_eq!(beach[1].props.len(), 1);
@@ -995,4 +1226,184 @@ fn outro_commands_follow_the_research() {
     assert_eq!(names(0x2D, &tw), ["09-57"]);
     assert_eq!(names(0x30, &colors), ["09-57", "09-64", "09-92", "prop-0"]);
     assert_eq!(names(0x2B, &beach), ["09-57", "prop-2", "prop-3"]);
+}
+
+/// Tank's model and map 0x24 (`../lab/research/mp-original/tank.md`): the tank (bank 01 #119):
+/// 14 joints, the turret (2) on the hull, the gun (3) on the turret, the muzzle (4) 110 along the
+/// gun, the antenna (6-11), the treads (13, 12: the game's two scroll lists of 28 vertices, RAM
+/// `0x800C4020[119]` = vertices 187 and 215, V); its 8 clips. Scene 0x24: 34 placements, the
+/// bunker doors `[4, 36, 4]` (0-7) in pairs at the bunkers, the gas bomb (12) on the centre post
+/// (the terrain's top at −617 under it), the 20 spawn records (starts: 0-3 the bunkers, 0x10-0x13),
+/// the 6 power-up spots 60 above their nodes (V p1, c1).
+#[test]
+fn tank_model_and_map() {
+    let Some(rom) = rom() else { return };
+    let tank = extract_character::Character::load(&rom, conker_extract::TANK).unwrap();
+    let joints = &tank.model.joints;
+    let parents: Vec<_> = joints.iter().map(|j| j.parent).collect();
+    let p = |j: u8| Some(j);
+    assert_eq!(
+        parents,
+        [
+            None,
+            p(0),
+            p(1),
+            p(2),
+            p(3),
+            p(2),
+            p(2),
+            p(6),
+            p(7),
+            p(8),
+            p(9),
+            p(10),
+            p(0),
+            p(0)
+        ]
+    );
+    let at = |j: usize| joints[j].translation.map(|v| (v * 100.0).round() / 100.0);
+    assert_eq!(
+        [at(2), at(3), at(4)],
+        [
+            [0.0, 80.15, -5.26],
+            [0.0, 26.42, 53.14],
+            [0.0, 10.13, 110.4]
+        ]
+    );
+    assert_eq!(
+        (at(12), at(13)),
+        ([46.16, 83.52, 0.0], [-44.57, 81.93, 0.0])
+    );
+    // The treads' vertices (texture 4607, the texture table's entry 4; address index = RAM index
+    // + 3) by joint.
+    let mut treads: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    let tread = Some(extract_gbi::Image::Flat {
+        index: 4607,
+        mode: 0,
+    });
+    for l in &tank.model.lists {
+        for d in (l.draws.iter()).filter(|d| d.material.texture.and_then(|t| t.image) == tread) {
+            for &i in d.triangles.iter().flatten() {
+                let v = &l.vertices[i as usize];
+                let joint = (v.matrix.unwrap_or(0) & 0xFF_FFFF) / 0x40;
+                treads
+                    .entry(joint)
+                    .or_default()
+                    .insert((v.address & 0xFF_FFFF) / 16);
+            }
+        }
+    }
+    assert_eq!(treads.len(), 2);
+    assert_eq!(treads[&13], (190..218).collect());
+    assert_eq!(treads[&12], (218..246).collect());
+    let clips: Vec<_> = (tank.playable_clips())
+        .map(|c| (c.pair, c.logical.clone(), c.duration))
+        .collect();
+    assert_eq!(
+        clips,
+        [
+            (0, vec![1, 3], 52),
+            (1, vec![0, 2], 30),
+            (2, vec![4], 26),
+            (3, vec![5], 30),
+            (4, vec![6], 8),
+            (5, vec![7], 39),
+            (6, vec![8], 10),
+            (7, vec![9], 25)
+        ]
+    );
+
+    let placements = extract_scene::scene_placements(&rom, conker_extract::TANK_MAP).unwrap();
+    assert_eq!(placements.len(), 34);
+    let doors: Vec<_> = placements[..8].iter().map(|p| p.position).collect();
+    let bunkers: [[i16; 3]; 8] = [
+        [-7041, -900, -688],
+        [-7041, -900, -688],
+        [7041, -900, 686],
+        [7041, -900, 686],
+        [-425, -1545, -7039],
+        [-425, -1545, -7039],
+        [425, -1545, 7039],
+        [425, -1545, 7039],
+    ];
+    assert_eq!(doors, bunkers);
+    assert_eq!(placements[12].position, [-20, -532, -108]);
+    let level = extract_level::scene_level(&rom, conker_extract::TANK_MAP).unwrap();
+    let model = |i: usize| {
+        let inst = level
+            .instances
+            .iter()
+            .find(|n| n.placement == Some(i))
+            .unwrap();
+        level.meshes[inst.mesh].path.clone()
+    };
+    assert!((0..8).all(|i| model(i) == [4, 0x24, 4]));
+    let props: Vec<_> = [16, 8, 10, 11, 12, 9, 17].map(model).to_vec();
+    assert_eq!(
+        props,
+        [
+            [3, 88],
+            [3, 71],
+            [3, 81],
+            [3, 70],
+            [3, 80],
+            [3, 72],
+            [3, 95]
+        ]
+        .map(|m| m.to_vec())
+    );
+    let collision =
+        extract_scene::scene_collision(&rom, conker_extract::TANK_MAP, &placements).unwrap();
+    let terrain: Vec<_> = (collision.triangles.iter())
+        .filter(|t| t.layer == Layer::Terrain)
+        .cloned()
+        .collect();
+    let post = extract_scene::floor_below(&terrain, [-20.0, -532.0, -108.0], 0.0);
+    assert_eq!(post.map(|f| f.1.round()), Some(-617.0));
+    let spawns = extract_scene::scene_spawns(&rom, conker_extract::TANK_MAP).unwrap();
+    assert_eq!(spawns.len(), 20);
+    let starts = [0, 1, 2, 3, 16, 17, 18, 19].map(|k| spawns[k].position);
+    let records: [[i16; 3]; 8] = [
+        [7156, -901, 683],
+        [-7146, -901, -674],
+        [517, -1546, 7029],
+        [-545, -1546, -7031],
+        [-3772, -1067, -5288],
+        [3778, -1069, 5341],
+        [2257, -138, 2336],
+        [-2169, -145, -2462],
+    ];
+    assert_eq!(starts, records);
+    let (pickups, spots) = conker_extract::pickup_table(&rom, conker_extract::TANK_MAP).unwrap();
+    let placed: Vec<_> = pickups.iter().map(|p| p.placement).collect();
+    assert_eq!(
+        (placed, spots),
+        (
+            vec![16, 8, 10, 11],
+            vec![
+                [-2512, 2, -2450],
+                [3736, 138, -1061],
+                [-3920, 160, 942],
+                [-3593, -974, -5799]
+            ]
+        )
+    );
+    // The props glTF: the hidden placements in place, `model@placement`.
+    let (props, scenes) = conker_extract::props_level(&rom, conker_extract::TANK_MAP).unwrap();
+    assert_eq!(props.instances.len(), 22);
+    assert_eq!(scenes.as_array().unwrap().len(), 1);
+    let names: Vec<_> = (props.instances.iter())
+        .map(|i| (props.meshes[i.mesh].path.clone(), i.placement.unwrap()))
+        .collect();
+    assert_eq!(
+        names[..5],
+        [
+            (vec![3, 72], 9),
+            (vec![3, 80], 12),
+            (vec![3, 72], 13),
+            (vec![3, 80], 14),
+            (vec![3, 71], 15)
+        ]
+    );
+    assert!(names[5..].iter().all(|(m, _)| m == &[3, 95]));
 }

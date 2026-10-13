@@ -64,7 +64,8 @@
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach] [--score 1-40|unlimited]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist] [--score 1-40|unlimited]
+//!   [--seed N]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
@@ -108,6 +109,11 @@
 //!   the villagers (the squirrels' side, item 0x3E, no attack) against at most 2 Tediz; the level's
 //!   AI script runs the escapes, the detonation, the weapon zones and the 90 s deadline (conker-rules'
 //!   `beach`); lives are never lost, and the match ends on the clock or at `--score` (as Colors').
+//! - `--mode heist`: the original's War: Heist (scenario 0), on map 1a only and without `--cavemen`:
+//!   four teams by slot (slot & 3: REDS, BLUES, GREENS, YELLOWS; at most 8 players and 2 humans a
+//!   team, 4 and 1 once 3 humans are in), the Wise Guy with the bat; the level's AI script runs the
+//!   bag (conker-rules' `heist`), and the match ends on the clock, at `--score` bags (1-5, default
+//!   3) or, untimed, once one team is left with lives.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -125,21 +131,21 @@ use conker_bots::lift::Lifts;
 use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
-use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, team_result};
+use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, teams_result};
 use conker_rules::gas::{self, Effect};
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors, traps};
+use conker_rules::{beach, colors, heist, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
-    Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID, Player,
-    PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, map_scene, scene_world,
+    CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID,
+    Player, PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -182,10 +188,13 @@ struct Setup {
     settings: Settings,
     /// `--cavemen`: scene 0x3F's Deathmatch on any map ([`Game::cavemen`]).
     cavemen: bool,
+    /// `--seed N`: the match RNG starts at the game's seed ^ N (0 the game's; runs to compare).
+    seed: u64,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), String> {
     let mut args = args.into_iter();
+    let mut score_given = false;
     let mut setup = Setup {
         first_read: LIVE_READ,
         margin: START_MARGIN,
@@ -273,17 +282,20 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--cavemen" => setup.cavemen = true,
             "--mode" => {
                 let s = &mut setup.settings;
-                (s.total_war, s.colors, s.beach) = match value()?.as_str() {
-                    "deathmatch" => (false, false, false),
-                    "total-war" => (true, false, false),
-                    "colors" => (false, true, false),
-                    "beach" => (false, false, true),
+                (s.total_war, s.colors, s.beach, s.heist) = match value()?.as_str() {
+                    "deathmatch" => (false, false, false, false),
+                    "total-war" => (true, false, false, false),
+                    "colors" => (false, true, false, false),
+                    "beach" => (false, false, true, false),
+                    "heist" => (false, false, false, true),
                     v => return Err(bad(v)),
                 }
             }
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
+            "--seed" => setup.seed = value()?.parse().map_err(|_| bad("seed"))?,
             "--time" | "--lives" | "--kills" | "--skill" | "--radar" | "--score" => {
                 let v = value()?;
+                score_given |= flag == "--score";
                 let n = |lo: u8, hi: u8| v.parse().ok().filter(|n| (lo..=hi).contains(n));
                 let s = setup.settings;
                 let set = match (flag.as_str(), v.as_str()) {
@@ -323,6 +335,22 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     if setup.settings.beach && setup.bots > beach::MAX_VILLAGERS + beach::MAX_TEDIZ {
         return Err("--mode beach: at most 10 bots (8 villagers, 2 Tediz)".into());
     }
+    // Heist is scenario 0, scene 0x1A's: its bag target 1-5 (opt[4], default 3), 8 players.
+    let s = &mut setup.settings;
+    if s.heist {
+        if net.map != "1a" || setup.cavemen {
+            return Err("--mode heist: map 1a only, without --cavemen".into());
+        }
+        if !score_given {
+            s.score = heist::SCORE;
+        }
+        if !(1..=5).contains(&s.score) {
+            return Err("--mode heist: --score 1-5".into());
+        }
+        if setup.bots > 7 {
+            return Err("--mode heist: at most 7 bots (8 players)".into());
+        }
+    }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
     }
@@ -359,7 +387,7 @@ fn main() {
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach] [--score 1-40|unlimited] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist] [--score 1-40|unlimited] [--seed N] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -398,9 +426,9 @@ fn main() {
     app.insert_resource(Collision(world));
     let mut game = Game::new(arena, setup);
     game.starts = starts;
-    for o in &pack.outros {
-        game.outros[usize::from(o.winner)] = o.frames();
-    }
+    game.outros = (pack.outros.iter())
+        .map(|o| (o.winner, o.cutscene, o.frames()))
+        .collect();
     game.cavemen = game.setup.cavemen || scene == 0x3F;
     game.vault = scene == 0x1A && !game.setup.cavemen;
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
@@ -500,6 +528,7 @@ fn main() {
         (true, ..) => "War: Total War",
         (_, true, _) => "War: Colors",
         (.., true) => "War: Beach",
+        _ if settings.heist => "War: Heist",
         _ => "Deathmatch",
     };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
@@ -657,8 +686,9 @@ struct Game {
     ai: Ai,
     /// Over, the slots whose human sent [`Restart`].
     votes: BTreeSet<usize>,
-    /// War: each winning team's outro on the map, in ticks (the pack's `outros.json`; 0 none).
-    outros: [u32; 2],
+    /// War: the map's outros (the pack's `outros.json`): the winning team each plays for, its
+    /// cutscene and its length in ticks ([`Game::outro`]).
+    outros: Vec<(u8, u8, u32)>,
     /// Over, the winner as it stood on the first tick over ([`Game::winner`]), so a leaver changes
     /// neither the outro nor the STATS' header.
     won: Option<Option<u8>>,
@@ -672,7 +702,8 @@ struct Game {
 
 impl Game {
     fn new(arena: Arena, setup: Setup) -> Self {
-        let m = Match::new(&arena, Vec::new(), Rng::default(), 0).with(setup.settings);
+        let rng = Rng::new(Rng::GAME_SEED ^ setup.seed);
+        let m = Match::new(&arena, Vec::new(), rng, 0).with(setup.settings);
         Self {
             arena,
             starts: starts(0x2D).expect("0x2D's tables"),
@@ -689,7 +720,7 @@ impl Game {
                 scene: 0x2D,
             },
             votes: BTreeSet::new(),
-            outros: [0; 2],
+            outros: Vec::new(),
             won: None,
             cavemen: false,
             vault: false,
@@ -716,7 +747,20 @@ impl Game {
 
     /// War: Beach caps the Tediz at [`beach::MAX_TEDIZ`] and the villagers at
     /// [`beach::MAX_VILLAGERS`]: `side` full, the other; both full, none.
+    /// War: Heist's team row (C `func_151E1744`): with under 3 humans at most 8 players and 2 humans
+    /// a team, else 4 and 1; the joiner's team is its slot's (I: the set-up's sizes, checked as
+    /// players join).
     fn capped(&self, side: Side) -> Option<Side> {
+        if self.setup.settings.heist {
+            let humans = self.humans() + 1;
+            let (most, per_team) = if humans >= 3 { (4, 1) } else { (8, 2) };
+            let team = (self.m.next_slot() & 3) as u8;
+            let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
+            let mates = (taken.clone())
+                .filter(|&i| !self.m.players[i].bot && self.m.players[i].team == team)
+                .count();
+            return (taken.count() < most && mates < per_team).then_some(side);
+        }
         if !self.setup.settings.beach {
             return Some(side);
         }
@@ -737,10 +781,14 @@ impl Game {
         taken.saturating_sub(self.setup.bots)
     }
 
-    /// The team of the next player to join on `side`: its own in a Deathmatch, its side's in Total
-    /// War and Colors (`0x800E0C00`: 0 the squirrels, 1 the Tediz).
-    fn team(&mut self, side: Side) -> u8 {
+    /// The team of the next player to join, in `slot` on `side`: its own in a Deathmatch, its
+    /// side's in Total War and Colors (`0x800E0C00`: 0 the squirrels, 1 the Tediz), its slot's in
+    /// Heist (slot & 3, as the oracle's runs set them).
+    fn team(&mut self, slot: usize, side: Side) -> u8 {
         let s = self.setup.settings;
+        if s.heist {
+            return (slot & 3) as u8;
+        }
         if s.total_war || s.colors || s.beach {
             return side as u8;
         }
@@ -754,7 +802,7 @@ impl Game {
         let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
         let (bots, humans): (Vec<usize>, Vec<usize>) = taken.partition(|&i| self.m.players[i].bot);
         let s = self.setup.settings;
-        let script = s.total_war || s.colors || s.beach;
+        let script = s.total_war || s.colors || s.beach || s.heist;
         self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
@@ -774,7 +822,7 @@ impl Game {
             bot: true,
             start: self.start_item(side),
             class: self.class(side),
-            ..Fighter::new(&place, self.team(side), 0)
+            ..Fighter::new(&place, self.team(slot, side), 0)
         };
         self.m.players.push(fighter);
         self.restart_bots();
@@ -808,6 +856,16 @@ impl Game {
             // (jittered, pushed apart); keep each player's record if that ever matters.
             // The cavemen take the squirrels' base (the Ugas' on 0x3F, `spawn::starts`).
             let base = usize::from(side == Side::Tediz);
+            // Heist: the team's k-th player on its k-th record, respawning on the team's four.
+            let team = heist::RECORDS[slot & 3];
+            if self.setup.settings.heist {
+                let place = place(
+                    &self.arena.spawns,
+                    usize::from(team[(slot >> 2) & 3]),
+                    &mut self.m.rng,
+                );
+                return (place, team.iter().fold(0, |m, &r| m | 1 << r));
+            }
             let record = match self.vault {
                 true => self.starts.deathmatch[slot % 16],
                 false => self.starts.sides[base][self.members(side) % 8],
@@ -841,15 +899,36 @@ impl Game {
     /// once over ([`Game::won`]).
     fn winner(&self) -> Option<u8> {
         let m = &self.m;
-        let war = m.settings.total_war || m.settings.colors || m.settings.beach;
-        (self.won).unwrap_or_else(|| team_result(&m.standings()).filter(|_| war))
+        let teams = m.teams();
+        (self.won).unwrap_or_else(|| (teams > 0).then(|| teams_result(&m.standings(), teams))?)
     }
 
-    /// The tick the results show from: the end fade's last frame, then in War (Total War, Colors,
-    /// Beach) the winning team's outro (none on a DRAW).
+    /// Heist: a human's team ranks 1st (the outro's choice, scenario 0: cs2 if so, else cs3).
+    fn human_won(&self) -> bool {
+        let places = self.m.places();
+        (self.m.players.iter().enumerate())
+            .any(|(i, f)| !f.bot && !self.m.free.contains(&i) && places.get(i) == Some(&1))
+    }
+
+    /// The outro the match's end plays, in ticks: Heist's by whether a human's team won (cutscene
+    /// 2, else 3), the other War modes' by the winning team (none on a DRAW), none if the map's
+    /// pack has none.
+    fn outro(&self) -> u32 {
+        let heist = self.m.settings.heist;
+        let cutscene = if self.human_won() { 2 } else { 3 };
+        let winner = self.winner();
+        (self.outros.iter())
+            .find(|o| match heist {
+                true => o.1 == cutscene,
+                false => Some(o.0) == winner,
+            })
+            .map_or(0, |o| o.2)
+    }
+
+    /// The tick the results show from: the end fade's last frame, then in War its outro
+    /// ([`Game::outro`]).
     fn results_at(&self) -> Option<u32> {
-        let outro = self.winner().map_or(0, |t| self.outros[usize::from(t)]);
-        Some(self.m.ended_at? + END_DELAY + FADE + 1 + outro)
+        Some(self.m.ended_at? + END_DELAY + FADE + 1 + self.outro())
     }
 
     /// Over, RESTART's fade: the ticks left before the next match, `RESTART_FADE` on the tick the
@@ -1083,11 +1162,11 @@ fn join_player(
     let Some(side) = game.capped(side) else {
         // ponytail: the client stays connected with no player; a kick needs netcode's per-client
         // disconnect, which lightyear's server doesn't expose.
-        warn!("client {:?}: War: Beach is full, no player", remote.0);
+        warn!("client {:?}: the match is full, no player", remote.0);
         return;
     };
     let (place, spawn_mask) = game.placement(index, side);
-    let team = game.team(side);
+    let team = game.team(index, side);
     let fighter = Fighter {
         side,
         spawn_mask,
@@ -1279,11 +1358,13 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         carrying: f.carrying,
         masked: f.masked,
         haze: f.haze(tick).map_or(0, |k| k as u8),
-        flag: f.flag,
+        // Colors' flags only (Heist's bag is `MatchView::cash`).
+        flag: f.flag.filter(|&k| usize::from(k) < colors::FLAGS.len()),
         score: 0,
         class: f.class,
         freeze: 0,
         deadline: 0,
+        bags: f.bags,
     }
 }
 
@@ -1482,10 +1563,10 @@ fn simulate(
         }
         let effects = bots.tick(&game.m, &game.arena, &world, &mut inputs);
         let countdown = game.m.gas.countdown;
-        let tag = if game.m.settings.beach {
-            "BEACH"
-        } else {
-            "COLORS"
+        let tag = match () {
+            _ if game.m.settings.beach => "BEACH",
+            _ if game.m.settings.heist => "HEIST",
+            _ => "COLORS",
         };
         for e in &effects {
             match e {
@@ -1510,6 +1591,8 @@ fn simulate(
                     info!("BEACH t={t} {e:?}")
                 }
                 Effect::Plunger(held) if *held != game.m.plunger.held => info!("BEACH t={t} {e:?}"),
+                // Heist's bag made and gone, and the voices.
+                Effect::Cash(_) | Effect::Voice(..) => info!("HEIST t={t} {e:?}"),
                 Effect::Give(i, w)
                     if (game.m.players.get(*i)).is_some_and(|f| f.weapon.unwrap_or(0) != *w) =>
                 {
@@ -1567,10 +1650,16 @@ fn simulate(
     }
     if game.m.ended_at.is_some() && pre.ended_at.is_none() {
         info!(
-            "t={t} match ends: places {:?}, scores {:?}",
+            "t={t} match ends: places {:?}, scores {:?}, bags {:?}",
             game.m.places(),
-            game.m.colors.scores
+            game.m.colors.scores,
+            game.m.heist.scores
         );
+    }
+    // Heist: the bag taken.
+    if let (None, Some(c)) = (pre.heist.cash.carrier, game.m.heist.cash.carrier) {
+        let team = game.m.players.get(c).map(|f| f.team);
+        info!("HEIST t={t} bag taken by slot {c} (team {team:?})");
     }
     for (k, (was, f)) in pre
         .colors
@@ -1785,9 +1874,11 @@ fn publish(
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
         let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
-        if m.settings.colors || m.settings.beach {
-            // Colors and Beach: no life is lost; the team's score ranks the player.
-            c.lives_left = colors::LIVES;
+        if m.settings.colors || m.settings.beach || m.settings.heist {
+            // Colors and Beach: no life is lost; the team's score ranks the player (Heist's too).
+            if !m.settings.heist {
+                c.lives_left = colors::LIVES;
+            }
             c.score = standings
                 .get(slot.index)
                 .copied()
@@ -1885,6 +1976,21 @@ fn publish(
         cooldown: beach.map_or(0, |b| b.globals().i32(beach_g::COOLDOWN).max(0) as u16),
         plates: m.traps.offsets(),
         traps: m.traps.on(),
+        heist: s.heist,
+        heist_scores: m.heist.scores,
+        cash: {
+            let c = &m.heist.cash;
+            CashView {
+                shown: c.shown,
+                carrier: c.carrier.map(|i| i as u16),
+                pos: c.pos,
+                yaw: c.yaw,
+                state: c.state as u8,
+                since: c.since,
+                touchable: c.touchable(m.tick),
+            }
+        },
+        human_won: s.heist && m.ended_at.is_some() && game.human_won(),
     });
 }
 
@@ -2164,7 +2270,7 @@ mod tests {
             },
             ..Setup::default()
         });
-        g.outros = [325, 400];
+        g.outros = vec![(0, 2, 325), (1, 3, 400)];
         let _ = (g.join_bot(0), g.join_bot(1));
         g.m.ended_at = Some(100);
         assert_eq!(g.results_at(), Some(over));
@@ -2317,6 +2423,88 @@ mod tests {
             assert!((f.body.pos[0] - x).abs() <= 40.0, "{s}: {:?}", f.body.pos);
         }
         assert_eq!(g.smaller_side(), Side::Squirrels);
+    }
+
+    /// War: Heist on 0x1A: `--score` 1-5 (default 3), map 1a only, at most 7 bots; teams by slot
+    /// (slot & 3), the team's k-th on its k-th record, respawning on its four; at most 8 players
+    /// and 2 humans a team, 4 players from the 3rd human; the outro by whether a human's team won
+    /// (cutscene 2, else 3), GREENS's and YELLOWS's wins included.
+    #[test]
+    fn heist_teams_records_and_outros() {
+        let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
+        let h = settings(&["--mode", "heist", "--map", "1a"]).unwrap();
+        assert!(h.heist && !h.colors && h.score == 3);
+        let five = settings(&["--mode", "heist", "--map", "1a", "--score", "5"]);
+        assert_eq!(five.unwrap().score, 5);
+        for bad in [
+            &["--mode", "heist"][..],
+            &["--mode", "heist", "--map", "1a", "--score", "6"],
+            &["--mode", "heist", "--map", "1a", "--score", "unlimited"],
+            &["--mode", "heist", "--map", "1a", "--bots", "8"],
+            &["--mode", "heist", "--map", "1a", "--cavemen"],
+        ] {
+            assert!(parse_args(args(bad)).is_err(), "{bad:?}");
+        }
+        let spawns = (0..32).map(|i| record([i * 100, 0, 0], 64)).collect();
+        let arena = Arena {
+            spawns,
+            ..Default::default()
+        };
+        let setup = Setup {
+            settings: h,
+            bots: 6,
+            ..Setup::default()
+        };
+        let mut g = Game::new(arena, setup);
+        (g.vault, g.starts) = (true, starts(0x1A).unwrap());
+        for slot in 0..6 {
+            let _ = g.join_bot(slot);
+        }
+        let human = |g: &mut Game| {
+            let slot = g.m.next_slot();
+            let side = g.capped(Side::Squirrels)?;
+            let (place, spawn_mask) = g.placement(slot, side);
+            let team = g.team(slot, side);
+            Some(g.m.join(Fighter {
+                spawn_mask,
+                start: g.start_item(side),
+                class: g.class(side),
+                ..Fighter::new(&place, team, 0)
+            }))
+        };
+        assert_eq!(human(&mut g), Some(6));
+        let f = &g.m.players;
+        assert_eq!(
+            f.iter().map(|f| f.team).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 0, 1, 2]
+        );
+        for (s, record) in [0u8, 1, 2, 3, 8, 11, 14].into_iter().enumerate() {
+            let x = 100.0 * f32::from(record);
+            assert!(
+                (f[s].body.pos[0] - x).abs() <= 40.0,
+                "{s}: {:?}",
+                f[s].body.pos
+            );
+            assert_eq!((f[s].start, f[s].class), (Some(0x19), 1));
+        }
+        assert_eq!(f[2].spawn_mask, 1 << 2 | 1 << 14 | 1 << 15 | 1 << 16);
+        // The outros: GREENS (the human's team) won, cutscene 2; YELLOWS, cutscene 3.
+        g.outros = vec![(0, 2, 325), (1, 3, 775)];
+        g.m.ended_at = Some(100);
+        let over = 100 + END_DELAY + FADE + 1;
+        g.m.heist.scores = [0, 0, 3, 0];
+        assert_eq!(
+            (g.winner(), g.human_won(), g.results_at()),
+            (Some(2), true, Some(over + 325))
+        );
+        g.m.heist.scores = [0, 0, 0, 3];
+        assert_eq!(
+            (g.winner(), g.human_won(), g.results_at()),
+            (Some(3), false, Some(over + 775))
+        );
+        // The second human; then, a third would make 9 players (4 at most with 3 humans).
+        assert_eq!(human(&mut g), Some(7));
+        assert_eq!(human(&mut g), None);
     }
 
     /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,

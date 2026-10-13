@@ -73,6 +73,10 @@ function validate(body: unknown): NewServer | string {
   if (!int(lives, 1, 5)) return "settings.lives: 1-5";
   if (!int(kills, 0, 10)) return "settings.kills: 0-10";
   if (score !== "unlimited" && !int(score, 1, 40)) return 'settings.score: 1-40 or "unlimited"';
+  const { name: modeName, maxScore, maxBots } = MODES[mode];
+  if (maxScore !== undefined && (score === "unlimited" || score > maxScore))
+    return `settings.score: 1-${maxScore} in ${modeName}`;
+  if (maxBots !== undefined && bots > maxBots) return `settings.bots: 0-${maxBots} in ${modeName}`;
   if (typeof radar !== "boolean") return "settings.radar: true or false";
   return { name, map, mode, settings: { bots, skill, time, lives, kills, score, radar } };
 }

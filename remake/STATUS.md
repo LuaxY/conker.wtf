@@ -1,5 +1,216 @@
 # Status after wave 6 (2026-10-10)
 
+## Heist: rules, server and bots (2026-10-13)
+**Batch M3. `--mode heist` on `--map 1a` plays the original's scenario 0. Four teams (REDS, BLUES, GREENS, YELLOWS)
+of Wise Guys, each with the bat and 6 health, fetch the cash bag (character 87) from the vault's centre to their own
+base. Script 0xB7's team branch, run by conker-bots, does the bag's work:
+- it creates and destroys the bag;
+- it notices a pickup;
+- it makes a carrier that is hit, dies or throws let go;
+- it sends the bag walking home on the nav graph;
+- it scores a carrier inside its own base.
+
+The carrier runs at 25.2 (0.72 × 35) with the bat put away, and B throws the bag. Winning:
+- the first team to the bag target (1-5, default 3) wins;
+- a time-out ranks the teams by bags, then kills, then fewer shots;
+- untimed, the last team with lives wins.
+
+The outro is cs2 if a human's team won, else cs3; no mode can index past the outro list any more. Protocol 25.**
+Research: `../lab/research/mp-original/heist.md` (M3), `heist-presentation.md` §2,
+`heist-presentation-scratch/bag/bag_timeline.txt`. Oracle runs bots1 and hb3 are in `/tmp/m3`; a frame is "+n" after
+the start (oracle read 23).
+
+| Part | What |
+|---|---|
+| conker-rules `heist.rs` (new) | **Constants:** `RECORDS` (team t starts on t and respawns on t's three records), `HOME`, `SCORE` 3, the carrier's clips `GRAB` 0x114 (26 frames) … `THROW` 0x118 (20 frames, release 15 in), `THROWN` 58, `DROPPED` 3. **`Cash`:** shown, carrier, pos, yaw, `State` (stand, carried, flight, fall, slide, walk), since, touchable_at, thrown, last. **The throw (V h2):** the bag leaves 49.5 ahead and 42.7 up and flies 9 a frame, rising 18.4 less 3 a frame. It lands at +16, 193.5 ahead, then slides 5, 5, then × 0.9 down to 0.5, resting about 244 ahead. **Other:** `body` (radius 29, pushes players), `touches` (as the flag's), `carry_clip` |
+| conker-rules `game.rs`, `gas.rs`, `colors.rs` | **Settings and state:** `Settings::heist`, `Match::heist` (bag plus four scores), `Fighter::bags`. **Effects:** `Cash(shown)` (the script's create/destroy), `CashAt(pos, yaw, walking)` (the walker's step, applied only while the bag `walks`), `Voice(slot, id)` → `Event::Voice`; `LetGo`/`Settle(heist::CASH)`; `Score` adds a bag and credits the last carrier. **The carry:** a touch in `pickups` (alive, free hands, no stun) makes `flag = Some(CASH)`, the grab pose, and the bat undrawn. B throws (`Pose::Throw`). `body.heavy` sets the speed. A takeover hands the bag to the human. **Ending:** `ends()` checks four teams; `teams_places`/`teams_result`/`teams()` generalise the team ranking (out teams below, the later out better); a target reached latches on the delivery frame. **Flag-1 pickups** (Heist with ≤ 4 players, `Match::unique`): a roaming pickup stays gone while its holder keeps the weapon. The holder's death drops it at the death spot for 150 frames; then it moves to a random spot |
+| conker-sim | `PlayerState::heavy`: the drive × 0.8 × 0.9 (cap 25.2). It is predicted, as `holding` is. `net.rs`: the wire (below) |
+| conker-bots | **`brain.rs`, the bag's queries** (handle 0x2010, checked before Beach's guns): 0x98, 0x99, 0xA3, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCD (`off_heading` shared with the flags). **The bag's commands:** 1 settle, 2, 0x14, 0x5B-0x5D, 0x7D. **Players:** 0xA5 6 (the team's score S), 0xC9, 0xD0 (xz distance to a node), cmd 7 (let go). **Objects:** obj(0x2011) create and (4,2) destroy; (3,7) voice lines → `Effect::Voice`. **`lib.rs`:** the walker (class 0x57's scripts 4/5: speed 5, +2.5 a frame to 17.5, turning ≤ 3840, floor from the world). `players[0x10]` is the bag, for cmd 0x19 chases. `mirror`: PICKUP_FLAGS 1 and the holder when unique |
+| conker-server | `--mode heist`: map 1a only, no `--cavemen`, `--score` 1-5 (default 3), ≤ 7 bots. Team = slot & 3. Under 3 humans: 8 players, ≤ 2 humans a team; from 3: 4 players, one a team. Placement on `RECORDS` with the team's mask. `winner`/`human_won` via `teams_result`. **Outros:** `outros` is (winner, cutscene, frames), found by cutscene in Heist (2 or 3), by winner elsewhere, 0 frames if none. `--seed N` (xors the game RNG's seed). HEIST log lines. `bots.sh`: `TIME`, `SEED`, and a Heist report (bags made, takes, let-gos, voices, deliveries) |
+| conker-client | `match_settings` copies `heist`; nothing drawn for Heist yet (M4) |
+| web `data.ts`, `server.ts`, `Servers.tsx` | **`data.ts`:** "heist" (War: Heist) in 0x1A's modes. `ModeInfo` gains `maxScore`, `defaultScore`, `maxBots`. `fit()` clamps bots and the score when the mode or map changes. **`server.ts`:** `validate` rejects scores and bots over a mode's limits. **`Servers.tsx`:** its option ranges follow the limits |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| heist `a_throw_flies_lands_and_slides` (V h2) | lands at +16, 193.5 ahead, rests at 243.5 ± 1, touchable at release + 58 |
+| movement `the_bag_drives_at_25_2` (V h1, bots1) | top 25.2; 33 frames of 0.75 reach 24.75 |
+| game `heist_grabs_carries_throws_and_scores` | 26-frame grab, then 0, 0.75, 1.5; top in (24.75, 25.2]; the throw leaves at +15 (touchable 58 later); a drop is touchable at +3; with `--score 2` the 2nd delivery latches on its frame |
+| game `heist_ranks_four_teams` | bots1's S [0, 2, 1, 1] with kills → ranks [4, 1, 2, 3], winner BLUES; unt1's out order → [2, 3, 1, 4]; a 1st-place tie → [1, 1, 3, 3], no winner |
+| game `heist_eliminates_and_hands_the_bag_over`, `heist_pickups_are_unique` | the last team in play wins untimed; a takeover moves the bag; a held weapon stays gone, a dead holder's drops at its spot for 150 frames, then roams |
+| server `heist_teams_records_and_outros`, `the_results_count_down` | teams [0, 1, 2, 3, 0, 1, 2], records 0, 1, 2, 3, 8, 11, 14; a GREENS win with a human → cs2 (325 frames); a YELLOWS win without one → cs3 (775); a 2nd human joins, a 3rd is refused with 7 bots |
+| ROM `heist_bots_fetch_and_deliver` (7 bots, 9,000 frames) | bag at +247 (bots1 +234, in 210-299); 23 pickups; carry top 25.2 outside hurt frames; 1,454 frames walking home; GREENS delivers; no unknown natives, 0 faults |
+| `bun run test` (428), `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass, with the other lanes' work in the tree |
+
+Runs (`bots.sh`, `MODE=heist MAP=1a TIME=5 HUMANS=1`, 350 s so the 5-minute time-out lands; ports
+5970-5976; no faults, unknown natives or panics). The oracle columns are the first 300 s of bots1 (10 min) and hb3
+(300 s).
+
+| Run | Bag made | Pickups | Deliveries | End |
+|---|---|---|---|---|
+| 7 bots, seed 1 | +264 | 16 | REDS +1511, GREENS +7284 | time-out, bags [1, 0, 1, 0]: GREENS 1st on kills (11 vs 4), the human's YELLOWS 4th (cs3) |
+| 7 bots, seed 2 | +211 | 30 | BLUES +2257, REDS +8707 | time-out, bags [1, 1, 0, 0]: BLUES 1st on kills (13 vs 4) |
+| oracle bots1 | +234 | 25 | BLUES +5339, GREENS +6484 | (at 10 min: S [0, 2, 1, 1], ranks [4, 1, 2, 3]) |
+| 3 bots, seed 1 | +210 | 14 | none | time-out, bags all 0: GREENS 1st on kills (12) |
+| 3 bots, seed 2 | +287 | 16 | BLUES +1864, +4269, +6859 | BLUES reaches 3: latched on the delivery frame |
+| oracle hb3 | +270 | 30 | none | S all 0, kills [0, 4, 2, 4] |
+
+With 7 bots, the deliveries (2 in 300 s) and pickups (16-30) match bots1's. With 3 bots, deliveries are within the
+oracle's variance, but pickups are about half of hb3's 30.
+Delivering carries last as the oracle's: ~780-800 frames from the take (smoke 1130 → 1930; 3 bots seed 2: 787, 780,
+774) against bots1's 780 and 849.
+
+**Gaps.**
+- **I, the bag:** there is no wall test in a throw's flight or slide, so a throw at a wall goes through it. The
+  walker's arrive radius (60) and its gain's shape are guesses. The held offset (10 ahead, 40 up) stands in for the
+  joint. The bag's body is a squirrel's with radius 29.
+- **I, the carrier:** its hit clip (0x11B) isn't played; the hit's drop comes from the script's cmd 7.
+- **I, teams and voices:** teams come from the slot (slot & 3, as the oracle runs had them); there is no team choice.
+  The voice lines' random pick uses the script's own draw, not checked against the oracle's sequence.
+- **V:** with 3 bots, pickups are about half the oracle's (fewer hits on the carrier). The takeover keeps Total War's
+  gate (an out human, 13 frames on), so timed Heist (99 lives) never takes over, as in bots1; untimed it does.
+- **C, not on the wire:** the voice lines (`Event::Voice` is server-side only, logged as HEIST lines).
+- **Server, I:** `human_won`, `winner` and the outro's length (`results_at`) are worked out from the live places at
+  each call, so a kill in the end phase can still flip a kills tie-break, and the cutscene with it. When the original
+  makes its pick is not traced. `--seed` is new
+  (for the runs).
+
+**For M4 (the client), protocol 25.**
+- **`MatchView`:**
+  - `heist`;
+  - `heist_scores: [u16; 4]` (each team's bags, also in each player's `Combat::score`);
+  - `score_limit` (the bag target);
+  - `winner` 0-3;
+  - `human_won` (cs2 if set, else cs3);
+  - `cash: CashView`.
+- **`CashView`:**
+  - `shown`;
+  - `carrier: Option<u16>` (a slot);
+  - `pos`, `yaw`;
+  - `state`: 0 stand (clip 0), 1 carried (6, 5), 2 flight (9), 3 fall (7, 8), 4 slide (10), 5 walk (3);
+  - `since` (the state's first tick);
+  - `touchable`.
+- **`Combat::bags`:** the player's deliveries, for the STATS bags column. `Combat::flag` stays Colors' only.
+- **The carrier's `anim`:** 0x114 grab, 0x115 idle, 0x116 walk, 0x117 run, 0x118 throw. Its bat is undrawn (`drawn`
+  false). `PlayerState::heavy` is predicted.
+- **Not on the wire yet:** the voice lines' ids (0x465-0x46B, 0x547) are `Event::Voice{player, id}` on the
+  server only.
+
+## Map 0x24 and the tank: the pack (2026-10-13)
+**Batch M8, the pack half. The pack has map 0x24 (Tank's map, scenario 1) like the other maps, the tank (model 119)
+with its flags, brake lights and tread lists, Tank's props, the shell's model, Tank's sounds, music and bomb countdown.
+The turret is joint 2 and the gun joint 3 (C, V). No rules, server or client change: M9/M10 play it.** Research:
+`../lab/research/mp-original/tank.md` (§7, §9 M8b), `tank-scratch/`; this batch's `tank-pack-scratch/` (oracle
+`ConkerRecomp.m8`: runs j1 the joints, s1 the sounds, sh1 the shell (`sh1_draws_42.txt`); b1, p1, c1 are tank.md's;
+decompiled callbacks in `code/`) and `../lab/audio/map24/` (music).
+
+| Part | What |
+|---|---|
+| conker-extract `lib.rs` | `TANK_MAP` (0x24), `TANK` (119), `TANK_AI` (0xB8). With 0x24 in `--map`: 119 as a prop character (own rig, 14 joints, 8 clips, lift 0), after the Wise Guy. `tank()` binds segment 6 → texture entry 15 (brake lights off), 7 → entry 9 (headlights on), 0x0A → entry 16 (red flag) in the glTF, and writes `textures/team-0..3.png` (entries 16-19) and `textures/brake-lit.png` (entry 12) (C `func_1502F01C`: a light code c ≥ 10 binds entry c − 10; V b1). `character.json` `teams` (as 59's) and `tank`. `hidden_placements(0x24)` = `TANK_PROPS` (9, 12-15, 17-33: `[3, 72]`, the bomb `[3, 80]`, the spare canisters, the wrecks `[3, 95]`) → `maps/24/props.gltf` (one scene, in place). `Roaming` (0x1A's and 0x24's): Tank's 4 power-ups (shield `[3, 88]` 0x80, canisters `[3, 71]` 0x01, container `[3, 81]` 0x10, launcher `[3, 70]` 0x02; placements 16, 8, 10, 11) on 6 spots (nodes 0x7B, 0x17, 0x40, 0x7C-0x7E + 60), respawn 300 VIs. `map_lights(0x24)`: the 16 type-9 triggers, steady, ambient (19, 68, 219). `ai_script(0x24)` = 0xB8. `PROJECTILES` + bank-09 #0x33: `projectiles.gltf` scene 4, the shell (drawn at 1.5, V sh1 DL 42) |
+| extract-scene | `deathmatch_solid(0x24)` = the bunker doors 0-7 (V b1: `+0x4F` 0x01, `+0x6E` 0): 48 of the 1694 collision faces |
+| conker-extract `audio.rs` | `clip_sounds` keeps every clip event of 119 (fire: clip 1's 699). `map_sounds("24")`: song 32, channels 0-15, volume 18000. `tank_cues()` (character 119; C `func_151BB0E0`, `func_15055A2C`, `func_1511DD98`, V s1): `tank_engine {moving}` records 1191 at 0x2000 idle / 1192 at 0x2EE0 moving (200/800); `tank_gear {coast}` 1187-1190 / 1189 into coasting (28000, 300/1800, channel a, if idle); `tank_blast` the rocket's set (689, 693-695, 701, 702; 32700, 1000/3000, pitch + 0-499), `{ground: true}` + 750 (30000, 500/1000); `tank_death {bomb}` 742 22 frames after the killing blast / 735 (12000, 500/1000); `bomb_pickup` 11/12 and the power-ups' `pickup` 1296, 1187, 385, 752 (26000, 100/1000). The gas is `gas` (1231) as Total War's. `--song 24=` → `audio/maps/24/countdown.wav`, `sounds.json` `maps["24"].lines["countdown"]` |
+| conker-assets | `Character.tank` (`Tank`: `turret`, `gun`, `muzzle`, `brake`, `brake_lit`, `treads`, `tread_joints`); `On::TankEngine`, `TankGear`, `TankBlast`, `TankDeath`, `BombPickup`. The sample covers each; round trips bit-exact |
+| Tests | `tests/pack.rs`: 0x24 in the read-back (ROM path, solid rule, 20 spawns), a Tank block (AI 0xB8, no lift or kill gate, bunker triggers 0x11-0x14's boxes, 48 door faces, power-ups, respawn and roams, lights, 119's clips, rig, `tank` parts, materials, team PNGs, props.gltf); `tank_audio_reads_back` (cues, countdown line, note, files). `tests/rom.rs`: `tank_model_and_map` (119's parents, joints 2-4 and 12/13, tread vertices 190-217 on 13 and 218-245 on 12, clips; 34 placements, the doors, the bomb at (−20, −532, −108), floor −617 under it, spawns, spots, props), `projectiles_and_undrawn_quads` (5 scenes) |
+| `../lab/audio/map24/` | `background_loop.wav`: song 32 (engines muted by `tank-pack-scratch/mute.py`), recorded 617.8 s, period 255.803 s, cut at 88.80 s with a crossfade. `countdown.wav`: song 50 (on player 1 at the plant), 26.4 s, trimmed |
+| Pack | Re-exported (`--force`; `bun run pack` + `--map 24 --background 24=../lab/audio/map24/background_loop.wav --song 24=../lab/audio/map24/countdown.wav`). New: `maps/24/` (level 69 textures, collision 1694 faces, 20 spawns, 4 pickups, 34 triggers, nav, ai.bin, 16 lights, props.gltf), `characters/119/` (19 textures), `audio/characters/119/` (9 WAVs), `audio/maps/24/` (background, countdown). Changed: `weapons/deathmatch/projectiles.*` (scene 4), `audio/events.json`, `sounds.json`, `pack.json`, `README.md`; 0012, 1191, 1192 moved from `maps/1a`, `2b`, `30` to `common` (now played by two scopes) |
+
+**The turret and the gun.** `func_15033FE0` → `func_150344A0` (models 0x28 and 0x77, C) overrides two joint angles:
+joint 2 about y by −obj+0x2E4·65536/18000 (the turret's yaw) and joint 3 about x by obj+0x2E6·65536/18000 (the gun's
+pitch). V j1 (turret poked to 90° yaw, 36° pitch): DL 60 moves only joints 2 and 3, by −90.00° and −36.21°. Joint 4
+sits 110.4 along joint 3's z: the muzzle (I). Joints 12 and 13 hold the treads (lists 0 and 1 of `func_150ED638`).
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle j1, b1 | The joints as above. Brake lights obj+0x6C 25 off / 22 on, headlights +0x6D 19; flags 16-19 by slot, slots from 3 up yellow |
+| Oracle s1 (`../lab/audio/captures/tank_s1_calls.txt`) | Every cue's id, volume and distances above, from the sound calls (lldb on a re-signed copy of m8) |
+| Oracle sh1 | A new 16-vertex batch in DL 42 at muzzle height 410 ahead = bank-09 #0x33's vertices at scale 1.5, nose at +48 |
+| Oracle lights (`lights24.py`, `lit24.py`) | 16 lights = the 16 type-9 triggers, ambient (19, 68, 219) |
+| conker-assets, conker-extract tests | pass (`tests/pack.rs`, `tests/rom.rs`, `tests/traps.rs`) |
+| `bun run test` | 428 pass, 1 ignored |
+| `bun run check` | pass |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1546 files |
+
+**Gaps.**
+- **I:** the power-ups' start spots [1, 3, 2, 4] (the game picks random free ones; one V run with 2 humans).
+- **I:** which tread list is the left side; the muzzle joint; the death sound's 22-frame delay (seen once); song 50's
+  volume on player 1 (the line is at 32767).
+- **C, not packed:** the engine's 0x4A9 (1193) on its 900/1412-VI timer (not heard in s1); the engine's pitch
+  (|speed|·obj+0xB8·0.5, I).
+- **Not in the pack's model:** the tanks' own lights (white, size 12 ahead; red, size 15 behind while braking) are not
+  in `lights.json`. The wrecks are not in the collision (solid while shown: not checked). The shell's two 4-vertex
+  quads along its path (I: smoke) are not packed. The bomb's look on the carrier (item 0x18) is not found.
+- Power-ups are `Gives::Weapon(bit)`: conker-server's `arena()` matches `Gives` exhaustively, so a new variant is M9's.
+- The background's run log was lost (the WAV is whole); the loop is not sample-exact (period from correlation).
+
+**Handoff to M9 (rules, server, bots).**
+- `conker_bots::script(0x24)` → 0xB8 (the pack's `ai.bin` already is). `weapon::pickups(0x24)`: move
+  `TANK_PICKUPS`/`TANK_SPOTS` into conker-rules with a `Gives::Power(bit)`; roaming as 0x1A's, respawn 300 VIs.
+- Doors 0-7 open (+0x80, 8 per frame) around the plant; wrecks: placement 18 + slot at the death spot for 330 frames;
+  the bomb is placement 12. The server refuses `--map 24` until then.
+
+**Handoff to M10 (client).**
+- `character.json` `tank`: yaw joint `turret` about y, pitch joint `gun` about x; scroll the `treads` material's
+  vertices on `tread_joints[0]`/`[1]` by −7·speed per frame in S (wrap 0x800); swap `brake` to `brake_lit` while
+  braking; `team-<slot>.png` on the flag; the tank's two lights; the shell is `projectiles.gltf#Scene4` at 1.5.
+- Cues: `tank_engine` by moving; `tank_gear` at a state change (speeding up: |v| > 1 with the accel; coasting: |v| > 5
+  without); `tank_blast`, `tank_death`, `bomb_pickup`; the `countdown` line at the plant; `gas` over Tank's gas span.
+- Outro export (not changed): Colors cs5's op 9 on its tanks is the headlights' entry 9, already bound in the glTF.
+
+## Heist's presentation in the pack (2026-10-13)
+**Batch M4, the pack half. Heist's two outros, its voices and the bag's sounds, its HUD strip and STATS pictures, and
+a stop-on-leave flag for sound zones are in the pack. No protocol change, no client change.** Research:
+`../lab/research/mp-original/heist-presentation.md` and its scratch (`outro/` CSVs and `outro.diff`, `bag/snd_bag_calls.txt`,
+`hud/`), from the headless oracle (`ConkerRecomp.m1`/`.m4`).
+
+| Part | What |
+|---|---|
+| conker-extract `outro.rs` | `outro.diff` applied: `OUTROS` (0x1A, [(0, 2), (1, 3)]): winner 0 is "a team with a human won", 1 "none did". Actor scale from the scene record's +0x20; `HEADS` (134, none, jaw 6); a scriptless trailing kind-3 object; a t-0 op 2 with c 2 holds frame 0. Decoded beyond the diff: `Actor.team` (op 5 b 0x6F: obj+0x68 = d, team d − 1; V cs3's Wise Guy in REDS' shirt, obj+0x68 = 1); `Actor.roll`/`pitch` (channels 6/8, only when they change: V 0 → −16 → 13 → 0 on the sinking Wise Guy); `Prop.scale` (channel 5 / 100, channel 4 / 100, the placement's +0x28: (37, 37.01, 2.195)); `Outro.light` (op 5 b 0x65 d 6 on a kind-0 object: a white light of size 8 at (−644, 180, 4728) from t 0); `Outro.particles` (op 5 b 0x50/0x51 c 0 → c 1: the bubbles, 5 bursts on actor 1 from t 530 to 1321); the attachment (op 0x0D b 0x68: bank-09 0x51 on joint 19 from t 400) is the existing `attach` |
+| conker-extract `lib.rs` (via `outros`) | `characters/134/` (Don Weaso, 5 clips), `maps/1a/outros.json`, `outro.gltf` (scenes `09-51`, `prop-13`; texture 2683), `audio/maps/1a/voice-b5.wav`, `voice-ce.wav`, `0010.wav`, `0012.wav` |
+| conker-extract `audio.rs` | `MATCH_CLIPS` + 0x114-0x118 (the carrier's grab, idle, walk, run, throw: footsteps 0x2000 at 10/30 on 0x116, 0x2001 at 7/17 on 0x117; every character shares them). With map 1a: `events.characters["87"]`, the bag's own clip events, every clip (`clip_sounds` keeps all of `CASH`'s): 473 at clips 5 and 9 (t 0 and 8), at 7 and 8 with chance 64; 190 at 5 and 9 t 8. `heist_cues`: `cash_pickup` [1130, 1131], `cash_steal { rare: true }` [1351], `cash_delivery` [1128, 1129] (32700, own 32700, 500/1000, channel b), `cash_steal { rare: false }` 1125-1127 (a record, 32700, 500/1000), `cash_throw` [91] (28000, 500/2500, channel b, at the bag). `zones()` sets `stops_on_leave` on every kind-2 zone |
+| conker-assets | `outro.rs`: `Actor.team/roll/pitch`, `Prop.scale`, `Light`, `Particles`, `Outro.light/particles` (all serde-default, absent before). `audio.rs`: `Zone.stops_on_leave` (default false), `On::CashPickup`, `CashSteal { rare }`, `CashDelivery`, `CashThrow`. `hud.rs`: `Hud.heist: Heist` and `End.heist: HeistResults` (both required: an older pack does not load) |
+| conker-extract `hud.rs` | `hud.json` `heist`: anchor centre/bottom, y 200, centre 36, step 73, `pip` `pips` [14, 16, 7, 7] (blob 0xD14, again under its own name), pip_step 8, empty 404040, `skull` atlas2 [48, 20, 16, 16], `colours` ff0000/0000ff/00ff00/ffff00, `bag` [142, 3, 12, 11] from atlas [50, 26, 12, 11], `radar` ff3737/4040ff/78ff16/ffb11e, `cash` ffffff. `hud/bubble_particle.png` (0xC01). `end.json` `heist`: `won[team]` = the name sprite (REDS 0x863, BLUES 0x851: 2 tiles at 81; GREENS 0x858, YELLOWS 0x86F: 3 tiles at 65) + WIN at 151, y 34; `icons` (the bags' icon [103, 49], then accuracy, kills, headshots, deaths), `label` [34, 64], `columns` [86, 110, 144, 170, 200, 230]: place, bags, accuracy, kills, headshots, deaths |
+| `pack-readme.md` | the outros' new fields, Heist's files, `hud.json`/`end.json` `heist`, the `cash_*` cues, character 87's events, `stops_on_leave` |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| conker-extract `heist_outros_follow_the_oracle` (rom.rs) | the decode: winners, cutscenes, lengths 650/1550, characters [134, 59], the camera cuts, voices, Don's scale 0.74, the light, the Wise Guy's team, attachment and roll, the sounds (0x0A at 594, 0x0C at 726), the five bubble bursts, the backdrop's placement, rotation and scale. Against the oracle's `outro/` CSVs (skipped when absent): every frame's camera (place within 0.05, yaw within 1e-3), every actor row (place 0.05, facing 1, scale, obj+0x68 = team + 1, roll 1e-3, clip and time; anim-0 rows held): cs2 325 rows, cs3 1286 + 264 held, and the fade on every frame. Exact |
+| conker-extract `pack_audio_reads_back` | `characters/87` in the manifest; the 1a outros' voices listed; 0x1A's and 0x2B's six zones stop on leave; 87's 8 events; 59's four carrier footsteps; the five Heist cues' ids, volumes, distances and channels |
+| conker-extract `pack_hud_reads_back` | `heist`'s pip, skull and bag rects, `pips.png` 32 × 32, `bubble_particle.png` 64 × 64, the names 64/64/96/96 × 32, GREENS WIN's tiles at 65, 97, 129, 151, 183 (V cs3b DL 970) |
+| conker-assets `write_then_load_gives_the_same_audio` | `stops_on_leave` round-trips |
+| `bun run test`, `bun run check` | pass (428 tests, with M3's and the Tank agent's work in progress in the tree) |
+| Pack | `bun run pack --force`, then `../lab/tools/verify-pack.sh`: "pack equal" (1,432 files; 1,546 after the Tank agent's re-export with map 24, still equal). Against the pack before M4: new `characters/134/`, `maps/1a/outro.{gltf,bin}` and texture 2683, `audio/characters/87/0473.wav`, `audio/common/0091.wav`, `1125-1131.wav`, `1351.wav`, `audio/maps/1a/voice-b5.wav`, `voice-ce.wav`, `0010.wav`, `0012.wav`, `hud/pips.png`, `bubble_particle.png`, `reds/blues/greens/yellows.png`; changed `maps/1a/outros.json`, `events.json` (+ 5 cues, 87, the carrier clips' footsteps on every character), `sounds.json`, `hud.json`, `end.json`, `pack.json`. 2d/30/2b's `outros.json` are unchanged (no team, roll, pitch, scale, light or particles there) |
+
+**Gaps.**
+- **C, a departure from the research's recipe:** `stops_on_leave` is set on 0x2B's two escape-tunnel zones too, not
+  only 0x1A's. `func_150A09D0`'s pass stops any kind-2 record that no player entered since its last pass. That is the
+  same code for every map, but it was seen (V) only on 0x1A. Beach's earlier "never stops" was C, with nothing found
+  that clears it, and its V is consistent with either.
+- **I:** the prop's z scale (the placement's +0x28) and the roll/pitch axes (not traced). Texture 0xC01's format: CI4
+  with the 16-entry ramp after its texels (2,080 bytes). It decodes to a soft white square, and no DL of it was seen.
+  The particles' motion is not decoded either (sizes 31-118 and lives 50-156 frames as seen). The name sprites' tile
+  layout is a guess for all but GREENS: REDS and BLUES 2 tiles at 81, YELLOWS 3 at 65.
+- **C, not heard:** the steal's 1125-1127 path. 87's events at clip 5 t 8 (190 + 473): at the grab, V hears only
+  473, because the clip is held at 8.
+- **Not packed:** the tommy gun's release sounds (727, 747-749: not logged). There is no per-team STATS row colour
+  table: rows use `results.colours[team]`, the pure team colours.
+
+**Handoff (client).**
+- `outro.rs`:
+  - The Heist pick: key 0 when the winning team has a human, else 1. `team_mode` includes Heist.
+  - `dress`: apply `Actor.team` (team-N.png on 59's material, as `render.rs`' `dress_teams`), `Actor.roll`/`pitch`,
+    `Prop.scale`, `Outro.light` (a point light), and `Outro.particles` (billboards of `hud/bubble_particle.png` from
+    the actor, `t`..`until`).
+  - Hide the bag during an outro.
+- `hud.rs`: `hud.heist` (the strip, the bag icon, the radar colours) and `end.heist` (the header: `won[team]` with 2+
+  humans, else `teams.won`/`lost`; `icons`, `label`, `columns`; rows `teams.down` lower in `results.colours[team]`;
+  no strip).
+- `audio.rs`:
+  - The `cash_*` cues: pickup, steal and delivery at the player; `rare` in one steal of three; the throw at the bag.
+  - `events.characters["87"]` on the bag's clips; skip clip 5's t-8 events at the grab.
+  - `Zone.stops_on_leave`: stop the frame after the last player leaves, restart on entry.
+- Files: `characters("1a")` adds "87" and "134". `audio/characters/87/`. `maps/1a/outros.json`, `outro.gltf`.
+  `audio/maps/1a/voice-b5.wav`, `voice-ce.wav`, `0010.wav`, `0012.wav`. `hud/pips.png`, `bubble_particle.png`,
+  `reds.png`, `blues.png`, `greens.png`, `yellows.png`.
+
 ## Visuals: projectiles, flames, the twist, the twin guns' textures (2026-10-13)
 **Batch E8 (Wave 7 item 1). Rockets, grenades, weapon 0x14's knives and the crossbow's bolts fly as the original's
 models, turned as its display lists turn them. Bullets draw nothing, as in the original: the placeholder spheres are

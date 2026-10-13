@@ -69,7 +69,9 @@ use serde::{Deserialize, Serialize};
 /// ([`MatchView::phase`] 3).
 /// 24: scene 0x1A's roaming pickups ([`MatchView::roaming`]) and the fighter's tommy-gun climb
 /// (conker-rules' `Fighter::climb`).
-pub const PROTOCOL_ID: u64 = 24;
+/// 25: War: Heist ([`MatchView`]'s `heist`, `heist_scores`, `cash`, `human_won`; [`Combat::bags`];
+/// the carrier's `PlayerState::heavy`, predicted).
+pub const PROTOCOL_ID: u64 = 25;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -154,6 +156,8 @@ pub struct Combat {
     pub class: u8,
     pub freeze: u8,
     pub deadline: u16,
+    /// War: Heist: the bags this player delivered (the STATS' bags column).
+    pub bags: u16,
 }
 
 /// War: Colors' flag as the clients draw it (conker-rules' `colors::Flag`).
@@ -169,6 +173,26 @@ pub struct FlagView {
     /// May be touched now: shown, not carried, 50 frames past its last release.
     pub touchable: bool,
     pub pos: [f32; 3],
+}
+
+/// War: Heist's bag as the clients draw it (conker-rules' `heist::Cash`): model 87 at scale 0.4.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct CashView {
+    /// Created by the script (210-299 frames after the start and after each delivery) and not
+    /// destroyed since.
+    pub shown: bool,
+    /// The carrier's slot (the bag is in its hands: `pos` follows it; its clips are in the
+    /// carrier's `anim`, conker-rules' `heist::GRAB`..`THROW`).
+    pub carrier: Option<u16>,
+    pub pos: [f32; 3],
+    pub yaw: u16,
+    /// conker-rules' `heist::State` as its index: 0 standing (clip 0), 1 carried (6, 5), 2 thrown,
+    /// in the air (9), 3 let go of on a hit or death (7, 8), 4 sliding from a throw's landing (10),
+    /// 5 walking home (3); `since` the state's first frame (server tick).
+    pub state: u8,
+    pub since: u32,
+    /// May be touched now (a throw's 58 frames, a drop's 3).
+    pub touchable: bool,
 }
 
 /// A mounted gun as the clients draw it (conker-rules' `gun`): model 138 at scale 0.5 at `pos`
@@ -270,6 +294,14 @@ pub struct MatchView {
     /// list (the trigger table's kind-12 records in table order) is on.
     pub plates: [i8; 4],
     pub traps: u32,
+    /// War: Heist (conker-rules' `Settings::heist`, `heist`): four teams (0 REDS, 1 BLUES, 2
+    /// GREENS, 3 YELLOWS; `Combat::team`), the bag target `score_limit` and `heist_scores` the
+    /// teams' bags; the bag; and, over, whether a human's team ranks 1st (the outro: cutscene 2 if
+    /// so, else 3). `winner` is 0-3 here.
+    pub heist: bool,
+    pub heist_scores: [u16; 4],
+    pub cash: CashView,
+    pub human_won: bool,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

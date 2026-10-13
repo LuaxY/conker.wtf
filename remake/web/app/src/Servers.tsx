@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { type FormEvent, type ReactNode, useState } from "react";
 import {
   createServer,
+  fit,
   type GameServer,
   killServer,
   MAPS,
@@ -227,19 +228,20 @@ function CreateServer() {
           options={(Object.keys(MAPS) as MapId[]).sort().map((id) => [id, MAPS[id].name])}
           onChange={(id) => {
             const modes = MAPS[id].modes;
-            setForm({ ...form, map: id, mode: modes.includes(form.mode) ? form.mode : modes[0] });
+            const mode = modes.includes(form.mode) ? form.mode : modes[0];
+            setForm({ ...form, map: id, mode, settings: fit(s, mode) });
           }}
         />
         <Select
           label="Mode"
           value={form.mode}
           options={map.modes.map((m) => [m, MODES[m].name])}
-          onChange={(mode) => setForm({ ...form, mode })}
+          onChange={(mode) => setForm({ ...form, mode, settings: fit(s, mode) })}
         />
         <Select
           label="Bots"
           value={s.bots}
-          options={range(0, 15).map((n) => [n, n ? String(n) : "None"])}
+          options={range(0, MODES[form.mode].maxBots ?? 15).map((n) => [n, n ? String(n) : "None"])}
           onChange={(bots) => setting({ bots })}
         />
         <Select
@@ -279,8 +281,13 @@ function CreateServer() {
           label="Score"
           value={s.score}
           options={[
-            ...range(1, 40).map((n): [number, string] => [n, String(n)]),
-            ["unlimited", "Unlimited"],
+            ...range(1, MODES[form.mode].maxScore ?? 40).map((n): [number, string] => [
+              n,
+              String(n),
+            ]),
+            ...(MODES[form.mode].maxScore
+              ? []
+              : [["unlimited", "Unlimited"] as [Settings["score"], string]]),
           ]}
           onChange={(score) => setting({ score })}
           hint={MODES[form.mode].score ? undefined : `None in ${MODES[form.mode].name}`}

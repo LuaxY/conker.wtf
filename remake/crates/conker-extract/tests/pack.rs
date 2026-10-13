@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24].map(|scene| PackMap {
         scene,
         background: None,
         song: None,
@@ -313,7 +313,7 @@ fn pack_reads_back_as_the_rom_path() {
     }
     // 0x2D's Total War props: its doors, masks and canisters in place, then the canister at the
     // origin, a glTF scene each.
-    let (props, scenes) = conker_extract::props_level(&rom).unwrap();
+    let (props, scenes) = conker_extract::props_level(&rom, 0x2D).unwrap();
     let mut gltf = extract_level::to_gltf(&props, &textures, "").unwrap();
     let mut json: Value = serde_json::from_str(&gltf.json).unwrap();
     let names: Vec<_> = (json["nodes"].as_array().unwrap().iter())
@@ -326,17 +326,17 @@ fn pack_reads_back_as_the_rom_path() {
     check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b", "1a"]);
+    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b", "1a", "24"]);
     assert_eq!(
-        manifest.characters[..6],
-        ["128", "117", "136", "156", "157", "59"]
+        manifest.characters[..7],
+        ["128", "117", "136", "156", "157", "59", "119"]
     );
 
     // Each map's solid placements (the oracle's RAM) are those with collision flags less its
     // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data. On 0x1A
     // the match sets 0x20 on every placement but 0, so its drawn 13 is not solid (V,
     // `lab/oracle/map1a/props_pickups_lights.md` §1).
-    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A] {
+    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24] {
         let (pickups, _) = conker_extract::pickup_table(&rom, scene).unwrap();
         let mut hidden = conker_extract::hidden_placements(scene).to_vec();
         if scene == 0x1A {
@@ -364,6 +364,7 @@ fn pack_reads_back_as_the_rom_path() {
         ("3f", 0x3F, 16),
         ("2b", 0x2B, 12),
         ("1a", 0x1A, 32),
+        ("24", 0x24, 20),
     ];
     for (name, scene, records) in maps {
         let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
@@ -465,6 +466,83 @@ fn pack_reads_back_as_the_rom_path() {
     assert_eq!(cash["skins"][0]["joints"].as_array().unwrap().len(), 5);
     assert_eq!(cash["animations"].as_array().unwrap().len(), 12);
     assert!(!files.contains_key("characters/87/character.json"));
+
+    // Map 0x24, Tank (`lab/research/mp-original/tank.md`): script 0xB8, no lift nor kill gate, the
+    // bunkers' plant zones (triggers 0x11-0x14); its 8 doors solid at their placements (6 faces
+    // each); the 4 power-ups roam the 6 spots and are back after 300 VIs; 16 static lights over
+    // ambient (19, 68, 219); the tank (119) on its own rig: 8 clips, model lift 0, its parts, its
+    // glTF drawing the brake lights unlit (4355), the headlights lit (4368) and flag 0 (4364), its
+    // other flags as team looks; the props glTF of its hidden placements.
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.push("119");
+    let tank_map = conker_assets::Slice::load("24", &names, PACK_WEAPONS, read).unwrap();
+    assert_eq!(conker_extract::ai_script(0x24), 0xB8);
+    assert!(conker_rules::lift::parse(&tank_map.triggers, 0x24).is_empty());
+    assert!(conker_rules::lift::kill_gates(&tank_map.triggers).is_empty());
+    let h = |r: &[u8; 0x34], o: usize| i16::from_be_bytes([r[o], r[o + 1]]);
+    let bunkers: Vec<_> = (tank_map.triggers.as_chunks::<0x34>().0[0x11..0x15].iter())
+        .map(|r| (r[0x15], [0, 2, 4, 6, 8, 10].map(|o| h(r, o))))
+        .collect();
+    assert_eq!(
+        bunkers,
+        [
+            (0x0E, [-830, -1555, -7062, 401, 128, 372]),
+            (0x0E, [-7415, -952, -707, 388, 205, 331]),
+            (0x0E, [779, -1562, 7030, 394, 224, 403]),
+            (0x0E, [7393, -905, 704, 377, 198, 352]),
+        ]
+    );
+    let doors = (tank_map.collision.iter())
+        .filter(|t| matches!(t.layer, PackLayer::Placement(0..8)))
+        .count();
+    assert_eq!((tank_map.collision.len(), doors), (1694, 48));
+    let gives: Vec<_> = (tank_map.pickups.iter())
+        .map(|p| (p.placement, p.gives, p.respawn, p.roams.len()))
+        .collect();
+    let power = |placement, bit| (placement, Gives::Weapon(bit), Some(300), 6);
+    assert_eq!(
+        gives,
+        [power(16, 0x80), power(8, 1), power(10, 0x10), power(11, 2)]
+    );
+    assert_eq!(tank_map.pickups[0].roams[0], [2504.0, -48.0, 2585.0]);
+    assert_eq!(tank_map.lights.ambient, [19, 68, 219]);
+    assert_eq!(tank_map.lights.lights.len(), 16);
+    assert!((tank_map.lights.lights.iter()).all(|l| l.swing == 0.0 && !l.flicker));
+    let tank = &tank_map.characters[3];
+    assert_eq!(
+        (tank.model_lift, tank.clips.len(), tank.root_clips.len()),
+        (0, 8, 0)
+    );
+    let parts = conker_assets::Tank {
+        turret: 2,
+        gun: 3,
+        muzzle: 4,
+        brake: 11,
+        brake_lit: "textures/brake-lit.png".into(),
+        treads: 13,
+        tread_joints: [13, 12],
+    };
+    assert_eq!(tank.tank.as_ref(), Some(&parts));
+    let gltf: Value = serde_json::from_slice(files["characters/119/character.gltf"]).unwrap();
+    assert_eq!(gltf["skins"][0]["joints"].as_array().unwrap().len(), 14);
+    let image = |m: usize| gltf["materials"][m]["extras"]["image"].clone();
+    let teams = tank.teams.as_ref().unwrap();
+    assert_eq!(
+        [image(11), image(12), image(13), image(teams.material)],
+        [
+            "flat 4355 mode 0",
+            "flat 4368 mode 0",
+            "flat 4607 mode 0",
+            "flat 4364 mode 0"
+        ]
+    );
+    let pngs: Vec<&[u8]> = (teams.textures.iter().chain([&parts.brake_lit]))
+        .map(|t| files[format!("characters/119/{t}").as_str()])
+        .collect();
+    assert!((1..5).all(|t| !pngs[..t].contains(&pngs[t])));
+    let props: Value = serde_json::from_slice(files["maps/24/props.gltf"]).unwrap();
+    assert_eq!(props["nodes"].as_array().unwrap().len(), 22);
+    assert_eq!(props["nodes"][1]["name"], "03-50@12");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -548,6 +626,7 @@ fn pack_audio_reads_back() {
             "characters/156",
             "characters/157",
             "characters/59",
+            "characters/87",
             "common",
             "maps/1a",
             "maps/2b",
@@ -600,7 +679,7 @@ fn pack_audio_reads_back() {
     // 30, Beach's on 2b) and the maps' voice lines (Beach's escape).
     let lines = audio.events.maps.values().flat_map(|m| m.lines.values());
     listed.extend(lines.map(|l| format!("audio/{}", l.file)));
-    for map in ["2d", "30", "2b"] {
+    for map in ["2d", "30", "2b", "1a"] {
         let file = format!("maps/{map}/outros.json");
         let outros: Vec<conker_assets::outro::Outro> =
             serde_json::from_slice(files[file.as_str()]).unwrap();
@@ -656,6 +735,7 @@ fn pack_audio_reads_back() {
     };
     assert_eq!(songs("2b"), [Some((1, 0x8A)), None]);
     assert_eq!(songs("30"), [None, None]);
+    assert_eq!(songs("1a"), [None, None]);
     assert!(
         audio.events.maps["2b"].background[0]
             .note
@@ -877,6 +957,74 @@ fn pack_audio_reads_back() {
             .collect::<Vec<_>>()
     );
     assert_eq!(audio.sounds.sounds[&1116].file, "maps/1a/1116.wav");
+    // Every kind-2 zone stops the frame after the last player leaves (C func_150A09D0; V 0x1A's).
+    let zones = vault.zones.iter().chain(&audio.events.maps["2b"].zones);
+    assert!(zones.map(|z| z.stops_on_leave).eq([true; 6]));
+    // Heist (`heist-presentation.md` §5; V snd_bag): the bag's own clips' sounds (473 at the grab,
+    // the release and the landing, 25 % at the start of the carried walk and run; 190 at the
+    // landing), the carrier's footsteps on 0x116/0x117, the voices and the throw.
+    let bag: Vec<_> = (audio.events.characters["87"].iter())
+        .map(|e| match &e.action {
+            ClipAction::Play(p) => (e.clip, e.time, p.sounds.clone(), p.chance),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        bag,
+        [
+            (5, 0.0, vec![473], 255),
+            (5, 8.0, vec![190], 255),
+            (5, 8.0, vec![473], 255),
+            (7, 0.0, vec![473], 64),
+            (8, 0.0, vec![473], 64),
+            (9, 0.0, vec![473], 255),
+            (9, 8.0, vec![190], 255),
+            (9, 8.0, vec![473], 255)
+        ]
+    );
+    assert_eq!(audio.sounds.sounds[&473].file, "characters/87/0473.wav");
+    let carrier: Vec<_> = (audio.events.characters["59"].iter())
+        .filter(|e| (0x114..=0x118).contains(&e.clip))
+        .map(|e| (e.clip, e.time, e.action.clone()))
+        .collect();
+    assert_eq!(
+        carrier,
+        [
+            (0x116, 10.0, ClipAction::Footstep(0)),
+            (0x116, 30.0, ClipAction::Footstep(0)),
+            (0x117, 7.0, ClipAction::Footstep(1)),
+            (0x117, 17.0, ClipAction::Footstep(1))
+        ]
+    );
+    let heist = |on: On| {
+        let c = (audio.events.cues.iter()).find(|c| c.on == on).unwrap();
+        let p = &c.play;
+        (p.sounds.clone(), p.volume, p.own, p.near, p.far, p.channel)
+    };
+    assert_eq!(
+        heist(On::CashPickup),
+        (vec![1130, 1131], 32700, Some(32700), 500, 1000, Channel::B)
+    );
+    assert_eq!(
+        heist(On::CashSteal { rare: true }),
+        (vec![1351], 32700, Some(32700), 500, 1000, Channel::B)
+    );
+    assert_eq!(
+        heist(On::CashSteal { rare: false }),
+        (
+            vec![1125, 1126, 1127],
+            32700,
+            None,
+            500,
+            1000,
+            Channel::Free
+        )
+    );
+    assert_eq!(heist(On::CashDelivery).0, [1128, 1129]);
+    assert_eq!(
+        heist(On::CashThrow),
+        (vec![91], 28000, None, 500, 2500, Channel::B)
+    );
     let volumes: Vec<u16> = vault.emitters.iter().map(|e| e.play.volume).collect();
     assert_eq!(volumes, [25000, 25000, 16000, 16000, 16000, 16000, 16000]);
     assert!(
@@ -1044,6 +1192,27 @@ fn pack_hud_reads_back() {
     );
     assert_eq!(hud.gun.handles.each_ref().map(|h| h.rect[0]), [9.0, 185.0]);
     assert_eq!(hud.gun.flash.centre, [205.0, 176.0]);
+    // Heist (`heist-presentation.md` §1, §6; V hud1 DL 200, cs3b DL 970): the strip's "$" pip, the
+    // skull and the carried bag; the STATS headers' team names, GREENS + WIN in 32-pixel tiles from
+    // 65 (the FRENCHYS layout), the bubbles' sprite.
+    let heist = &hud.heist;
+    assert_eq!(
+        (&heist.pip.texture[..], heist.pip.rect, size("pips")),
+        ("pips", [14, 16, 7, 7], [32, 32])
+    );
+    assert_eq!(
+        (heist.skull.rect, heist.bag.rect),
+        ([48, 20, 16, 16], [142, 3, 12, 11])
+    );
+    assert_eq!(size("bubble_particle"), [64, 64]);
+    assert_eq!(
+        ["reds", "blues", "greens", "yellows"].map(|n| end.textures[n].size),
+        [[64, 32], [64, 32], [96, 32], [96, 32]]
+    );
+    let tiles: Vec<i16> = (end.heist.won[2].iter())
+        .flat_map(|p| (0..p.rect[2] / 32).map(|k| p.rect[0] + 32 * k))
+        .collect();
+    assert_eq!(tiles, [65, 97, 129, 151, 183]);
 
     // War: Beach (`beach-presentation.md` §1, §3): the strip's heads, the escape countdown and the
     // STATS header, against the oracle's draws (`beach-presentation-scratch/hw/<run>_dl_<n>/
@@ -1160,6 +1329,106 @@ fn pack_hud_reads_back() {
             end.teams.beach_won[team]
                 .iter()
                 .all(|p| p.rect[1] == 34 && p.rect[3] == 32)
+        );
+    }
+}
+
+/// Tank's sound on 0x24 (`lab/research/mp-original/tank.md` §8; V
+/// `lab/audio/captures/tank_s1_calls.txt`): song 32's recording, the bomb's countdown (song 50)
+/// as a map line, the tank's fire on its clip 1, and its engine, gear, blasts, deaths and pickups
+/// as cues for the tank, their sounds in its folder.
+#[test]
+fn tank_audio_reads_back() {
+    use conker_assets::audio::{Audio, ClipAction, On};
+    use conker_extract::audio::{pack_audio, wav};
+    let Some(path) = std::env::var_os("CONKER_ROM") else {
+        eprintln!("CONKER_ROM unset: skipping");
+        return;
+    };
+    let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
+    let (background, countdown) = (wav(&[1, 2], 22020), wav(&[3], 22020));
+    let maps = [(
+        "24".to_string(),
+        Some(background.as_slice()),
+        None,
+        Some(countdown.as_slice()),
+    )];
+    let surfaces = std::collections::BTreeSet::new();
+    let (files, _) = pack_audio(&rom, &surfaces, &maps, &[conker_extract::TANK], &[]).unwrap();
+    let files: BTreeMap<&str, &[u8]> = (files.iter())
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
+    let audio = Audio::load(|p: &str| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
+    let map = &audio.events.maps["24"];
+    assert_eq!(files["audio/maps/24/background.wav"], &background[..]);
+    assert!(
+        map.background[0]
+            .note
+            .contains("sequence 32, channels 0-15, at volume 18000")
+    );
+    assert_eq!(map.lines["countdown"].file, "maps/24/countdown.wav");
+    assert_eq!(files["audio/maps/24/countdown.wav"], &countdown[..]);
+    assert!(map.emitters.is_empty() && map.zones.is_empty());
+    let clips: Vec<_> = (audio.events.characters["119"].iter())
+        .map(|c| match &c.action {
+            ClipAction::Play(p) => (c.clip, p.sounds.clone()),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(clips, [(1, vec![699])]);
+    let cue = |on: On| {
+        (audio.events.cues.iter())
+            .filter(|c| c.on == on && c.character.as_deref() == Some("119"))
+            .map(|c| {
+                (
+                    c.play.sounds.clone(),
+                    c.play.volume,
+                    c.play.near,
+                    c.play.far,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let blast = (vec![689, 693, 694, 695, 701, 702], 32700, 1000, 3000);
+    assert_eq!(
+        cue(On::TankEngine { moving: false }),
+        [(vec![1191], 0x2000, 200, 800)]
+    );
+    assert_eq!(
+        cue(On::TankEngine { moving: true }),
+        [(vec![1192], 0x2EE0, 200, 800)]
+    );
+    assert_eq!(
+        cue(On::TankGear { coast: false }),
+        [(vec![1187, 1188, 1189, 1190], 28000, 300, 1800)]
+    );
+    assert_eq!(cue(On::TankBlast { ground: false }), [blast.clone()]);
+    assert_eq!(
+        cue(On::TankBlast { ground: true }),
+        [blast, (vec![750], 30000, 500, 1000)]
+    );
+    assert_eq!(
+        cue(On::TankDeath { bomb: false }),
+        [(vec![742], 12000, 500, 1000)]
+    );
+    assert_eq!(
+        cue(On::TankDeath { bomb: true }),
+        [(vec![735], 12000, 500, 1000)]
+    );
+    assert_eq!(cue(On::BombPickup), [(vec![11, 12], 26000, 100, 1000)]);
+    let pickups: Vec<_> = [0x80, 1, 0x10, 2]
+        .map(|bit| {
+            cue(On::Pickup {
+                gives: Gives::Weapon(bit),
+            })[0]
+                .0[0]
+        })
+        .into();
+    assert_eq!(pickups, [1296, 1187, 385, 752]);
+    for id in [1191, 1192, 742, 735, 750, 11, 12, 752] {
+        assert_eq!(
+            audio.sounds.sounds[&id].file,
+            format!("characters/119/{id:04}.wav")
         );
     }
 }

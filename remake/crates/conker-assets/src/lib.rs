@@ -317,9 +317,13 @@ pub struct Character {
     /// k: the glTF primitives whose `extras.list` is k). Empty (absent) for the other characters.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub looks: std::collections::BTreeMap<u8, u8>,
-    /// Heist's team looks drawn with this model (the Wise Guy's); absent for the others.
+    /// Heist's team looks drawn with this model (the Wise Guy's), or the tank's flag colours (model
+    /// 119); absent for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teams: Option<Teams>,
+    /// The tank's moving parts and light swaps (model 119); absent for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tank: Option<Tank>,
 }
 
 /// A character's look per team: one material's texture swapped (the game binds it to segment 0x0A
@@ -328,8 +332,29 @@ pub struct Character {
 pub struct Teams {
     /// The glTF material that draws it (its own texture is team 0's).
     pub material: usize,
-    /// Per team (Heist's REDS, BLUES, GREENS, YELLOWS), its PNG, relative to the character's folder.
+    /// Per team (Heist's REDS, BLUES, GREENS, YELLOWS; the tank's red, blue, green and yellow
+    /// flags), its PNG, relative to the character's folder.
     pub textures: Vec<String>,
+}
+
+/// Model 119's parts besides its clips (`../lab/research/mp-original/tank.md`): joint indices of
+/// the model (the glTF skin's order) and glTF materials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tank {
+    /// The turret's joint, turned about its parent's y axis by the turret's yaw.
+    pub turret: usize,
+    /// The gun's joint, turned about the turret's x axis by the gun's pitch.
+    pub gun: usize,
+    /// The joint at the gun's muzzle.
+    pub muzzle: usize,
+    /// The brake lights' material, drawn unlit; `brake_lit` (relative to the character's folder)
+    /// is its texture while the tank brakes.
+    pub brake: usize,
+    pub brake_lit: String,
+    /// The treads' material, whose texture scrolls as each side moves: the tread on joint
+    /// `tread_joints[0]` by the game's first speed, the one on `tread_joints[1]` by its second.
+    pub treads: usize,
+    pub tread_joints: [usize; 2],
 }
 
 /// What a match on one map, with its characters and one weapon set, reads from the pack: the
@@ -1020,6 +1045,15 @@ mod tests {
                         material: 2,
                         textures: vec!["textures/team-0.png".into(), "textures/team-1.png".into()],
                     }),
+                    tank: Some(Tank {
+                        turret: 2,
+                        gun: 3,
+                        muzzle: 4,
+                        brake: 11,
+                        brake_lit: "textures/brake-lit.png".into(),
+                        treads: 13,
+                        tread_joints: [13, 12],
+                    }),
                 },
                 Character {
                     model_lift: 43,
@@ -1038,6 +1072,7 @@ mod tests {
                     }],
                     looks: Default::default(),
                     teams: None,
+                    tank: None,
                 },
             ],
             held: vec![Held {
@@ -1110,6 +1145,9 @@ mod tests {
                     joint: 14,
                     on: true,
                 }],
+                team: None,
+                roll: vec![],
+                pitch: vec![],
             },
             cast: vec![Actor {
                 character: "40".into(),
@@ -1133,6 +1171,8 @@ mod tests {
                     blend: 9,
                 }],
                 mask: Some(0x0E),
+                team: Some(0),
+                roll: vec![key(530, 0.0, true), key(601, -16.0, true)],
                 ..Actor::default()
             }],
             fade: Fade {
@@ -1174,6 +1214,7 @@ mod tests {
                 placement: 3,
                 at: [1076, -29, 257],
                 rotation: [7.0, 174.0],
+                scale: Some([37.0, 37.01, 2.195]),
             }],
             sounds: vec![ScriptSound {
                 id: 0x6DE,
@@ -1185,6 +1226,18 @@ mod tests {
                 cents: 150,
             }],
             near: Some(30.0),
+            light: Some(Light {
+                t: 0,
+                at: [-644, 180, 4728],
+                rgb: [255; 3],
+                size: 8.0,
+            }),
+            particles: vec![Particles {
+                actor: 1,
+                emitter: 0x50,
+                t: 530,
+                until: 566,
+            }],
         }
     }
 

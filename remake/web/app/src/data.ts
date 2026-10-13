@@ -4,23 +4,41 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war" | "colors" | "beach";
-/** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target. */
-export const MODES: Record<Mode, { name: string; kills: boolean; lives: boolean; score: boolean }> =
-  {
-    deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
-    "total-war": { name: "War: Total War", kills: false, lives: true, score: false },
-    colors: { name: "War: Colors", kills: false, lives: false, score: true },
-    beach: { name: "War: Beach", kills: false, lives: false, score: true },
-  };
+export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist";
+/** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target,
+ * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; at most 7 bots). */
+export interface ModeInfo {
+  name: string;
+  kills: boolean;
+  lives: boolean;
+  score: boolean;
+  maxScore?: number;
+  defaultScore?: number;
+  maxBots?: number;
+}
+export const MODES: Record<Mode, ModeInfo> = {
+  deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
+  "total-war": { name: "War: Total War", kills: false, lives: true, score: false },
+  colors: { name: "War: Colors", kills: false, lives: false, score: true },
+  beach: { name: "War: Beach", kills: false, lives: false, score: true },
+  heist: {
+    name: "War: Heist",
+    kills: false,
+    lives: true,
+    score: true,
+    maxScore: 5,
+    defaultScore: 3,
+    maxBots: 7,
+  },
+};
 
 export type MapId = "1a" | "2b" | "2d" | "30" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
   "1a": {
     name: "Vault 0x1A",
-    modes: ["deathmatch"],
-    note: "Everyone is the Wise Guy, holding the bat.",
+    modes: ["deathmatch", "heist"],
+    note: "Everyone is the Wise Guy, holding the bat. Heist: 4 teams, at most 7 bots, 1-5 bags.",
   },
   "2b": { name: "Beach 0x2B", modes: ["deathmatch", "beach"] },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
@@ -43,7 +61,8 @@ export interface Settings {
   lives: number;
   /** 0-10, the kill limit (0: none): only in modes that have one. */
   kills: number;
-  /** The score to win, 1-40, or none: only in modes that have one (War: Colors, War: Beach). */
+  /** The score to win, 1-40, or none: only in modes that have one (War: Colors, War: Beach; War:
+   * Heist's bags 1-5). */
   score: number | "unlimited";
   radar: boolean;
 }
@@ -74,6 +93,17 @@ export interface GameServer extends NewServer {
   started: string;
   /** The game server's own /info, when it answered. */
   info?: { map: string; protocol: number };
+}
+
+/** `s` within `mode`'s limits: fewer bots, and its default score for one out of its range. */
+export function fit(s: Settings, mode: Mode): Settings {
+  const { maxScore, defaultScore, maxBots } = MODES[mode];
+  const over = maxScore !== undefined && (s.score === "unlimited" || s.score > maxScore);
+  return {
+    ...s,
+    bots: Math.min(s.bots, maxBots ?? s.bots),
+    score: over ? (defaultScore ?? maxScore) : s.score,
+  };
 }
 
 /** The settings that apply to this server's mode, as label and value. */

@@ -150,16 +150,27 @@ pub struct Follow {
     pub far: u16,
 }
 
-/// A sound zone (a kind-2 trigger, `func_150A11C4` → `func_150A23E4`): the first time any player is
-/// inside trigger record `trigger` (its zone test), `play` starts at `at` and never stops (the record
-/// restarts its voice); heard centred, by the listener's distance to `at` (`horizontal`: in x and z
-/// only) between `play.near` and `play.far`.
+/// A sound zone (a kind-2 trigger, `func_150A11C4` → `func_150A23E4`): when a player is inside
+/// trigger record `trigger` (its zone test), `play` starts at `at` (the record restarts its voice);
+/// heard centred, by the listener's distance to `at` (`horizontal`: in x and z only) between
+/// `play.near` and `play.far`. It plays on until `stops_on_leave` and no player is inside: then it
+/// stops the frame after the last one leaves and starts again on the next entry
+/// (`func_150A09D0`'s pass: a zone entered this frame is marked 1, the next pass makes it 2, the
+/// zone test sets it back to 1, and a pass that finds 2 stops it with `func_1000FC18`; C, the same
+/// for every kind-2 record; V 0x1A's base hum, `heist-presentation.md` §3). Without it (a pack
+/// before the flag): it never stops.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Zone {
     pub trigger: u16,
     pub at: [i16; 3],
     pub horizontal: bool,
     pub play: Play,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stops_on_leave: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A flickering lamp's buzz (`func_15160954` → `func_151618BC`): it plays at `at` as each of
@@ -251,6 +262,28 @@ pub enum On {
     StrikeCall,
     /// War: Beach: the strike's shell landing, 40 frames after the call, at the same spot.
     StrikeBlast,
+    /// Heist: a player taking the money bag at rest (standing, or home: script 0xB7's `query(cash,
+    /// 0xC7)`): its voice, at it.
+    CashPickup,
+    /// Heist: a player taking the bag within 240 frames of another player's drop: in one case of
+    /// three the `rare` line, else the other (script 0xB7's kind 0).
+    CashSteal { rare: bool },
+    /// Heist: the carrier delivering the bag in its team's zone: its voice, at it.
+    CashDelivery,
+    /// Heist: the carrier's throw letting the bag go (clip 0x118's tick-15 event), at the bag.
+    CashThrow,
+    /// Tank: a tank's engine, a loop at it while it idles (`moving` false) or drives.
+    TankEngine { moving: bool },
+    /// Tank: a tank's engine changing between idling, speeding up and coasting, at it; `coast`:
+    /// into coasting (fast, not speeding up).
+    TankGear { coast: bool },
+    /// Tank: a shell's blast, at it: on a tank (`ground` false) or on the ground.
+    TankBlast { ground: bool },
+    /// Tank: a tank blowing up, at it, [`Cue::delay`] after its death: by a shell, or by the gas
+    /// bomb (`bomb`).
+    TankDeath { bomb: bool },
+    /// Tank: a tank taking the gas bomb, at it.
+    BombPickup,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -466,7 +499,13 @@ mod tests {
                             at: [-1101, -1201, -229],
                             play: play(vec![577]),
                         }],
-                        zones: Vec::new(),
+                        zones: vec![Zone {
+                            trigger: 0x34,
+                            at: [-2867, -52, -4914],
+                            horizontal: true,
+                            play: play(vec![577]),
+                            stops_on_leave: true,
+                        }],
                         lines: BTreeMap::from([(
                             "escape".into(),
                             Line {
@@ -502,17 +541,28 @@ mod tests {
                     full_speed: 30.0,
                     surfaces: BTreeMap::from([(5, [vec![577], vec![], vec![], vec![], vec![]])]),
                 },
-                cues: vec![Cue {
-                    on: On::Pickup {
-                        gives: crate::Gives::Weapon(9),
+                cues: vec![
+                    Cue {
+                        on: On::Pickup {
+                            gives: crate::Gives::Weapon(9),
+                        },
+                        character: Some("128".into()),
+                        play: play(vec![577]),
+                        then: vec![play(vec![1254])],
+                        at: Some([-319, -273, -3419]),
+                        delay: 23,
+                        note: "V".into(),
                     },
-                    character: Some("128".into()),
-                    play: play(vec![577]),
-                    then: vec![play(vec![1254])],
-                    at: Some([-319, -273, -3419]),
-                    delay: 23,
-                    note: "V".into(),
-                }],
+                    Cue {
+                        on: On::TankGear { coast: true },
+                        character: Some("119".into()),
+                        play: play(vec![577]),
+                        then: vec![],
+                        at: None,
+                        delay: 0,
+                        note: "C".into(),
+                    },
+                ],
             },
         }
     }
@@ -538,6 +588,11 @@ mod tests {
         );
         assert!(
             events.contains(r#""on": {"pickup":{"gives":{"weapon":9}}}"#),
+            "{events}"
+        );
+        assert!(events.contains(r#""stops_on_leave":true"#), "{events}");
+        assert!(
+            events.contains(r#""on": {"tank_gear":{"coast":true}}"#),
             "{events}"
         );
         assert_eq!(

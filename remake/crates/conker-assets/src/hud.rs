@@ -306,6 +306,31 @@ pub struct Beach {
     pub escape: Text,
 }
 
+/// Heist's HUD (scenario 0, map 0x1A; `../lab/research/mp-original/heist-presentation.md` §1), the
+/// rest as Deathmatch's but no kills or rank and the weapon icon hidden while carrying. Per team t
+/// ([0] REDS, [1] BLUES, [2] GREENS, [3] YELLOWS) a block centred on c = `centre` + `step`·t: with a
+/// participant that has lives, the score limit's `pip`s (7 × 7) at x = c − `pip_step`/2·limit +
+/// `pip_step`·i, top `y`: the first S (its score) in `colours[t]`, the next one too while the team
+/// carries the bag and the blink shows (Colors' `flag_icons(vi)`), the rest `empty`; without one,
+/// the `skull` (16 × 16) at [c − 8, `y` − 6] in `colours[t]`. While anyone carries, the `bag` icon
+/// (white) blinks with the "+1" pip. The radar's blips are `radar[t]`, the free bag's `cash`
+/// (steady), the carrier's hidden while the bag icon shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Heist {
+    pub anchor: Anchor,
+    pub y: i16,
+    pub centre: i16,
+    pub step: i16,
+    pub pip: Image,
+    pub pip_step: i16,
+    pub empty: Rgba,
+    pub skull: Image,
+    pub colours: [Rgba; 4],
+    pub bag: Placed,
+    pub radar: [Rgba; 4],
+    pub cash: Rgba,
+}
+
 /// `hud/hud.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hud {
@@ -332,6 +357,7 @@ pub struct Hud {
     pub haze: Haze,
     pub gun: Gun,
     pub beach: Beach,
+    pub heist: Heist,
     /// `hud/end.json` ([`End::load`]; not part of `hud.json`).
     #[serde(skip)]
     pub end: Option<End>,
@@ -372,6 +398,9 @@ impl Hud {
         all.extend([
             ("gun.lit".into(), &gun.lit),
             ("gun.flash".into(), &gun.flash.image),
+            ("heist.pip".into(), &self.heist.pip),
+            ("heist.skull".into(), &self.heist.skull),
+            ("heist.bag".into(), &self.heist.bag.image),
         ]);
         all
     }
@@ -504,6 +533,20 @@ pub struct Teams {
     pub beach_won: [[Placed; 2]; 2],
 }
 
+/// Heist's results (`../lab/research/mp-original/heist-presentation.md` §6), Total War's way
+/// ([`Teams`]: `down` lower, one human's `won`/`lost`), but with more humans `won[team]`, the
+/// winning team's name and WIN ([0] REDS, [1] BLUES, [2] GREENS, [3] YELLOWS); its own columns,
+/// each line centred on `columns`: place (with its suffix), bags (deliveries), accuracy (%), kills,
+/// headshots and deaths, under `icons` (the bags' first; placed as [`Results::icons`]), the labels
+/// at `label`; each row in `results.colours[team]`; no strip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeistResults {
+    pub won: [[Placed; 2]; 4],
+    pub icons: Vec<Placed>,
+    pub label: [i16; 2],
+    pub columns: [i16; 6],
+}
+
 /// `hud/end.json`: what the end of a match draws, in [`Hud::frame`] like the HUD: the lives left
 /// (untimed), the skull over the view of a player out of lives, and the results (Total War's
 /// `teams`).
@@ -514,6 +557,7 @@ pub struct End {
     pub skull: Placed,
     pub results: Results,
     pub teams: Teams,
+    pub heist: HeistResults,
 }
 
 impl End {
@@ -544,6 +588,10 @@ impl End {
                 .chain(t.beach_won.iter().flatten().map(|p| ("beach_won", p))),
         );
         all.extend(header.map(|(name, p)| (format!("teams.{name}.image"), &p.image)));
+        let h = &self.heist;
+        let heist = (h.won.iter().flatten().map(|p| ("won", p)))
+            .chain(h.icons.iter().map(|p| ("icons", p)));
+        all.extend(heist.map(|(name, p)| (format!("heist.{name}.image"), &p.image)));
         all
     }
 

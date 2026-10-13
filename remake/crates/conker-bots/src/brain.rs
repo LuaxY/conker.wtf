@@ -16,6 +16,7 @@ use conker_rules::colors::{self, Pose};
 use conker_rules::damage;
 use conker_rules::game::TAKEOVER_DELAY;
 use conker_rules::gas::{self, Effect};
+use conker_rules::heist::{self, Cash};
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
 
@@ -204,6 +205,16 @@ pub struct World<'a> {
     /// the deadline starts 49 frames in: V `beach.md` §2.4, x1's strike at read 2772; I for the
     /// other modes, left as they were).
     pub appear: i32,
+    /// War: Heist's bag and scores; `None` in the other modes.
+    pub cash: Option<Heist<'a>>,
+}
+
+/// War: Heist as the script sees it: the bag and the team scores at the frame's start, and the
+/// bag's walker (class 0x57's object: `cur`, `goal`, `avoid`, `length`, `script`, [`AT_GOAL`]).
+pub struct Heist<'a> {
+    pub cash: Cash,
+    pub scores: [u16; heist::TEAMS],
+    pub walker: &'a mut Npc,
 }
 
 impl Host for World<'_> {
@@ -321,6 +332,22 @@ impl World<'_> {
                 self.effects.push(Effect::Gas(true));
                 h
             }
+            // Heist's voices (0xB7's sub 0x3FB8 and the delivery): `obj(id, 2, 0x7FBC, p, …)`, or a
+            // random one of `obj(lo, 0, hi, 0, 0x7FBC, p, …)` (the client's to play).
+            (3, 7) if self.cash.is_some() => {
+                let a = |k: usize| args.get(k).copied().unwrap_or(0);
+                let (id, p) = match a(1) {
+                    0 if a(2) >= h => (
+                        h + (self.rng.next_u32() % (a(2) - h + 1) as u32) as i32,
+                        a(5),
+                    ),
+                    _ => (h, a(3)),
+                };
+                if let Some(slot) = self.slot(index(p) as i32) {
+                    self.effects.push(Effect::Voice(slot, (id & 0xFFF) as u16));
+                }
+                0
+            }
             (3, 7) => 0,
             (4, 7) => {
                 self.effects.push(Effect::Gas(false));
@@ -330,6 +357,21 @@ impl World<'_> {
             // `obj2` destroys it. The mounted guns (uids 0x13, 0x14), destroyed and recreated after
             // each capture: the create brings gun uid − 0x13 back afresh ([`Effect::Gun`]; I: answered
             // as their handles were).
+            // Heist: `obj(0x2011)` creates the bag (scene uid 0x11) and answers 0x2010; its walker
+            // starts afresh (the script then sets it standing, script 4).
+            (3, 2) if self.cash.is_some() && index(h) == usize::from(heist::UID) => {
+                if !self.starting {
+                    self.effects.push(Effect::Cash(true));
+                    if let Some(h) = &mut self.cash {
+                        *h.walker = Npc::default();
+                    }
+                }
+                0x2000 | i32::from(heist::HANDLE)
+            }
+            (4, 2) if self.is_cash(h) => {
+                self.effects.push(Effect::Cash(false));
+                0
+            }
             (3, 2) => match (colors::FLAGS.iter()).position(|f| usize::from(f.uid) == index(h)) {
                 Some(k) => {
                     if !self.starting {
@@ -371,6 +413,11 @@ impl World<'_> {
             .and_then(|p| self.slots.get(p).copied().flatten())
     }
 
+    /// Heist: `h` names the bag (0x2010; Beach's gun has that handle on its own map).
+    fn is_cash(&self, h: i32) -> bool {
+        self.cash.is_some() && kind(h) == 2 && index(h) == usize::from(heist::HANDLE)
+    }
+
     /// The vacant participants, a mask.
     fn vacant(&self) -> i32 {
         (self.slots.iter().enumerate())
@@ -380,6 +427,9 @@ impl World<'_> {
 
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        if self.is_cash(h) {
+            return self.cash_query(code, args);
+        }
         if let Some(k) = flag(h) {
             return self.flag_query(k, code, args);
         }
@@ -471,6 +521,28 @@ impl World<'_> {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
         // Colors' flags: 2 (touchable, which the create makes it here) and 0x7D (its radar blip,
         // the client's: not carried) ask nothing of the match; 0x23 clears "just let go of".
+        // Heist's bag: 1 clears "thrown" (+0x25C 0x40), 2 (touchable) and 0x7D (radar) ask
+        // nothing of the match; 0x14, 0x5B-0x5D its walker's script, goal, node and node to avoid.
+        if self.is_cash(h) {
+            let by_id = |g: &Graph, id: i32| if id < 0 { NONE } else { g.by_id(id) };
+            let graph = self.graph;
+            let Some(Heist { walker: n, .. }) = &mut self.cash else {
+                return 0;
+            };
+            match code {
+                1 => self.effects.push(Effect::Settle(usize::from(heist::CASH))),
+                2 | 0x7D => {}
+                0x14 => {
+                    n.script = a(2) as u8;
+                    n.flags &= !AT_GOAL;
+                }
+                0x5B => n.goal = by_id(graph, a(2)),
+                0x5C => n.cur = by_id(graph, a(2)),
+                0x5D => n.avoid = by_id(graph, a(2)),
+                c => return self.unknown(6, 2, c),
+            }
+            return 1;
+        }
         if let Some(k) = flag(h) {
             return match code {
                 2 | 0x7D => 1,
@@ -482,6 +554,8 @@ impl World<'_> {
             };
         }
         match (kind(h), code) {
+            // A handle of type 0 (0xB7's G[0] before its first bot loop, 0x16E6): nothing.
+            (0, _) => 0,
             (2, _) => self.player_command(index(h), code, args),
             // Props (type 3) 0 shows a prop; 4 sets +0x7C.., +0x80 and +0x84 (0x7FFFFFFF keeps
             // one): camera/zone setup at level start, and the gas's props ([`Effect`]). The level
@@ -674,6 +748,10 @@ impl World<'_> {
     /// A player query (`func_15099C14`).
     fn player_query(&mut self, p: usize, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        // 0xA5 6 on a team's record (`0x2000 | team`): its score S, +0xC (Heist's bags; colors.md).
+        if let (0xA5, 6, Some(h)) = (code, a(2), &self.cash) {
+            return i32::from(h.scores.get(p).copied().unwrap_or(0));
+        }
         let Some(&b) = self.bodies.get(p) else {
             return match code {
                 0x9A => 0x7D00,
@@ -699,10 +777,25 @@ impl World<'_> {
             0xBC => 0,
             // Colors: it holds the flag `a(2)` (obj+0x13C = the flag + 100); it was hit (+0x104);
             // a human's buttons, the pad byte `0x800BE710 + 2p` (A, B, Z, start; I its byte).
+            0x95 if self.is_cash(a(2)) => i32::from(
+                self.slot(p as i32)
+                    .is_some_and(|s| self.cash.as_ref().and_then(|h| h.cash.carrier) == Some(s)),
+            ),
             0x95 => i32::from(flag(a(2)).is_some_and(|k| {
                 self.slot(p as i32)
                     .is_some_and(|s| self.flags[k].carrier == Some(s))
             })),
+            // Its height band; its distance across to the node of id `a(2)` (Heist's carrier to its
+            // base, 0xB7 at 0xFE6).
+            0xC9 => i32::from(self.graph.band(b.pos[1])),
+            0xD0 => match self.graph.node(self.graph.by_id(a(2))) {
+                Some(_) => {
+                    let o = self.graph.at(self.graph.by_id(a(2)));
+                    let (dx, dz) = (b.pos[0] - o[0], b.pos[2] - o[2]);
+                    (dx * dx + dz * dz).sqrt() as i32
+                }
+                None => 0x7D00,
+            },
             0xA8 => i32::from(b.stunned),
             0xED => i32::from(b.buttons >> 8),
             0x9A => match self.at(a(2)) {
@@ -727,7 +820,7 @@ impl World<'_> {
             0xC8 => self.goal_distance(p),
             0xCA => self.node_id(p),
             0xCD => match self.bodies.get(index(a(2))) {
-                Some(o) => off_heading(&b, o, a(3) == 1),
+                Some(o) => off_heading(b.pos, b.heading, o.pos, a(3) == 1),
                 None => 0,
             },
             0xCF => self.pick_node(p, args),
@@ -745,6 +838,9 @@ impl World<'_> {
 
     /// Where the object `h` names stands: a participant, or a Colors flag.
     fn at(&self, h: i32) -> Option<[f32; 3]> {
+        if self.is_cash(h) {
+            return self.cash.as_ref().map(|h| h.cash.pos);
+        }
         match flag(h) {
             Some(k) => Some(self.flags[k].pos),
             None => self.bodies.get(index(h)).map(|b| b.pos),
@@ -765,17 +861,62 @@ impl World<'_> {
                 let near = self.graph.approach(f.pos, &[], &[]);
                 self.graph.node(near).map_or(0xFF, |x| i32::from(x.id))
             }
-            0xCB => {
-                let Some(to) = self.at(args.get(2).copied().unwrap_or(-1)) else {
-                    return 0;
+            0xCB => self.in_sight(f.pos, args.get(2).copied().unwrap_or(-1)),
+            c => self.unknown(5, 2, c),
+        }
+    }
+
+    /// Query 0xCB on an object at `from`: the participant `h` is in sight of a point 100 above it
+    /// (`func_150AC9C0`'s ray and the barrier lines), its distance, else 0.
+    fn in_sight(&self, from: [f32; 3], h: i32) -> i32 {
+        let Some(to) = self.at(h) else {
+            return 0;
+        };
+        let up = |p: [f32; 3]| [p[0], p[1] + 100.0, p[2]];
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        match sight(self.world, self.graph, up(from), up(to)) {
+            Some(true) => ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() as i32).max(1),
+            _ => 0,
+        }
+    }
+
+    /// A query on Heist's bag (`func_15099C14` on class 0x57's object): its height (0x98), the
+    /// participant `a(2)` within `a(3)` (0x99), thrown (0xA3, +0x25C 0x40), its walk at its goal
+    /// (0xC7) and the way left (0xC8), its band (0xC9) and node (0xCA), a participant in sight
+    /// (0xCB) and off its heading (0xCD), as the players' (C 0x39E8-0x3F7A).
+    fn cash_query(&mut self, code: i32, args: &[i32]) -> i32 {
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        let Some((c, n)) = self.cash.as_ref().map(|h| (h.cash, *h.walker)) else {
+            return 0;
+        };
+        let d3 = |o: [f32; 3]| {
+            let d = [o[0] - c.pos[0], o[1] - c.pos[1], o[2] - c.pos[2]];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        };
+        match code {
+            0x98 => c.pos[1] as i32,
+            0x99 => self.at(a(2)).map_or(0, |o| i32::from(d3(o) < a(3) as f32)),
+            0xA3 => i32::from(c.thrown),
+            0xC7 if n.goal == NONE => 1,
+            0xC7 => (n.flags & AT_GOAL) as i32,
+            0xC8 if n.cur == NONE || n.goal == NONE => 0,
+            0xC8 => d3(self.graph.at(n.cur)) as i32 + n.length,
+            0xC9 => i32::from(self.graph.band(c.pos[1])),
+            0xCA => {
+                let near = match n.cur {
+                    NONE => self.graph.approach(c.pos, &[], &[]),
+                    cur => cur,
                 };
-                let up = |p: [f32; 3]| [p[0], p[1] + 100.0, p[2]];
-                let d = [to[0] - f.pos[0], to[1] - f.pos[1], to[2] - f.pos[2]];
-                match sight(self.world, self.graph, up(f.pos), up(to)) {
-                    Some(true) => ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() as i32).max(1),
-                    _ => 0,
-                }
+                self.graph.node(near).map_or(0xFF, |x| i32::from(x.id))
             }
+            0xCB => self.in_sight(c.pos, a(2)),
+            0xCD => match self.at(a(2)) {
+                Some(o) => {
+                    let heading = conker_camera::heading_from_facing(c.yaw);
+                    off_heading(c.pos, heading, o, a(3) == 1)
+                }
+                None => 0,
+            },
             c => self.unknown(5, 2, c),
         }
     }
@@ -845,6 +986,7 @@ impl World<'_> {
         let slot = self.slot(p as i32);
         let effect = match (code, slot) {
             (0x62, _) => Some(Effect::Score(p as u8, a(2) as u16)),
+            (7, Some(_)) if self.is_cash(a(2)) => Some(Effect::LetGo(usize::from(heist::CASH))),
             (7, Some(_)) => flag(a(2)).map(Effect::LetGo),
             (0x13, Some(s)) => Some(Effect::Immune(s, a(2) as u8)),
             (0x53, Some(s)) => Some(Effect::Hold(s, a(2) as u8)),
@@ -1639,10 +1781,10 @@ fn walkway(
 /// Query 0xCD: how far `o` lies off `b`'s heading, in degrees (−180..180, or its size when `abs`):
 /// `func_1505A630(dx, −dz) + 0x4000` (the direction's angle, a quarter turn on, as the heading
 /// obj+0x40 is the facing + 90°, V on bot_long3) against the heading.
-fn off_heading(b: &Body, o: &Body, abs: bool) -> i32 {
-    let to = conker_sim::movement::atan2_u16(b.pos[2] - o.pos[2], o.pos[0] - b.pos[0]);
+fn off_heading(pos: [f32; 3], heading: f32, o: [f32; 3], abs: bool) -> i32 {
+    let to = conker_sim::movement::atan2_u16(pos[2] - o[2], o[0] - pos[0]);
     let deg = wrap360((to.wrapping_add(0x4000)) as f32 * 0.005_493_164);
-    let mut d = wrap360(wrap360(b.heading) - deg);
+    let mut d = wrap360(wrap360(heading) - deg);
     if d > 180.0 {
         d -= 360.0;
     }
@@ -1773,6 +1915,7 @@ mod tests {
             gunners: Vec::new(),
             plunger: Plunger::default(),
             appear: 0,
+            cash: None,
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1836,6 +1979,7 @@ mod tests {
             gunners: vec![None, Some(1)],
             plunger: Plunger::default(),
             appear: 0,
+            cash: None,
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
@@ -1930,6 +2074,7 @@ mod tests {
                 gunners: Vec::new(),
                 plunger: Plunger::default(),
                 appear: 0,
+                cash: None,
             };
             let mut g = Globals::new(g::SIZE);
             g.set_f32(g::AIM_RATE, 1.0);
@@ -1950,15 +2095,15 @@ mod tests {
             heading: 90.0,
             ..Body::default()
         };
-        let at = |x, z| Body {
-            pos: [x, 0.0, z],
-            ..Body::default()
-        };
-        assert_eq!(off_heading(&me, &at(100.0, 0.0), false), 0);
+        let at = |x, z| [x, 0.0, z];
+        assert_eq!(off_heading(me.pos, me.heading, at(100.0, 0.0), false), 0);
         // The facing turns toward −z as it grows (a move by (cos a, −sin a)): −z is 90° to one side.
-        assert_eq!(off_heading(&me, &at(0.0, -100.0), false).abs(), 90);
-        assert_eq!(off_heading(&me, &at(0.0, 100.0), true), 90);
-        assert_eq!(off_heading(&me, &at(-100.0, 0.0), true), 180);
+        assert_eq!(
+            off_heading(me.pos, me.heading, at(0.0, -100.0), false).abs(),
+            90
+        );
+        assert_eq!(off_heading(me.pos, me.heading, at(0.0, 100.0), true), 90);
+        assert_eq!(off_heading(me.pos, me.heading, at(-100.0, 0.0), true), 180);
     }
 
     #[test]

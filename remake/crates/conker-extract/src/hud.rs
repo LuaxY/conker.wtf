@@ -6,9 +6,9 @@
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{
-    Align, Anchor, Beach, Button, End, Flash, Glyph, Grenades, Gun, Haze, HazeLayer, Health,
-    Horizontal as H, Hud, Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle, Scope, Sprite,
-    Strip, Tape, Teams, Text, Texture, Tv, Vertical as V, Weapon,
+    Align, Anchor, Beach, Button, End, Flash, Glyph, Grenades, Gun, Haze, HazeLayer, Health, Heist,
+    HeistResults, Horizontal as H, Hud, Image, Iris, Lives, Placed, Radar, Rank, Results, Reticle,
+    Scope, Sprite, Strip, Tape, Teams, Text, Texture, Tv, Vertical as V, Weapon,
 };
 use extract_core::Rom;
 use extract_gbi::{Format, Tlut, decode, png};
@@ -30,8 +30,11 @@ const GLYPHS: usize = 95;
 /// detonation and strike draw (screen-space texrects, not yet used by the remake: V the RAM's at
 /// 0x801CE678, 0x801F7540, 0x801F6120, 0x801F7130 and 0x801E4910 that `../lab/research/mp-original/
 /// beach-presentation-scratch`'s det1 DL 318 and ev3 DL 1044 draw, byte for byte the blob's; the
-/// strike's red flash, 0x80202220, is `iris`).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 31] = [
+/// strike's red flash, 0x80202220, is `iris`); Heist's "$" pip (0xD14, `end.json`'s `lives`, again
+/// under its own name: V hud1 DL 200 draws its texels [14, 16, 7, 7]), and the bubbles its outro
+/// cs3 sends up (0xC01, C `func_150EA11C`'s sprite: CI4 64 × 64 with a 16-entry palette by its size,
+/// read RGBA16 as the atlases; I, no DL of it seen).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 33] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -64,6 +67,15 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 31] = [
     // War: Beach's strike: its floor glow and its streak (`beach-environment.md` §2).
     ("strike_glow", 0xE20, Format::I8, 64, 64, true),
     ("strike_streak", 0xB97, Format::I8, 128, 32, true),
+    ("pips", 0xD14, Format::Rgba32, 32, 32, false),
+    (
+        "bubble_particle",
+        0xC01,
+        Format::Ci4(Tlut::Rgba16),
+        64,
+        64,
+        true,
+    ),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):
@@ -324,6 +336,7 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
         },
         gun: gun(),
         beach: beach(),
+        heist: heist(),
         end: None,
     }
 }
@@ -454,6 +467,38 @@ fn beach() -> Beach {
     }
 }
 
+/// Heist's HUD (`../lab/research/mp-original/heist-presentation.md` §1; C `func_151E966C`,
+/// `func_151E89A0`, `func_15093B58`): four 73-pixel team blocks, centred from x 36, at y 200 (one
+/// view; 102 in a split: V h1 DL 348); the "$" pip 0xD14 [14, 16, 7, 7] 8 apart (V hud1 DL 341:
+/// REDS' +1 at [24, 200]), filled in the pure team colours (0x800ABA90), else 404040 (V); the
+/// skull `atlas2` [48, 20, 16, 16] (V hud2 DL 300: GREENS' at [174, 194]); the bag `atlas` [50, 26,
+/// 12, 11] at [142, 3] (V hud1 DLs 341-399); the radar's team colours 0x800AB62C (REDS ff3737, BLUES
+/// 4040ff, GREENS 78ff16, YELLOWS ffb11e; V hud1 DL 340) and the free bag's white (V hud1 DL 296).
+fn heist() -> Heist {
+    let opaque = |rgb: u32| {
+        let [_, r, g, b] = rgb.to_be_bytes();
+        [r, g, b, 255]
+    };
+    Heist {
+        anchor: Anchor(H::Centre, V::Bottom),
+        y: 200,
+        centre: 36,
+        step: 73,
+        pip: image("pips", [14, 16, 7, 7]),
+        pip_step: 8,
+        empty: opaque(0x40_4040),
+        skull: image("atlas2", [48, 20, 16, 16]),
+        colours: [0xFF_0000, 0x00_00FF, 0x00_FF00, 0xFF_FF00].map(opaque),
+        bag: Placed {
+            anchor: Anchor(H::Centre, V::Top),
+            rect: [142, 3, 12, 11],
+            image: image("atlas", [50, 26, 12, 11]),
+        },
+        radar: [0xFF_3737, 0x40_40FF, 0x78_FF16, 0xFF_B11E].map(opaque),
+        cash: opaque(0xFF_FFFF),
+    }
+}
+
 /// `hud/`'s files: `hud.json`, a PNG per texture and one per glyph (`font/<n>.png`, in the game's
 /// order: its character list names two glyphs `ê` and two `ô`, the first of each is the one drawn).
 pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
@@ -497,7 +542,7 @@ pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
 /// (`.game` data's sprite records at 0x800859E0: tiles across, the first id) is one PNG. The stick
 /// is its 6 frames 0x7E7..0x7EC side by side (sprite 0x1A draws 0x7E7 + frame: V t5_b, `lab/
 /// research/mp-original/dm-maps-results.md` §5.3). V: `lab/research/mp-original` (STATS screen).
-const END_TEXTURES: [(&str, usize, usize, bool); 18] = [
+const END_TEXTURES: [(&str, usize, usize, bool); 22] = [
     ("lives", 0xD14, 1, false),
     ("skull", 0xD0F, 1, true),
     ("stats", 0x816, 2, false),
@@ -519,6 +564,12 @@ const END_TEXTURES: [(&str, usize, usize, bool); 18] = [
     ("draw", 0x853, 2, false),
     // War: Beach's: sprite 0x55 FRENCHYS (its team 0's name, id 9: 0x4C + 9).
     ("frenchys", 0x855, 3, false),
+    // Heist's team names: sprites 0x4C REDS, 0x4D BLUES, 0x4E GREENS, 0x4F YELLOWS (0x4C + the
+    // team's name id; their records at 0x800859E0 give the tiles).
+    ("reds", 0x863, 2, false),
+    ("blues", 0x851, 2, false),
+    ("greens", 0x858, 3, false),
+    ("yellows", 0x86F, 3, false),
 ];
 
 /// `end.json`'s layout, the original's draws (V, the oracle's display lists: `lab/research/
@@ -612,6 +663,32 @@ fn end_layout(textures: std::collections::BTreeMap<String, Texture>) -> End {
                     placed([151, 34, 64, 32], "win", [0, 0, 64, 32]),
                 ],
             ],
+        },
+        // V cs2 DL 790 (the icons at y 89, P1's row: "1" at 76 with its suffix at 81, "1" at 108,
+        // "0%" at 136/143, "0" at 167, 197, 227; laid out as the client centres a line) and cs3b DL
+        // 970 (GREENS's tiles at 65, 97, 129, WIN at 151). The names of 2 tiles at 81 and those of
+        // 3 at 65, WIN at 151, as TEDIZ and FRENCHYS (I but GREENS).
+        heist: HeistResults {
+            won: [("reds", 2), ("blues", 2), ("greens", 3), ("yellows", 3)].map(|(name, n)| {
+                let w = 32 * n;
+                [
+                    placed(
+                        [if n == 2 { 81 } else { 65 }, 34, w, 32],
+                        name,
+                        [0, 0, w as u16, 32],
+                    ),
+                    placed([151, 34, 64, 32], "win", [0, 0, 64, 32]),
+                ]
+            }),
+            icons: vec![
+                placed([103, 49, 16, 16], "stat_deaths", [16, 0, 16, 16]),
+                placed([133, 49, 16, 16], "stat_icons", [16, 0, 16, 16]),
+                placed([162, 49, 16, 16], "stat_icons", [0, 0, 16, 16]),
+                placed([181, 49, 32, 16], "stat_icons", [0, 16, 32, 16]),
+                placed([222, 49, 16, 15], "stat_deaths", [0, 16, 16, 15]),
+            ],
+            label: [34, 64],
+            columns: [86, 110, 144, 170, 200, 230],
         },
     }
 }

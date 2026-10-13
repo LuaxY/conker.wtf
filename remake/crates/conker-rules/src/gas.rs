@@ -246,6 +246,16 @@ pub enum Effect {
     /// team-mate bot `j`'s body where it stands (its momentum, health, weapons, lives) with 90
     /// immune frames, and `j` gets `i`'s corpse and is out (`Match::apply`; V t1).
     TakeOver(usize, usize),
+    /// War: Heist (script 0xB7): the bag created at home (`obj(0x2011)`) or destroyed (`obj2`).
+    /// [`Effect::LetGo`] and [`Effect::Settle`] take [`crate::heist::CASH`] for it, and
+    /// [`Effect::Score`] its four teams.
+    Cash(bool),
+    /// Heist: the walker's step (conker-bots, class 0x57's scripts 4 and 5 on the nav graph): the
+    /// bag's position and facing, and whether it walks on (false: it arrived and stands).
+    CashAt([f32; 3], u16, bool),
+    /// Heist: a voice line at slot `.0`'s player (`obj(0x74nn, …)` on the radio path, 0x7FBC): the
+    /// sound id (handle & 0xFFF), for the client to play ([`crate::game::Event::Voice`]).
+    Voice(usize, u16),
 }
 
 #[cfg(test)]

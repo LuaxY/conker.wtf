@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{Anchor, Horizontal, Rgba, Vertical};
 use conker_assets::outro::{
-    Actor, Attach, CHATTER, Camera, Fade, Head, Key, OPEN, Outro, Page, Place, Play, Prop, Quad,
-    SHUT, Say, ScriptSound, Subtitles, Talk, Voice,
+    Actor, Attach, CHATTER, Camera, Fade, Head, Key, Light, OPEN, Outro, Page, Particles, Place,
+    Play, Prop, Quad, SHUT, Say, ScriptSound, Subtitles, Talk, Voice,
 };
 use extract_character::{Character, parse_attachment};
 use extract_core::{Rom, Table};
@@ -29,24 +29,30 @@ use crate::{GAME_DATA, map_name, model_lift};
 
 /// Each scene's (winning team, cutscene): `func_1501D348(scene, n)`, the first n if team 0 ranks
 /// 1st, else the second (table 0x800AB7BC, V).
-const OUTROS: [(usize, [(u8, u8); 2]); 3] = [
+const OUTROS: [(usize, [(u8, u8); 2]); 4] = [
     (0x2D, [(0, 2), (1, 4)]),
     (0x30, [(0, 1), (1, 5)]),
     (0x2B, [(0, 4), (1, 3)]),
+    // Heist: cutscene 2 if some human's team ranks 1st, else 3 (`func_151E43DC`'s scenario-0 case;
+    // `heist-presentation-scratch/outro`): "winner 0" here is that human win.
+    (0x1A, [(0, 2), (1, 3)]),
 ];
 /// Op 5 b=1's colour table (`func_15029BB8`: 3 bytes per entry, indexed by the record's d).
 const COLOURS: usize = 0x8008_4110 - GAME_DATA;
 /// The scene's character records (bank 0x0E entry `scene`, 0x30 bytes each): model at +4, uid at
 /// +0x28 (C/V).
 const RECORD: usize = 0x30;
-/// Characters are drawn at half their model units (V obj+0x14C/+0x150, as players).
-const SCALE: f32 = 0.5;
+/// A character record's scale (f32 at +0x20): 0.5 for every War actor, 0.74 for Heist's 134
+/// (V obj+0x14C/+0x150).
+const RECORD_SCALE: usize = 0x20;
 /// The voice lines' bank.
 const MP3: usize = 0x16;
 /// Each actor model's head joint (`func_15036F34`'s a0: 3 for 90, 4 for 135 and 88;
 /// `func_15036CE8`'s 0xC for the villagers) and jaw (the model's special joint 0, header words
 /// 12/13) (C, V lldb; `outros-leftovers-scratch/joints.py`).
-const HEADS: [(usize, u8, u8); 5] = [
+const HEADS: [(usize, u8, u8); 6] = [
+    // Heist's Don Weaso: jaw 6 (header words 12/13); no op 0x11 turns his head (joint unknown).
+    (134, u8::MAX, 6),
     (90, 3, 6),
     (88, 4, 7),
     (135, 4, 7),
@@ -205,6 +211,53 @@ fn bubbles(scene: usize, cutscene: u8) -> Vec<(Anchor, [i16; 2], Bubble)> {
                 ([0, 4, 146, 61], [260.09375, 256.21875], [419, 1122]),
             ],
         )],
+        // Heist cs2: one place (`heist-presentation-scratch/outro`, DLs 500/587/657; the text's
+        // centre fits left + floor(advance / 2), 194).
+        (0x1A, 2) => vec![(
+            top(Horizontal::Right),
+            [194, 25],
+            [
+                ([110, 3, 282, 48], [256.0, 257.28125], [377, 1410]),
+                ([160, 44, 202, 54], [271.0, 256.59375], [-377, 1410]),
+                ([173, 47, 193, 57], [271.0, 257.125], [-756, 1442]),
+                ([105, 8, 277, 52], [319.0, 257.0], [-378, 1442]),
+            ],
+        )],
+        // Heist cs3: right (camera 0), left from 530 (camera 4), right from 800, left from 1300
+        // (camera 4, 6 px wider), right from 1400 (DLs 205-880).
+        (0x1A, _) => {
+            let right = (
+                top(Horizontal::Right),
+                [196, 28],
+                [
+                    ([101, 0, 297, 58], [256.15625, 257.4375], [331, 1102]),
+                    ([158, 52, 206, 65], [271.0, 256.875], [-331, 1102]),
+                    ([173, 54, 196, 67], [271.0, 256.21875], [-665, 1122]),
+                    ([96, 4, 292, 61], [319.0, 256.21875], [-332, 1122]),
+                ],
+            );
+            let left = (
+                top(Horizontal::Left),
+                [77, 28],
+                [
+                    ([0, 0, 178, 58], [262.25, 257.4375], [331, 1102]),
+                    ([38, 52, 86, 65], [271.0, 256.875], [-331, 1102]),
+                    ([53, 54, 76, 67], [271.0, 256.21875], [-665, 1122]),
+                    ([0, 4, 173, 61], [311.5625, 256.21875], [-332, 1122]),
+                ],
+            );
+            let wider = (
+                top(Horizontal::Left),
+                [83, 28],
+                [
+                    ([0, 0, 184, 58], [260.34375, 257.4375], [331, 1102]),
+                    ([44, 52, 92, 65], [271.0, 256.875], [-331, 1102]),
+                    ([59, 54, 82, 67], [271.0, 256.21875], [-665, 1122]),
+                    ([0, 4, 179, 61], [313.5, 256.21875], [-332, 1122]),
+                ],
+            );
+            vec![right, left, right, wider, right]
+        }
         // cs1: right (cameras 0), left (camera 3), its tail turned (camera 8), right again.
         _ => {
             let right = (
@@ -266,12 +319,12 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
     let game_data = rom.game_data()?;
     let placements = scene_placements(rom, scene)?;
     let records = rom.asset(&[0x0E, scene])?;
-    let model_of = |uid: u8| {
+    let record_of = |uid: u8| {
         (records.as_chunks::<RECORD>().0.iter())
             .find(|r| r[0x28] == uid)
-            .map(|r| usize::from(r[4]))
             .with_context(|| format!("no character record for uid {uid:#x}"))
     };
+    let model_of = |uid: u8| record_of(uid).map(|r| usize::from(r[4]));
     let mut loaded: BTreeMap<usize, Character> = BTreeMap::new();
     let mut out = Vec::new();
     for &(winner, cutscene) in which {
@@ -279,15 +332,21 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         let table = Table::parse(&asset)?;
         let entry = |i: usize| table.raw(i);
         let counts = entry(0)?;
-        let [objects, curves, scripts, _] = [0, 2, 4, 6].map(|o| be16(counts, o) as usize);
-        ensure!(
-            curves == objects && scripts == objects,
-            "a curve and a script per object"
-        );
+        let [objects, curves, n_scripts, _] = [0, 2, 4, 6].map(|o| be16(counts, o) as usize);
         let (kinds, first_curve, first_script) = (1 + objects, 1 + 2 * objects, 1 + 3 * objects);
         let kind = |o: usize| entry(kinds + o).map(|k| (be16(k, 0), k[2]));
+        // Heist cs3's last object, a kind-3 prop, has no script (7 objects, 6 scripts).
+        ensure!(
+            curves == objects
+                && (n_scripts == objects
+                    || (n_scripts + 1 == objects && kind(objects - 1)?.0 == 3)),
+            "a curve and a script per object"
+        );
         let scripts: Vec<_> = (0..objects)
-            .map(|o| Ok(script(entry(first_script + o)?)))
+            .map(|o| match o < n_scripts {
+                true => Ok(script(entry(first_script + o)?)),
+                false => Ok((None, Vec::new())),
+            })
             .collect::<Result<_>>()?;
         let all: Vec<(usize, Command)> = (scripts.iter().enumerate())
             .flat_map(|(o, s)| s.1.iter().map(move |c| (o, *c)))
@@ -338,7 +397,7 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         // The actors: op 2 plays a clip (c 0) at rate 2 × its ticks / VIs to the object's next op 2
         // (a nonzero d: still), once if that next one plays a clip too (else it ends this one: a
         // loop; `func_15029BB8`'s flag to `func_1505E650`, V cs1's soldier's clip 37 holds at 24).
-        let (mut actors, mut sounds) = (Vec::new(), Vec::new());
+        let (mut actors, mut sounds, mut particles) = (Vec::new(), Vec::new(), Vec::new());
         for (n, o) in of_kind(2).into_iter().enumerate() {
             let model = model_of(kind(o)?.1)?;
             if let std::collections::btree_map::Entry::Vacant(e) = loaded.entry(model) {
@@ -378,6 +437,22 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                     },
                 });
             }
+            // Heist cs3's Wise Guy: its t-0 op 2 has c 2, which plays nothing (`func_15029BB8` acts
+            // on c 0; V obj+0x84 0, no clip, till t 530): its first clip is held at frame 0 till then.
+            if plays.first().is_some_and(|p| p.t > 0)
+                && op2.first().is_some_and(|c| (c.t, c.c) == (0, 2))
+            {
+                let first = plays[0].clone();
+                plays.insert(
+                    0,
+                    Play {
+                        t: 0,
+                        rate: 0.0,
+                        once: true,
+                        ..first
+                    },
+                );
+            }
             ensure!(
                 plays.first().is_some_and(|p| p.t == 0),
                 "cutscene {cutscene} object {o}: a clip from t 0"
@@ -386,7 +461,8 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
             let curve = entry(first_curve + o)?;
             let points = path(entry(1 + o)?)?;
             let yaw = keys(curve, 7);
-            let turns = yaw.windows(2).any(|w| w[0].value != w[1].value);
+            let turns = |k: &[Key]| k.windows(2).any(|w| w[0].value != w[1].value);
+            let moving = |channel| Some(keys(curve, channel)).filter(|k| turns(k));
             actors.push(Actor {
                 character: model.to_string(),
                 animation: first.animation,
@@ -395,7 +471,10 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                 at: *points.first().context("the actor's place")?,
                 facing: facing(yaw.first().map_or(0.0, |k| k.value)),
                 lift: model_lift(rom, model)?,
-                scale: SCALE,
+                scale: {
+                    let r = record_of(kind(o)?.1)?;
+                    f32::from_be_bytes(r[RECORD_SCALE..RECORD_SCALE + 4].try_into()?)
+                },
                 once: first.once,
                 along: match points.len() {
                     0 | 1 => Vec::new(),
@@ -405,14 +484,18 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                     0 | 1 => Vec::new(),
                     _ => points,
                 },
-                yaw: if turns { yaw } else { Vec::new() },
+                yaw: if turns(&yaw) { yaw } else { Vec::new() },
                 plays,
                 head: head(&scripts[o].1, model, curve)?,
                 talk: talk(&scripts[o].1, model)?,
                 mask: mask(&scripts[o].1)?,
                 attach: attach(&scripts[o].1, &game_data)?,
+                team: team(&scripts[o].1)?,
+                roll: moving(6).unwrap_or_default(),
+                pitch: moving(8).unwrap_or_default(),
             });
             sounds.extend(script_sounds(&scripts[o].1, n)?);
+            particles.extend(particles_of(&scripts[o].1, n)?);
         }
         ensure!(
             (all.iter())
@@ -515,12 +598,38 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                 .position(|p| p.raw[PLACEMENT_UID] == uid)
                 .with_context(|| format!("cutscene {cutscene}: no placement {uid:#x}"))?;
             let curve = entry(first_curve + o)?;
-            let first = |ch| keys(curve, ch).first().map_or(0.0, |k| k.value);
+            let first = |ch| keys(curve, ch).first().map(|k| k.value);
+            // Heist cs3's backdrop: channels 5 and 4 scale x and y in percent (V obj scale (37,
+            // 37.01) for 3700, 3701); z keeps the placement's.
+            let scale = match (first(5), first(4)) {
+                (Some(x), Some(y)) => Some([x / 100.0, y / 100.0, placements[placement].scale[2]]),
+                _ => None,
+            };
             props.push(Prop {
                 placement: u16::try_from(placement)?,
                 at: *path(entry(1 + o)?)?.first().context("a prop's place")?,
-                rotation: [first(8), first(7)],
+                rotation: [first(8).unwrap_or(0.0), first(7).unwrap_or(0.0)],
+                scale,
             });
+        }
+        // Heist's light: op 5 b=0x65 d 6 on a kind-0 object (`func_151619A0`), its colour channels
+        // 0-2 and size channel 5 (V white, 8); its c 1 does not end it (V).
+        let mut light = None;
+        for o in of_kind(0) {
+            for c in (scripts[o].1.iter()).filter(|c| (c.op, c.b, c.c) == (5, 0x65, 0)) {
+                ensure!(
+                    c.d == 6 && light.is_none(),
+                    "cutscene {cutscene}: light {c:?}"
+                );
+                let curve = entry(first_curve + o)?;
+                let first = |ch| keys(curve, ch).first().map_or(0.0, |k| k.value);
+                light = Some(Light {
+                    t: at(c),
+                    at: *path(entry(1 + o)?)?.first().context("a light's place")?,
+                    rgb: [0, 1, 2].map(|ch| first(ch) as u8),
+                    size: first(5),
+                });
+            }
         }
         let near = (all.iter().map(|a| a.1))
             .find(|c| c.op == 5 && c.b == 0x25)
@@ -540,7 +649,37 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
             props,
             sounds,
             near,
+            light,
+            particles,
         });
+    }
+    Ok(out)
+}
+
+/// Op 5 b=0x6F (`func_1502460C`): obj+0x68 + c = d; c 0 (every use) selects the team look d − 1.
+fn team(script: &[Command]) -> Result<Option<u8>> {
+    let Some(c) = script.iter().find(|c| c.op == 5 && c.b == 0x6F) else {
+        return Ok(None);
+    };
+    ensure!(c.c == 0 && c.d > 0, "a team look {c:?}");
+    Ok(Some(c.d - 1))
+}
+
+/// Actor `actor`'s particle emitters: op 5 b=0x50 / 0x51 c 0 starts one, its next c 1 stops it.
+fn particles_of(script: &[Command], actor: usize) -> Result<Vec<Particles>> {
+    let mut out = Vec::new();
+    for (i, c) in script.iter().enumerate() {
+        if c.op == 5 && matches!(c.b, 0x50 | 0x51) && c.c == 0 {
+            let stop = (script[i + 1..].iter())
+                .find(|x| (x.op, x.b, x.c) == (5, c.b, 1))
+                .with_context(|| format!("emitter {:#x}: no stop", c.b))?;
+            out.push(Particles {
+                actor: u8::try_from(actor)?,
+                emitter: c.b,
+                t: at(c),
+                until: at(stop),
+            });
+        }
     }
     Ok(out)
 }

@@ -344,17 +344,20 @@ pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
 /// (the club's: `combat6_*` traces, `../lab/oracle/caveman_README.md`), and War: Total War's gas
 /// mask put on and taken off (0x14E, 0x151: `../lab/research/mp-original/total-war-effects.md` §4),
 /// and map 0x1A's bat (draw 0x10E, 0x110) and tommy gun (draw 0x1DD, idles 0x1DE/0x1DF, fire
-/// 0x1E0, 0x253, 0x254) (C `func_15065A5C`; V `../lab/research/mp-original/heist.md` h3, h4).
-pub const MATCH_CLIPS: [u16; 125] = [
+/// 0x1E0, 0x253, 0x254) (C `func_15065A5C`; V `../lab/research/mp-original/heist.md` h3, h4), and
+/// Heist's carrier's grab, idle, walk, run and throw (0x114-0x118; its hit 0x11B is already the
+/// club's: V `../lab/research/mp-original/heist-presentation.md` §2).
+pub const MATCH_CLIPS: [u16; 130] = [
     0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x2B, 0x32, 0x36, 0x37, 0x38,
     0x4C, 0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xC5, 0xC6,
     0xCF, 0xD3, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8, 0xF9, 0xFB, 0xFC,
-    0x102, 0x103, 0x10A, 0x10C, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x119, 0x11A, 0x11B,
-    0x11C, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A, 0x12B, 0x144, 0x14E, 0x151, 0x152,
-    0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162,
-    0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D,
-    0x1DD, 0x1DE, 0x1DF, 0x1E0, 0x1EA, 0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6,
-    0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x253, 0x254, 0x26E, 0x28E, 0x2C2, 0x2C3,
+    0x102, 0x103, 0x10A, 0x10C, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x114, 0x115, 0x116,
+    0x117, 0x118, 0x119, 0x11A, 0x11B, 0x11C, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A,
+    0x12B, 0x144, 0x14E, 0x151, 0x152, 0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B,
+    0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176,
+    0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1DD, 0x1DE, 0x1DF, 0x1E0, 0x1EA, 0x1EB, 0x1ED, 0x1EE,
+    0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x253,
+    0x254, 0x26E, 0x28E, 0x2C2, 0x2C3,
 ];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
@@ -460,8 +463,9 @@ fn sound_op(arg: u32, class: u8) -> Option<ClipAction> {
     Some(ClipAction::Play(p))
 }
 
-/// The sound events of character `class`'s Deathmatch clips: its route table's events
-/// (`[0x0F, route entry]`, as held.rs reads them) decoded as their op handlers do.
+/// The sound events of character `class`'s Deathmatch clips (Heist's bag, [`crate::CASH`], and the
+/// tank, [`crate::TANK`]: all their clips): its route table's events (`[0x0F, route entry]`, as held.rs reads them) decoded as their
+/// op handlers do.
 fn clip_sounds(rom: &Rom, game_data: &[u8], class: usize) -> Result<Vec<ClipSound>> {
     let entry = animation_entry(game_data, animation_entry(game_data, class)?)?;
     let table = rom.asset(&[ROUTE_BANK, entry])?;
@@ -469,7 +473,8 @@ fn clip_sounds(rom: &Rom, game_data: &[u8], class: usize) -> Result<Vec<ClipSoun
     let mut out = Vec::new();
     for (clip, route) in parse_routes(&table)?.iter().enumerate() {
         let clip = clip as u16;
-        if route.aux_offset == 0 || !MATCH_CLIPS.contains(&clip) {
+        let every = matches!(class, crate::CASH | crate::TANK);
+        if route.aux_offset == 0 || (!every && !MATCH_CLIPS.contains(&clip)) {
             continue;
         }
         let (mut at, mut deferred, mut last) = (route.aux_offset as usize + 0x10, None, 0.0);
@@ -1294,6 +1299,159 @@ fn beach_cues() -> Vec<Cue> {
     cues
 }
 
+/// Heist's voices and the bag's throw on 0x1A (`../lab/research/mp-original/heist-presentation.md` §5,
+/// `heist.md` §2.3; V `heist-presentation-scratch/bag/snd_bag_calls.txt`). The voices are fixed ids,
+/// the same for every character: script 0xB7's `obj(id, 2, 0x7FBC, player, 500, 1000, 1)` →
+/// `func_1509EFF0` → `func_1509F5F4` on the speaker's channel B, centred for it, at it for the others.
+fn heist_cues() -> Vec<Cue> {
+    let voice = |ids: &[u16]| {
+        play(
+            ids.iter().copied(),
+            32700,
+            Some(32700),
+            500,
+            1000,
+            Channel::B,
+        )
+    };
+    vec![
+        cue(
+            On::CashPickup,
+            voice(&[1130, 1131]),
+            "a pickup of the bag at rest (C script 0xB7 kind 1: 0x46A + random(2); V snd_bag 335, 566: 1130)",
+        ),
+        cue(
+            On::CashSteal { rare: true },
+            voice(&[1351]),
+            "a steal within 240 frames of another's drop, one case in three (C script 0xB7 kind 0; V snd_bag 464)",
+        ),
+        cue(
+            On::CashSteal { rare: false },
+            record(range(1125, 3), 32700, 500, 1000),
+            "a steal's other two cases: one of 1125-1127 as Colors' loser lines, a record at the picker (C script \
+             0xB7 kind 0: obj(0x7465, 0, 0x7467, 0, 0x7FBC, picker, 500, 1000) → func_1509F354; not heard)",
+        ),
+        cue(
+            On::CashDelivery,
+            voice(&[1128, 1129]),
+            "a delivery: 0x468 + random(2) at the carrier (C script 0xB7; V snd_bag 632: 1129)",
+        ),
+        cue(
+            On::CashThrow,
+            play([91], 28000, None, 500, 2500, Channel::B),
+            "the throw's release (clip 0x118's op 54 → func_1506EA98 → func_15060A30): the whoosh on the bag's \
+             channel B, at it (V snd_bag 394)",
+        ),
+    ]
+}
+
+/// Tank's sounds besides the tank's clips (its shell's fire is clip 1's event: 699) on 0x24
+/// (`../lab/research/mp-original/tank.md` §8; C as named, V `../lab/audio/captures/tank_s1_calls.txt`).
+fn tank_cues() -> Vec<Cue> {
+    let tank = |on, play, note: &str| Cue {
+        character: Some(crate::TANK.to_string()),
+        ..cue(on, play, note)
+    };
+    let pickup = |bit, id, note: &str| {
+        let gives = Gives::Weapon(bit);
+        let play = play([id], 26000, Some(26000), 100, 1000, Channel::Free);
+        tank(On::Pickup { gives }, play, note)
+    };
+    let blast = || Play {
+        pitch: [0, 499],
+        ..record([689, 693, 694, 695, 701, 702], 32700, 1000, 3000)
+    };
+    let mut gear = play(range(1187, 4), 28000, Some(28000), 300, 1800, Channel::A);
+    gear.if_idle = true;
+    vec![
+        tank(
+            On::TankEngine { moving: false },
+            record([1191], 0x2000, 200, 800),
+            "idling: 0x4A7 from the tank's creation, back to it when it neither speeds up nor coasts (C \
+             func_151BB044, func_151BB0E0: a record following the tank, |speed| · obj+0xB8 / 2 a parameter \
+             of it, I: the pitch; V s1 22, 58)",
+        ),
+        tank(
+            On::TankEngine { moving: true },
+            record([1192], 0x2EE0, 200, 800),
+            "driving (speeding up, or faster than 5 and coasting): 0x4A8, its volume scaled by a fade of 8/256 \
+             a frame; 900 or 1412 VIs on, 0x4A9 at 0x2EE0 (C func_151BB0E0; V s1 44, 351; 0x4A9 not heard: \
+             not packed)",
+        ),
+        tank(
+            On::TankGear { coast: false },
+            gear.clone(),
+            "a change of the engine's state: one of 0x4A3-0x4A6 on the tank's channel A when idle (C \
+             func_151BB0E0: func_1000F568(0x4A3, 4); V s1 58, 99, 140, 221)",
+        ),
+        tank(
+            On::TankGear { coast: true },
+            Play {
+                sounds: vec![1189],
+                ..gear
+            },
+            "into coasting: 0x4A5 (C func_151BB0E0; V s1 44, 85, 126, 167, 207)",
+        ),
+        tank(
+            On::TankBlast { ground: false },
+            blast(),
+            "a shell on a tank: the rocket's blast (C func_151BBA9C → func_15055A2C(1, …, 0); V s1 43, 84, \
+             125, 166, 206, 247)",
+        ),
+        tank(
+            On::TankBlast { ground: true },
+            blast(),
+            "a shell on the ground: the rocket's blast (C func_151BB61C → func_15055A2C(0, …, 0); V s1 296)",
+        ),
+        tank(
+            On::TankBlast { ground: true },
+            play([750], 30000, None, 500, 1000, Channel::A),
+            "a shell on the ground, on the shell's channel A as well (C func_1504A730 → func_150538CC; V s1 \
+             296)",
+        ),
+        Cue {
+            delay: 22,
+            ..tank(
+                On::TankDeath { bomb: false },
+                play([742], 12000, None, 500, 1000, Channel::Free),
+                "a tank killed by a shell, at its clip 7's tick 23 (C func_151670C0 → func_15133C58; V s1 \
+                 269, 22 frames after the killing blast at 247)",
+            )
+        },
+        tank(
+            On::TankDeath { bomb: true },
+            play([735], 12000, None, 500, 1000, Channel::Free),
+            "a tank killed by the bomb's gas, at its clip 6's tick 6 (C func_151670C0 → func_15133C58; V s1 \
+             652; the delay after the detonation not measured)",
+        ),
+        tank(
+            On::BombPickup,
+            play([11, 12], 26000, Some(26000), 100, 1000, Channel::Free),
+            "the gas bomb taken: 0xB + random(2) (C func_1511DD98, class 0x50; V s1 311: 12)",
+        ),
+        pickup(
+            0x80,
+            1296,
+            "the shield taken (C func_1511DD98, class 0x58; V s1 271)",
+        ),
+        pickup(
+            0x01,
+            1187,
+            "the boost's canisters taken (C func_1511DD98, class 0x47)",
+        ),
+        pickup(
+            0x10,
+            385,
+            "the one-shot shells' container taken (C func_1511DD98, class 0x51)",
+        ),
+        pickup(
+            0x02,
+            752,
+            "the scope's launcher taken (C func_1511DD98, class 0x46)",
+        ),
+    ]
+}
+
 /// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.
 /// 0x2D: its two flickering lamps' buzz (C func_151607A4 → func_15160954 → func_151618BC; V: these
 /// two positions in every capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
@@ -1306,7 +1464,9 @@ fn beach_cues() -> Vec<Cue> {
 /// 98-99 buzzes each in 8,653 reads); its five switching lights (`lights.json` `switching`), each
 /// switch back on one of 1099-1108 at 16000, 500/1000 (C func_15100340 → func_151616D0 →
 /// func_151604A0, message 0x1C; V 191-219 each); sequence 30, no channel muted (mask 0), volume 8000
-/// (C func_150000B0: the scene record's song, V).
+/// (C func_150000B0: the scene record's song, V). 0x24 (Tank, scenario 1, 2 humans): no emitter
+/// (V `../lab/audio/captures/tank_s1_calls.txt`: only the tanks' and the match's sounds), sequence
+/// 32, no channel muted, volume 18000 (C func_150000B0, V).
 fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     let spots = match map {
         "2d" => &[[-1101, -1201, -229], [650, -1191, 486]][..],
@@ -1338,6 +1498,7 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
         "1a" => (30, "0-15", 8000),
         "34" => (36, "0-5", 32000),
         "3f" => (84, "0-15", 24000),
+        "24" => (32, "0-15", 18000),
         _ => (19, "0-5", 32000),
     };
     (emitters, sequence, channels, volume)
@@ -1348,7 +1509,8 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
 /// sound `+0x1C >> 16` at its centre at volume (`+0x17` & 0x7F)·0x147, near `+0x1C & 0xFFFF`, far
 /// `+0x18`, centred (flag 0x100), by horizontal distance for shape 0 (bit 0x8000 of the far): 0x2B's
 /// two, 0x1A's four (its bases' 1116; V `../lab/audio/map1a/`: they played while idle players stood
-/// in 0x35 and 0x37).
+/// in 0x35 and 0x37). Every one stops on leave: `func_150A09D0`'s pass stops any kind-2 record no
+/// player entered since its last pass (C; V on 0x1A, `heist-presentation.md` §3).
 fn zones(triggers: &[u8]) -> Vec<conker_assets::audio::Zone> {
     let records = triggers.as_chunks::<0x34>().0.iter().enumerate();
     (records.filter(|(_, r)| r[0x15] >> 2 == 2))
@@ -1367,6 +1529,7 @@ fn zones(triggers: &[u8]) -> Vec<conker_assets::audio::Zone> {
                     w(0x18) as u16,
                     Channel::Free,
                 ),
+                stops_on_leave: true,
             }
         })
         .collect()
@@ -1429,14 +1592,14 @@ pub fn loop_cut(wav: &[u8], skip: usize) -> Result<Vec<u8>> {
 
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
 /// under `audio/` that hold them. `surfaces`: the maps' terrain surface kinds (footsteps); `maps`:
-/// each map's folder name and recordings of its background (`../lab/audio`'s) and of its song's
-/// positional channels ([`STEM_LAG`]), or None; `characters`: the bank-01 entries whose clip sounds
+/// each map's folder name and recordings of its background (`../lab/audio`'s), of its song's
+/// positional channels ([`STEM_LAG`]) and of its song (0x24's bomb countdown), or None; `characters`: the bank-01 entries whose clip sounds
 /// and hit voices play (each its own folder).
 #[allow(clippy::type_complexity)]
 pub fn pack_audio(
     rom: &Rom,
     surfaces: &BTreeSet<u8>,
-    maps: &[(String, Option<&[u8]>, Option<&[u8]>)],
+    maps: &[(String, Option<&[u8]>, Option<&[u8]>, Option<&[u8]>)],
     characters: &[usize],
     outro_sounds: &[(String, BTreeSet<u16>)],
 ) -> Result<(Files, Vec<String>)> {
@@ -1450,11 +1613,20 @@ pub fn pack_audio(
         characters.insert(folder.clone(), clip_sounds(rom, &game_data, class)?);
         cues.extend(hit_voices(rom, &game_data, class, &folder)?);
     }
+    // Heist's bag on 0x1A: its own clips' sounds (no voice), and the voices and the throw.
+    if maps.iter().any(|m| m.0 == "1a") {
+        let bag = clip_sounds(rom, &game_data, crate::CASH)?;
+        characters.insert(crate::CASH.to_string(), bag);
+        cues.extend(heist_cues());
+    }
+    if maps.iter().any(|m| m.0 == "24") {
+        cues.extend(tank_cues());
+    }
     // No cues for a character the pack leaves out (the Wise Guy's without map 0x1A).
     cues.retain(|c| (c.character.as_ref()).is_none_or(|n| characters.contains_key(n)));
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
-    for (name, background, stem) in maps {
+    for (name, background, stem, song) in maps {
         let (emitters, sequence, channels, volume) = map_sounds(name);
         let scene = usize::from_str_radix(name, 16)?;
         let mut map = MapSounds {
@@ -1532,6 +1704,20 @@ pub fn pack_audio(
                 }),
             });
             files.push((format!("audio/{file}"), loop_cut(wav, STEM_LAG)?));
+        }
+        // Tank's bomb countdown: song 50, recorded alone.
+        if let Some(wav) = song.filter(|_| name == "24") {
+            let file = format!("maps/{name}/countdown.wav");
+            let note = "the bomb's plant: song 50 on music player 1 over the map's (script 0xB8 command \
+                        0xA032 → func_1509E730 → func_1000D96C(50); V s1 read 331), once, 26 s, for everyone: \
+                        recorded on the oracle in place of the map's song 32 (I: player 1's volume as player 0's)";
+            let line = pack::Line {
+                file: file.clone(),
+                volume: 32767,
+                note: note.into(),
+            };
+            map.lines.insert("countdown".into(), line);
+            files.push((format!("audio/{file}"), wav.to_vec()));
         }
         map_events.insert(name.clone(), map);
     }

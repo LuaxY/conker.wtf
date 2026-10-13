@@ -2,10 +2,11 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b] [MODE=deathmatch|total-war|colors|beach] [SCORE=1-40|unlimited]
-#   [SKILL=inbred|crap|normal|bastard|einstein] crates/conker-server/bots.sh [seconds=150].
+# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a] [MODE=deathmatch|total-war|colors|beach|heist] [SCORE=1-40|unlimited]
+#   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] crates/conker-server/bots.sh [seconds=150].
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
-# MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move.
+# MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
+# MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -18,6 +19,8 @@ secs=${1:-150} bots=${BOTS:-2} humans=${HUMANS:-1} port=${PORT:-5888}
 mode=(); [[ -n ${MODE:-} ]] && mode=(--mode $MODE)
 [[ -n ${SCORE:-} ]] && mode+=(--score $SCORE)
 [[ -n ${SKILL:-} ]] && mode+=(--skill $SKILL)
+[[ -n ${TIME:-} ]] && mode+=(--time $TIME)
+[[ -n ${SEED:-} ]] && mode+=(--seed $SEED)
 $bin/conker-server --port $port --map ${MAP:-2d} $mode --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!
@@ -76,6 +79,15 @@ if [[ ${MODE:-} == beach ]]; then
   echo "  zone gives: $(grep -oE 'BEACH t=[0-9]+ Give\([0-9]+, (22|36)\)' $logs/server.log | wc -l | tr -d ' '), ejections: $(grep -c 'BEACH t=[0-9]* Place' $logs/server.log)," \
     "gun mounts: $(grep -oE 'GUN t=[0-9]+ gun 0 state 0x1 -> 0x2 slot Some\([0-9]+\)' $logs/server.log | grep -oE 'Some\([0-9]+' | tr -d 'Some(' | tr '\n' ' ')"
   echo "  $(grep -E 'match ends|villager down' $logs/server.log | tail -1)"
+fi
+if [[ ${MODE:-} == heist ]]; then
+  at() { grep -oE "HEIST t=[0-9]+ $1" $logs/server.log | grep -oE 't=[0-9]+' | tr '\n' ' ' }
+  bags=$(grep -c 'HEIST t=[0-9]* Score' $logs/server.log)
+  echo "heist: bags made at $(at 'Cash\(true')"
+  echo "  takes $(grep -c 'HEIST t=[0-9]* bag taken' $logs/server.log), let-gos $(grep -c 'HEIST t=[0-9]* LetGo' $logs/server.log)" \
+    "(deliveries included), voices $(grep -c 'HEIST t=[0-9]* Voice' $logs/server.log)"
+  echo "  deliveries $bags: $(grep -oE 'HEIST t=[0-9]+ Score\([0-9]+' $logs/server.log | sed 's/HEIST //; s/Score(/team /' | tr '\n' ' ')"
+  echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
 fi
 report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))
 report "no panics" $(( ! $(cat $logs/*.log | grep -c 'panicked') ))

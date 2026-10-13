@@ -223,6 +223,10 @@ pub struct PlayerState {
     /// 0x1504E3A0 and 0x1504EE64, C; V bots1: carriers top out at 28 = 0.8 · 35, gaining 0.75 then
     /// 0.0075; e1: +0.75 a frame).
     pub holding: bool,
+    /// War: Heist's bag held (with [`Self::holding`]): the drive 0.9 more, 0.72 of the stick's (V
+    /// h1, bots1: carriers top out at 25.2 = 0.72 · 35, gaining 0.75 a frame; I: the factor's
+    /// source, taken as the floor's 90 % on the holding 0.8).
+    pub heavy: bool,
     /// The animation clock and the root's advance ([`animate`], [`crate::root`]).
     pub root: Root,
     /// s126+0x12: the upper body's twist while a gun is aimed ([`twist`]), u16 angle units within
@@ -321,6 +325,7 @@ impl PlayerState {
             armed: 0,
             crouch_ok: false,
             holding: false,
+            heavy: false,
             root: Root {
                 id: u16::MAX,
                 ..Root::default()
@@ -1036,7 +1041,9 @@ fn scaled(p: &PlayerState) -> f32 {
     } else {
         p.target_speed * (f32::from(p.speed_percent) * f32::from_bits(0x3C23_D70A)) // 0.01
     };
-    if p.holding {
+    if p.holding && p.heavy {
+        drive * f32::from_bits(0x3F4C_CCCD) * 0.9
+    } else if p.holding {
         drive * f32::from_bits(0x3F4C_CCCD) // 0.8, 0x8009922C
     } else {
         drive
@@ -1609,6 +1616,25 @@ mod tests {
         }
         assert_eq!(s, 27.75);
         assert!((accelerate(s, drive, 0.75) - 27.7575).abs() < 1e-5);
+    }
+
+    /// Heist's bag (V h1, bots1): 0.72 of the stick's 35, 0.75 a frame, easing in under 25.2.
+    #[test]
+    fn the_bag_drives_at_25_2() {
+        let p = PlayerState {
+            target_speed: 35.0,
+            holding: true,
+            heavy: true,
+            ..PlayerState::spawn([0.0; 3], 0)
+        };
+        let drive = scaled(&p);
+        assert!((drive - 25.2).abs() < 1e-4, "{drive}");
+        let mut s = 0.0;
+        for _ in 0..33 {
+            s = accelerate(s, drive, 0.75);
+        }
+        assert_eq!(s, 24.75);
+        assert!(accelerate(s, drive, 0.75) < drive);
     }
 
     #[test]
