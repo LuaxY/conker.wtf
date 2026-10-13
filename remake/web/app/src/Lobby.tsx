@@ -1,7 +1,7 @@
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { ArrowLeft, Crosshair } from "lucide-react";
 import { motion } from "motion/react";
-import { MAPS, MODES, settingRows } from "./data";
+import { allowed, MAPS, MODES, PICKS, settingRows } from "./data";
 import { usePlayer } from "./store";
 import { Banner, PLATES, SIDES, StatusBadge } from "./ui";
 
@@ -9,10 +9,15 @@ const route = getRouteApi("/lobby/$serverId");
 
 export function Lobby() {
   const server = route.useLoaderData();
-  const { side, transport, set } = usePlayer();
+  const { side, transport, character, set } = usePlayer();
+  // The picks this server's map and mode allow with its cheats (none: no select); a pick not among
+  // them is not asked for (the server would give the slot's default anyway).
+  const picks = allowed(server.map, server.mode, server.settings.cheats);
+  const pick = character !== null && picks & (1 << character) ? character : null;
   // play.html's options (web/README.md): the client rejects any it does not know. The digest is this
   // server's own, since several run at once (dist/digest.txt names one at most).
-  const play = `play.html?${new URLSearchParams({ server: server.address, transport, side, digest: server.digest })}`;
+  const options = { server: server.address, transport, side, digest: server.digest };
+  const play = `play.html?${new URLSearchParams(pick === null ? options : { ...options, character: String(pick) })}`;
   const facts = [
     ["Map", MAPS[server.map].name],
     ["Mode", MODES[server.mode].name],
@@ -105,6 +110,28 @@ export function Lobby() {
               ))}
             </div>
           </fieldset>
+          {picks !== 0 && (
+            <label className="mt-6 block">
+              <span className="font-stencil text-sm tracking-wider text-dust uppercase">
+                Character
+              </span>
+              <select
+                name="character"
+                value={pick ?? ""}
+                onChange={(e) => set({ character: e.target.value ? Number(e.target.value) : null })}
+                className="field mt-1"
+              >
+                <option value="">The server's choice</option>
+                {PICKS.map((name, k) =>
+                  picks & (1 << k) ? (
+                    <option key={name} value={k}>
+                      {name}
+                    </option>
+                  ) : null,
+                )}
+              </select>
+            </label>
+          )}
           <label className="mt-6 block">
             <span className="font-stencil text-sm tracking-wider text-dust uppercase">
               Connection

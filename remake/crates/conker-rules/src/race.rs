@@ -391,8 +391,9 @@ impl Match {
         }
         let f = &mut self.players[i];
         let go = t >= f.ride.go;
-        // The power-up on Z.
-        let pressed = input.buttons & !late;
+        // The power-up on Z: a human's press; a bot's Z while it is in its pad (`func_150528C8`
+        // reads s126+0x8C every frame, C; V L1 928/938: a missile fired the frame after its take).
+        let pressed = input.buttons & !if f.bot { 0 } else { late };
         let mut fired = false;
         if go && pressed & BUTTON_Z != 0 && f.rounds > 0 {
             match f.weapon {
@@ -1065,6 +1066,26 @@ mod tests {
         }
         assert_eq!(knocked, Some(board::KICK_HIT));
         assert_eq!(m.players[1].body.state, board::KICK);
+    }
+
+    /// A bot's Z stays in its pad (V L1: the bot whose last press was the canister's Z fired each
+    /// missile the frame after its take, reads 928 and 938): held, a bot uses every power-up the
+    /// frame it has one, while a human holding Z uses only the one it pressed for.
+    #[test]
+    fn a_bot_holding_z_uses_each_power_up() {
+        let (arena, world) = course();
+        let mut m = race(2, 1, 5);
+        m.tick = GO;
+        let z = [input(0, 0, BUTTON_Z); 2];
+        for k in 0..3 {
+            m.race_take(0, MISSILE);
+            m.race_take(1, MISSILE);
+            m.step(&arena, &z, &world);
+            let left: Vec<u8> = m.players.iter().map(|f| f.rounds).collect();
+            assert_eq!(left, [u8::from(k > 0) * k, 0], "take {k}");
+        }
+        assert_eq!(m.race.missiles.iter().filter(|s| s.owner == 1).count(), 3);
+        assert_eq!(m.race.missiles.iter().filter(|s| s.owner == 0).count(), 1);
     }
 
     /// A human out of lives with bots racing on ends as Deathmatch's (V b1).

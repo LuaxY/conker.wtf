@@ -130,11 +130,12 @@ pub fn decode(
 impl Material {
     /// PNG of the material's flat (ROM) texture, upright: the last row in memory comes first
     /// (see [`crate::Texture::uv`]). `payload(id)` returns texture `id`'s decompressed bytes
-    /// (`extract_core::Textures::get`). None when the material is untextured, its image or
-    /// palette is bound at runtime (a segment) or its format is not decoded; an error when a
-    /// payload is missing or shorter than the display list's tile.
+    /// (`extract_core::Textures::get`). None when the material is untextured, its combiner reads
+    /// no texel ([`Material::samples_texel`]), its image or palette is bound at runtime (a
+    /// segment) or its format is not decoded; an error when a payload is missing or shorter than
+    /// the display list's tile.
     pub fn texture_png(&self, payload: impl Fn(u32) -> Option<Vec<u8>>) -> Option<Result<Vec<u8>>> {
-        let t = self.texture?;
+        let t = self.texture.filter(|_| self.samples_texel())?;
         let Some(Image::Flat { index, mode }) = t.image else {
             return None;
         };
@@ -323,6 +324,13 @@ mod tests {
             Some(Err(Error::Short { need: 4, have: 3 }))
         ));
         assert!(Material::default().texture_png(|_| None).is_none());
+        // A combiner that reads no texel (Conker's head: (shade − env) × k5 + prim, alpha shade ×
+        // env) draws no texture; one reading TEXEL0 does.
+        let mut shaded = i8;
+        shaded.combine = [0xFFFE8F, 0xF517F8FF];
+        assert!(!shaded.samples_texel() && shaded.texture_png(|_| Some(vec![0; 4])).is_none());
+        shaded.combine = [0x127E24, 0x55FDF2F9]; // 0x1A's screens'
+        assert!(shaded.samples_texel());
         let mut segment = i8;
         segment.texture.as_mut().unwrap().image = Some(Image::Segment(0x0600_0000));
         assert!(segment.texture_png(|_| None).is_none());

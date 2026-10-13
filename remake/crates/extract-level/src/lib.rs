@@ -19,7 +19,7 @@
 //! alpha-mode rule (`decode_other_mode`) and the zero-area face rule
 //! (`omit_zero_area_preview_faces`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use extract_core::{Rom, Table, Textures};
 use extract_gbi::{Draw, Image, Ir, Material, Palette, Vertex, walk};
@@ -137,6 +137,10 @@ pub struct Level {
     pub instances: Vec<Instance>,
     /// Placements whose model is missing (scenes 17 and 62).
     pub missing: Vec<usize>,
+    /// Segment → texture id: what [`to_gltf`] draws the materials reading that segment with (the
+    /// game binds it at run time). They keep their own names (`m{n}-seg{a}`) and stay apart from
+    /// materials drawing the same texture.
+    pub segments: BTreeMap<u32, u32>,
 }
 
 impl Level {
@@ -284,6 +288,21 @@ fn wrap(cm: u8) -> u32 {
     }
 }
 
+/// `material` with its images on `segment` bound to texture `id`.
+pub fn bind_material(mut material: Material, segment: u32, id: u32) -> Material {
+    let bound = |image: Image, mode| match image {
+        Image::Segment(a) if a >> 24 == segment => Image::Flat { index: id, mode },
+        other => other,
+    };
+    if let Some(t) = &mut material.texture {
+        t.image = t.image.map(|i| bound(i, 0));
+        if let Some(p) = &mut t.palette {
+            p.image = bound(p.image, 1);
+        }
+    }
+    material
+}
+
 /// The flat images (texture ids) a material reads: pixels, then palette.
 fn flat_ids(m: &Material) -> impl Iterator<Item = u32> {
     let t = m.texture;
@@ -295,9 +314,13 @@ fn flat_ids(m: &Material) -> impl Iterator<Item = u32> {
     })
 }
 
-/// File stem and PNG of a material's texture ([`Material::texture_png`]). None for untextured
-/// materials and runtime-bound (segment) images.
-fn texture_png(m: &Material, blobs: &HashMap<u32, Vec<u8>>) -> Option<Result<(String, Vec<u8>)>> {
+/// File stem and PNG of a material's texture ([`Material::texture_png`]), as [`to_gltf`] names its
+/// `textures/<stem>.png`; `blobs` holds its texture ids' bytes. None for untextured materials and
+/// runtime-bound (segment) images.
+pub fn texture_png(
+    m: &Material,
+    blobs: &HashMap<u32, Vec<u8>>,
+) -> Option<Result<(String, Vec<u8>)>> {
     let file = m.texture_png(|id| blobs.get(&id).cloned())?;
     let t = m.texture?;
     let Some(Image::Flat { index, .. }) = t.image else {
@@ -398,9 +421,11 @@ fn hex(v: u32) -> String {
 /// fail to decode are left off their material and listed in [`Gltf::warnings`].
 pub fn to_gltf(level: &Level, textures: &Textures, bin_uri: &str) -> Result<Gltf> {
     let (mut pngs, mut warnings, mut unlit) = (Vec::new(), Vec::new(), false);
+    let bound =
+        |m: Material| (level.segments.iter()).fold(m, |m, (&s, &id)| bind_material(m, s, id));
     let mut blobs = HashMap::new();
     for m in level.meshes.iter().flat_map(|m| &m.ir.draws) {
-        for id in flat_ids(&m.material) {
+        for id in flat_ids(&bound(m.material)) {
             blobs.entry(id).or_insert_with(|| {
                 textures.get(id as usize).unwrap_or_else(|e| {
                     warnings.push(format!("texture {id}: {e}"));
@@ -456,7 +481,7 @@ pub fn to_gltf(level: &Level, textures: &Textures, bin_uri: &str) -> Result<Gltf
                             "level": t.level,
                         });
                     }
-                    match texture_png(&m, &blobs) {
+                    match texture_png(&bound(m), &blobs) {
                         Some(Ok((stem, file))) => {
                             let image = *image_ids.entry(stem).or_insert_with_key(|stem| {
                                 let uri = format!("textures/{stem}.png");

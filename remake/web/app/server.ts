@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
+  CHEATS,
+  type Cheat,
   type GameServer,
   MAPS,
   type MapId,
@@ -54,6 +56,7 @@ const int = (v: unknown, lo: number, hi: number): v is number =>
 const isMap = (v: unknown): v is MapId => typeof v === "string" && Object.hasOwn(MAPS, v);
 const isMode = (v: unknown): v is Mode => typeof v === "string" && Object.hasOwn(MODES, v);
 const isSkill = (v: unknown): v is (typeof SKILLS)[number] => SKILLS.some((s) => s === v);
+const isCheat = (v: unknown): v is Cheat => typeof v === "string" && Object.hasOwn(CHEATS, v);
 // The name never reaches the command line; still, nothing a shell or a page would read as code.
 const NAME = /^[\p{L}\p{N} _.,'!?-]{1,32}$/u;
 
@@ -61,7 +64,7 @@ const NAME = /^[\p{L}\p{N} _.,'!?-]{1,32}$/u;
 function validate(body: unknown): NewServer | string {
   if (!isObject(body) || !isObject(body.settings)) return "expected {name, map, mode, settings}";
   const { name, map, mode } = body;
-  const { bots, skill, time, lives, kills, score, radar, laps, route } = body.settings;
+  const { bots, skill, time, lives, kills, score, radar, laps, route, cheats } = body.settings;
   if (typeof name !== "string" || !NAME.test(name))
     return "name: 1-32 letters, digits, spaces or _.,'!?-";
   if (!isMap(map)) return `map: one of ${Object.keys(MAPS).sort().join(", ")}`;
@@ -80,11 +83,13 @@ function validate(body: unknown): NewServer | string {
   if (typeof radar !== "boolean") return "settings.radar: true or false";
   if (!int(laps, 1, 20)) return "settings.laps: 1-20";
   if (route !== 11 && route !== 12) return "settings.route: 11 or 12";
+  if (!Array.isArray(cheats) || !cheats.every(isCheat) || new Set(cheats).size < cheats.length)
+    return `settings.cheats: distinct codes of ${Object.keys(CHEATS).join(", ")}`;
   return {
     name,
     map,
     mode,
-    settings: { bots, skill, time, lives, kills, score, radar, laps, route },
+    settings: { bots, skill, time, lives, kills, score, radar, laps, route, cheats },
   };
 }
 
@@ -131,6 +136,7 @@ function spawn({ name, map, mode, settings: s }: NewServer, port: number): Runni
     ...(MODES[mode].laps
       ? { laps: s.laps, route: s.route }
       : { time: s.time, kills: s.kills, score: s.score }),
+    ...(s.cheats.length ? { cheats: s.cheats.join(",") } : {}),
   }).flatMap(([flag, value]) => [`--${flag}`, String(value)]);
   const proc = Bun.spawn([BINARY, ...argv], {
     cwd: REMAKE,

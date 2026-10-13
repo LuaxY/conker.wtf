@@ -14,7 +14,7 @@
 //! Everything hides while an outro plays. Clip clocks are this client's: a feed counts from the
 //! tick this client saw it, a drop too; what was already there at first sight counts as done.
 
-use bevy::gltf::{Gltf, GltfExtras};
+use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 use conker_assets::character_gltf;
@@ -222,7 +222,6 @@ pub fn build(app: &mut App, windowed: bool, raptor: Option<Raptor>, clips: Clips
         advance.after(crate::tick_anims).run_if(not(is_in_rollback)),
     );
     if windowed {
-        app.add_systems(Update, first_list_only);
         app.add_systems(FixedUpdate, splat.after(advance));
         app.add_systems(
             Update,
@@ -656,33 +655,6 @@ fn hide_bitten(
                     false => Visibility::Inherited,
                 },
             );
-        }
-    }
-}
-
-/// 83, 165 and 22 draw their list 0 only, wherever they are (players, the baby, the body, the outros'
-/// actors). V
-/// (`../lab/research/mp-original/raptor-client-scratch` run hg, DLs 200 and 400): the raptor draws
-/// 456 vertices, list 0's; obj+0x94 = 2 hides list 1 (a box and straps on its head); lists 2-3, the
-/// second table (list 0's and 1's again, untextured), are not drawn, as 150's (V). I: 165's list 1,
-/// its second table's, the same. V b22, b22b (a bite; DLs 95, 101, 130): the body draws 215
-/// vertices, its list 0's, not list 1.
-fn first_list_only(
-    parts: Query<(Entity, &GltfExtras, &Mesh3d), Added<GltfExtras>>,
-    mut commands: Commands,
-) {
-    let ours = [MODEL, BABY, BODY].map(character_gltf);
-    for (part, extras, mesh) in &parts {
-        let list = serde_json::from_str::<serde_json::Value>(&extras.value).ok();
-        let first = list
-            .and_then(|x| x.get("list")?.as_u64())
-            .is_none_or(|l| l == 0);
-        let path = mesh
-            .0
-            .path()
-            .map(|p| p.path().to_string_lossy().into_owned());
-        if !first && path.is_some_and(|p| ours.contains(&p)) {
-            commands.entity(part).insert(Visibility::Hidden);
         }
     }
 }

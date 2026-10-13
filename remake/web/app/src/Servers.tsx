@@ -3,6 +3,9 @@ import { LogIn, Play, RefreshCw, X } from "lucide-react";
 import { motion } from "motion/react";
 import { type FormEvent, type ReactNode, useState } from "react";
 import {
+  allowed,
+  CHEATS,
+  type Cheat,
   createServer,
   fit,
   type GameServer,
@@ -175,6 +178,7 @@ const DEFAULT: NewServer = {
     radar: true,
     laps: 5,
     route: 11,
+    cheats: [],
   },
 };
 
@@ -333,6 +337,36 @@ function CreateServer() {
             On the HUD
           </span>
         </label>
+        <fieldset
+          disabled={!allowed(form.map, form.mode, [])}
+          className="grid content-start gap-1 sm:col-span-2 lg:col-span-4"
+        >
+          <legend className={LABEL}>Cheats</legend>
+          <div className="mt-1 flex flex-wrap gap-x-5 gap-y-2">
+            {(Object.keys(CHEATS) as Cheat[]).map((code) => (
+              <label key={code} className="flex items-center gap-2 font-mono text-sm text-bone">
+                <input
+                  type="checkbox"
+                  checked={s.cheats.includes(code)}
+                  onChange={(e) =>
+                    setting({
+                      cheats: e.target.checked
+                        ? [...s.cheats, code]
+                        : s.cheats.filter((c) => c !== code),
+                    })
+                  }
+                  className="size-5 accent-lime"
+                />
+                {code}
+              </label>
+            ))}
+          </div>
+          <span className="text-xs text-dust">
+            {allowed(form.map, form.mode, [])
+              ? "More characters to pick in the lobby."
+              : `No character select in ${MODES[form.mode].name} on this map`}
+          </span>
+        </fieldset>
         {map.note && <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">{map.note}</p>}
         <div className="flex flex-wrap items-center gap-4 sm:col-span-2 lg:col-span-4">
           <button type="submit" disabled={pending} className="cta">

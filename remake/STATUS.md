@@ -1,5 +1,326 @@
 # Status after wave 6 (2026-10-10)
 
+## Bots: the follow-ups (2026-10-14)
+**Batch M6b, the bots lane. Four gaps against the original, one mode each. War: Raptor: a bolt or a knife no longer
+kills a raptor through its head (the original's raptor has no head part), and a caveman bot clubs a raptor from 160, as
+script 0xBE has it (query 0xEF answers 0x1F for a raptor). Race: a bot's power-up press is held, as the original's,
+so the bots fire their missiles and take canisters again. Tank: the bots fire on the original's rule (`func_1508D850`).
+Heist: the pickup gap is the server's roster: its bots fill slots 0-2, while the original seats its humans first. Not
+fixed.** Research: `../lab/research/mp-original/bots-followups-scratch/` (`tools/lldb_m6b.sh` on the private
+`ConkerRecomp.m6b`; `tankfire.py`, `tankfire2.py`, the race scripts; `code/`: the decompiled natives; `b1r_players.txt`,
+`hb3_players.txt`, `tank-tbl/`). The traces (b1r, tf1, tf2, L1, L2, fire1) were not kept. `PROTOCOL_ID` stays 31:
+`Fighter::aim_error` is not on the wire.
+
+| Part | What |
+|---|---|
+| conker-rules `game.rs` | **`first_part`**: a raptor (class 9) has no head part, so every bolt and knife on one hits for 1. V b1r: 103 of 103 hits for 1. Before, a head hit counted as `SNIPER_RAY`, and 9 of the raptor bots' 21 deaths in a probe run were these one-shot kills. **`Fighter::aim_error`** (Tank, s126+0x12A; `serde(skip)`, the server's alone), set by **`Effect::AimError`** |
+| conker-rules `race.rs` | A bot's held Z counts as a press every frame (a human's must be new). C `func_150528C8`: while riding (+0x226 = 0xFF), every frame +0x8C holds 0x2000 uses the power-up held (`func_150D7790`). +0x8C is the bot's last command-0x61 press, and `func_1504C854` never decays a racer's. Before, a bot that pressed before it took a missile kept it, and with a missile in hand it took no canister |
+| conker-rules `tank.rs` | **`BOT_REFIRE`** 51: a bot's fire clip lasts 51 frames, and a press inside it fires nothing. V tf2: 40 whole bot clips, all 51 frames; the 34 presses 41-42 frames in were ignored. I: why the human's (f3) lasts 34. **The pitch** of a bot with `aim_error` solves for the target 400 nearer (min 100; C `func_150ED298`'s last argument) |
+| conker-bots `brain.rs` | **`tank_fire`** = `func_1508D850`, command (0xF, 0xE), which ends each of 0xB8's bot frames and was a no-op before. Band by the enemy's xz distance: >5000, >2000, else near. When the fire counter G+0x29C passes `skill::TANK_FIRE[skill][band]` (V the oracle's RAM; normal skill 420/300/80 VIs), it restarts at 0, and with the enemy in sight (G+0x16C0 bit 16 + e) the bot presses Z (command 0x61 0x2000). Each restart draws the aim error: 1 when `STEADY[skill]` < rand·100. **`World::tank`**: in Tank the idle reset of the counter is skipped (C `func_1508A6FC` tests G+0x16BC = 0xB8). **Query 0xEF** answers 0x1F for a raptor and 1 for everyone else. V b1r: model 83's objects; the cavemen answer 1 or 5. 0xBE's free-for-all melee reach (0x2BDE) is 160 against a 0x1F, else 80. The raptor's push holds a club 147 off, so before this a caveman bot never swung at a raptor in 3f's Deathmatch. Command 0x61 keeps the press in `Npc::last` |
+| conker-bots `lib.rs`, `npc.rs` | Tank: Z is the script's press. Gone: the old guess (fire when ready with the lead within 5°, a −2..2° error drawn every frame). `Npc::error` (0/1) turns the turret 10° and goes to the rules as `AimError`. Race: the bot's input holds `last & Z` |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| rules `a_bot_holding_z_uses_each_power_up` (new), `refire_after_34` | A bot holding Z fires each missile as it takes it (3 of 3), a human only on a new press (1). A bot's press 42 frames after a shot is ignored, at 51 it fires |
+| bots `trigger_natives` | 0xEF answers 1 for a squirrel, 0x1F for a raptor |
+| rom `raptor_bots_play` (rewritten; seeds 1-3, 9000 frames; b1's roster: 6 cavemen with the idle human, 2 raptors) | Scores (cavemen-raptors) 17-12 at 9023, 14-20 at 8473, 14-20 at 8287. A 1000 frames: the cavemen's kills 1.75 (asserted 1.4-2.0; b1 and b1r 1.63-1.65), the raptors' 2.02 (1.4-2.4; b1r 1.65, b1 2.35), bites 8.3 (6-9; b1r 7.3). No hit on a raptor takes more than 1 |
+| rom `race_bots_finish` (L1, L2, L7e, L7f) | The bots fire missiles (asserted; 1, 1, 1 and 9 in the four races). 3 bots' steady laps: route 11 832-835 (L1 837; before 946-948), route 12 934 (L2 1063-1081; before 1068-1070). 7 bots: route 11 830-842, route 12 931-934 (before 833, 935); mean finishes within 5% of L7e's and L7f's |
+| rom `tank_bots_bomb_and_fight` (b1's roster, seed 1, 9000 frames) | Shots 335 (b1 321 to read 9023; asserted within 10%). Shell deaths 8 (b1 about 10; before 20; asserted 5-15). Hits of 1: 115 (b1 63). 4 plants, 21 blast deaths (b1 2 bombs, 12) |
+| rom `heist_bots_fetch_and_deliver` | Passes, 33 pickups (7 bots) |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | 526 pass, 1 ignored (with the other lanes' work in the tree); `check` passes (fmt, clippy on all 10 packages, `web/app`); wasm clippy passes |
+
+| Server run (`bots.sh`) | Before | After | Oracle |
+|---|---|---|---|
+| War: Raptor, `SIDE=cavemen BOTS=7`, 300 s (b1's roster), cavemen-raptors | 20-7 (at 8472), 20-8 (7577) | seeds 1-6: 17-11, 16-11, 18-16, 16-20 (at 9030), 19-16, 16-18 | b1 14-20 at 8510; b1r 16-16 at 9688 |
+| 3f Deathmatch, the raptor pick (`CHARACTER=10 BOTS=3`, 150 s), hits on the idle raptor | 1, 2 (only 0xEF reverted) | 5 (1 kill), 20 (5 kills) | none run |
+| Tank, `BOTS=7 TIME=5`, about 9000 frames, seeds 1, 2 | shell deaths 21, 17 (seeds 3, 4); 40, 45 in 600 s | shell deaths 7, 9; blast deaths 16, 16 (3, 4 plants); shell hits 94, 110 | b1: 23 shell and 34 blast deaths in 620 s (about 11 and 16 a 300 s), 63 shell hits to read 9023 |
+| Heist, `BOTS=3 TIME=5`, seeds 1, 2 | The same code (the batch changes no Heist path); the task's "half the oracle's" | takes 14 (9000 frames), 16 (the match won at 7158) | hb3: 30 takes, 39 hits to read 9023 |
+| Smoke: DM 2d `BOTS=3`, TW 2d `BOTS=3 HUMANS=2` (seeds 1, 2), Colors 30 `BOTS=7`, Beach 2b `BOTS=7`, 120-150 s | | Every bot moves. No fault, unknown native or panic. TW's FAIL lines are the known ones: a bot that never died in 2 minutes. DM, Colors, Beach and TW seed 1 ran before the last Tank and Raptor edits, TW seed 2 on the final build. These modes run the same code: every change is gated on Tank, Race or class 9, and with (0xF, 0xE) made an unknown native outside Tank every other ROM test still saw none | |
+
+**Heist: why 3 bots take the bag half as often.** The roster. The server seats its bots in slots 0-2 before any human
+joins, and the human takes slot 3. Heist's teams and start records follow the slot (team = slot & 3,
+`heist::RECORDS`), so the bots hold teams 0-2. Bases 0 and 1 are at the map's far ends (x 7052 and −8052), base 2 is
+near the middle, and so is base 3 (the human's). In the original the humans come first (hb3's idle human is slot 0),
+so its 3 bots hold teams 1-3, with one far base. The ROM path (`play`: the same script and rules, 9000 frames, seeds
+1 and 2) shows it:
+- the human in slot 0: 24 and 23 takes, 31 and 28 hits;
+- the human in slot 3: 13 and 16 takes, 15 and 16 hits. The server got 14 and 16.
+
+**Left.**
+- **Heist's roster** (not fixed). Seating humans first means renumbering the slots as humans join: the bots start
+  alone, and `PlayerId::Local(slot)` is on the wire. With the original's roster the bots still take the bag about 80%
+  as often (23-24 against 30; hits 28-31 against 39). Cause not found.
+- **Tank's hit rate.** At b1's shot count the shells hit about 1.8× as often (115 against 63; on the server 94-110).
+  95 of the 115 hits are near-band shots (under 2000) on the bot's own enemy. Yet the shell deaths are b1's or fewer,
+  because the hits spread over more tanks: b1's 63 hits made about 10 kills. Next: the near solve (`func_150ED298`'s
+  clamps) and the turret's lead (the remake's `d / 100`). Blast deaths in the ROM test are 21, against b1's 12
+  (4 plants against 2).
+- **Race route 12 with 3 bots** laps in 934, 12% faster than L2's 1063-1081 (asserted within 15%). The 7 bots' 931-934
+  is L7f's pace. In L2, a bot passes at the boosts; here the convoy keeps its order and leads there. Not traced.
+- **Raptor.** On the server the cavemen still score about 15% over b1 and b1r (16-19 against 14-16 a match), and the
+  raptors spread wider (11-20). Not checked: a War: Raptor run with a raptor human under the original's roster. In
+  these runs an idle raptor human took 12-18 hits a match before and 6-26 after, so bots hitting it "rarely" in War:
+  Raptor was not reproduced. There the reach was always 160, and the club hits on raptors in the ROM path match b1r's
+  (43 against 47).
+
+## Maps: runtime segments (2026-10-14)
+**Batch F4, the pack lane. Map 0x1A's nine white level materials are two computer screens (a 3-frame loop) and the
+lamp fixtures of its five switching lights (lit or dark with their light). The game binds these segments every frame.
+`level.gltf` now draws each one's first frame, with the lamps lit. The new `maps/<map>/segments.json` (in `Slice`)
+gives the client the screens' frames and each lamp's materials. No other packed map binds a level segment at run time.
+0x33's crowd now uses the same mechanism. Also from M14c: 31 textured character materials whose combiner reads no
+texel now carry no texture and draw their vertex colours (Conker's head and tail, material 11, no longer navy).**
+Scripts: `../lab/research/mp-original/race-effects-scratch/seg1a.py` (the rule against the dumps), `cc.py` (combiners).
+
+| Part | What |
+|---|---|
+| extract-level | `Level::segments` (segment → texture id): `to_gltf` draws the materials on that segment with that texture, but keeps the unbound material as the dedup key and the name `m<n>-seg<address>`. Bound materials no longer merge with others drawing the same texture. `bind_material` moved here from conker-extract |
+| extract-gbi | `Material::samples_texel`: the combiner reads TEXEL0/1 (as colour, alpha or a colour factor) in either cycle, or the list never set it. `texture_png` gives no texture otherwise, for every exporter (characters, levels, held, outros, props) |
+| conker-extract `lib.rs` | `vault_ids` (the 5 ids at 0x80090324). `map_level` fills `segments`: on 0x1A, 2 → 0x60B, 3 → 0x60C, 4-8 → 0x16C; on 0x33, each crowd segment → `ids[0]` (`CROWD_PHASE` and the material rewrite are gone). `map_segments` builds `segments.json` and its frame PNGs. A lamp's segment is 4 + (light command − 8), read from the triggers in `switching` order. `race_crowd` and `map_segments` share `segment_frames`. `bind_faces` leaves textureless materials out of `faces` (176's 12) |
+| conker-assets | `Segments { screens: Option<race::Crowd>, lamps: Vec<Lamp> }` and `Lamp { materials, on, off }`. `Slice::segments` comes from `maps/<map>/segments.json`, the 14th data file, so the web fetches it through `Slice::files`. `load` refuses screens with step 0 or no frames, and a lamp count other than 0 or `switching.len()`. `Crowd::invalid` is shared with `race.json`. `Panel` doc: the glTF draws `frames[0]` |
+| `pack-readme.md` | `segments.json`; the `-seg` names; the crowd draws `frames[0]` |
+| Pack | Re-exported. 2,043 → 2,054 files, 224,559,936 bytes. New: `maps/*/segments.json` (8; `{}` except 1a), `maps/1a/textures/0364-, 1547-, 1548-, 3197-32x64-rgba16-i.png` (1549 was there). Changed: `maps/1a/level.gltf` (9 materials textured), `maps/33/level.gltf` and `race.json` (crowd names `m53-seg06000000`, `m55-seg07000000`, `m56-seg04000000`, `m57-seg05000000`, drawing frame 0), 15 `character.gltf`s, `characters/176/character.json`, `characters/0/textures/character-06.png`. Removed by hand: the stale `characters/0/textures/character-07.png` (images shifted down by one). `README.md`. An older pack has no `segments.json`, so `Slice::load` refuses it ("missing"): re-export |
+
+**0x1A's rule (C, V).** Scene 0x1A's case in `func_1510B9D0`'s switch calls `func_15100464`. Of the five ids at
+0x80090324 (0x60B, 0x60C, 0x60D, 0x16C, 0xC7D), it binds segment 2 to `ids[(t/4) % 3]` and segment 3 to
+`ids[(t/4 + 1) % 3]`. t is the u8 at 0x800DD405, +1 a frame (`func_15100340`). Segment 4 + k gets `ids[3]` (lit) while
+switching light k is on and `ids[4]` (dark) while it's off, from the byte at 0x800BE500 + k. `func_15100340` toggles
+that byte together with light kinds 9-13. `seg1a.py` checks this against hud1-3, bag_dl, bag_ap, bag_dl3, dm3, dm15,
+cs2 and cs3: every dump's segments 2-8 match.
+
+| Segment | Materials | Frames |
+|---|---|---|
+| 2, 3 (screens, MASK) | `m69`, `m71` | 1547 → 1548 → 1549, segment 3 one frame ahead; every 8 VIs |
+| 4-8 (lamps of `switching` 0-4: lights 10, 11, 12, 20, 29) | 4: `m30`, `m31`; 5: `m75`; 6: `m68`; 7: `m70`; 8: `m73`, `m74` | on 0364, off 3197 |
+
+**Sweep.** 2d, 30, 34, 3f, 2b and 24 have no case in the switch (C), and their levels draw no segment image
+(`runtime_segments`). The tank's segment-8 calls are render-state lists, not textures.
+
+**Characters ignoring their texture.** All 31 materials have the combine `fffe8f f517f8ff`. Colour is cycle 1 = 0, then
+cycle 2 = (SHADE − ENV) × K5 + PRIM; alpha is SHADE × ENV. They now have no `baseColorTexture`, so they draw white ×
+COLOR_0. By character, material (texture): 0: 3 (3097), 6 (3099), 8 (3098), 11 (3649). 59: 4 (7244). 83: 6 (3701),
+9 (3709), 10 (3709). 88: 5 (1540), 7 (4211). 90: 2 (4397), 6 (4399). 128: 2 (4214), 4 (4211). 134: 11 (1520),
+13 (3521, BLEND). 135: 11 (2648), 14 (4200). 144: 2 (4751). 150: 5 (1562), 7 (2260). 156: 2 (1363), 4 (4211). 157:
+2 (4211), 7 (1356, BLEND). 165: 6 (3702), 9 (3709), 10 (3709). 176: 9 (2648), 12 (4200). 177: 5 (4545). No level,
+held, outro or props material has this combine. Material indices are unchanged.
+
+| Check (2026-10-14) | Result |
+|---|---|
+| `tests/rom.rs` `runtime_segments` (new) | `vault_ids`. 0x1A's `segments` cover every segment its draws read. 104 materials, 9 `-seg`, each drawing its first frame. The screens' and lamps' materials and frames, in command order. 5 PNGs. The six other maps: no segment drawn, `segments.json` empty |
+| `tests/rom.rs` `race_crowd_and_effects_follow_the_oracle` | Now: `segments` = each crowd segment's frame 0 and cover every drawn segment. Still 73 materials, 54 kept apart (`m54-tex4704`). Panels `m56`/`m57`/`m53`/`m55-seg…` draw `frames[0]` |
+| `tests/rom.rs` `parts_ignoring_their_texture_draw_vertex_colours` (new) | Conker's material 11: image flat 3649, combine `fffe8ff517f8ff`, no `baseColorTexture` |
+| `tests/pack.rs` | 0x1A's `segments` = `map_segments`, 5 lamps, each material drawing its first frame, every frame a PNG. Every map: no `-seg` material without a texture, `segments.json` `{}` off 1a. The crowd draws `frames[0]`. Faces: every face material is textured |
+| extract-gbi, conker-assets | `samples_texel` (Conker's combine vs a TEXEL0 one). The slice round trip with `segments`, the lamp count and empty-frames refusals, `{}` when empty |
+| Pack (`../lab/tools/verify-pack.sh`) | "pack equal", 2,054 files |
+| `bun run test`, `bun run check` | Pass (clippy `-D warnings` on extract-gbi and extract-level too) |
+
+**Gaps (I).** 8 VIs a screen frame assumes 2 VIs a game frame (t counts frames). The characters' colour drops PRIM,
+ENV and K5. Vertex colour alone is what M14c saw on Conker in a1 (V). 88, 90, 134 and 135 were not checked against the
+oracle.
+
+**Handoff (client; no wire or rules change, and no new fetch: `segments.json` is in `Slice::files`).**
+- **0x1A screens:** `slice.segments.screens` (a `race::Crowd`). For each panel, set the `level.gltf` material named
+  `panel.material` to `maps/1a/<frames[i]>`, with i = (VIs / `step`) % 3 on one clock (`step` 8). Keep MASK. Race's
+  crowd code works unchanged if it takes the map folder as a parameter.
+- **0x1A lamps:** `slice.segments.lamps[k]` follows `lights.switching[k]` (`lights.rs`'s switch k). While it's on, the
+  materials in `lamps[k].materials` draw `on`; while it's off they draw `off`. No material is shared between lamps.
+- **0x33:** the crowd's material names changed (`m56-seg04000000` …) and the glTF draws `frames[0]`. Nothing to change
+  if the names are read from `race.json`.
+- **Characters:** the 31 materials above have no base-colour texture, so don't assume one. 176's face segment 6 now
+  lists only material 10.
+
+**Client (batch F3c, conker-client `segments.rs`).** One system binds every runtime-segment material by name as the
+level spawns and swaps its texture in place (alpha mode kept, the glTF texture's sampler): the panels of
+`segments.screens` (or Race's `race.json` `crowd` on 0x33) on one clock, `frames[(tick × 2 / step) % len]`, and each
+`segments.lamps[k]` material `on` while `lights::Flickers::switches[k]` is on, else `off` (lit until known). Tests
+`the_vault_screens_loop_with_one_ahead` (1547/1548 → 1548/1549 → 1549/1547 every 4 frames) and
+`the_vault_lamps_follow_their_lights`. Screens: `../lab/screens/vault/screens.png` and `screens-4.png` (reads 120
+and 124, a free camera at (−350, 250, −250): the right-hand monitors step one frame). The textureless character
+materials need no client change: only faces' sampler and the tank's tread width read `base_color_texture`, both
+`None`-safe, and the code that sets one (team looks 119/14 and 59/2, 119's brake, the faces) only touches textured
+materials. **For the pack lane:** by position the lamps do not sit by the light they follow: segment 4's fixtures
+(`m30`/`m31`, about (1896, 150, 671)) are by light 11 (1887, 300, 739), 5's (`m75`) by light 10, 6's (`m68`) by 20,
+7's (`m70`) by 12, and 8's by 29. `segments.lamps[k]` pairs segment 4 + (command − 8) with `switching[k]` = lights
+10, 11, 12, 20, 29, so lamps 0-3 follow a light across the map. Either the original cross-wires them (C says byte k
+toggles with light kind 9 + k) or the command-to-light pairing is off; worth one dump of a lamp going dark.
+
+## Characters: the client and the lobby (2026-10-14)
+**Batch M14c. Every pick is drawn, posed and heard by its class. The client loads the models of the match's allowed
+picks (`MatchView.characters`) and of every player's class, one glTF at a time after the map's own. A class whose
+model isn't in yet is drawn as its side's body, so no pick indexes past a list (M14b's crash is gone). The nine
+mesh-only models (0, 150, 152, 159, 160, 176, 177, 178, 180) play 117's clips through the retarget. Bodies are drawn
+at `characters::scale`: 0.6 for the Sergeant and the Tediz Leader, with the camera's aim raised to match, and 0.7 for
+the raptor. Every model's `hidden` lists apply, and the leaders hold the bazooka their own way. The blinkers blink. In
+Race any pick rides the board. `--character` takes an index or a name. The web lobby has a picker over the server's
+allowed set, and the create form has the cheats.** Research: `../lab/research/mp-original/characters-scratch/m14c/`
+(`run.sh` on the private `ConkerRecomp.m14c`, `scale.py`, `combine.py`, `kick.txt`). Screens:
+`../lab/screens/characters/`.
+
+| Part | What |
+|---|---|
+| conker-client `lib.rs` | **`PICKS`**: (folder, name) for the 22 picks. **`parse_pick`**: an index or a name, any case, for `character=`. **`map_characters(map)`** is the old list. **`characters(map)`** adds every model a pick allowed with every cheat would need, and **`character_files`** adds 0x3F's baby and body. **`body(c, characters)`**: the class's model, else `c.side`. **`Bodies`** (names, `clips_from`). **`BodyClips`** gives a mesh-only body its `clips_from`'s clips. **`camera_view`**: `head` × `scale(class)` / 0.5, except for the raptor (its camera is its own). `tick_anims`: durations by `clip(class, id)`, racers by `MatchView.race`, the kick's rate by human or bot (below). `attach`: the racer's camera cut by `MatchView.race` |
+| conker-client `render.rs` | **`load_characters`**: one glTF at a time, keeping each handle (the connection waits on the own ones). Order: the map's own, then the players' bodies, then the allowed picks; a mesh-only pick comes after its `clips_from`. `Look` keeps the joints' bind translations. **`Characters::drawn`**: the class's body once loaded, else the side's; `rebuild_models` redraws a player when that changes. `add_player_models` scales by `scale(class)` (the lift too). **The retarget** (`Retarget`, `rig_ready`, `rest_retargeted`, `retarget`): a mesh-only rig gets an `AnimationTargetId` per joint (its path from `joint_00`), `AnimatedBy` and an `AnimationPlayer` on `joint_00`, and 117's graph. Before the animation systems, each joint's translation is reset to 117's bind; after them, `own bind − 117's bind` is added. So joint k sits at `key − 117's node k + own node k`, and a joint the clip doesn't key rests at its own bind. Rotations and scales are 117's keys. `pose_players` asks `clip(class, id)`. **`hide_lists`**: for every glTF with `hidden`, the primitives whose `extras.list` bit is set are hidden. This replaces `raptor::first_list_only`, which is removed |
+| conker-client `faces.rs` (new) | **`Blink`** (C `func_1507E2B0`, `func_1502EEF4`): open ⌊T/2⌋ frames, T = `rand() % 140 + 10` VIs, then half, shut, half, a frame each. Each blinker (a player whose model has `faces`) gets its own copies of its eye materials (as `wear` does), and its three looks load with the glTF image's sampler. Both eyes and both segments switch together, bots too. Each slot has its own LCG, set from the match start once known, so `--wait` replays show the same blinks every run. Held at health 0 until the respawn (the local player's by its prediction). The outros' actors and 0x3F's baby are not players, so they keep the glTF's open eyes |
+| conker-client `race.rs`, `held.rs`, `beach.rs`, `audio.rs`, `raptor.rs`, `connection.rs`, `smooth.rs`, `main.rs` | Race: `racer()` is gone. The board, gear, clips, held items and camera go by `MatchView.race`, so any pick rides. **`rate(clip, human)`**: the kick plays at 1.35 for a human whatever the pick, 1 for a bot (V kick7, below). Gear: helmets only on classes 0xD-0xF (`race.json` `heads`, C `func_15083384`); the other picks ride bare-headed. Beach's dress ORs the model's own `hidden`. Audio: voices and clip sounds by the body's model. The connection gate waits on `map_characters` only |
+| web `app/src/data.ts`, `store.ts`, `Lobby.tsx`, `Servers.tsx`, `server.ts`, `README.md` | `PICKS` (names), `CHEATS` (code → picks), **`allowed(map, mode, cheats)`** as the server's `characters()` (0x3F with all: 0x3F_CFFA, as its test), `Settings.cheats`. Create server: the 7 codes as checkboxes, disabled where the map and mode have no select. `server.ts` accepts only distinct known codes and passes `--cheats a,b` when any are on; a "Cheats N" settings row. Lobby: a "Character" select ("The server's choice" plus the allowed picks by name), shown only where there is a select. The choice is kept in `usePlayer.character` and goes into the play URL as `character=N` only when this server allows it. README: the `character=` option |
+| `../lab/screens/characters/shots.sh` (new) | Ports 5980-5988, `--cheats all`. Each shot: one offscreen client plus a headless one per further pick, joined in order onto `--spawn`s in a row facing the camera |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| client `bodies_by_map_and_class` | Every pick allowed on 0x2D, 0x34, 0x30, 0x1A, 0x3F and 0x33 with every cheat draws its own model. 0x2D's extra models in pick order (176, 177, 59, 152, 144, 156, 0, 150, 157, 159, 160, 178, 180); none on 0x24 and 0x2B; 0x3F's files end with 165 and 22 |
+| client `a_pick_is_drawn_as_its_side_till_its_model_is_in` | The Sergeant on the Tediz side is drawn as the Tedi until 176 is in, then as 176. Conker and Gregg with no model on the list are drawn as their sides' |
+| client `picks_are_the_rules_and_have_names`, `mesh_only_picks_take_their_clips_from` | The folders are conker-rules' models; `parse_pick` and `character=` (index, name, bad values). A `clips_from` body has the Tedi's clips and durations |
+| client `a_blink_follows_the_oracle` | V c1's blinks start at reads 132, 141 and 199 (T 127, 13, 111): half, shut, half, open. T spans 5-74 frames |
+| client `racers_show_their_clips` | `rate(KICKING, human)` 1.35, a bot's 1 |
+| `bun run test` | 520 pass, 1 ignored (with the bots and pack lanes' work in the tree). Then `cargo test -p conker-client` after the last edits (the drawn-body test): 126 pass |
+| `bun run check` | Stops at `cargo fmt --check` on the other lanes' in-progress files (`conker-bots/tests/rom.rs`, `conker-rules/src/game.rs`, `conker-assets/src/lib.rs`, `conker-extract`, `extract-level`); conker-client passes fmt. Its clippy (`-D warnings`, all 10 packages) passes when run alone, and so does the `web/app` check (typecheck, oxlint, oxfmt) |
+| wasm clippy (`conker-client`, `-D warnings`) | Passes |
+
+| Oracle (`ConkerRecomp.m14c`; scenario 3 = DM 0x2D, 1 bot, idle; DL 100) | Result |
+|---|---|
+| Scale (`scale.py` on s0, s1, s3: `CONKER_MP_CHARS` 0, 1, 3) | 128's vertices are drawn under a modelview of scale 0.5000; 176's and 177's under 0.6000 = `scale(class)` |
+| Camera (the same runs, read 90) | Aim +67.5 over the squirrel and +81 over the Sergeant and the Tediz Leader. Ours is `head` × 0.75 with `head` × 1.2. The eye is +100 in all three. Ours should be too, by the code (`head` feeds only the aim and the scope's eye); not measured |
+| Conker's head (`combine.py`, F2's a1) | The 54 triangles of material 11 (the head and the tail) are drawn under combine `fffe8ff517f8ff`, (shade − env) × K5 + prim, which samples no texel (F3's `cc.py` agrees). Their vertex colours average (0.93, 0.53, 0.27), orange. The pack gives material 11 texture 3649 (at +1024: a blue strip), so the client draws Conker's head navy (gap) |
+| Kick rate (`race-scratch/run.sh` kick7: scenario 11, 1 bot, `CONKER_MP_CHARS=7`, `kick.txt`) | The human (pick 7) kicks (state 84) at 1.35 at reads 242-270 and 301+. 296-300 is the knock, at 1. So the rate goes by human, not by class |
+
+| Screen (`zsh shots.sh [name]`; 0x2D unless noted) | What it shows |
+|---|---|
+| `lineup-a.png`, `lineup-b.png`, `lineup-c.png` (read 90) | Every pick allowed on 0x2D with every cheat (19), idle: the squirrel, Sergeant, Tedi, Tediz Leader, Wise Guy, weasel and caveman; the four racers, the villager, Conker and Neo; the villager woman, both zombies, both Greggs. Every mesh-only model stands posed (the retarget), none collapsed or stretched |
+| `scale.png` | The Tedi, Sergeant, Tediz Leader and squirrel side by side: 0.6 against 0.5 |
+| `bazooka.png` (B at 40, read 100) | The Sergeant, Tediz Leader and Tedi given 0x16: the leaders on 0x2C5, the Tedi on 0xBD |
+| `blink.png` (read 44) | Conker's eyes shut (slot 0's first blink after the start), the squirrel's open |
+| `raptor.png` (0x3F) | The raptor pick at 0.7 next to the caveman |
+| `race.png`, `race-grid.png` (0x33, read 300 and 150) | Conker (WELLYTOP) on the board, bare-headed, behind it in the race camera and from the front on the grid beside a bot |
+| `../lab/screens/raptor/shots.sh a`, rerun into `/tmp` (not kept) | `hide_lists` on 165 and 22 (`first_list_only` gone): the baby draws one head (nest, read 345) and the raptor carries the body (205). Both look as the committed `nest.png` and `body-side.png`, except that the raptor's and the baby's eyes are now textured |
+
+Natively, 0x2D's 13 extra glTFs (every cheat) load within 0.45 s of connecting, so a pick shows its side's body for
+under half a second.
+
+**Gaps.**
+- **Pack fix needed: Conker's (0) head and tail draw navy.** Material 11 should carry no texture (oracle above).
+  Fifteen models carry such textured materials under a combine that samples no texel (0: 3, 6, 8, 11; 128: 2, 4;
+  134, 135, 144, 150, 156, 157, 165, 176, 177, 59, 83, 88, 90). Of those in the shots, only 0's is visibly wrong:
+  the others' textures are close to their vertex colours. 134, 135, 88 and 90 were not looked at.
+- **C, not drawn:** the helmets of the racer classes 0xD-0xF outside Race. 0x3F's Deathmatch allows 0xD (pick 8),
+  and EATBOX adds all the racers to every Deathmatch; C attaches the helmet in any mode. The helmet models are in
+  0x33's `props.gltf`, so these picks are drawn bare-headed there.
+- **I:** 176's and 177's lift is drawn × 0.6 (the lift scales with the model). Not checked against a frame.
+- **I:** the held weapons stay at their size on the 0.6 picks. The leaders' bazooka looked right in `bazooka.png`.
+- On the web, a cheat pick's model loads after the connection (each glTF a few MB), so it shows its side's body
+  meanwhile. Not measured in a browser.
+- No portraits in the lobby: the picker is names only.
+- The lobby's allowed set comes from the dev server's settings, not the game server's `/info`. A server started
+  outside the dev server (other cheats) is not reflected. The game server still refuses a pick it doesn't allow.
+
+## Race: the effects (2026-10-14)
+**Batch F3, the pack lane. Race's effect textures are in the pack: the countdown lamps' flare, the canister's boost
+flare, the exhaust glow's four frames and the missile's trail (`hud/race_*.png`). The white panels near the grid were
+0x33's crowd: five-frame cheering spectators that the game binds to segments 4-7 every frame. `level.gltf` now draws
+each panel with one of its frames, the other frames are in `maps/33/textures/`, and `race.json`'s `crowd` gives each
+panel's material and frame order. The client changes are a handoff (below).** Research and scripts:
+`../lab/research/mp-original/race-effects-scratch/`. `segtex.py` lists the textures set through segments 2-7.
+`fxdl.py` dumps one texture's draws, with state, vertices and matrix. `cc.py` decodes combiners. `glow.py` and
+`lamps.py` list the quads. `sheet.py` makes contact sheets. These read M13's dumps in `/tmp/m13` (cd, it, w1, w3, w3b,
+w3c), so no new oracle run was needed. `../lab/hud/texfind` gained `raw DIR ids…`.
+
+| Part | What |
+|---|---|
+| conker-extract `hud.rs` | `TEXTURES` + 7 (43). `race_lamp` 0x235, I8 64×64. `race_boost` 0xE21, I8 64×64. `race_exhaust_0..3` 0x923-0x926, RGBA32 32×32. `race_trail` 0xB39, I8 128×1. All load with dxt 0, so odd rows are swapped as for the others. M13 read the trail as "I8 16×1". Its tile is I8 256×1, but `G_TEXTURE` scales by 0.5 and s reaches 8100, so only the blob's 128 bytes are sampled (a ramp 0 → 0xFF → 0). The second half of the 256-byte load is RAM garbage (V w1 DL 222) |
+| conker-extract `lib.rs` | **`crowd_frames(rom)`**: for segments 4-7, the 5 ids in the order shown, read from the two tables addressed at 0x80088900 (`.game` data). **`map_level`**: on 0x33, binds each segment to its frame at `CROWD_PHASE` 1 (`bind_material`, as the characters' segments; F4: replaced by `Level::segments` at frame 0, see "Maps: runtime segments"). **`race_crowd(rom, textures)`**: `race.json`'s `Crowd` (each panel's material name, read from the produced glTF, and its 5 frame paths) and the 10 frame PNGs. The PNGs are named by extract-level's `texture_png`, as the level's. **`race_mode`** fills `crowd`. **`pack`** adds the frames to 0x33's level images |
+| extract-level | `texture_png` is public (docs only otherwise) |
+| conker-assets `race.rs` | `Race::crowd: Option<Crowd>` (serde default, skipped when absent, so older packs load). `Crowd { step, panels }`, `Panel { material, frames }`. `load` refuses `step` 0 or a panel with no frames. The round trip covers both cases |
+| `pack-readme.md` | The 7 HUD PNGs, 0x33's extra frames, `race.json`'s `crowd` |
+| Pack | Re-exported (`bun run pack -- --force`): 2,027 → 2,043 files, 224,505,862 → 224,544,672 bytes. New: `hud/race_lamp.png`, `race_boost.png`, `race_exhaust_0..3.png`, `race_trail.png`; `maps/33/textures/4697…4702, 4706, 4708, 4710-64x32-rgba16-i.png` (9; 4704 was there). Changed: `maps/33/level.gltf` (materials 53, 55, 56, 57 textured), `maps/33/race.json` (`crowd`), `hud/hud.json` (7 textures), `README.md` |
+
+**The crowd (C, V).** `func_1510B9D0` switches on the scene (word 0x800BE9F0 − 0x13, table 0x800A2C2C). Scene 0x33 calls
+`func_150D765C`. That function binds segment s = 2…7 to `func_1510D0EC(table[(k + 13 (s − 2)) % 5])`. Segments 2-5 use
+table A (0x80090230) and 6-7 use table B (0x80090244). k is the u16 at 0x800D9910 >> 8. `func_150D7630` adds VIs × 64
+to it every frame (2 VIs in Race), so the frame changes every 4 VIs, 15 times a second. The u16 wraps every 1,024 VIs,
+and 256 ≢ 0 (mod 5), so the cycle skips one frame then. The counter's phase is free (I).
+
+| | Ids | Level materials |
+|---|---|---|
+| A (segments 2-5) | 0x125E, 0x1260, 0x1262, 0x1264, 0x1266 (4702-4710 even) | seg 4: 56, seg 5: 57 |
+| B (segments 6-7) | 0x1259-0x125D (4697-4701) | seg 6: 53 (the most quads), seg 7: 55 |
+
+Material 54 is the static 0x1260 panel, A's second frame. Binding at k = 0 would put segment 4 on 0x1260 too, and the
+writer would merge 56 into 54. Phase 1 keeps all 73 materials and gives the names `m53-tex4700`, `m55-tex4698`,
+`m56-tex4706`, `m57-tex4702` (F4: superseded; bound segments no longer merge, so the names are `m<n>-seg<address>` and
+the glTF draws frame 0). Segments 2 and 3 are bound too, but no 0x33 level material draws them (V). The panels
+are RGBA16 64×32, BLEND, shown in every Race frame seen (never hidden). They show two cheering spectators.
+
+**What the original's DLs show** (V; all world-space quads, the matrix before them the identity; render mode
+0x00504350: blended, z compare, no z write):
+
+| Effect | Texture | Colour × alpha | Quad (world units) |
+|---|---|---|---|
+| Countdown lamps (cd 142-285, it 206-270) | `race_lamp` | env RGB: red (255, 0, 0) in stages 1-2, green from stage 3 (197); alpha = tex α × env α | Squares 845-857 wide, centred about (274, 1616, −7537), (282, 1489, −7538), (290, 1365, −7545), top to bottom. They appear one per stage (142, 172, 197) and turn with the camera. Their centres drift toward it (I). **Env alpha is 0 in every dump up to the go** (142-202, 16 dumps). After the go the lower two flicker 0x11-0x84 (law I) and the top one stays 0. None after about 270 (it 285, cd 600). So the red lamps never show in the original |
+| Boost flare (w3b/w3c 480-510) | `race_boost` | white; alpha = tex α × 0x6B-0x71 | 348-399 × 74-76, centred on the racer: −6…19 ahead, 24-27 to the side, 33-90 up (M13) |
+| Exhaust glow | `race_exhaust_0..3` | tex RGB; alpha = tex α × env α 0xE1-0xFD | Per racer, one frame per game frame from the four. The frame looks random (V runs such as 924, 923, 923, 925 …, both views of w1 equal; I). 84-91 × 78-85 while boosting: 7-35 behind, 22-25 to the side, 42-99 up (w3c). 17-178 wide in cd/w3 without a boost (size law not decoded). `.game` lists 0x923-0x926 next to 0xBA6 (the traps' puff) at 0x8009016C |
+| Missile trail (w1 218-240) | `race_trail` | white; alpha = tex α × vertex α | A ribbon of 7 points about 200 apart (a missile's frames), 58 wide. u runs 0 → 1 across the width. Vertex alpha falls 255, 212, 169, 127, 84, 42, 0 from the missile back. A second, narrower 3-column strip follows it with env α 0xFF (not decoded) |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| `texfind` on M13's dumps | 0x801C02B0 = blob 0x235, 0x801B7770 = 0xE21, 10 RAM copies of the glow = 0x923-0x926, 0x801AB800 = 0xB39, segments 4-7 in cd 142/200 and w1 218 = 0x1259-0x1266 (12 matches), each byte for byte |
+| Crowd rule | k 60 (cd 142), 89 (cd 200), 98 (w1 218): the rule gives the four ids drawn |
+| `tests/rom.rs` `race_crowd_and_effects_follow_the_oracle` | (F4 changed the names and frame, see "Maps: runtime segments".) Tables, order and the three frames above. `map_level(0x33)` has no segment image left. 73 materials, 53-57 = `m53-tex4700`, `m54-tex4704`, `m55-tex4698`, `m56-tex4706`, `m57-tex4702`. `race_mode`'s crowd: step 4, panel order, frames, `frames[1]` = the bound texture. 10 PNGs. Blob sizes, and the trail rising to 0xFF at byte 64 and back to 0 |
+| `tests/pack.rs` | `race.json` = `race_mode` (now with the crowd). Each panel's material in `level.gltf` draws `frames[1]` (F4: `frames[0]`). Every frame is a PNG. `hud.json` sizes of the new textures (all HUD PNG sizes are checked already) |
+| conker-assets | 14 pass (round trip with and without `crowd`; the refusal) |
+| Pack (`../lab/tools/verify-pack.sh`) | "pack equal", 2,043 files |
+| `bun run test` | 520 pass, 1 ignored |
+| `bun run check` | Fails only on the other lanes' in-progress files: `cargo fmt --check` (conker-client `beach.rs`, `faces.rs`, `lib.rs`, `render.rs`) and clippy (conker-client `lib.rs` `attach`: too many arguments, a complex type). Clippy `-D warnings` on conker-extract, conker-assets and extract-level, and the `web/app` check, pass |
+
+**Gaps.**
+- **I:** the lamps' flicker law after the go, why the top lamp and every red stage stay at alpha 0, and the drift of
+  the quads' centres. The exhaust glow's size law without a boost, and its frame choice. The trail's second strip.
+  Where in the code each effect's alpha comes from was not read (`func_15065A5C`'s 0x235 is a sound id, not this
+  texture).
+- **Map 0x1A has the same gap** (done in F4, "Maps: runtime segments"): 9 level materials on segments 2-8 (`m30`/`m31` seg 4, `m68` seg 6, `m69` seg 2,
+  `m70` seg 7, `m71` seg 3, `m73`/`m74` seg 8, `m75` seg 5). There the switch calls `func_15100464`. Segments 2 and 3
+  cycle 3 ids, `table[(t + i) % 3]` with t = byte 0x800DD405 >> 2 and the table at 0x80090324 (0x60B-0x60D).
+  Segments 4-8 take `table[3 + byte 0x800BE500 + k]` (C, not seen in a frame). The tank's segment-8 render-state
+  lists are another matter.
+- `../lab/research/mp-original/race.md` §M13 still says "find the missile trail in w1b/w5"; this section has it.
+
+**Handoff (client: conker-client `race.rs`; nothing changes in the wire or the rules).** The PNGs load through Bevy's
+asset server like the others, and the web build fetches no new JSON.
+- **Crowd:** `Race::crowd` (`Option`). For each `Panel`, the `level.gltf` primitives whose `GltfMaterialName` is
+  `panel.material` (one material per panel, used by nothing else) get that material's `base_color_texture` set to
+  `maps/33/<frames[i]>` with i = (VIs / `step`) % `frames.len()`, on one clock shared by all four panels (VIs =
+  elapsed seconds × 60: 15 frames a second; the phase is free). Mutate the material or use one copy per panel, as
+  `beach.rs` `scroll_water` does. Keep its BLEND.
+- **Boost flare:** replace `sprites.streak` (`hud/strike_streak.png`) in `flares` with `hud/race_boost.png`. Keep the
+  size, place and alpha 0x6E: white × texture alpha, blended, no depth write.
+- **Exhaust glow (new):** a camera-facing quad per racer, blended, depth-tested, no depth write. Colour is
+  `hud/race_exhaust_{f}.png` with f random 0-3 each game frame per racer, alpha × about 0.96 (0xF5). Use about 88 × 82
+  at 25 behind, 24 to the side, 60 up while boosting. Without a boost the size varies 17-178 (law not decoded: a
+  steady 88 is the I choice).
+- **Missile trail (new):** a ribbon through each missile's last 7 positions, 58 wide, facing the camera (I), with u 0 → 1
+  across its width on `hud/race_trail.png` (clamp). White; alpha = texture × (1 − n/6) at point n from the missile.
+  Blended, no depth write.
+- **Countdown lamps:** to match the original, draw nothing before the go. After the go, draw the lower two lamps
+  (centres above, about 850 square, camera-facing) green × `hud/race_lamp.png` alpha × a flicker of 0.07-0.5 for about
+  70 frames (I). Skipping them entirely is also close to the original.
+
+**Client (batch F3c, conker-client `race.rs`, `segments.rs`).** **Crowd** (`segments.rs`, shared with 0x1A's
+screens, see Maps: runtime segments): each panel's level material, found by name, gets `frames[(VIs / step) % 5]` as
+its texture in place (BLEND kept, the glTF texture's wrapping sampler), VIs = match tick × 2, one clock for all (the
+u16's skipped frame every 1,024 VIs is not drawn). **Flare:** `race_boost.png` in place of
+the streak. **Exhaust:** an 88 × 82 camera-facing quad per live racer, frame = a hash of (tick, slot) (I), alpha 0xF5.
+Both sit 24 to the racer's right, −x in its frame (V: M13's w3c 480/490/500 put the flare 24-26 and the glow 22-25 to
+player 0's right, the glow 16-31 behind). **Lamps:** the lower two, green, 850 square, from `RaceView::go` for 70
+frames at alpha 0x11-0x84 (a hash, I). **Trail:** `ribbon` through each missile's last 7 places (reset on a jump over
+600), 58 wide facing the camera, alpha 1 − n/6. All use `traps::material` (Blend: an I8 PNG's RGB is its intensity,
+so the edges are greyer than white × alpha; hud.rs loads these PNGs as sRGB first and Bevy 0.19 keeps one handle per
+path). Checks: client `race` and `segments` tests (the crowd's clock, exhaust frames, the lamps' window and range, the
+trail's alphas, width and u); `bun run test` 527 pass, 1 ignored; wasm clippy and `bun run check` pass. Screens
+(`../lab/screens/race/shots.sh`, new `lamps`, `lamps-side`, `trail`): `grid.png` (150: the crowd, the glows),
+`lamps.png` (220: green on the post over the arch), `lamps-side.png` (free camera), `boost.png` (225), `missile.png`
+(238), `trail.png` (240). No oracle frame renders exist (M13's `hw_*/hud.png` are HUD only): compared by the dumps'
+numbers. **Gaps (I):** seen from the side, the lamp quads float about 380 in front of the post (the original's drift
+toward the camera, not decoded); the glow's size without a boost; the trail's second strip; the other screens
+predate the glow.
+
 ## Character materials' alpha (2026-10-14)
 **Batch F2, the pack lane. Every character glTF material now says how the original draws it: `alphaMode` `BLEND`
 (translucent), `MASK` with `alphaCutoff` 0.5 (alpha-tested) or `OPAQUE`, and `doubleSided` from the culling at the
@@ -141,7 +462,8 @@ one in flight), `missile-hit.png` (Z at 345; at 361, a free camera: slot 1 knock
   - the death's look-down (123 → 2.6 over 87 frames);
   - the finish cameras (a fixed eye at the finish, the sweep from 321; V F1).
   `conker_camera::CameraState` in mode 8 with the board flag would be closer.
-- **Pack (none packed):** these textures are not in the pack, so they have stand-ins or nothing:
+- **Pack (none packed):** these textures are not in the pack, so they have stand-ins or nothing (packed now: Race: the
+  effects, above; the trail is I8 128×1):
   - the countdown's lamp flare (I8 64×64 at DRAM 0x801C02B0: three world quads, red, then green at go; nothing drawn);
   - the boost flare (I8 64×64 `801b7770`, ≈370 × 75 at alpha 0x6E: the strike's streak stands in, facing the camera, I);
   - the riding exhaust glow (RGBA32 32×32 per racer; nothing);
@@ -158,7 +480,7 @@ one in flight), `missile-hit.png` (Z at 345; at 361, a free camera: slot 1 knock
   Race's picks (0xC-0xF) are inside that range, but a human who picks one kicks at 1, and a cheat's pick outside it
   would ride with none of these.
 - The white panels near the grid are 0x33's level materials 53-57 on the runtime segments 4-7 (BLEND), drawn white
-  (pack lane).
+  (pack lane). (Done: the crowd, Race: the effects, above.)
 - The missiles' sounds match them in order within 8 frames' flight. A missile snapped far onto the track reads as a
   new one: a second launch, seen once, from a dying human.
 

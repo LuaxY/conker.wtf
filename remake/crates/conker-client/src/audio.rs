@@ -166,10 +166,7 @@ impl Pack {
         triggers: &[u8],
     ) -> Self {
         // On 3f the baby's and the body's events too (no player is drawn as them).
-        let mut characters = crate::characters(map);
-        if map == "3f" {
-            characters.extend([crate::raptor::BABY, crate::raptor::BODY]);
-        }
+        let characters = crate::character_files(map);
         let mut clips: Vec<_> = (characters.iter())
             .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
             .collect();
@@ -2316,7 +2313,7 @@ fn hear(
         let bot = id.is_some_and(|i| matches!(i.0, PeerId::Local(_)));
         let seen = Seen {
             slot: c.slot,
-            body: crate::body(c),
+            body: crate::body(c, &pack.characters),
             pos: p.pos,
             clock: anim.0,
             weapon,

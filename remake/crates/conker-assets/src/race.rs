@@ -1,7 +1,7 @@
 //! `maps/<map>/race.json`: what Race (scenarios 11 and 12, on `33` only) adds to its map: the two
 //! routes (the barriers each shows, one lap of track nodes, the overview map), the racers'
-//! characters, and the board and helmets hung on them (`props.gltf`'s scenes)
-//! (`../lab/research/mp-original/race.md`). Its power-ups are `pickups.json`'s, its AI script
+//! characters, the board and helmets hung on them (`props.gltf`'s scenes), and the crowd panels its
+//! level animates (`../lab/research/mp-original/race.md`). Its power-ups are `pickups.json`'s, its AI script
 //! `ai.bin` (`[0x14, 0xBC]`). Tags in the docs: V seen in the oracle, C read in code or ROM, I
 //! inferred.
 
@@ -32,6 +32,39 @@ pub struct Race {
     pub board: Attached,
     /// The helmet a bot class wears (C `func_15083384`, V cls); absent: none.
     pub heads: BTreeMap<u8, Attached>,
+    /// The crowd in the stands, `level.gltf`'s panels the game animates (absent in older packs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowd: Option<Crowd>,
+}
+
+/// The crowd: level materials whose texture the game swaps every `step` VIs (C `func_150D765C`
+/// binds their segments 4-7 each frame; V cd, w1, w3b). Also 0x1A's screens
+/// ([`crate::Segments::screens`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Crowd {
+    /// VIs a frame shows (4: 15 a second).
+    pub step: u8,
+    pub panels: Vec<Panel>,
+}
+
+impl Crowd {
+    /// The field a client could not show (relative to the crowd's) and why.
+    pub(crate) fn invalid(&self) -> Option<(String, &'static str)> {
+        if self.step == 0 {
+            return Some(("step".into(), "0"));
+        }
+        let i = self.panels.iter().position(|p| p.frames.is_empty())?;
+        Some((format!("panels[{i}].frames"), "empty"))
+    }
+}
+
+/// One crowd panel: at VI `v` it shows `frames[(v / step) % frames.len()]` (the phase is free).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Panel {
+    /// `level.gltf`'s material (its name, `m{n}-seg{a}`), drawing `frames[0]`.
+    pub material: String,
+    /// PNGs relative to the map's folder (`level.gltf`'s `textures/`).
+    pub frames: Vec<String>,
 }
 
 /// One route: the barriers it shows (the others hidden, prop +0x6E, from the match's start; V L1,
@@ -57,7 +90,7 @@ pub struct Attached {
 
 impl Race {
     /// Reads `maps/<map>/race.json` (`read` as [`crate::Slice::load`]'s) and checks that each
-    /// route shows only barriers and that a lap passes a node once.
+    /// route shows only barriers, that a lap passes a node once and that the crowd has frames.
     pub fn load<E: Display>(
         map: &str,
         read: impl FnOnce(&str) -> Result<Vec<u8>, E>,
@@ -77,6 +110,9 @@ impl Race {
                 let field = format!("routes[{i}].lap[{k}]");
                 return Err(invalid(&file, field, "passed twice"));
             }
+        }
+        if let Some((field, why)) = race.crowd.as_ref().and_then(Crowd::invalid) {
+            return Err(invalid(&file, format!("crowd.{field}"), why));
         }
         Ok(race)
     }
@@ -111,11 +147,26 @@ mod tests {
             racers: [(0xB, "136".to_string()), (0xC, "144".to_string())].into(),
             board: at(0, 23),
             heads: [(0xD, at(1, 12))].into(),
+            crowd: Some(Crowd {
+                step: 4,
+                panels: vec![Panel {
+                    material: "m53-tex4700".into(),
+                    frames: vec!["textures/a.png".into(), "textures/b.png".into()],
+                }],
+            }),
         }
     }
 
     #[test]
     fn write_then_load_gives_the_same_race() {
+        let mut old = sample();
+        old.crowd = None;
+        let json = old.to_json();
+        assert!(!String::from_utf8_lossy(&json).contains("crowd"));
+        assert_eq!(
+            Race::load("33", |_| Ok::<_, String>(json.clone())).unwrap(),
+            old
+        );
         let race = sample();
         let json = race.to_json();
         let read = |path: &str| match path == "maps/33/race.json" {
@@ -144,6 +195,12 @@ mod tests {
         assert_eq!(
             refused(race),
             "maps/33/race.json: routes[0].lap[4]: passed twice"
+        );
+        let mut race = sample();
+        race.crowd.as_mut().unwrap().panels[0].frames.clear();
+        assert_eq!(
+            refused(race),
+            "maps/33/race.json: crowd.panels[0].frames: empty"
         );
     }
 }

@@ -172,9 +172,10 @@ fn ready(
     mut calm: Local<u32>,
     cfg: Res<Config>,
 ) -> bool {
-    // The level and the characters (`render`'s assets): windowed clients connect once they loaded.
+    // The level and the map's own characters (`render`'s assets): windowed clients connect once
+    // they loaded (the picks' load after, `render::load_characters`).
     let loaded = assets.is_none_or(|a| {
-        let characters = crate::characters(&cfg.map).into_iter();
+        let characters = crate::map_characters(&cfg.map).into_iter();
         std::iter::once(crate::render::level_scene(&cfg.map))
             .chain(characters.map(conker_assets::character_gltf))
             .all(|path| {

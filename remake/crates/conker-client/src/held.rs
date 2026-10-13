@@ -277,8 +277,10 @@ fn show(
         Has<Predicted>,
     )>,
     held: Res<HeldModels>,
+    game: Query<&conker_sim::net::MatchView>,
     mut visibility: Query<&mut Visibility>,
 ) {
+    let race = game.iter().any(|m| m.race);
     for (anim, hands, combat, fighting, predicted) in &players {
         let (weapon_id, drawn, masked) = match (fighting, combat) {
             (Some(f), _) if predicted => {
@@ -287,10 +289,10 @@ fn show(
             (_, Some(c)) => (c.weapon, c.drawn, c.masked),
             _ => (0, false, false),
         };
-        // A raptor holds nothing (its clips are not the weapons' events'); a racer holds what its
-        // clip makes (the kick's fist, [`clip_shows`]).
+        // A raptor holds nothing (its clips are not the weapons' events'); a racer (anyone in
+        // Race) holds what its clip makes (the kick's fist, [`clip_shows`]).
         let raptor = combat.is_some_and(|c| c.class == conker_rules::raptor::CLASS);
-        let racer = combat.is_some_and(|c| crate::race::racer(c.class));
+        let racer = combat.is_some() && race;
         for &(i, entity) in &hands.0 {
             let h = &held.0[i];
             let shown = !raptor

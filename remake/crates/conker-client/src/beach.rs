@@ -98,9 +98,10 @@ const STRIKE: u32 = 40;
 const PUFFS: [[u8; 3]; 4] = [[255, 255, 255], [128, 128, 128], [0, 0, 0], [0x59, 0, 0]];
 const PUFF_ALPHA: [u8; 2] = [0x64, 0xC7];
 
-/// Each body's villager looks (class → hidden display lists), from the pack's characters.
+/// Each body's looks (class → hidden display lists: the villagers', 0xF's) and the lists its
+/// model always hides (`hidden`), from the pack's characters.
 #[derive(Resource)]
-struct Looks(Vec<BTreeMap<u8, u8>>);
+struct Looks(Vec<(BTreeMap<u8, u8>, u16)>);
 
 /// Whether a villager of `class` hides display list `list` of its model (`looks`: its body's;
 /// `func_15083384`'s obj+0x94: bit k hides list k).
@@ -288,7 +289,10 @@ struct Escaping {
 struct Dressed(u8, Entity);
 
 pub fn build(app: &mut App, characters: &[Character]) {
-    app.insert_resource(Looks(characters.iter().map(|c| c.looks.clone()).collect()));
+    let looks = characters
+        .iter()
+        .map(|c| (c.looks.clone(), c.hidden.unwrap_or(0)));
+    app.insert_resource(Looks(looks.collect()));
     app.init_resource::<Blasts>();
     app.add_systems(
         Startup,
@@ -313,7 +317,8 @@ pub fn build(app: &mut App, characters: &[Character]) {
     );
 }
 
-/// Each villager's model shows its class's look: the primitives of its hidden lists hide.
+/// Each villager's (each looked) model shows its class's look: the primitives of its hidden lists
+/// hide, with those its model always hides (`render`'s `hide_lists`; no model has both today).
 #[allow(clippy::type_complexity)]
 fn dress(
     looks: Res<Looks>,
@@ -323,7 +328,7 @@ fn dress(
     mut commands: Commands,
 ) {
     for (entity, c, model, dressed) in &players {
-        let Some(looks) = looks.0.get(model.body).filter(|l| !l.is_empty()) else {
+        let Some((looks, base)) = looks.0.get(model.body).filter(|l| !l.0.is_empty()) else {
             continue;
         };
         if dressed.is_some_and(|d| d.0 == c.class && d.1 == model.scene) {
@@ -337,7 +342,8 @@ fn dress(
             let Some(list) = list.and_then(|x| x.get("list")?.as_u64()) else {
                 continue;
             };
-            v.set_if_neq(match hidden(looks, c.class, list) {
+            let always = list < 16 && base >> list & 1 != 0;
+            v.set_if_neq(match always || hidden(looks, c.class, list) {
                 true => Visibility::Hidden,
                 false => Visibility::Inherited,
             });

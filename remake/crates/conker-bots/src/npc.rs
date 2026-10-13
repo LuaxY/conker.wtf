@@ -99,6 +99,9 @@ pub struct Npc {
     pub pressed: u16,
     pub hold: i8,
     pub press: i8,
+    /// The script's last press (command 0x61), as it stays in a race bot's +0x8C: the bots' update
+    /// in Race (`func_150528C8`) never runs the decay (`func_1504C854`), V L1.
+    pub last: u16,
     /// struct126 +0x1AF: the pickup radius · 64/100 the AI script asks for.
     pub pickup: u8,
     /// struct126 +0x16C: the aim yaw in degrees while R is held, and the point aimed at this frame.
@@ -106,8 +109,8 @@ pub struct Npc {
     pub aim: Option<[f32; 3]>,
     /// s126+0x85, +0x86: the virtual stick a mounted gun's scope turns with ([`crate::Bots`]).
     pub stick: Option<[i8; 2]>,
-    /// s126+0x12A: a tank's aim error, 10° of turret yaw a unit (`func_150ED748`, C); −1, 0 or 1,
-    /// drawn at each shot (I).
+    /// s126+0x12A: a tank's aim error, 10° of turret yaw a unit (`func_150ED748`, C); 0 or 1,
+    /// drawn as its fire counter starts over (`func_1508D850`, C).
     pub error: i8,
     /// +0x22C bit 0x200: placed since the AI's last frame (the match start, a respawn, a lift). The
     /// placement (`func_15085430`) sets it; the AI's frame takes it: state 0 and a replan (V, the
@@ -138,6 +141,7 @@ impl Default for Npc {
             pressed: 0,
             hold: 0,
             press: 0,
+            last: 0,
             pickup: 64,
             aim_yaw: None,
             aim: None,

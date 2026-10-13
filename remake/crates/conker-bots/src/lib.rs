@@ -480,6 +480,7 @@ impl Bots {
                 },
                 raptor: m.settings.raptor.then_some(&m.raptor),
                 race: m.settings.race.then_some((m, arena.track.nodes.len())),
+                tank: m.settings.tank,
                 struck: &mut self.struck,
             };
             if !self.started {
@@ -590,12 +591,14 @@ impl Bots {
                 continue;
             }
             // Race: the board's autopilot steers and speeds (the match's); the script's presses (Z
-            // a power-up, B a kick) are the pad.
+            // a power-up, B a kick) are the pad. A Z stays in it until the next press (V L1: the bot
+            // that used a canister at 542 kept Z, s126+0x8C, and fired each missile the frame after
+            // its take, 928 and 938; the two whose last press was B kept theirs all race).
             if m.settings.race {
                 let (held, pressed) = n.pad();
                 if let Some(i) = inputs.get_mut(slot) {
                     *i = Input {
-                        buttons: held | pressed,
+                        buttons: held | pressed | n.last & BUTTON_Z,
                         ..Input::default()
                     };
                 }
@@ -677,24 +680,13 @@ impl Bots {
                 input.camera_yaw = input
                     .camera_yaw
                     .wrapping_add((i32::from(n.error) * 10 * 65536 / 360) as u16);
-                // Z, a press (the rules fire on one), once the gun is ready and the turret within
-                // 5° of the aim (I).
-                let (turret, ready) = m
-                    .players
-                    .get(slot)
-                    .map_or((0.0, false), |f| (f.body.turret, m.tick >= f.ready));
-                let on = |yaw: u16| {
-                    let off = angle_diff(yaw, b.facing) as f32 / 65536.0 * 360.0 - turret;
-                    (off + 180.0).rem_euclid(360.0) - 180.0
-                };
-                let last = inputs.get(slot).map_or(0, |i| i.buttons);
-                if lead.is_some()
-                    && ready
-                    && on(input.camera_yaw).abs() < 5.0
-                    && last & BUTTON_Z == 0
-                {
-                    input.buttons = BUTTON_Z;
-                    n.error = (self.rng.next_u32() % 5) as i8 - 2;
+                // Z, the script's press (`brain::World::tank_fire`, on the skill's interval for
+                // the enemy's distance); the rules fire on it once the gun is ready. The error
+                // also shortens the gun's pitch (the rules').
+                input.buttons = (held | pressed) & BUTTON_Z;
+                let error = n.error as u8;
+                if m.players.get(slot).is_some_and(|f| f.aim_error != error) {
+                    effects.push(Effect::AimError(slot, error));
                 }
                 if let Some(i) = inputs.get_mut(slot) {
                     *i = input;

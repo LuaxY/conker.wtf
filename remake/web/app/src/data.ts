@@ -86,6 +86,63 @@ export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }>
   },
 };
 
+/** The character select's 22 picks (conker-rules `characters::PICKS`), by the index `--character`
+ * and play.html's `character=` take (the client also takes the name, lower-case with dashes). */
+export const PICKS = [
+  "Squirrel",
+  "Sergeant",
+  "Tedi",
+  "Tediz Leader",
+  "Wise Guy",
+  "Weasel",
+  "Caveman",
+  "Racer",
+  "Racer 76",
+  "Racer 78",
+  "Raptor",
+  "Villager",
+  "Bat",
+  "Bat 2",
+  "Racer 77",
+  "Conker",
+  "Neo Conker",
+  "Villager Woman",
+  "Zombie",
+  "Zombie 2",
+  "Gregg",
+  "Gregg 2",
+] as const;
+
+/** The cheats that add picks (`--cheats`), each with the picks it adds (bit k: pick k). */
+export const CHEATS = {
+  EASTEREGGSRUS: 0x10000,
+  WELLYTOP: 0x8000,
+  CHINDITVICTORY: 0x30,
+  EATBOX: 0x43c0,
+  BEEFCURTAINS: 0xe0800,
+  RUSTYSHERIFFSBADGE: 0xa,
+  BILLYMILLROUNDABOUT: 0x300000,
+} as const;
+export type Cheat = keyof typeof CHEATS;
+
+/** Each map's select (bit k: pick k): its Deathmatch's, Race's on 0x33. None on 0x2B (no Deathmatch
+ * in the original) and 0x24 (Tank). */
+const SELECTS: Partial<Record<MapId, number>> = {
+  "1a": 0x831,
+  "2d": 0x815,
+  "30": 0x815,
+  "33": 0x4380,
+  "34": 0x815,
+  "3f": 0x5c0,
+};
+
+/** The picks a player may play on `map` in `mode` with `cheats` on (bit k: pick k), as the game
+ * server's `characters()`: 0 in the team modes and Tank, which have no select. */
+export function allowed(map: MapId, mode: Mode, cheats: readonly Cheat[]): number {
+  const base = mode === "deathmatch" || mode === "race" ? (SELECTS[map] ?? 0) : 0;
+  return base && cheats.reduce((mask, c) => mask | CHEATS[c], base);
+}
+
 /** The bots' skill (`--skill`), as the original's SET-UP screen names them. */
 export const SKILLS = ["inbred", "crap", "normal", "bastard", "einstein"] as const;
 export type Skill = (typeof SKILLS)[number];
@@ -107,6 +164,8 @@ export interface Settings {
   /** Race: 1-20 laps, and the route (`--route`: 11 the low road, 12 the elevated one). */
   laps: number;
   route: Route;
+  /** The cheats on (`--cheats`): more picks where the map and mode have a select. */
+  cheats: Cheat[];
 }
 
 export type Route = 11 | 12;
@@ -152,7 +211,7 @@ export function fit(s: Settings, mode: Mode): Settings {
 }
 
 /** The settings that apply to this server's mode, as label and value. */
-export function settingRows({ mode, settings: s }: NewServer): [string, string][] {
+export function settingRows({ map, mode, settings: s }: NewServer): [string, string][] {
   const { laps } = MODES[mode];
   const rows: [string, string][] = [["Bots", s.bots ? `${s.bots}, ${s.skill}` : "none"]];
   if (laps) rows.push(["Laps", String(s.laps)], ["Route", ROUTES[s.route]]);
@@ -161,6 +220,7 @@ export function settingRows({ mode, settings: s }: NewServer): [string, string][
   if (MODES[mode].kills) rows.push(["Kill limit", s.kills ? String(s.kills) : "none"]);
   if (MODES[mode].score) rows.push(["Score", String(s.score)]);
   rows.push(["Radar", s.radar ? "on" : "off"]);
+  if (s.cheats.length && allowed(map, mode, [])) rows.push(["Cheats", String(s.cheats.length)]);
   return rows;
 }
 

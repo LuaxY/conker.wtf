@@ -37,8 +37,13 @@ const GLYPHS: usize = 95;
 /// `func_150918EC`: 0xCF2 when `0x8008FDBC & 0x40`; V k1 DL 250 and b2 DL 150, scenarios 11 and 12:
 /// the RAM's that the map's texrect draws, found by `texfind`); War: Raptor's strip heads and its
 /// carried body's icon (V: the RAM's at 0x80206BC0 that `../lab/research/mp-original/
-/// raptor-client-scratch`'s h1 DL 40 draws, byte for byte the blob's).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 36] = [
+/// raptor-client-scratch`'s h1 DL 40 draws, byte for byte the blob's); Race's world effects (V: the
+/// RAM's that `../lab/research/mp-original/race-effects-scratch` finds drawn, byte for byte the
+/// blob's): the countdown lamps' flare (cd DLs 142-235 at 0x801C02B0), the canister's boost flare
+/// (w3b/w3c DLs 480-510 at 0x801B7770), the exhaust glow's four frames (w1, w3b, w3c, cd), and
+/// the missile's trail, drawn I8 128 wide and one high (w1 DLs 218-240 at 0x801AB800: its tile is
+/// 256 wide, but `G_TEXTURE`'s scale 0.5 keeps s within 0-127).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 43] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -83,6 +88,13 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 36] = [
         64,
         true,
     ),
+    ("race_lamp", 0x235, Format::I8, 64, 64, true),
+    ("race_boost", 0xE21, Format::I8, 64, 64, true),
+    ("race_exhaust_0", 0x923, Format::Rgba32, 32, 32, true),
+    ("race_exhaust_1", 0x924, Format::Rgba32, 32, 32, true),
+    ("race_exhaust_2", 0x925, Format::Rgba32, 32, 32, true),
+    ("race_exhaust_3", 0x926, Format::Rgba32, 32, 32, true),
+    ("race_trail", 0xB39, Format::I8, 128, 1, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):

@@ -18,6 +18,9 @@ use conker_sim::tank::{self as hull, Drive, KNOCK, PITCH_MAX, PITCH_MIN};
 pub const CLASS: u8 = 8;
 /// Z fires again 34 frames after a shot (the fire clip's length; V f3); a press, not a hold.
 pub const REFIRE: u32 = 34;
+/// A bot's fire clip runs 51 frames, and its presses in it fire nothing (V tf2: 40 whole bot
+/// clips, all 51; the 34 presses 41-42 frames in ignored; I why, f3's human clip runs 34).
+pub const BOT_REFIRE: u32 = 51;
 /// The shell (`func_1506C460`; V c1 61-72): 296.5 along the gun's yaw (half of it a frame), its
 /// pitch's share up; falling as a player does (`y += vy/2 − 0.275·5`, `vy −= 5`); gone at a wall
 /// or the ground. It starts 128 ahead and 113 up (V c1 61: 128.2, 112.6).
@@ -275,7 +278,7 @@ impl Match {
         let scope = f.power == SCOPE && held(crate::game::BUTTON_R);
         let fired = held(BUTTON_Z) && late & BUTTON_Z == 0 && t >= f.ready;
         if fired {
-            f.ready = t + REFIRE;
+            f.ready = t + if f.bot { BOT_REFIRE } else { REFIRE };
             f.shots = f.shots.saturating_add(1);
         }
         let clip = t < f.ready;
@@ -291,7 +294,13 @@ impl Match {
             let want = wrap180(deg(input.camera_yaw) - deg(f.body.facing) - f.body.turret);
             f.body.turret = (f.body.turret + want * 0.125).rem_euclid(360.0);
         }
-        // The gun's pitch: toward the best target within the turret's cone, else back to level.
+        // The gun's pitch: toward the best target within the turret's cone, else back to level;
+        // a bot's aim error solves for it 400 nearer, at least 100 off (`func_150ED298`, C).
+        let short = if f.bot {
+            400.0 * f32::from(f.aim_error)
+        } else {
+            0.0
+        };
         let b = &f.body;
         let yaw = deg(b.facing) + b.turret;
         let muzzle = b.pos[1] + MUZZLE[1];
@@ -306,6 +315,11 @@ impl Match {
         let hull_pitch = hull_pitch(b, world);
         let pitch = match best {
             Some((_, d, y)) => {
+                let d = if short > 0.0 {
+                    (d - short).max(100.0)
+                } else {
+                    d
+                };
                 let want = solve_pitch(d, y + 40.0 - muzzle) - hull_pitch;
                 b.pitch + (want - b.pitch).clamp(-PITCH_RATE, PITCH_RATE)
             }
@@ -573,7 +587,7 @@ mod tests {
         }
     }
 
-    /// V f3: Z held fires once; pressed again it fires only from 34 frames on.
+    /// V f3: Z held fires once; pressed again it fires only from 34 frames on (a bot's, 51).
     #[test]
     fn refire_after_34() {
         let world = flat();
@@ -589,6 +603,18 @@ mod tests {
         assert_eq!(m.players[0].shots, 1);
         m.step(&arena, &[press(BUTTON_Z), Input::default()], &world);
         assert_eq!(m.players[0].shots, 2);
+        // A bot's clip: a press 42 frames on fires nothing, one at 51 fires (V tf2).
+        let (mut m, arena) = duel(5000.0, 3000.0);
+        m.players[0].bot = true;
+        for t in 0..=BOT_REFIRE {
+            let z = if matches!(t, 0 | 42 | BOT_REFIRE) {
+                BUTTON_Z
+            } else {
+                0
+            };
+            m.step(&arena, &[press(z), Input::default()], &world);
+            assert_eq!(m.players[0].shots, 1 + u16::from(t == BOT_REFIRE), "{t}");
+        }
     }
 
     /// V f1 248 → 336: the kill (one-shot 0x10 here, V p1) leaves a wreck for 330 frames; the tank

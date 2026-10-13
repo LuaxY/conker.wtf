@@ -115,6 +115,15 @@ mod skill {
     pub const G_C: [i32; 5] = [0x1E, 0x19, 0x14, 0x0F, 0x0F];
     /// `0x800872F8`: f32 aim following rate per VI.
     pub const AIM_RATE: [f32; 5] = [0.05, 0.1, 0.125, 0.25, 1.0];
+    /// `0x80087320` (s16): a tank's VIs between shots at an enemy beyond 5000 (`0x8009DA8C`),
+    /// beyond 2000, and nearer (V: the oracle's RAM).
+    pub const TANK_FIRE: [[i32; 3]; 5] = [
+        [900, 300, 80],
+        [600, 300, 80],
+        [420, 300, 80],
+        [360, 240, 60],
+        [300, 180, 60],
+    ];
 }
 
 /// A participant as the AI sees it each frame (filled from the match by [`crate::Bots`]).
@@ -219,6 +228,8 @@ pub struct World<'a> {
     /// Race: the match (its race table: the racers' rides) and the lap's node count; `None` in
     /// the other modes.
     pub race: Option<(&'a conker_rules::Match, usize)>,
+    /// Tank (script 0xB8, G+0x16BC): the fire counter runs on while a bot attacks no one.
+    pub tank: bool,
     /// Per participant, a bit: hit since the script last read it (obj+0x22C bit 0x100, query
     /// 0xD1 reads and clears it; the egg referee reads a carrier's only every third frame).
     pub struck: &'a mut u32,
@@ -863,8 +874,7 @@ impl World<'_> {
                 0
             }
             (0xF, 1) => 0,
-            // Tank's every bot frame ends with it (meaning unread, I): nothing here.
-            (0xF, 0xE) => 0,
+            (0xF, 0xE) => self.tank_fire(g, a(2) as usize),
             (k, c) => {
                 let _ = a(0);
                 self.unknown(6, k, c)
@@ -1035,7 +1045,10 @@ impl World<'_> {
             0xD5 => i32::from(self.ffa),
             0xD6 => 0,
             0xDC => 0,
-            // obj+0, the object's type: 1, a player (every dump; the scripts look for 0x1F).
+            // obj+0, the object's type: 1, a player; 0x1F, a raptor (V raptor b1r: model 83's
+            // objects all match, the cavemen 1 or 5). 0xBE's melee reach against a 0x1F is 160,
+            // else 80 (0x2BDE): the raptor's push holds a club 147 off, so at 80 it never swung.
+            0xEF if b.class == raptor::CLASS => 0x1F,
             0xEF => 1,
             0xF0 => i32::from(b.place),
             c => self.unknown(5, 2, c),
@@ -1258,7 +1271,7 @@ impl World<'_> {
             }
             0x61 => {
                 let b = if a(2) == -1 { 0x8000 } else { a(2) as u16 };
-                n.pressed = b;
+                (n.pressed, n.last) = (b, b);
                 n.press = 0;
                 if matches!(a(2), -1 | 4 | 0x2000) {
                     n.held = b;
@@ -1433,7 +1446,9 @@ impl World<'_> {
                     }
                 }
             }
-            if idle {
+            // Not in Tank: 0xB8 never sets an attack target, its counter runs on for
+            // [`Self::tank_fire`] (`func_1508A6FC` tests G+0x16BC != 0xB8, C).
+            if idle && !self.tank {
                 g.set(g::FIRE, p, -skill::FIRST[self.skill]);
             }
             // obj+0x22C bit 0x200 (a placement since the last frame), taken here.
@@ -1451,6 +1466,42 @@ impl World<'_> {
         g.set_f32(g::DT, dt as f32);
         self.noises(g);
         died
+    }
+
+    /// `func_1508D850` (command 0xE, ending each of Tank's bot frames): the turret's target
+    /// s126+0x129 is the enemy G+0x11C (`crate::Bots` reads it there). With one, the fire counter
+    /// past the skill's interval for its distance ([`skill::TANK_FIRE`]) starts over, and with no
+    /// wall between their eyes (G+0x16C0 bit 16 + e) the bot presses Z (command 0x61 0x2000). Each
+    /// start over draws the aim error s126+0x12A: 1 when the roll beats [`skill::STEADY`] (C; V the
+    /// press's writer in tw1, a bot's +0x8C).
+    fn tank_fire(&mut self, g: &mut Globals, p: usize) -> i32 {
+        let e = g.get(g::ENEMY, p);
+        let (Ok(t), Some(b)) = (usize::try_from(e), self.bodies.get(p)) else {
+            return 0;
+        };
+        let Some(o) = self.bodies.get(t) else {
+            return 0;
+        };
+        let d = (o.pos[0] - b.pos[0]).hypot(o.pos[2] - b.pos[2]);
+        let band = if d > 5000.0 {
+            0
+        } else if d > 2000.0 {
+            1
+        } else {
+            2
+        };
+        if skill::TANK_FIRE[self.skill][band] < g.get(g::FIRE, p) {
+            g.set(g::FIRE, p, 0);
+            if g.get(g::SEES, p) & (0x10000 << t) != 0 {
+                let h = 0x2000 | p as i32;
+                self.player_command(p, 0x61, &[h, 0x61, 0x2000]);
+            }
+        }
+        if g.get(g::FIRE, p) == 0 {
+            let roll = (self.rng.next_f32() * 100.0) as i32;
+            self.npcs[p].error = i8::from(skill::STEADY[self.skill] < roll);
+        }
+        0
     }
 
     /// `func_1508B3F8`: a bot within a noise's radius (+100 on the square, and 200 above to 100
@@ -2137,6 +2188,7 @@ mod tests {
             gunners: Vec::new(),
             plunger: Plunger::default(),
             race: None,
+            tank: false,
             appear: 0,
             cash: None,
             raptor: None,
@@ -2162,7 +2214,7 @@ mod tests {
     }
 
     /// Type-4 queries 6 and 16, player query 0xAC and type-4 command 1 on one box (shape 2) with
-    /// one participant inside and one outside.
+    /// one participant inside and one outside; 0xEF, the object's type (the raptor's 0x1F).
     #[test]
     fn trigger_natives() {
         let mut r = [0; 0x34];
@@ -2180,7 +2232,13 @@ mod tests {
             old: [x, 10.0, 0.0],
             ..Body::default()
         };
-        let bodies = [at(50.0), at(150.0)];
+        let bodies = [
+            at(50.0),
+            Body {
+                class: raptor::CLASS,
+                ..at(150.0)
+            },
+        ];
         let mut npcs = [Npc::default(); 2];
         let (graph, world) = (Graph::default(), CollisionWorld::default());
         let (mut rng, mut unknown) = (Rng::default(), Unknown::new());
@@ -2204,6 +2262,7 @@ mod tests {
             gunners: vec![None, Some(1)],
             plunger: Plunger::default(),
             race: None,
+            tank: false,
             appear: 0,
             cash: None,
             raptor: None,
@@ -2221,6 +2280,8 @@ mod tests {
         assert_eq!(q(&mut w, &[0x2001, 0xAC, 0x4000]), 0);
         w.command(&mut Globals::new(0), 0x4000, 1, &[0x4000, 1]);
         assert_eq!(q(&mut w, &[0x4000, 0x10]), 0);
+        assert_eq!(q(&mut w, &[0x2000, 0xEF]), 1);
+        assert_eq!(q(&mut w, &[0x2001, 0xEF]), 0x1F);
         assert!(w.unknown.is_empty());
     }
 
@@ -2302,6 +2363,7 @@ mod tests {
                 gunners: Vec::new(),
                 plunger: Plunger::default(),
                 race: None,
+                tank: false,
                 appear: 0,
                 cash: None,
                 raptor: None,

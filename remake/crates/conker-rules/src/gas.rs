@@ -260,6 +260,8 @@ pub enum Effect {
     Raptor(crate::raptor::Op),
     /// Race's table ([`crate::race::Op`]).
     Race(crate::race::Op),
+    /// Tank: bot `.0`'s aim error s126+0x12A, 0 or 1 ([`crate::game::Fighter::aim_error`]).
+    AimError(usize, u8),
 }
 
 #[cfg(test)]

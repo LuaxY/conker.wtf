@@ -159,6 +159,37 @@ impl Material {
         }
     }
 
+    /// Whether the combiner reads a texel (TEXEL0 or TEXEL1, as colour, alpha or a colour factor)
+    /// in either cycle; true while the list never set it (inherited at runtime). Some textured
+    /// parts of Conker's characters ignore their texture: their colour is the vertex colours'.
+    pub fn samples_texel(&self) -> bool {
+        let [w0, w1] = self.combine;
+        let field = |w: u32, shift: u32, bits: u32| w >> shift & ((1 << bits) - 1);
+        // The colour cycles' c inputs (5 bits: 8 and 9 the texels' alphas), then the other inputs.
+        let factors = [field(w0, 15, 5), field(w0, 0, 5)];
+        let inputs = [
+            (w0, 20, 4),
+            (w0, 5, 4),
+            (w1, 28, 4),
+            (w1, 24, 4),
+            (w1, 15, 3),
+            (w1, 6, 3),
+            (w0, 12, 3),
+            (w0, 9, 3),
+            (w1, 21, 3),
+            (w1, 18, 3),
+            (w1, 12, 3),
+            (w1, 9, 3),
+            (w1, 3, 3),
+            (w1, 0, 3),
+        ];
+        self.combine == [0, 0]
+            || factors.iter().any(|f| matches!(f, 1 | 2 | 8 | 9))
+            || inputs
+                .iter()
+                .any(|&(w, s, b)| matches!(field(w, s, b), 1 | 2))
+    }
+
     /// Texel format of the texture. A 4- or 8-bit RGBA tile is colour-indexed: Conker loads
     /// indexed pixels through an RGBA16 transfer image and samples them through a TLUT.
     pub fn texture_format(&self) -> Option<Format> {

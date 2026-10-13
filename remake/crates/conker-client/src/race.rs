@@ -5,10 +5,14 @@
 //! - the route the match names (`RaceView::route`): its lap of nav nodes is the prediction's track
 //!   (the steering's clamp, the autopilot's point, the respawns), and the barriers it does not show
 //!   are moved out of the client's collision as the server's (20000 up) and hidden ([`props`]);
-//! - the racers: the human (class 0xB) is 136, the bots (0xC-0xF) 144 in their helmets; the board
-//!   (`props.gltf` scene `board.scene`) on joint 23 and a bot's helmet on joint 12, all three
+//! - the racers: every player, the human (class 0xB) 136 or its pick, the bots (0xC-0xF) 144 in
+//!   their helmets; the board (`props.gltf` scene `board.scene`) on joint 23 and a helmet (classes
+//!   0xD-0xF) on joint 12, all three
 //!   hidden from the death to the respawn, with the blast where it died ([`gear`]);
-//!   their clips ([`clip`], [`rate`]); the canister's boost flare ([`flares`]);
+//!   their clips ([`clip`], [`rate`]); the exhaust glow and the canister's boost flare
+//!   ([`flares`]);
+//! - the effects the pack has (`hud/race_*.png`): the countdown lamps after the go ([`lamps`]),
+//!   the missiles' trails ([`trails`]); the crowd's panels cheer in [`crate::segments`];
 //! - the power-ups (placements 4-10) spinning, shrinking when taken and growing back with an
 //!   overshoot ([`power_scale`]);
 //! - the missiles in flight (`projectiles.gltf#Scene4` at 1.0, V m1 DL 224), nose along their way;
@@ -18,15 +22,17 @@
 
 use std::collections::HashMap;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::gltf::Gltf;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use conker_assets::race::{Race, Route};
 use conker_assets::{PACK_WEAPONS, projectiles_gltf, props_gltf};
 use conker_rules::Fighter;
 use conker_rules::net::Fighting;
-use conker_rules::race::{DEAD, HUMAN, Track};
+use conker_rules::race::{DEAD, Track};
 use conker_sim::board::KICK;
 use conker_sim::follow::Follow;
 use conker_sim::net::{Collision, Combat, MatchView, Player};
@@ -62,17 +68,32 @@ const MISSILE_SCALE: f32 = 1.0;
 /// 1.94 to 5.83) and the 9 debris, as [`crate::beach::burst`]'s puffs and chunks (I).
 const BLAST_UP: f32 = 55.0;
 const BLAST: (u32, f32, u32) = (10, 300.0, 9);
-/// The canister's boost flare (V w3c DLs 480-510: a white star quad at alpha 0x6B-0x71, 348-399
-/// wide, 74-76 tall, over the racer 33-90 up). I: the strike's streak facing the camera, at its
-/// middle (its texture, `801b7770`, is not in the pack).
+/// The canister's boost flare (V w3c DLs 480-510: `hud/race_boost.png`, white × its alpha × 0x6B-0x71,
+/// 348-399 wide, 74-76 tall, over the racer 33-90 up, −6…19 ahead and 24-26 to its right: the
+/// racer's frame faces +z, so its right is −x), facing the camera (I).
 const FLARE: [f32; 2] = [370.0, 75.0];
-const FLARE_UP: f32 = 60.0;
-const FLARE_ALPHA: u8 = 0x6E;
-
-/// A racer's class: the human's (0xB) or a bot's (0xC-0xF).
-pub fn racer(class: u8) -> bool {
-    (HUMAN..=0xF).contains(&class)
-}
+const FLARE_AT: [f32; 3] = [-24.0, 60.0, 0.0];
+const FLARE_ALPHA: f32 = 0x6E as f32 / 255.0;
+/// The exhaust glow (V w1, w3c: `hud/race_exhaust_{0..3}.png`, one a frame, × env alpha 0xE1-0xFD;
+/// 84-91 × 78-85, 7-35 behind, 22-25 to the right, 42-99 up while boosting), facing the camera. I:
+/// that size always (17-178 wide without a boost, its law not decoded).
+const EXHAUST: [f32; 2] = [88.0, 82.0];
+const EXHAUST_AT: [f32; 3] = [-24.0, 60.0, -25.0];
+const EXHAUST_ALPHA: f32 = 0xF5 as f32 / 255.0;
+/// The countdown lamps' lower two (V cd 142-285, it 206-270: `hud/race_lamp.png` green × its alpha,
+/// 845-857 square, facing the camera). The top one and every red stage stay at alpha 0, so only
+/// these show, from the go for about this many frames, flickering 0x11-0x84 ([`lamp_alpha`]; I: the
+/// law, and their centres' drift toward the camera is not drawn).
+const LAMPS: [[f32; 3]; 2] = [[282.0, 1489.0, -7538.0], [290.0, 1365.0, -7545.0]];
+const LAMP_SIZE: f32 = 850.0;
+const LAMP_FRAMES: u32 = 70;
+/// A missile's trail (V w1 DLs 218-240): a ribbon through its last 7 frames, 58 wide, with
+/// `hud/race_trail.png` across it, white × its alpha × 1 − n/6 at point n from the missile
+/// ([`ribbon`]). I: facing the camera; the second, narrower strip is not drawn.
+const TRAIL_POINTS: usize = 7;
+const TRAIL_WIDTH: f32 = 58.0;
+/// A missile this far from its last place is another one (the list's order changed).
+const TRAIL_JUMP: f32 = 600.0;
 
 /// The clip a racer shows for the rules' animation (5 riding, 84 kicking or knocked up, 112
 /// dead): state 84 is the kick's clip while its kick runs, else the knock's; the death's 0x170.
@@ -85,9 +106,11 @@ pub fn clip(anim: u16, kicking: bool) -> u16 {
     }
 }
 
-/// A racer's clip rate: the human's kick at 1.35, the rest at 1 (C: the Tedi's rate table).
-pub fn rate(clip: u16, class: u8) -> f32 {
-    match clip == KICKING && class == HUMAN {
+/// A racer's clip rate: a human's kick at 1.35, whatever it picked, the rest at 1 (C: the Tedi's
+/// rate table; V anim1/2: the bots' kick at 1; V `characters-scratch/m14c` kick7: a human on pick 7,
+/// class 0xC, model 144, kicks at 1.35).
+pub fn rate(clip: u16, human: bool) -> f32 {
+    match clip == KICKING && human {
         true => 1.35,
         false => 1.0,
     }
@@ -158,7 +181,7 @@ pub fn build(app: &mut App, windowed: bool, race: Option<Race>, nav: Vec<u8>) {
     app.add_systems(FixedPreUpdate, course);
     if windowed {
         app.init_resource::<Missiles>();
-        app.add_systems(Update, (hang, gear, flares, props, missiles));
+        app.add_systems(Update, (hang, gear, flares, props, missiles, lamps, trails));
     }
 }
 
@@ -196,14 +219,16 @@ fn course(
 
 /// A racer's board and helmet are under its joints; whether it was dead last frame.
 #[derive(Component)]
-struct Gear(bool);
+pub(crate) struct Gear(bool);
 
-/// Once a racer's model is in, the board on its joint and its class's helmet on its own
-/// (`props.gltf` in the joint's frame, model units, as a held weapon: V k1, cls). The glTF loads
-/// after the characters' (one GLB at a time, `render::load_characters`).
+/// Once a racer's model is in (every player in Race, any pick), the board on its joint and its
+/// class's helmet on its own (`props.gltf` in the joint's frame, model units, as a held weapon: V
+/// k1, cls). The helmets go by class (0xD-0xF, C `func_15083384`): any other pick rides bare. The
+/// glTF loads after the characters' (one GLB at a time, `render::load_characters`).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn hang(
     players: Query<(Entity, &Combat), (With<Rig>, Without<Gear>)>,
+    game: Query<&MatchView>,
     children: Query<&Children>,
     names: Query<&Name>,
     course: Res<Course>,
@@ -212,7 +237,10 @@ fn hang(
     mut gltf: Local<Option<Handle<Gltf>>>,
     mut commands: Commands,
 ) {
-    for (player, c) in players.iter().filter(|p| racer(p.1.class)) {
+    if !game.iter().any(|m| m.race) {
+        return;
+    }
+    for (player, c) in &players {
         let handle = gltf.get_or_insert_with(|| assets.load(props_gltf("33")));
         let Some(g) =
             (gltfs.get(&*handle)).filter(|_| assets.is_loaded_with_dependencies(&*handle))
@@ -278,63 +306,242 @@ fn gear(
     }
 }
 
-/// A racer's boost flare.
+/// A racer's boost flare or exhaust glow.
 #[derive(Component)]
 struct Flare;
 
-/// While a canister's boost runs, its racer's flare shows ([`FLARE`]; the local racer's boost is
-/// its prediction's).
+/// A frame's draw for effect `k` (an exhaust's frame, a lamp's flicker), the same on every client.
+fn noise(tick: u32, k: u32) -> u32 {
+    let x = tick.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+    (x ^ x >> 15).wrapping_mul(0x2C1B_3C6D) >> 16
+}
+
+/// The exhaust glow's frame (0-3) for racer `slot` at frame `tick`: one at random each frame (V
+/// runs such as 924, 923, 923, 925; I: the draw).
+pub fn exhaust_frame(tick: u32, slot: u16) -> usize {
+    (noise(tick, u32::from(slot)) % 4) as usize
+}
+
+/// Lamp `lamp`'s alpha at frame `tick` (`go` the boards' go, 0 not yet known): 0x11-0x84 of 255
+/// for [`LAMP_FRAMES`] from the go, else `None` (not drawn).
+pub fn lamp_alpha(go: u32, tick: u32, lamp: u32) -> Option<f32> {
+    (go > 0 && (go..go + LAMP_FRAMES).contains(&tick))
+        .then(|| (0x11 + noise(tick, 0x100 + lamp) % 0x74) as f32 / 255.0)
+}
+
+/// Every racer's exhaust glow while it is alive ([`EXHAUST`]), and its boost flare while a
+/// canister's boost runs ([`FLARE`]; the local racer's boost is its prediction's), facing the
+/// camera.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn flares(
     game: Query<&MatchView>,
-    racers: Query<
-        (
-            Entity,
-            &Combat,
-            &Transform,
-            Option<&Fighting>,
-            Has<Predicted>,
-        ),
-        With<Gear>,
-    >,
+    racers: Query<(
+        Entity,
+        &Combat,
+        &Transform,
+        &Gear,
+        Option<&Fighting>,
+        Has<Predicted>,
+    )>,
     camera: Query<&GlobalTransform, (With<Camera3d>, With<FreeCameraState>)>,
     sprites: Option<Res<crate::beach::Sprites>>,
-    mut quads: Query<(&mut Transform, &mut Visibility), (With<Flare>, Without<Gear>)>,
-    mut made: Local<HashMap<Entity, Entity>>,
+    (assets, timeline): (Res<AssetServer>, Res<LocalTimeline>),
+    mut quads: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (With<Flare>, Without<Gear>),
+    >,
+    mut made: Local<HashMap<Entity, [Entity; 2]>>,
+    // The exhaust's four frames, then the flare.
+    mut looks: Local<Vec<Handle<StandardMaterial>>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
     let (Some(m), Some(sprites)) = (game.iter().find(|m| m.race), sprites) else {
         return;
     };
+    if looks.is_empty() {
+        let mut look = |file: String, alpha: f32| {
+            materials.add(crate::traps::material(&assets.load(file), [255; 3], alpha))
+        };
+        let glows = (0..4).map(|f| look(format!("hud/race_exhaust_{f}.png"), EXHAUST_ALPHA));
+        *looks = glows.collect();
+        looks.push(look("hud/race_boost.png".into(), FLARE_ALPHA));
+    }
     let facing = camera.single().map_or(Quat::IDENTITY, |c| c.rotation());
-    for (racer, c, at, fighting, predicted) in &racers {
+    let tick = timeline.tick().0;
+    for (racer, c, at, gear, fighting, predicted) in &racers {
         let boost = match fighting {
             Some(f) if predicted => f.state.boost,
             _ => (m.racing.racers.iter().find(|r| r.slot == c.slot)).map_or(0, |r| r.boost),
         };
-        let flare = *made.entry(racer).or_insert_with(|| {
-            let material = materials.add(StandardMaterial {
-                base_color: Color::srgba_u8(255, 255, 255, FLARE_ALPHA),
-                base_color_texture: Some(sprites.streak.clone()),
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                cull_mode: None,
-                ..default()
+        let pair = *made.entry(racer).or_insert_with(|| {
+            let mut quad = |look: &Handle<StandardMaterial>, [w, h]: [f32; 2], at: Vec3| {
+                let place = Transform::from_translation(at).with_scale(Vec3::new(w, h, 1.0));
+                let quad = (Mesh3d(sprites.quad.clone()), MeshMaterial3d(look.clone()));
+                (commands.spawn((Flare, quad, place, Visibility::Hidden, ChildOf(racer)))).id()
+            };
+            [
+                quad(&looks[4], FLARE, Vec3::from(FLARE_AT)),
+                quad(&looks[0], EXHAUST, Vec3::from(EXHAUST_AT)),
+            ]
+        });
+        let glow = &looks[exhaust_frame(tick, c.slot)];
+        for (e, shown) in pair.into_iter().zip([boost > 0, !gear.0]) {
+            let Ok((mut t, mut v, mut look)) = quads.get_mut(e) else {
+                continue;
+            };
+            v.set_if_neq(match shown {
+                true => Visibility::Inherited,
+                false => Visibility::Hidden,
             });
-            let quad = (Mesh3d(sprites.quad.clone()), MeshMaterial3d(material));
-            let place = Transform::from_xyz(0.0, FLARE_UP, 0.0)
-                .with_scale(Vec3::new(FLARE[0], FLARE[1], 1.0));
-            (commands.spawn((Flare, quad, place, Visibility::Hidden, ChildOf(racer)))).id()
-        });
-        let Ok((mut t, mut v)) = quads.get_mut(flare) else {
-            continue;
-        };
-        v.set_if_neq(match boost > 0 {
-            true => Visibility::Inherited,
-            false => Visibility::Hidden,
-        });
-        t.rotation = at.rotation.inverse() * facing;
+            t.rotation = at.rotation.inverse() * facing;
+            if e == pair[1] && look.0 != *glow {
+                look.0 = glow.clone();
+            }
+        }
+    }
+}
+
+/// The countdown lamps after the go ([`LAMPS`]), facing the camera.
+#[allow(clippy::too_many_arguments)]
+fn lamps(
+    game: Query<&MatchView>,
+    timeline: Res<LocalTimeline>,
+    camera: Query<&GlobalTransform, (With<Camera3d>, With<FreeCameraState>)>,
+    sprites: Option<Res<crate::beach::Sprites>>,
+    assets: Res<AssetServer>,
+    mut made: Local<Vec<(Entity, Handle<StandardMaterial>)>>,
+    mut quads: Query<(&mut Transform, &mut Visibility)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let (Some(m), Some(sprites)) = (game.iter().find(|m| m.race), sprites) else {
+        return;
+    };
+    if made.is_empty() {
+        let texture = assets.load("hud/race_lamp.png");
+        for at in LAMPS {
+            let look = materials.add(crate::traps::material(&texture, [0, 255, 0], 0.0));
+            let place =
+                Transform::from_translation(Vec3::from(at)).with_scale(Vec3::splat(LAMP_SIZE));
+            let quad = (Mesh3d(sprites.quad.clone()), MeshMaterial3d(look.clone()));
+            made.push((commands.spawn((quad, place, Visibility::Hidden)).id(), look));
+        }
+    }
+    let facing = camera.single().map_or(Quat::IDENTITY, |c| c.rotation());
+    let tick = timeline.tick().0;
+    for (k, (e, look)) in made.iter().enumerate() {
+        let alpha = lamp_alpha(m.racing.go, tick, k as u32);
+        if let Ok((mut t, mut v)) = quads.get_mut(*e) {
+            v.set_if_neq(match alpha {
+                Some(_) => Visibility::Inherited,
+                None => Visibility::Hidden,
+            });
+            t.rotation = facing;
+        }
+        if let Some(a) = alpha
+            && let Some(mut look) = materials.get_mut(look)
+        {
+            look.base_color.set_alpha(a);
+        }
+    }
+}
+
+/// A missile's trail: its places, the newest first, and its ribbon once it has two.
+#[derive(Default)]
+struct Trail {
+    points: Vec<Vec3>,
+    drawn: Option<(Entity, Handle<Mesh>)>,
+}
+
+/// A trail's ribbon through `points` (the newest first), [`TRAIL_WIDTH`] across and facing `eye`:
+/// u 0 → 1 across it, white × 1 − n/6 at point n.
+pub fn ribbon(points: &[Vec3], eye: Vec3) -> Mesh {
+    let n = points.len();
+    let (mut at, mut uv, mut rgba) = (Vec::new(), Vec::new(), Vec::new());
+    for (k, &p) in points.iter().enumerate() {
+        let along = points[k.saturating_sub(1)] - points[(k + 1).min(n - 1)];
+        let side = along.cross(eye - p).normalize_or_zero() * TRAIL_WIDTH / 2.0;
+        let alpha = 1.0 - k as f32 / (TRAIL_POINTS - 1) as f32;
+        for (edge, u) in [(p - side, 0.0), (p + side, 1.0)] {
+            at.push(edge.to_array());
+            uv.push([u, 0.5]);
+            rgba.push([1.0, 1.0, 1.0, alpha]);
+        }
+    }
+    let quads = (0..n.saturating_sub(1) as u32).flat_map(|k| {
+        let a = 2 * k;
+        [a, a + 1, a + 2, a + 1, a + 3, a + 2]
+    });
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, at)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, rgba)
+    .with_inserted_indices(Indices::U32(quads.collect()))
+}
+
+/// Each missile's trail ([`TRAIL_POINTS`] of its places, [`ribbon`]).
+#[allow(clippy::too_many_arguments)]
+fn trails(
+    game: Query<&MatchView>,
+    camera: Query<&GlobalTransform, (With<Camera3d>, With<FreeCameraState>)>,
+    assets: Res<AssetServer>,
+    mut trails: Local<Vec<Trail>>,
+    mut look: Local<Option<Handle<StandardMaterial>>>,
+    mut shown: Query<&mut Visibility>,
+    (mut meshes, mut materials): (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>),
+    mut commands: Commands,
+) {
+    let (Some(m), Ok(eye)) = (game.iter().find(|m| m.race), camera.single()) else {
+        return;
+    };
+    let eye = eye.translation();
+    let look = (look.get_or_insert_with(|| {
+        let texture = assets.load("hud/race_trail.png");
+        materials.add(crate::traps::material(&texture, [255; 3], 1.0))
+    }))
+    .clone();
+    let flying = &m.racing.missiles;
+    let n = trails.len().max(flying.len());
+    trails.resize_with(n, Trail::default);
+    for (i, trail) in trails.iter_mut().enumerate() {
+        match (flying.get(i).map(|f| Vec3::from(f.0)), trail.points.first()) {
+            (None, _) => trail.points.clear(),
+            (Some(at), Some(&last)) if at == last => {}
+            (Some(at), Some(&last)) if at.distance(last) > TRAIL_JUMP => trail.points = vec![at],
+            (Some(at), _) => {
+                debug!("race: missile {i} at {at}");
+                trail.points.insert(0, at);
+                trail.points.truncate(TRAIL_POINTS);
+            }
+        }
+        let show = trail.points.len() >= 2;
+        match (&trail.drawn, show) {
+            (Some((e, mesh)), _) => {
+                if let Ok(mut v) = shown.get_mut(*e) {
+                    v.set_if_neq(match show {
+                        true => Visibility::Inherited,
+                        false => Visibility::Hidden,
+                    });
+                }
+                if show && let Some(mut mesh) = meshes.get_mut(mesh) {
+                    *mesh = ribbon(&trail.points, eye);
+                }
+            }
+            (None, true) => {
+                let mesh = meshes.add(ribbon(&trail.points, eye));
+                let e = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(look.clone())));
+                trail.drawn = Some((e.id(), mesh));
+            }
+            (None, false) => {}
+        }
     }
 }
 
@@ -502,21 +709,20 @@ fn missiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::mesh::VertexAttributeValues;
 
     /// The rules' animations show the pack's clips: 84 the kick's while it runs, else the knock's;
-    /// 112 the death's; riding as is. Racers are classes 0xB-0xF.
+    /// 112 the death's; riding as is.
     #[test]
     fn racers_show_their_clips() {
         assert_eq!(clip(5, false), RIDE);
         assert_eq!(clip(84, true), 0x354);
         assert_eq!(clip(84, false), 0x54);
         assert_eq!(clip(112, false), 0x170);
-        assert!([0xB, 0xC, 0xF].into_iter().all(racer));
-        assert!(![0, 8, 9, 0x10, 0x14].into_iter().any(racer));
-        // The human's kick plays at 1.35, the rest at 1 (C).
-        assert_eq!(rate(KICKING, HUMAN), 1.35);
-        assert_eq!(rate(KICKING, 0xC), 1.0);
-        assert_eq!(rate(RIDE, HUMAN), 1.0);
+        // A human's kick plays at 1.35 (any pick, V kick7), a bot's and the rest at 1.
+        assert_eq!(rate(KICKING, true), 1.35);
+        assert_eq!(rate(KICKING, false), 1.0);
+        assert_eq!(rate(RIDE, true), 1.0);
     }
 
     /// A taken power-up shrinks over 4 frames and hides (V L1 541-544); back, it grows with the
@@ -538,6 +744,61 @@ mod tests {
         let want = Quat::from_rotation_y(30.3f32.to_radians()) * Vec3::Z;
         assert!((turned - want).length() < 1e-4);
         assert!((0..=10).all(owns) && !owns(11));
+    }
+
+    /// The exhaust's frame is one of four, drawn anew each frame (V runs 924, 923, 923, 925 …);
+    /// the lamps show only for 70 frames from the go, at 0x11-0x84 (and not before the go is known).
+    #[test]
+    fn exhaust_and_lamps_follow_the_handoff() {
+        let frames: Vec<_> = (0..400).map(|t| exhaust_frame(t, 3)).collect();
+        assert!((0..4).all(|f| frames.contains(&f)) && frames.iter().all(|&f| f < 4));
+        assert_ne!(
+            frames,
+            (0..400).map(|t| exhaust_frame(t, 4)).collect::<Vec<_>>()
+        );
+        let go = 210;
+        assert_eq!(lamp_alpha(go, go - 1, 0), None);
+        assert_eq!(lamp_alpha(go, go + LAMP_FRAMES, 1), None);
+        assert_eq!(lamp_alpha(0, 30, 0), None);
+        let alphas: Vec<f32> = (go..go + LAMP_FRAMES)
+            .flat_map(|t| [0, 1].map(|k| lamp_alpha(go, t, k).unwrap()))
+            .collect();
+        let (lo, hi) = (0x11 as f32 / 255.0, 0x84 as f32 / 255.0);
+        assert!(alphas.iter().all(|&a| (lo..=hi).contains(&a)), "{alphas:?}");
+        assert!(alphas.iter().any(|&a| a < 0.2) && alphas.iter().any(|&a| a > 0.4));
+    }
+
+    /// The trail (V w1 218-240): 7 points, 58 wide across the view, u 0 → 1 across, alpha 255,
+    /// 212, 169, 127, 84, 42, 0 from the missile back.
+    #[test]
+    fn a_trail_fades_behind_its_missile() {
+        let points: Vec<_> = (0..7)
+            .map(|k| Vec3::new(200.0 * k as f32, 0.0, 0.0))
+            .collect();
+        let eye = Vec3::new(0.0, 1000.0, 0.0);
+        let mesh = ribbon(&points, eye);
+        let Some(VertexAttributeValues::Float32x4(rgba)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("no colours");
+        };
+        let alphas = rgba.iter().step_by(2).map(|c| c[3] * 255.0);
+        let want = [255.0, 212.0, 169.0, 127.0, 84.0, 42.0, 0.0];
+        assert!(alphas.zip(want).all(|(a, b)| (a - b).abs() <= 1.0));
+        let Some(VertexAttributeValues::Float32x3(at)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("no positions");
+        };
+        // Seen from above, the ribbon spans z: 58 wide at every point.
+        for pair in at.chunks(2) {
+            assert!((Vec3::from(pair[0]).distance(Vec3::from(pair[1])) - 58.0).abs() < 1e-3);
+            assert_eq!(pair[0][1], 0.0);
+        }
+        let Some(VertexAttributeValues::Float32x2(uv)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("no uvs");
+        };
+        assert_eq!((uv[0][0], uv[1][0]), (0.0, 1.0));
+        assert_eq!(mesh.indices().map(|i| i.len()), Some(6 * 6));
     }
 
     /// The missile's nose along its way.

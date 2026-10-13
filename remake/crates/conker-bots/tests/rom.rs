@@ -1887,48 +1887,68 @@ fn heist_bots_fetch_and_deliver() {
 }
 
 /// War: Raptor on 0x3F, script 0xBE's team branch: 1 idle human caveman, 5 caveman bots, 2
-/// raptor bots (oracle b1's roster).
+/// raptor bots (oracle b1's roster: b1 raptors 20-14 at 8510; b1r 16-16 at 9688, the raptors' 71
+/// bites and the 103 hits they took, all for 1). Seeds 1-3, to 20 or 9000 frames: the kills a 1000
+/// frames each way are the oracle's within its two runs' spread (b1 2.35 raptors' and 1.65
+/// cavemen's, b1r 1.63 and 1.63; before, with the bolts' head kills, 1.33 and 2.4), the raptor bots
+/// bite about as often (b1r 7.2 a 1000), and no hit on a raptor takes more than 1.
 #[test]
 fn raptor_bots_play() {
+    use conker_rules::raptor::CLASS;
     let Some(rom) = rom() else { return };
     let raptor = conker_rules::Settings {
         raptor: true,
         score: conker_rules::raptor::SCORE,
         ..Default::default()
     };
-    let mut scores = [0u16; 2];
-    let (mut bites, mut drops, mut carried, mut speed) = ([0u32; 2], 0u32, 0u32, 0f32);
-    let mut stats = Vec::new();
-    let bots = play(&rom, 0x3F, 7, 1, 9000, Some(raptor), |m, _| {
-        use conker_rules::colors::Pose;
-        use conker_rules::game::Action;
-        scores = m.colors.scores;
-        for f in &m.players {
-            match f.action {
-                Action::Pose(Pose::Bite) if f.since == m.tick - 1 => bites[0] += 1,
-                Action::Pose(Pose::RunBite) if f.since == m.tick - 1 => bites[1] += 1,
-                Action::Pose(Pose::Drop) if f.since == m.tick - 1 => drops += 1,
-                _ => {}
+    let (mut frames, mut kills, mut bites) = (0u32, [0u32; 2], [0u32; 2]);
+    for seed in 1..=3 {
+        let mut scores = [0u16; 2];
+        let (mut drops, mut carried, mut speed, mut tick) = (0u32, 0u32, 0f32, 0u32);
+        let mut health: Vec<u8> = Vec::new();
+        let bots = play(&rom, 0x3F, 7, seed, 9000, Some(raptor), |m, _| {
+            use conker_rules::colors::Pose;
+            use conker_rules::game::Action;
+            scores = m.colors.scores;
+            tick = m.tick;
+            for (i, f) in m.players.iter().enumerate() {
+                match f.action {
+                    Action::Pose(Pose::Bite) if f.since == m.tick - 1 => bites[0] += 1,
+                    Action::Pose(Pose::RunBite) if f.since == m.tick - 1 => bites[1] += 1,
+                    Action::Pose(Pose::Drop) if f.since == m.tick - 1 => drops += 1,
+                    _ => {}
+                }
+                if f.class == CLASS {
+                    speed = speed.max(f.body.xz_speed);
+                    let was = health.get(i).copied().unwrap_or(f.health);
+                    assert!(
+                        was <= f.health + 1 || f.health > 0 && was == 0,
+                        "{seed}: {i} {was} → {}",
+                        f.health
+                    );
+                }
             }
-            if f.class == conker_rules::raptor::CLASS {
-                speed = speed.max(f.body.xz_speed);
-            }
-        }
-        carried += m.raptor.eggs.iter().filter(|e| e.carrier.is_some()).count() as u32;
-        stats = (m.players.iter())
-            .map(|f| (f.team, f.kills, f.deaths))
-            .collect();
-    });
+            health = m.players.iter().map(|f| f.health).collect();
+            carried += m.raptor.eggs.iter().filter(|e| e.carrier.is_some()).count() as u32;
+        });
+        assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
+        assert_eq!(bots.faults, 0);
+        eprintln!(
+            "raptor {seed}: scores {scores:?} at {tick}, bites {bites:?}, drops {drops}, egg frames {carried}, \
+             raptor top speed {speed}"
+        );
+        frames += tick - 23;
+        kills[0] += u32::from(scores[0]);
+        kills[1] += u32::from(scores[1]);
+    }
+    let rate = |n: u32| n as f32 * 1000.0 / frames as f32;
+    let (cavemen, raptors, bit) = (rate(kills[0]), rate(kills[1]), rate(bites[0] + bites[1]));
     eprintln!(
-        "raptor: scores {scores:?}, bites {bites:?}, drops {drops}, egg frames {carried}, raptor top speed \
-         {speed}; (team, kills, deaths) {stats:?}; unknown {:?}",
-        bots.unknown
+        "raptor: a 1000 frames, cavemen's kills {cavemen:.2}, raptors' {raptors:.2}, bites {bit:.2}"
     );
-    assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
-    assert_eq!(bots.faults, 0);
-    // The oracle's b1 and b2: a team reaches 20 by kills, the other has 14-17.
-    assert!(scores.iter().any(|&s| s >= 20), "{scores:?}");
-    assert!(scores[0].min(scores[1]) >= 5, "{scores:?}");
+    assert!((1.4..=2.4).contains(&raptors), "{raptors}");
+    assert!((1.4..=2.0).contains(&cavemen), "{cavemen}");
+    assert!((6.0..=9.0).contains(&bit), "{bit}");
 }
 
 /// Tank on 0x24 as the server has it (`humans` then `bots`, slot i on record i, from slot 4 on
@@ -2107,17 +2127,22 @@ fn tank_bomb_as_c1() {
 }
 
 /// Script 0xB8's bots against oracle b1 (7 bots, an idle human; 10 minutes there, 5 here): they
-/// fetch the bomb and plant it, its blasts and their shells kill, no native is unknown.
+/// fetch the bomb and plant it, its blasts and their shells kill, no native is unknown. They fire
+/// as b1's (`func_1508D850`: 321 shells to read 9023, here within 10%) and their shells kill
+/// about as many (b1 about 10; the old rule, firing whenever ready and aimed, 20).
 #[test]
 fn tank_bots_bomb_and_fight() {
     let Some(rom) = rom() else { return };
     let (mut m, arena, mut world, mut ai) = tank_match(&rom, &[0], &[1, 2, 3, 4, 5, 6, 7], 1);
     let mut inputs = vec![conker_sim::movement::Input::default(); 8];
-    let (mut plants, mut taken, mut shells, mut bomb_kills) = (0, 0, 0, 0);
+    let (mut plants, mut taken, mut shells, mut bomb_kills, mut hits) = (0, 0, 0, 0, 0);
     let (mut counting, mut carrier) = (false, None);
     for _ in 0..9000 {
         let before: Vec<u8> = m.players.iter().map(|f| f.health).collect();
         let ev = tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
+        hits += (m.players.iter().zip(&before))
+            .filter(|(f, b)| f.health + 1 == **b)
+            .count();
         if m.gas.countdown > 0 && !counting {
             plants += 1;
         }
@@ -2142,20 +2167,24 @@ fn tank_bots_bomb_and_fight() {
         }
     }
     let kills: Vec<u16> = m.players.iter().map(|f| f.kills).collect();
+    let fired: Vec<u16> = m.players.iter().map(|f| f.shots).collect();
     eprintln!(
         "tank bots: {taken} pickups, {plants} plants, {bomb_kills} bomb deaths, {shells} shell \
-         deaths, kills {kills:?}; unknown {:?}",
+         deaths, {hits} hits of 1, kills {kills:?}, shots {fired:?}; unknown {:?}",
         ai.unknown
     );
     assert!(plants >= 1 && taken >= plants && bomb_kills >= 1);
-    assert!(shells >= 1);
+    let total: u32 = fired.iter().map(|&s| u32::from(s)).sum();
+    assert!(total.abs_diff(321) * 10 <= 321, "shots {total}");
+    assert!((5..=15).contains(&shells), "shell deaths {shells}");
     assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
     assert_eq!(ai.faults, 0);
 }
 
 /// Race on 0x33 as the server sets it up: slot 0 an idle human with 99 lives (the oracle's L1/L2
 /// poke), `bots` bots on script 0xBC, 5 laps on route 11 (`high`: 12). Runs to the results (or
-/// `frames`); returns the match, the bots and each racer's lap ticks (`ride.lap` going up).
+/// `frames`); returns the match, the bots, each racer's lap ticks (`ride.lap` going up), the
+/// human's death ticks and the missiles fired.
 fn race_run(
     rom: &extract_core::Rom,
     high: bool,
@@ -2167,6 +2196,7 @@ fn race_run(
     conker_bots::Bots,
     Vec<Vec<u32>>,
     Vec<u32>,
+    usize,
 ) {
     use conker_bots::{Assets, Bots, DEFAULT_SKILL};
     use conker_rules::game::Event;
@@ -2253,7 +2283,7 @@ fn race_run(
     let slots: Vec<usize> = (1..=bots).collect();
     let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, Rng { state: seed }).unwrap();
     let mut laps = vec![Vec::new(); bots + 1];
-    let mut deaths = Vec::new();
+    let (mut deaths, mut shots) = (Vec::new(), 0);
     while m.race.results.is_none() && m.tick < frames {
         let mut inputs = vec![conker_sim::movement::Input::default(); bots + 1];
         let before: Vec<i8> = m.players.iter().map(|f| f.ride.lap).collect();
@@ -2267,6 +2297,10 @@ fn race_run(
                 laps[i].push(m.tick);
             }
         }
+        shots += ev
+            .iter()
+            .filter(|e| matches!(e, Event::Shot { .. }))
+            .count();
         if (ev.iter()).any(|e| {
             matches!(
                 e,
@@ -2280,7 +2314,7 @@ fn race_run(
             deaths.push(m.tick);
         }
     }
-    (m, ai, laps, deaths)
+    (m, ai, laps, deaths, shots)
 }
 
 /// Script 0xBC races its bots, one idle human with 99 lives as the oracle's L1/L2 (3 bots: laps
@@ -2288,7 +2322,8 @@ fn race_run(
 /// the go; the human's first 3 deaths) and L7e/L7f (7 bots: finishes 4165-4323 and 4762-4880
 /// frames after the go, means 4249 and 4814): no native unknown, the bots finish (a few may run
 /// out of lives at the chasm after node 8, as L2's bot at 4128), the results follow, the 3 bots'
-/// steady laps stay within 15% of the oracle's and the 7 bots' mean finish within 5%.
+/// steady laps stay within 3% of L1's (route 12: 15% of L2's), they fire missiles, and the 7 bots'
+/// mean finish stays within 5%.
 #[test]
 fn race_bots_finish() {
     use conker_rules::race;
@@ -2299,7 +2334,7 @@ fn race_bots_finish() {
         (false, 7, 2, 0, 4249),
         (true, 7, 2, 0, 4814),
     ] {
-        let (m, ai, laps, deaths) = race_run(&rom, high, bots, seed, 9000);
+        let (m, ai, laps, deaths, shots) = race_run(&rom, high, bots, seed, 9000);
         let go = race::GO;
         for (i, f) in m.players.iter().enumerate() {
             let gaps: Vec<u32> = laps[i].windows(2).map(|w| w[1] - w[0]).collect();
@@ -2326,11 +2361,17 @@ fn race_bots_finish() {
                 assert!(r.abs_diff(o) <= 8, "human deaths {reads:?}");
             }
         }
+        // The bots fire their missiles (V L1: 928 and 938, L2), so they take canisters again.
+        eprintln!("route {}: {shots} missiles", 11 + u8::from(high));
+        assert!(shots > 0);
+        // Route 11's 3 bots lap as L1's within 3%; route 12's convoy leads at the boosts where
+        // L2's passes, so its laps run about 12% fast (STATUS's "Bots: the follow-ups").
         if oracle > 0 {
+            let within = if high { 15 } else { 3 };
             for l in laps.iter().skip(1) {
                 let lap = l[l.len() - 1] - l[l.len() - 2];
                 assert!(
-                    lap.abs_diff(oracle) * 100 <= oracle * 15,
+                    lap.abs_diff(oracle) * 100 <= oracle * within,
                     "lap {lap} vs {oracle}"
                 );
             }

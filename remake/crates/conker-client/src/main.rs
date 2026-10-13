@@ -31,7 +31,7 @@ fn main() {
     if cfg.map.is_empty() {
         cfg.map = conker_client::connection::server_map(&cfg).unwrap_or_else(|e| fail(e));
     }
-    let characters = conker_client::characters(&cfg.map);
+    let characters = conker_client::character_files(&cfg.map);
     let slice = Slice::load(&cfg.map, &characters, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
@@ -94,7 +94,7 @@ pub async fn start() -> Result<(), String> {
     }
     // Every file at once, from the folder Bevy's asset server reads the glTF models from.
     let root = bevy::asset::AssetPlugin::default().file_path;
-    let characters = conker_client::characters(&cfg.map);
+    let characters = conker_client::character_files(&cfg.map);
     let mut files = Slice::files(&cfg.map, &characters, PACK_WEAPONS);
     files.extend([conker_assets::hud::HUD, conker_assets::hud::END].map(String::from));
     let raptor = cfg.map == "3f";

@@ -16,13 +16,14 @@
 //! them as is. Units are the game's: the map spans about 7,000 x 13,000 units.
 
 use crate::connection::NetStatus;
-use crate::{Anim, BodyClips, Config, FollowCamera, body, hud_text};
+use crate::{Anim, Bodies, BodyClips, Config, FollowCamera, hud_text};
+use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::app::AnimationSystems;
 use bevy::asset::AssetMetaCheck;
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState};
 use bevy::color::Srgba;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::gltf::Gltf;
+use bevy::gltf::{Gltf, GltfExtras, GltfNode};
 use bevy::mesh::VertexAttributeValues;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
@@ -125,12 +126,17 @@ pub(crate) fn wear(
 #[derive(Component)]
 struct TeamDressed(u8, Entity);
 
-/// A body's character: its scene and its clips' graph.
+/// A body's character: its glTF (kept loaded: the connection waits on it), its scene and its
+/// clips' graph (a mesh-only pick's are `from`'s, the Tedi's), and its joints' bind translations
+/// (`joint_00`...).
 struct Look {
+    _gltf: Handle<Gltf>,
     scene: Handle<WorldAsset>,
     graph: Handle<AnimationGraph>,
     /// Animation id → graph node, for the ids in its [`crate::Clips`].
     nodes: Vec<(u16, AnimationNodeIndex)>,
+    binds: Vec<Vec3>,
+    from: Option<usize>,
 }
 
 impl Look {
@@ -139,17 +145,33 @@ impl Look {
     }
 }
 
-/// The bodies' characters ([`crate::characters`]), once loaded.
+/// The bodies' characters ([`crate::characters`]) loaded so far; the resource exists once the
+/// map's own ([`crate::map_characters`]) are.
 #[derive(Resource)]
-struct Characters(Vec<Look>);
+struct Characters(Vec<Option<Look>>);
 
 impl Characters {
-    fn of(&self, body: usize) -> &Look {
-        &self.0[body]
+    fn of(&self, body: usize) -> Option<&Look> {
+        self.0.get(body)?.as_ref()
+    }
+
+    /// The body a player is drawn as: its class's ([`Bodies::of`]) once loaded, till then its
+    /// side's (no pick crashes a client, M14b's handoff).
+    fn drawn(&self, bodies: &Bodies, c: &Combat) -> usize {
+        Some(bodies.of(c))
+            .filter(|&b| self.of(b).is_some())
+            .unwrap_or(c.side as usize)
     }
 }
 
-/// A player entity that has its model: its body ([`crate::body`]) and the model's scene root.
+/// Each character glTF's hidden display lists (`character.json`'s `hidden`: bit k hides the
+/// primitives whose `extras.list` is k), by glTF path: Neo's second table, the zombies', the
+/// raptor's, the baby's and Raptor's body's ([`hide_lists`]).
+#[derive(Resource)]
+struct HiddenLists(Vec<(String, u16)>);
+
+/// A player entity that has its model: the body drawn ([`Characters::drawn`]) and the model's
+/// scene root.
 #[derive(Component)]
 pub(crate) struct Model {
     pub(crate) body: usize,
@@ -187,14 +209,18 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     let level = level_scene(&cfg.map);
     let lift = |c: &conker_assets::Character| f32::from(c.model_lift);
     app.insert_resource(ModelLift(slice.characters.iter().map(lift).collect()));
-    let bodies = crate::characters(&cfg.map);
-    let teams = (slice.characters.iter().zip(bodies)).map(|(c, name)| {
+    let names = crate::character_files(&cfg.map);
+    let teams = (slice.characters.iter().zip(&names)).map(|(c, name)| {
         let t = c.teams.as_ref()?;
         let textures = t.textures.iter().map(|f| format!("characters/{name}/{f}"));
         Some((format!("material_{:02}", t.material), textures.collect()))
     });
     app.insert_resource(TeamLooks(teams.collect()));
-    app.add_systems(Update, dress_teams);
+    let hidden = (slice.characters.iter().zip(&names))
+        .filter_map(|(c, name)| Some((character_gltf(name), c.hidden?)));
+    app.insert_resource(HiddenLists(hidden.collect()));
+    app.add_systems(Update, (dress_teams, hide_lists));
+    crate::faces::build(app, &slice.characters, &names);
     crate::beach::build(app, &slice.characters);
     crate::projectiles::build(app);
     let carried = (slice.lights.lights.iter())
@@ -284,10 +310,10 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     app.add_systems(
         Update,
         (
-            load_characters.run_if(not(ready)),
+            load_characters,
             shade_vertex_colors,
             toggle_debug_camera,
-            rebuild_models,
+            rebuild_models.run_if(ready),
             add_player_models.run_if(ready),
             place_players,
             pose_players.run_if(ready),
@@ -307,72 +333,126 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
         )
             .chain(),
     );
+    app.add_systems(PostUpdate, rest_retargeted.before(AnimationSystems));
     app.add_systems(
         PostUpdate,
-        pin_creep_root
+        (retarget, pin_creep_root)
+            .chain()
             .after(AnimationSystems)
             .before(TransformSystems::Propagate),
     );
 }
 
-/// The bodies' characters, one after the other once the level has loaded: each glTF, then its
-/// scene and clips from the loaded asset, each clip found by its animation's name (its body's
-/// [`crate::Clips`]). A glTF load polls other pending IO tasks from inside its texture tasks on
-/// the same thread, so a second load of a GLB (the level, or the character again through hundreds
-/// of labelled clip requests) nested inside it and overflowed the IO thread's stack in debug builds
-/// (V: lldb, `load_gltf` within `execute_global_scope<ImageOrPath>`, with the GLBs' embedded
-/// images).
-#[allow(clippy::too_many_arguments)]
+/// The bodies' characters, one glTF at a time once the level has loaded: the map's own
+/// ([`crate::map_characters`]: then [`Characters`] exists), then any body a player plays (drawn as
+/// its side's body until then), then each pick the match allows ([`MatchView::characters`]). Each glTF's scene and clips come from
+/// the loaded asset, each clip found by its animation's name (its body's [`crate::Clips`]); a
+/// mesh-only pick takes its `clips_from`'s graph (loaded first). A glTF load polls other pending IO
+/// tasks from inside its texture tasks on the same thread, so a second load of a GLB (the level, or
+/// the character again through hundreds of labelled clip requests) nested inside it and overflowed
+/// the IO thread's stack in debug builds (V: lldb, `load_gltf` within
+/// `execute_global_scope<ImageOrPath>`, with the GLBs' embedded images).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn load_characters(
     mut commands: Commands,
     assets: Res<AssetServer>,
-    clips: Res<BodyClips>,
-    gltfs: Res<Assets<Gltf>>,
+    (clips, bodies): (Res<BodyClips>, Res<Bodies>),
+    (gltfs, gltf_nodes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>),
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut animations: ResMut<Assets<AnimationClip>>,
-    mut loads: Local<Vec<Handle<Gltf>>>,
-    mut looks: Local<Vec<Look>>,
+    (game, players): (Query<&MatchView>, Query<&Combat>),
+    mut characters: Option<ResMut<Characters>>,
+    (mut first, mut loading): (
+        Local<Vec<Option<Look>>>,
+        Local<Option<(usize, Handle<Gltf>)>>,
+    ),
     cfg: Res<Config>,
 ) {
     let level = assets.get_handle_untyped(level_scene(&cfg.map));
     if !level.is_some_and(|h| assets.is_loaded_with_dependencies(&h)) {
         return;
     }
-    let bodies = crate::characters(&cfg.map);
-    let (body, path) = (looks.len(), character_gltf(bodies[looks.len()]));
-    if loads.len() == looks.len() {
-        loads.push(assets.load(&path));
-    }
-    let handle = &loads[looks.len()];
-    let Some(gltf) = gltfs
-        .get(handle)
-        .filter(|_| assets.is_loaded_with_dependencies(handle))
-    else {
-        return;
-    };
-    let mut ids = Vec::new();
-    let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
-    for (id, name, ticks) in &clips.of(body).0 {
-        let Some(handle) = gltf.named_animations.get(name.as_str()) else {
-            warn!("{path}: no animation {name} (animation id {id:#x})");
-            continue;
-        };
-        // The clocks loop on the game's duration; the glTF clips end a tick earlier.
-        // ponytail: the last tick holds the last key instead of blending back to the first.
-        if let Some(mut clip) = animations.get_mut(handle) {
-            clip.set_duration(f32::from(*ticks) / conker_sim::TICK_HZ as f32);
+    let ready = characters.is_some();
+    let looks = match characters.as_deref_mut() {
+        Some(c) => &mut c.0,
+        None => {
+            first.resize_with(bodies.names.len(), || None);
+            &mut *first
         }
-        ids.push(*id);
-        handles.push(handle.clone());
+    };
+    if let Some((body, handle)) = loading.as_ref() {
+        let Some(gltf) = gltfs
+            .get(handle)
+            .filter(|_| assets.is_loaded_with_dependencies(handle))
+        else {
+            return;
+        };
+        let path = character_gltf(bodies.names[*body]);
+        let binds = (0..)
+            .map_while(|k| gltf.named_nodes.get(format!("joint_{k:02}").as_str()))
+            .filter_map(|h| gltf_nodes.get(h))
+            .map(|n| n.transform.translation)
+            .collect();
+        let from = bodies.clips_from[*body];
+        let (graph, nodes) = match from.and_then(|f| looks[f].as_ref()) {
+            Some(f) => (f.graph.clone(), f.nodes.clone()),
+            None => {
+                let mut ids = Vec::new();
+                let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
+                for (id, name, ticks) in &clips.of(*body).0 {
+                    let Some(handle) = gltf.named_animations.get(name.as_str()) else {
+                        warn!("{path}: no animation {name} (animation id {id:#x})");
+                        continue;
+                    };
+                    // The clocks loop on the game's duration; the glTF clips end a tick earlier.
+                    // ponytail: the last tick holds the last key instead of blending back to the first.
+                    if let Some(mut clip) = animations.get_mut(handle) {
+                        clip.set_duration(f32::from(*ticks) / conker_sim::TICK_HZ as f32);
+                    }
+                    ids.push(*id);
+                    handles.push(handle.clone());
+                }
+                let (graph, nodes) = AnimationGraph::from_clips(handles);
+                (graphs.add(graph), ids.into_iter().zip(nodes).collect())
+            }
+        };
+        looks[*body] = Some(Look {
+            _gltf: handle.clone(),
+            scene: gltf.scenes[0].clone(),
+            graph,
+            nodes,
+            binds,
+            from,
+        });
+        if ready {
+            info!("{path} loaded: drawn from now on");
+        }
+        *loading = None;
     }
-    let (graph, nodes) = AnimationGraph::from_clips(handles);
-    looks.push(Look {
-        scene: gltf.scenes[0].clone(),
-        graph: graphs.add(graph),
-        nodes: ids.into_iter().zip(nodes).collect(),
-    });
-    if looks.len() == bodies.len() {
-        commands.insert_resource(Characters(std::mem::take(&mut *looks)));
+    // The map's own first; once they are in, the players' bodies, then the match's picks.
+    let own = 0..crate::map_characters(&cfg.map).len();
+    let mask = game.iter().next().map_or(0, |m| m.characters);
+    let picks = (0..crate::PICKS.len()).filter(|k| mask >> k & 1 != 0);
+    let picked = picks.filter_map(|k| bodies.names.iter().position(|n| *n == crate::PICKS[k].0));
+    let played = players.iter().map(|c| bodies.of(c));
+    let wanted: Vec<usize> = match ready {
+        true => own.chain(played).chain(picked).collect(),
+        false => own.collect(),
+    };
+    // A mesh-only pick's clips' body before it.
+    let next = (wanted.into_iter())
+        .map(|b| match bodies.clips_from[b] {
+            Some(f) if looks[f].is_none() => f,
+            _ => b,
+        })
+        .find(|&b| looks[b].is_none());
+    match next {
+        Some(body) => {
+            let path = character_gltf(bodies.names[body]);
+            *loading = Some((body, assets.load(path)));
+        }
+        None if !ready => commands.insert_resource(Characters(std::mem::take(&mut *first))),
+        None => {}
     }
 }
 
@@ -506,25 +586,27 @@ fn toggle_debug_camera(
     info!("debug camera {}", if state.enabled { "on" } else { "off" });
 }
 
-/// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each its body's
-/// model ([`crate::body`]), lifted by its own model lift, at the players' scale (a raptor at its
-/// own, [`crate::raptor::SCALE`]).
+/// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each the model it
+/// is drawn as ([`Characters::drawn`]), lifted by its own model lift, at its class's scale
+/// (conker-rules' `characters::scale`: 0.6 for the Sergeant and the Tediz Leader, 0.7 for the
+/// raptor, else [`MODEL_SCALE`]; I: the 0.6 models' lift, 41, scaled with them, characters.md §4).
 #[allow(clippy::type_complexity)]
 fn add_player_models(
     players: Query<(Entity, &Combat), (With<Anim>, Without<Model>)>,
     characters: Res<Characters>,
+    bodies: Res<Bodies>,
     lift: Res<ModelLift>,
     mut commands: Commands,
 ) {
     for (entity, combat) in &players {
-        let body = body(combat);
-        let scale = match combat.class {
-            conker_rules::raptor::CLASS => crate::raptor::SCALE,
-            _ => MODEL_SCALE,
+        let body = characters.drawn(&bodies, combat);
+        let Some(look) = characters.of(body) else {
+            continue;
         };
+        let scale = conker_rules::characters::scale(combat.class);
         let scene = commands
             .spawn((
-                WorldAssetRoot(characters.of(body).scene.clone()),
+                WorldAssetRoot(look.scene.clone()),
                 Transform::from_xyz(0.0, scale * lift.0[body], 0.0).with_scale(Vec3::splat(scale)),
                 ChildOf(entity),
             ))
@@ -538,16 +620,26 @@ fn add_player_models(
     }
 }
 
-/// A player whose body changed (War: Beach's villagers re-roll their class, and so maybe their
-/// model, at each respawn) loses its model, rig and held models: [`add_player_models`] gives it
-/// the new one.
-fn rebuild_models(players: Query<(Entity, &Combat, &Model)>, mut commands: Commands) {
+/// A player whose drawn body changed (War: Beach's villagers re-roll their class, and so maybe
+/// their model, at each respawn; a pick's model came in after it was drawn as its side's) loses its
+/// model and what hung on it: [`add_player_models`] gives it the new one.
+fn rebuild_models(
+    players: Query<(Entity, &Combat, &Model)>,
+    characters: Res<Characters>,
+    bodies: Res<Bodies>,
+    mut commands: Commands,
+) {
     for (entity, combat, model) in &players {
-        if body(combat) != model.body {
+        if characters.drawn(&bodies, combat) != model.body {
             commands.entity(model.scene).despawn();
-            commands
-                .entity(entity)
-                .remove::<(Model, Rig, crate::held::Hands)>();
+            commands.entity(entity).remove::<(
+                Model,
+                Rig,
+                Retarget,
+                crate::held::Hands,
+                crate::race::Gear,
+                crate::faces::Eyes,
+            )>();
         }
     }
 }
@@ -588,7 +680,19 @@ fn dress_teams(
     }
 }
 
+/// A mesh-only pick's joints posed by the Tedi's clips (`Look::from`): each joint, its bind
+/// translation in the clips' character, and its own bind's offset from it. The clips key a joint's
+/// translation as their character's bind plus a delta, so each frame the joints rest at the clips'
+/// binds before the animation ([`rest_retargeted`]) and move by the offset after it ([`retarget`]):
+/// a keyed joint is drawn at `key − from + own`, one the clip does not key at its own bind
+/// (M14a's handoff).
+#[derive(Component)]
+pub(crate) struct Retarget(Vec<(Entity, Vec3, Vec3)>);
+
 /// The model's scene is in: hook its `AnimationPlayer` to its body's clips and find the root joint.
+/// A mesh-only pick's glTF has no animations, so no player or targets: `joint_00` gets the player
+/// and every joint the target the Tedi's clips name (its path of joint names from `joint_00`, as
+/// Bevy's glTF loader names an animated glTF's), and the player its [`Retarget`].
 #[allow(clippy::too_many_arguments)]
 fn rig_ready(
     ready: On<WorldInstanceReady>,
@@ -610,17 +714,61 @@ fn rig_ready(
     else {
         return;
     };
+    let Some(look) = characters.of(body) else {
+        return;
+    };
     let mut animator = None;
     let mut root = None;
+    let mut rig = Vec::new();
     for entity in children.iter_descendants(ready.entity) {
         if animators.contains(entity) {
             animator = Some(entity);
         }
-        if let Ok((name, transform)) = joints.get(entity)
-            && name.as_str() == ROOT_JOINT
-        {
+        let Ok((name, transform)) = joints.get(entity) else {
+            continue;
+        };
+        if name.as_str() == ROOT_JOINT {
             root = Some((entity, transform.translation.z));
         }
+        if let Some(k) = name
+            .strip_prefix("joint_")
+            .and_then(|k| k.parse::<usize>().ok())
+        {
+            rig.push((entity, k));
+        }
+    }
+    if let (Some(from), Some((joint_00, _))) = (look.from, root) {
+        let from = characters.of(from).map_or(&[][..], |f| &f.binds[..]);
+        let mut retarget = Vec::new();
+        for &(entity, k) in &rig {
+            // Its path from `joint_00`, `joint_00` included.
+            let mut path = vec![entity];
+            path.extend(
+                parents
+                    .iter_ancestors(entity)
+                    .take_while(|&e| e != ready.entity),
+            );
+            path.reverse();
+            let names: Vec<&Name> = path
+                .iter()
+                .filter_map(|&e| joints.get(e).ok())
+                .map(|j| j.0)
+                .collect();
+            let start = names
+                .iter()
+                .position(|n| n.as_str() == ROOT_JOINT)
+                .unwrap_or(0);
+            commands.entity(entity).insert((
+                AnimationTargetId::from_names(names[start..].iter().copied()),
+                AnimatedBy(joint_00),
+            ));
+            if let (Some(&f), Some(&own)) = (from.get(k), look.binds.get(k)) {
+                retarget.push((entity, f, own - f));
+            }
+        }
+        commands.entity(joint_00).insert(AnimationPlayer::default());
+        commands.entity(player).insert(Retarget(retarget));
+        animator = Some(joint_00);
     }
     let (Some(animator), Some((root, root_z))) = (animator, root) else {
         warn!("character model without an AnimationPlayer or {ROOT_JOINT}");
@@ -628,13 +776,31 @@ fn rig_ready(
     };
     commands
         .entity(animator)
-        .insert(AnimationGraphHandle(characters.of(body).graph.clone()));
+        .insert(AnimationGraphHandle(look.graph.clone()));
     commands.entity(player).insert(Rig {
         body,
         animator,
         root,
         root_z,
     });
+}
+
+/// [`Retarget`]'s first half: the joints at the clips' binds before the animation.
+fn rest_retargeted(rigs: Query<&Retarget>, mut joints: Query<&mut Transform>) {
+    for (joint, from, _) in rigs.iter().flat_map(|r| &r.0) {
+        if let Ok(mut t) = joints.get_mut(*joint) {
+            t.translation = *from;
+        }
+    }
+}
+
+/// [`Retarget`]'s second half: each joint moved by its own bind's offset after the animation.
+fn retarget(rigs: Query<&Retarget>, mut joints: Query<&mut Transform>) {
+    for (joint, _, offset) in rigs.iter().flat_map(|r| &r.0) {
+        if let Ok(mut t) = joints.get_mut(*joint) {
+            t.translation += *offset;
+        }
+    }
 }
 
 /// Each player where its state is; the local player where and as its correction draws it
@@ -653,21 +819,25 @@ fn place_players(
     }
 }
 
-/// Shows each player's clock: its clip at its time, cross-faded with the previous clip.
+/// Shows each player's clock: its clip at its time, cross-faded with the previous clip; the
+/// Sergeant's and the Tediz Leader's own clips for the bazooka and the mounted gun
+/// (conker-rules' `characters::clip`).
 fn pose_players(
-    players: Query<(&Anim, &Rig)>,
+    players: Query<(&Anim, &Rig, Option<&Combat>)>,
     mut animators: Query<&mut AnimationPlayer>,
     characters: Res<Characters>,
 ) {
-    for (anim, rig) in &players {
-        let Ok(mut animator) = animators.get_mut(rig.animator) else {
+    for (anim, rig, combat) in &players {
+        let (Ok(mut animator), Some(character)) =
+            (animators.get_mut(rig.animator), characters.of(rig.body))
+        else {
             continue;
         };
-        let character = characters.of(rig.body);
+        let clip = |id| conker_rules::characters::clip(combat.map_or(0, |c| c.class), id);
         let a = &anim.0;
         let w = a.prev_weight();
-        let current = character.node(a.id);
-        let prev = character.node(a.prev).filter(|_| w > 0.0 && a.prev != a.id);
+        let current = character.node(clip(a.id));
+        let prev = (character.node(clip(a.prev))).filter(|_| w > 0.0 && a.prev != a.id);
         let stale: Vec<AnimationNodeIndex> = animator
             .playing_animations()
             .map(|(node, _)| *node)
@@ -689,8 +859,9 @@ fn pose_players(
 }
 
 /// The creep clip carries its walk in the root's z (143 model units); the game turns that into
-/// the player's motion instead of drawing it (V: conker-anim), so the root stays at rest here. So
-/// do the raptor's braking (1) and running bite (53), which conker-sim's `raptor` moves.
+/// the player's motion instead of drawing it (V: conker-anim), so the root stays at rest here (a
+/// pick's own rest, after [`retarget`]). So do the raptor's braking (1) and running bite (53),
+/// which conker-sim's `raptor` moves.
 fn pin_creep_root(players: Query<(&Anim, &Rig, &Combat)>, mut joints: Query<&mut Transform>) {
     use conker_sim::raptor::clip;
     for (anim, rig, c) in &players {
@@ -896,6 +1067,34 @@ fn update_hud(
     }
 }
 
+/// [`HiddenLists`]: each new primitive of a character glTF whose display list its character hides
+/// hides, wherever the model is (players, War: Raptor's baby and body, the outros' actors). V:
+/// the raptor draws list 0 only (raptor-client-scratch hg), the baby and the body too (h2, b22),
+/// Neo its first table, the zombies all but lists 4, 8-10 (characters-scratch k15).
+fn hide_lists(
+    lists: Res<HiddenLists>,
+    parts: Query<(Entity, &GltfExtras, &Mesh3d), Added<GltfExtras>>,
+    mut commands: Commands,
+) {
+    for (part, extras, mesh) in &parts {
+        let Some(path) = mesh
+            .0
+            .path()
+            .map(|p| p.path().to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let Some(&(_, mask)) = lists.0.iter().find(|l| l.0 == path) else {
+            continue;
+        };
+        let list = serde_json::from_str::<serde_json::Value>(&extras.value).ok();
+        let list = list.and_then(|x| x.get("list")?.as_u64());
+        if list.is_some_and(|l| l < 16 && mask >> l & 1 != 0) {
+            commands.entity(part).insert(Visibility::Hidden);
+        }
+    }
+}
+
 /// Logs when the level and the characters have finished loading (load time on native and in the
 /// browser).
 fn log_loaded(
@@ -905,7 +1104,7 @@ fn log_loaded(
     cfg: Res<Config>,
 ) {
     let pending = pending.get_or_insert_with(|| {
-        let characters = crate::characters(&cfg.map).into_iter();
+        let characters = crate::map_characters(&cfg.map).into_iter();
         let characters = characters.map(|c| format!("{}#Scene0", character_gltf(c)));
         std::iter::once(level_scene(&cfg.map))
             .chain(characters)
@@ -954,6 +1153,39 @@ fn shot(world: &World) -> Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conker_sim::movement::Side;
+
+    /// A pick is drawn as its own model once that is loaded, as its side's till then, and as its
+    /// side's where the map's list has no model for it (no index past a list: M14b's crash).
+    #[test]
+    fn a_pick_is_drawn_as_its_side_till_its_model_is_in() {
+        let bodies = Bodies {
+            names: vec!["128", "117", "136", "176"],
+            clips_from: vec![None, None, None, Some(1)],
+        };
+        let look = || {
+            Some(Look {
+                _gltf: default(),
+                scene: default(),
+                graph: default(),
+                nodes: Vec::new(),
+                binds: Vec::new(),
+                from: None,
+            })
+        };
+        let c = |side, class| Combat {
+            side,
+            class,
+            ..Combat::default()
+        };
+        let mut characters = Characters(vec![look(), look(), look(), None]);
+        let sergeant = c(Side::Tediz, 0x25);
+        assert_eq!(characters.drawn(&bodies, &sergeant), Side::Tediz as usize);
+        characters.0[3] = look();
+        assert_eq!(characters.drawn(&bodies, &sergeant), 3);
+        assert_eq!(characters.drawn(&bodies, &c(Side::Squirrels, 0)), 0);
+        assert_eq!(characters.drawn(&bodies, &c(Side::Tediz, 0x28)), 1);
+    }
 
     /// A pickup taken shrinks by 0.26 of its size a frame, then hides (V d1 713-716).
     #[test]

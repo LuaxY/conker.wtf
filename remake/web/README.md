@@ -44,7 +44,8 @@ pings, lobby players, ready states or chat. The lobby's player columns, ready to
 host's port 5888) is gone from the list too: a game server started by hand is reached with `play.html?server=HOST:PORT`.
 
 **URL contract.**
-- The lobby's "Join game" opens `play.html?server=HOST:PORT&transport=wt|ws&side=squirrels|tediz&digest=HEX` (URL-encoded:
+- The lobby's "Join game" opens `play.html?server=HOST:PORT&transport=wt|ws&side=squirrels|tediz&digest=HEX` (plus
+  `&character=N` when a pick is chosen; URL-encoded:
   `server=localhost%3A5900`; the client decodes it). `digest` is that server's WebTransport certificate hash, from
   `/api/servers`: several servers run at once, so `dist/digest.txt` (one server's at most) can't serve them all. The game
   page hands its URL to the client unchanged, and the client rejects any option it does not know (table below).
@@ -225,6 +226,7 @@ The game page's URL options (`play.html?a=1&b=2`):
 | `id=N` | netcode client id (default random) |
 | `map=2d` / `30` | the map to load instead of asking the server's `/info` (it must be the server's) |
 | `side=squirrels` / `tediz` / `cavemen` | the side to play on: the squirrels (the SHC soldier), the Tediz (the Tedi) or the cavemen (the caveman), each with its own model; default: the server puts you on the side with fewer players (the squirrels on a tie; the Tediz against caveman bots, on 0x3F or with `--cavemen`). Deathmatch scoring stays per player |
+| `character=N` / name | the character to play (the select's pick: 0-21 or its name, e.g. `sergeant`, `neo-conker`; `../STATUS.md`, "Characters: the client and the lobby"), where the server's map and mode have a select and allow it (its `--cheats` add picks); else the server gives the slot's default. The lobby's picker lists the allowed ones |
 | `script` | drive the player with a test pattern instead of the keyboard |
 | `lag=MS` | add MS to every packet in both directions (a round trip takes 2·MS more), to test the netcode |
 | `log=DIRECTIVES` | more log filters (`EnvFilter` syntax), e.g. `log=conker_client=debug` for the `STATE` (the predicted player, every tick) and `SEEN` lines (where the screen showed each other player when it took that tick's input). The browser has no `RUST_LOG`; natively `RUST_LOG` wins |

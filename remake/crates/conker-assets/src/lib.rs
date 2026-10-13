@@ -6,7 +6,7 @@
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
 //!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
-//!   `outros.json` ([`outro::Outro`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
+//!   `outros.json` ([`outro::Outro`]), `segments.json` ([`Segments`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
 //!   on `3f`, `raptor.json` ([`raptor::Raptor`]); on `33`, `race.json` ([`race::Race`]); on `2b`,
 //!   `effects.gltf` (+ `effects.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
@@ -276,6 +276,43 @@ pub struct Lights {
     pub switching: Vec<usize>,
 }
 
+/// `level.gltf`'s materials whose texture the game binds at run time (CBFD's per-scene switch in
+/// `func_1510B9D0`: 0x1A's `func_15100464`; 0x33's crowd is in `race.json`, the other packed maps
+/// have none), `level.gltf` drawing each one's first frame; empty off 0x1A.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Segments {
+    /// Materials showing their frames in turn, as Race's crowd: 0x1A's two computer screens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screens: Option<race::Crowd>,
+    /// The lamp of each [`Lights::switching`] light, in its order (0x1A's five).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lamps: Vec<Lamp>,
+}
+
+/// A switching light's lamp: `materials` (`level.gltf`'s, by name) draw `on` while the light is on
+/// (as `level.gltf` does), `off` while it is off; PNGs relative to the map's folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lamp {
+    pub materials: Vec<String>,
+    pub on: String,
+    pub off: String,
+}
+
+impl Segments {
+    /// Refuses screens a client could not show and lamps that are not one per switching light.
+    fn check(&self, file: &str, lights: &Lights) -> Result<()> {
+        if let Some((field, why)) = self.screens.as_ref().and_then(race::Crowd::invalid) {
+            return Err(invalid(file, format!("screens.{field}"), why));
+        }
+        let (n, k) = (self.lamps.len(), lights.switching.len());
+        if n != 0 && n != k {
+            let why = format!("{n}, not one per switching light ({k})");
+            return Err(invalid(file, "lamps", why));
+        }
+        Ok(())
+    }
+}
+
 /// A point light at `at`, of `rgb`, `size + swing × sin φ` big, φ stepping `step` a frame (from
 /// any phase), shining `when`; `flicker`: it flickers in bursts (light behaviour 4, `func_151607A4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +452,8 @@ pub struct Slice {
     pub lights: Lights,
     /// `maps/<map>/outros.json`: War: Total War's victory outros (on `2d`; none elsewhere).
     pub outros: Vec<outro::Outro>,
+    /// `maps/<map>/segments.json`.
+    pub segments: Segments,
     /// The characters, in the order [`Slice::load`] was given their folders.
     pub characters: Vec<Character>,
     /// `weapons/<set>/held.json`: glTF scene `i` of the held glTF is `held[i]`.
@@ -432,7 +471,7 @@ pub struct Slice {
 
 /// The data files of a slice, relative to the pack root, in [`Slice::files`] order: the manifest,
 /// the map's five, the weapon set's, the game's two, the map's AI script, the game's class data,
-/// the map's lights and outros, then one per character.
+/// the map's lights, outros and segments, then one per character.
 fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
     let mut files = vec![
         MANIFEST.into(),
@@ -453,6 +492,7 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
         },
         format!("maps/{map}/lights.json"),
         format!("maps/{map}/outros.json"),
+        format!("maps/{map}/segments.json"),
     ];
     files.extend(
         characters
@@ -651,9 +691,10 @@ impl Slice {
             class,
             lights,
             outros,
-        ] = &files[..13]
+            segments,
+        ] = &files[..14]
         else {
-            unreachable!("data_files lists 13 files before the characters")
+            unreachable!("data_files lists 14 files before the characters")
         };
         let mut bytes = |file: &str| {
             read(file).map_err(|e| Error::Read {
@@ -706,6 +747,7 @@ impl Slice {
             let why = format!("{ACOS_LEN} entries, not {}", acos_table.len());
             return Err(invalid(acos, "(table)", why));
         }
+        let lights: Lights = parse_json(lights, &bytes(lights)?)?;
         Ok(Self {
             collision: (runs.into_iter())
                 .flat_map(|r| {
@@ -723,11 +765,16 @@ impl Slice {
             pickups: parse_json(pickups, &bytes(pickups)?)?,
             triggers: records.iter().flat_map(Trigger::bytes).collect(),
             nav: nav_bytes(word_2, nodes),
-            characters: (files[13..].iter())
+            characters: (files[14..].iter())
                 .map(|f| parse_json(f, &bytes(f)?))
                 .collect::<Result<_>>()?,
-            lights: parse_json(lights, &bytes(lights)?)?,
             outros: parse_json(outros, &bytes(outros)?)?,
+            segments: {
+                let s: Segments = parse_json(segments, &bytes(segments)?)?;
+                s.check(segments, &lights)?;
+                s
+            },
+            lights,
             held: parse_json(held, &bytes(held)?)?,
             acos: acos_table,
             sink: parse_json(sink, &bytes(sink)?)?,
@@ -766,10 +813,11 @@ impl Slice {
             class,
             lights,
             outros,
-        ] = files[..13]
+            segments,
+        ] = files[..14]
             .to_vec()
             .try_into()
-            .expect("13 files before the characters");
+            .expect("14 files before the characters");
         let mut runs: Vec<Run> = Vec::new();
         for t in &self.collision {
             let face = Face(t.points, t.surface);
@@ -817,8 +865,9 @@ impl Slice {
             (class, self.class.clone()),
             (lights, to_json(&self.lights, 2)),
             (outros, to_json(&self.outros, 3)),
+            (segments, to_json(&self.segments, 3)),
         ];
-        let character_files = files[13..].iter().cloned();
+        let character_files = files[14..].iter().cloned();
         out.extend(character_files.zip(self.characters.iter().map(|c| to_json(c, 2))));
         Ok(out)
     }
@@ -1079,6 +1128,20 @@ mod tests {
                 switching: vec![1],
             },
             outros: vec![sample_outro()],
+            segments: Segments {
+                screens: Some(race::Crowd {
+                    step: 8,
+                    panels: vec![race::Panel {
+                        material: "m69-seg02000000".into(),
+                        frames: vec!["textures/1547.png".into(), "textures/1548.png".into()],
+                    }],
+                }),
+                lamps: vec![Lamp {
+                    materials: vec!["m30-seg04000000".into(), "m31-seg04000000".into()],
+                    on: "textures/0364.png".into(),
+                    off: "textures/3197.png".into(),
+                }],
+            },
             characters: vec![
                 Character {
                     model_lift: 42,
@@ -1460,6 +1523,20 @@ mod tests {
             e,
             "maps/2d/triggers.json: [0]: kind 64 (0-63) and shape 3 (0-3)"
         );
+        // Lamps one per switching light, screens with frames; none at all off 0x1A (`{}`).
+        let e = error("maps/2d/segments.json", &|t| {
+            Some(t.replace(
+                "\"lamps\": [",
+                "\"lamps\": [{\"materials\":[],\"on\":\"\",\"off\":\"\"},",
+            ))
+        });
+        let why = "lamps: 2, not one per switching light (1)";
+        assert_eq!(e, format!("maps/2d/segments.json: {why}"));
+        let e = error("maps/2d/segments.json", &|t| {
+            Some(t.replace("\"textures/1547.png\",\"textures/1548.png\"", ""))
+        });
+        assert_eq!(e, "maps/2d/segments.json: screens.panels[0].frames: empty");
+        assert_eq!(to_json(&Segments::default(), 3), b"{}\n");
         let e = error(MANIFEST, &|t| {
             Some(t.replace("\"format\": 1", "\"format\": 2"))
         });

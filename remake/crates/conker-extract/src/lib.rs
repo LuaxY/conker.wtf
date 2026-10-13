@@ -27,7 +27,8 @@ use extract_character::{
 use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
 use extract_gbi::Material;
 use extract_level::{
-    Gltf, IDENTITY, Instance, Level, Mesh, Model, bundle_segments, scene_level, to_gltf,
+    Gltf, IDENTITY, Instance, Level, Mesh, Model, bind_material, bundle_segments, scene_level,
+    to_gltf,
 };
 pub use extract_scene::{Layer, SpawnPoint, Triangle};
 use extract_scene::{
@@ -688,21 +689,6 @@ fn team_ids(rom: &Rom, entry: usize) -> Result<[u32; 4]> {
 }
 
 /// `material` with the image (and palette) it draws from `segment` bound to texture `id`.
-fn bind_material(mut material: Material, segment: u32, id: u32) -> Material {
-    use extract_gbi::Image;
-    let bound = |image: Image, mode| match image {
-        Image::Segment(a) if a >> 24 == segment => Image::Flat { index: id, mode },
-        other => other,
-    };
-    if let Some(t) = &mut material.texture {
-        t.image = t.image.map(|i| bound(i, 0));
-        if let Some(p) = &mut t.palette {
-            p.image = bound(p.image, 1);
-        }
-    }
-    material
-}
-
 /// `character` with its materials drawing from `segment` bound to texture `id`.
 fn bind_segment(mut character: Character, segment: u32, id: u32) -> Character {
     for d in character.model.lists.iter_mut().flat_map(|l| &mut l.draws) {
@@ -919,9 +905,12 @@ pub fn bind_faces(
                 "{}: segment {s}'s material draws more",
                 character.entry
             );
+            // A material ignoring its texture shows no face (176's 12, [`Material::samples_texel`]).
             Ok(assets::FaceSegment {
                 segment: s as u8,
-                materials: materials.into_iter().collect(),
+                materials: (materials.into_iter())
+                    .filter(|&i| distinct[i].samples_texel())
+                    .collect(),
                 textures: std::array::from_fn(|k| format!("textures/face-{:02}.png", e[k])),
             })
         })
@@ -1048,13 +1037,26 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let mut data = None;
     for (i, map) in maps.iter().enumerate() {
         let name = map_name(map.scene);
-        let d = pack_data(rom, map.scene, &characters, &faces, &held, &outros[i])?;
+        let (segments, frames) = map_segments(rom, map.scene, &textures)?;
+        let d = pack_data(
+            rom,
+            map.scene,
+            &characters,
+            &faces,
+            &held,
+            &outros[i],
+            segments,
+        )?;
         for (path, bytes) in d.write(&name, &names, PACK_WEAPONS)? {
             if i == 0 || path.starts_with("maps/") {
                 out.add(path, bytes);
             }
         }
-        let level = to_gltf(&map_level(rom, map.scene)?, &textures, "level.bin")?;
+        let mut level = to_gltf(&map_level(rom, map.scene)?, &textures, "level.bin")?;
+        level.images.extend(frames);
+        if map.scene == RACE_MAP {
+            level.images.extend(race_crowd(rom, &textures)?.1);
+        }
         gltfs.push((
             assets::level_gltf(&name),
             parse(&level.json)?,
@@ -1452,6 +1454,19 @@ pub fn map_level(rom: &Rom, scene: usize) -> Result<Level> {
             }
         }
     }
+    // The runtime segments' first frames: Race's crowd, 0x1A's screens and lamps (lit).
+    if scene == RACE_MAP {
+        level.segments = crowd_frames(rom)?
+            .into_iter()
+            .map(|(s, ids)| (s, ids[0]))
+            .collect();
+    }
+    if scene == VAULT {
+        let ids = vault_ids(rom)?;
+        level.segments = (VAULT_SCREENS.map(|(s, k)| (s, ids[k])).into_iter())
+            .chain(VAULT_LAMPS.map(|s| (s, ids[VAULT_LIT])))
+            .collect();
+    }
     Ok(level)
 }
 
@@ -1749,6 +1764,28 @@ const RACE_HEADS: [(u8, u32); 3] = [(0xD, 0x76), (0xE, 0x78), (0xF, 0x77)];
 /// The racers' classes: the humans' (model 136) and the bots' ([`RACER`]) (V cls).
 const RACE_HUMAN: u8 = 0xB;
 const RACE_BOTS: std::ops::RangeInclusive<u8> = 0xC..=0xF;
+/// Race's crowd, 0x33's level materials on segments 4-7 (panels in the stands, drawn white when
+/// unbound). Each frame, `func_150D765C` (scene 0x33's case in `func_1510B9D0`'s switch) binds
+/// segment s (2-7) to texture `table[(k + 13 (s - 2)) % 5]`: the first of the two tables whose
+/// addresses are at 0x80088900 for segments 2-5, the second for 6-7; k is the u16 at 0x800D9910
+/// (`func_150D7630`: + 64 a VI) >> 8 (C; V cd 142-235, w1, w3b: segments 4-7 draw those ids, and no
+/// 0x33 level material draws segments 2 and 3).
+const CROWD_TABLES: usize = 0x8008_8900 - GAME_DATA;
+const CROWD_SEGMENTS: std::ops::RangeInclusive<u32> = 4..=7;
+/// VIs a crowd frame shows (256 / 64, C).
+const CROWD_STEP: u8 = 4;
+/// 0x1A's runtime segments: `func_15100464` (scene 0x1A's case in `func_1510B9D0`'s switch) binds
+/// each frame, of the 5 texture ids at 0x80090324 ([`vault_ids`]), segments 2 and 3 (the computer
+/// screens) to `ids[(t / 4 + j) % 3]`, j 0 and 1, t the u8 at 0x800DD405 (+ 1 a frame,
+/// `func_15100340`), and segment 4 + k to `ids[3]` while switching light k (light command 8 + k) is
+/// on, `ids[4]` while it is off (the byte at 0x800BE500 + k, toggled with the light) (C; V hud1-3,
+/// bag_dl, bag_ap, bag_dl3, dm3, dm15, cs2, cs3: the dumps' segments 2-8 draw those ids).
+const VAULT_IDS: usize = 0x8009_0324 - GAME_DATA;
+const VAULT_SCREENS: [(u32, usize); 2] = [(2, 0), (3, 1)];
+const VAULT_LAMPS: std::ops::RangeInclusive<u32> = 4..=8;
+const VAULT_LIT: usize = 3;
+/// VIs a screen frame shows: 4 frames of t, 2 VIs each (I: the multiplayer's 30 frames a second).
+const VAULT_STEP: u8 = 8;
 
 /// Race's board, then the helmets of [`RACE_HEADS`], as their actions attach them (one bank-09
 /// model on a matrix slot each): `props.gltf`'s scenes on 0x33.
@@ -1819,8 +1856,143 @@ fn race_lap(nav: &[u8], high: bool) -> Result<Vec<u8>> {
     }
 }
 
+/// Each crowd segment ([`CROWD_SEGMENTS`]) and its 5 texture ids in the order shown: the original
+/// draws `ids[k % 5]`.
+pub fn crowd_frames(rom: &Rom) -> Result<Vec<(u32, [u32; 5])>> {
+    let data = rom.game_data()?;
+    let word = |at: usize| -> Result<usize> {
+        let w = data.get(at..at + 4).context("short crowd tables")?;
+        Ok(u32::from_be_bytes(w.try_into()?) as usize)
+    };
+    (CROWD_SEGMENTS.map(|s| {
+        let at = word(CROWD_TABLES + 4 * usize::from(s >= 6))?;
+        let table = at.checked_sub(GAME_DATA).context("crowd table")?;
+        let id = |j: usize| -> Result<u32> {
+            Ok(word(table + 4 * ((j + 13 * (s as usize - 2)) % 5))? as u32)
+        };
+        Ok((s, [id(0)?, id(1)?, id(2)?, id(3)?, id(4)?]))
+    }))
+    .collect()
+}
+
+/// Race's crowd for `race.json`, each panel's `level.gltf` material and frames, and the frames'
+/// PNGs (paths relative to the map's folder, named as the level's).
+pub fn race_crowd(rom: &Rom, textures: &Textures) -> Result<(assets::race::Crowd, Images)> {
+    let (level, names) = level_names(rom, RACE_MAP, textures)?;
+    let (mut panels, mut images) = (Vec::new(), Images::new());
+    for (s, ids) in crowd_frames(rom)? {
+        let (materials, frames) = segment_frames(&level, &names, s, &ids, textures, &mut images)?;
+        let [material] = <[String; 1]>::try_from(materials)
+            .map_err(|m| anyhow::anyhow!("0x33: segment {s}: {} materials", m.len()))?;
+        panels.push(assets::race::Panel { material, frames });
+    }
+    let step = CROWD_STEP;
+    Ok((assets::race::Crowd { step, panels }, images))
+}
+
+/// A map's level ([`map_level`]) and its `level.gltf` material names.
+fn level_names(rom: &Rom, scene: usize, textures: &Textures) -> Result<(Level, Vec<String>)> {
+    let level = map_level(rom, scene)?;
+    let gltf: Value = serde_json::from_str(&to_gltf(&level, textures, "level.bin")?.json)?;
+    let names = (gltf["materials"].as_array().into_iter().flatten())
+        .filter_map(|m| Some(m["name"].as_str()?.to_string()))
+        .collect();
+    Ok((level, names))
+}
+
+/// The `level.gltf` materials (`names`) of `level`'s draws on runtime segment `s`, and each of
+/// `ids` as they draw it: its PNG's path relative to the map's folder (the file added to `images`
+/// once).
+fn segment_frames(
+    level: &Level,
+    names: &[String],
+    s: u32,
+    ids: &[u32],
+    textures: &Textures,
+    images: &mut Images,
+) -> Result<(Vec<String>, Vec<String>)> {
+    use extract_gbi::Image;
+    let on_s = |m: &Material| match m.texture.and_then(|t| t.image) {
+        Some(Image::Segment(a)) if a >> 24 == s => Some(a),
+        _ => None,
+    };
+    let draws = || level.meshes.iter().flat_map(|m| &m.ir.draws);
+    let drawn = (draws().map(|d| d.material).find(|m| on_s(m).is_some()))
+        .with_context(|| format!("no segment-{s} material"))?;
+    let suffixes: BTreeSet<_> = (draws().filter_map(|d| on_s(&d.material)))
+        .map(|a| format!("-seg{a:08x}"))
+        .collect();
+    let materials = (names.iter())
+        .filter(|n| suffixes.iter().any(|x| n.ends_with(x)))
+        .cloned()
+        .collect();
+    let mut frames = Vec::new();
+    for &id in ids {
+        let blobs = [(id, textures.get(id as usize)?)].into();
+        let (stem, png) = extract_level::texture_png(&bind_material(drawn, s, id), &blobs)
+            .with_context(|| format!("segment {s}: texture {id}"))??;
+        let file = format!("textures/{stem}.png");
+        if !images.iter().any(|(f, _)| *f == file) {
+            images.push((file.clone(), png));
+        }
+        frames.push(file);
+    }
+    Ok((materials, frames))
+}
+
+/// The 5 texture ids 0x1A's runtime segments draw ([`VAULT_IDS`]).
+pub fn vault_ids(rom: &Rom) -> Result<[u32; 5]> {
+    let data = rom.game_data()?;
+    let w = data
+        .get(VAULT_IDS..VAULT_IDS + 20)
+        .context("short .game data")?;
+    Ok(std::array::from_fn(|k| {
+        u32::from_be_bytes(w[4 * k..4 * k + 4].try_into().unwrap())
+    }))
+}
+
+/// A map's `segments.json` and the frames' PNGs (named as the level's): 0x1A's screens and its
+/// switching lights' lamps (a lamp's segment by its light's command, [`VAULT_IDS`]); empty elsewhere.
+pub fn map_segments(
+    rom: &Rom,
+    scene: usize,
+    textures: &Textures,
+) -> Result<(assets::Segments, Images)> {
+    let mut images = Images::new();
+    if scene != VAULT {
+        return Ok((assets::Segments::default(), images));
+    }
+    let ids = vault_ids(rom)?;
+    let (level, names) = level_names(rom, scene, textures)?;
+    let mut frames_of =
+        |s, ids: &[u32]| segment_frames(&level, &names, s, ids, textures, &mut images);
+    let mut panels = Vec::new();
+    for (s, k) in VAULT_SCREENS {
+        let (materials, frames) = frames_of(s, &[ids[k], ids[(k + 1) % 3], ids[(k + 2) % 3]])?;
+        let [material] = <[String; 1]>::try_from(materials)
+            .map_err(|m| anyhow::anyhow!("0x1A: segment {s}: {} materials", m.len()))?;
+        panels.push(assets::race::Panel { material, frames });
+    }
+    let triggers = rom.asset(&[0x0C, scene, 5])?;
+    let commands = (triggers.as_chunks::<0x34>().0.iter())
+        .filter(|r| r[0x15] >> 2 == 9)
+        .map(|r| u32::from_be_bytes(r[0x20..0x24].try_into().unwrap()))
+        .filter(|c| (8..=0xC).contains(c));
+    let mut lamps = Vec::new();
+    for c in commands {
+        let (materials, frames) = frames_of(4 + c - 8, &ids[VAULT_LIT..])?;
+        let [on, off] = <[String; 2]>::try_from(frames).expect("a frame per id");
+        lamps.push(assets::Lamp { materials, on, off });
+    }
+    let screens = Some(assets::race::Crowd {
+        step: VAULT_STEP,
+        panels,
+    });
+    Ok((assets::Segments { screens, lamps }, images))
+}
+
 /// `maps/33/race.json` from the ROM: the scene's placements (the barriers by uid), its navigation
-/// graph (the laps) and the board's and helmets' actions (their joints).
+/// graph (the laps), the board's and helmets' actions (their joints) and the crowd.
 pub fn race_mode(rom: &Rom) -> Result<assets::race::Race> {
     use assets::race::{Attached, Race, Route};
     let placements = scene_placements(rom, RACE_MAP)?;
@@ -1859,6 +2031,7 @@ pub fn race_mode(rom: &Rom) -> Result<assets::race::Race> {
         heads: (RACE_HEADS.iter().enumerate())
             .map(|(k, h)| (h.0, at(k + 1)))
             .collect(),
+        crowd: Some(race_crowd(rom, &rom.textures()?)?.0),
     })
 }
 
@@ -1884,6 +2057,7 @@ fn pack_data(
     faces: &[(Vec<assets::FaceSegment>, Images)],
     held: &[Held],
     outros: &[assets::outro::Outro],
+    segments: assets::Segments,
 ) -> Result<assets::Slice> {
     let placements = scene_placements(rom, scene)?;
     let (pickups, spots) = pickup_table(rom, scene)?;
@@ -1950,6 +2124,7 @@ fn pack_data(
         nav,
         lights: map_lights(rom, scene)?,
         outros: outros.to_vec(),
+        segments,
         ai: rom.asset(&[0x14, ai_script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, conker_bots::class(scene)])?.into_owned(),
         characters: (characters.iter().zip(faces))

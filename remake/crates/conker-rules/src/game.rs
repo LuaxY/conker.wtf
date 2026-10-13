@@ -401,6 +401,11 @@ pub struct Fighter {
     /// Tank: the power-up held (s126+0x128's bit, [`crate::tank::SHIELD`]..; 0 none), its timer
     /// or shells in [`Self::boost`].
     pub power: u8,
+    /// Tank: a bot's aim error s126+0x12A (0 or 1, the AI's draw): its gun's pitch solves for the
+    /// target 400 nearer (`func_150ED298`'s last argument, C), the turret 10° off (the bot's input).
+    /// The server's alone: not on the wire (a client predicts only its human, always 0).
+    #[cfg_attr(feature = "net", serde(skip))]
+    pub aim_error: u8,
     /// War: Raptor: a body (character 22) in the raptor's jaws (+0x2E4[0]), from its standing
     /// bite's kill to the drop or the nest; kept through hits and its death, gone at its respawn.
     pub prey: bool,
@@ -463,6 +468,7 @@ impl Fighter {
             boost: 0,
             climb: weapon::Climb::default(),
             power: 0,
+            aim_error: 0,
             prey: false,
             ride: race::Ride::default(),
         }
@@ -1802,6 +1808,11 @@ impl Match {
                         f.immune = n;
                     }
                 }
+                Effect::AimError(i, e) => {
+                    if let Some(f) = self.players.get_mut(i) {
+                        f.aim_error = e;
+                    }
+                }
                 Effect::Hold(i, n) => {
                     if let Some(f) = self.players.get_mut(i) {
                         f.body.lock = n;
@@ -2937,7 +2948,9 @@ impl Match {
 
     /// `func_15081E78` for an instant ray or an aimed shot: the first player whose head or torso
     /// ([`projectile::hits_parts`]) the segment meets, how far along, and whether it is the head
-    /// (type 0x20, it kills; C) or the body (the weapon's own type; V combat4_pitch24).
+    /// (type 0x20, it kills; C) or the body (the weapon's own type; V combat4_pitch24). A raptor
+    /// has no head part: every bolt and knife on one hits for 1 (V raptor b1r: 103 of 103; the
+    /// remake's head test made 9 of the raptor bots' 21 deaths one-shot kills).
     fn first_part(
         &self,
         owner: usize,
@@ -2955,7 +2968,9 @@ impl Match {
                     movement::state::CROUCH | movement::state::CROUCH_WALK
                 );
                 let at = self.seen_pos(seen, owner, v);
-                projectile::hits_parts(from, dir, len, at, crouched).map(|(d, h)| (v, d, h))
+                let raptor = self.players[v].class == raptor::CLASS;
+                projectile::hits_parts(from, dir, len, at, crouched)
+                    .map(|(d, h)| (v, d, h && !raptor))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }

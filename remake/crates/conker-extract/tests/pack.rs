@@ -99,6 +99,19 @@ fn check_gltf(dir: &Path, path: &str, glb_bytes: &[u8]) {
     assert!(pack.2 == memory.2, "{path}: images");
 }
 
+/// The image uri a glTF's material `name` draws.
+fn drawn_uri<'a>(gltf: &'a Value, name: &str) -> &'a str {
+    let m = (gltf["materials"].as_array().unwrap().iter())
+        .find(|m| m["name"] == name)
+        .unwrap_or_else(|| panic!("no material {name}"));
+    let texture = &gltf["textures"][m["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+        .as_u64()
+        .unwrap() as usize];
+    gltf["images"][texture["source"].as_u64().unwrap() as usize]["uri"]
+        .as_str()
+        .unwrap()
+}
+
 fn bits<const N: usize>(v: [f32; N]) -> [u32; N] {
     v.map(f32::to_bits)
 }
@@ -440,6 +453,39 @@ fn pack_reads_back_as_the_rom_path() {
     assert_eq!(vault.lights.ambient, [94, 94, 96]);
     assert_eq!(vault.lights.lights.len(), 34);
     assert_eq!(vault.lights.switching, [10, 11, 12, 20, 29]);
+    // Its runtime segments (F4): the two screens and a lamp per switching light, each material in
+    // `level.gltf` drawing its first frame (the lamps lit), every frame a PNG in the map's folder.
+    let segments = conker_extract::map_segments(&rom, 0x1A, &textures)
+        .unwrap()
+        .0;
+    assert_eq!(vault.segments, segments);
+    assert_eq!(segments.lamps.len(), 5);
+    let level: Value = serde_json::from_slice(files["maps/1a/level.gltf"]).unwrap();
+    let screens = segments.screens.as_ref().unwrap().panels.iter();
+    let lamps = segments.lamps.iter();
+    for (materials, frames) in (screens.map(|p| (vec![p.material.clone()], p.frames.clone())))
+        .chain(lamps.map(|l| (l.materials.clone(), vec![l.on.clone(), l.off.clone()])))
+    {
+        for m in &materials {
+            assert_eq!(drawn_uri(&level, m), frames[0], "{m}");
+        }
+        for f in &frames {
+            assert!(files[format!("maps/1a/{f}").as_str()].starts_with(b"\x89PNG"));
+        }
+    }
+    // No packed level leaves a material on a runtime segment unbound (the `-seg` ones draw their
+    // first frame); `segments.json` is empty off 0x1A.
+    for name in ["2d", "30", "34", "3f", "2b", "1a", "24", "33"] {
+        let level = files[conker_assets::level_gltf(name).as_str()];
+        let level: Value = serde_json::from_slice(level).unwrap();
+        for m in level["materials"].as_array().unwrap() {
+            let texture = &m["pbrMetallicRoughness"]["baseColorTexture"];
+            let segment = m["name"].as_str().unwrap().contains("-seg");
+            assert!(!segment || texture.is_object(), "{name}: {}", m["name"]);
+        }
+        let empty = files[format!("maps/{name}/segments.json").as_str()] == b"{}\n";
+        assert_eq!(empty, name != "1a", "{name}");
+    }
     let flicker = vault.lights.lights.iter().filter(|l| l.flicker).count();
     let pulse = vault
         .lights
@@ -662,6 +708,17 @@ fn pack_reads_back_as_the_rom_path() {
     let race = conker_assets::race::Race::load("33", read).unwrap();
     assert_eq!(race, conker_extract::race_mode(&rom).unwrap());
     assert_eq!(race.to_json(), files["maps/33/race.json"]);
+    // Its crowd (F3, F4): each panel's material in `level.gltf` draws its `frames[0]`, and every
+    // frame is a PNG in the map's folder.
+    let level: Value = serde_json::from_slice(files["maps/33/level.gltf"]).unwrap();
+    let crowd = race.crowd.as_ref().unwrap();
+    for panel in &crowd.panels {
+        let uri = drawn_uri(&level, &panel.material);
+        assert_eq!(uri, panel.frames[0], "{}", panel.material);
+        for f in &panel.frames {
+            assert!(files[format!("maps/33/{f}").as_str()].starts_with(b"\x89PNG"));
+        }
+    }
     let mut names = PACK_CHARACTERS.to_vec();
     names.push("144");
     let race_map = conker_assets::Slice::load("33", &names, PACK_WEAPONS, read).unwrap();
@@ -1543,6 +1600,17 @@ fn pack_hud_reads_back() {
         files["hud/race_map_low.png"],
         files["hud/race_map_high.png"]
     );
+    // Race's world effects (F3): the lamps' and the boost's flares, the exhaust's frames, the trail.
+    let race_fx = [
+        ("race_lamp", [64, 64]),
+        ("race_boost", [64, 64]),
+        ("race_exhaust_0", [32, 32]),
+        ("race_exhaust_3", [32, 32]),
+        ("race_trail", [128, 1]),
+    ];
+    for (name, size) in race_fx {
+        assert_eq!(hud.textures[name].size, size, "{name}");
+    }
     // The results' place, accuracy and labels are drawn with these.
     assert!(['%', 'P'].iter().all(|&c| hud.glyph(c).is_some()));
     // A mounted gun's gunner view (`mounted-gun.md` §3; its PNGs' sizes checked above).

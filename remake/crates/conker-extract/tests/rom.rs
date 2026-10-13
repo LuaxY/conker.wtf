@@ -1575,6 +1575,200 @@ fn race_map_and_racers() {
     assert_eq!((racer.model.joints.len(), racer.model.lists.len()), (28, 2));
 }
 
+/// Race's crowd and effects (F3, `../lab/research/mp-original/race-effects-scratch`): each crowd
+/// segment's frames from the two `.game` tables, in the order the original draws them (V: the ids
+/// segments 4-7 draw at the counter's k in cd DLs 142 and 200 and w1 DL 218); 0x33's level drawing
+/// every segment's first frame (F4: material 54 kept apart, though segment 4 draws its texture);
+/// `race.json`'s panels; the effects' blobs at the sizes their DLs draw (V: equal to the RAM's), the
+/// trail a ramp up and down.
+#[test]
+fn race_crowd_and_effects_follow_the_oracle() {
+    let Some(rom) = rom() else { return };
+    let frames = conker_extract::crowd_frames(&rom).unwrap();
+    let segments: Vec<u32> = frames.iter().map(|f| f.0).collect();
+    assert_eq!(segments, [4, 5, 6, 7]);
+    let seen = [
+        (60, [0x1260, 0x1266, 0x125B, 0x1259]),
+        (89, [0x125E, 0x1264, 0x125A, 0x125D]),
+        (98, [0x1266, 0x1262, 0x1259, 0x125C]),
+    ];
+    for (k, ids) in seen {
+        let drawn: Vec<u32> = frames.iter().map(|(_, f)| f[k % 5]).collect();
+        assert_eq!(drawn, ids, "k {k}");
+    }
+    let sets: Vec<BTreeSet<u32>> = frames.iter().map(|f| f.1.into()).collect();
+    assert_eq!(
+        sets[0],
+        BTreeSet::from([0x125E, 0x1260, 0x1262, 0x1264, 0x1266])
+    );
+    assert_eq!(sets[0], sets[1]);
+    assert_eq!(sets[2], (0x1259..=0x125D).collect());
+    assert_eq!(sets[2], sets[3]);
+
+    let level = conker_extract::map_level(&rom, 0x33).unwrap();
+    let first: BTreeMap<u32, u32> = frames.iter().map(|&(s, ids)| (s, ids[0])).collect();
+    assert_eq!(level.segments, first);
+    assert_eq!(drawn_segments(&level), first.keys().copied().collect());
+    let textures = rom.textures().unwrap();
+    let gltf = extract_level::to_gltf(&level, &textures, "level.bin").unwrap();
+    let json: Value = serde_json::from_str(&gltf.json).unwrap();
+    let names: Vec<&str> = (json["materials"].as_array().unwrap().iter())
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 73);
+    let bound = [
+        "m53-seg06000000",
+        "m54-tex4704",
+        "m55-seg07000000",
+        "m56-seg04000000",
+        "m57-seg05000000",
+    ];
+    assert_eq!(names[53..58], bound);
+
+    let race = conker_extract::race_mode(&rom).unwrap();
+    let crowd = race.crowd.unwrap();
+    assert_eq!(crowd.step, 4);
+    let panels: Vec<&str> = crowd.panels.iter().map(|p| p.material.as_str()).collect();
+    assert_eq!(
+        panels,
+        [
+            "m56-seg04000000",
+            "m57-seg05000000",
+            "m53-seg06000000",
+            "m55-seg07000000"
+        ]
+    );
+    for (p, (_, ids)) in crowd.panels.iter().zip(&frames) {
+        let files: Vec<String> = (ids.iter())
+            .map(|id| format!("textures/{id:04}-64x32-rgba16-i.png"))
+            .collect();
+        assert_eq!(p.frames, files);
+        assert_eq!(drawn_uri(&json, &p.material), files[0]);
+    }
+    let (_, images) = conker_extract::race_crowd(&rom, &textures).unwrap();
+    assert_eq!(images.len(), 10);
+
+    // Lamp and boost flares I8 64 × 64, the exhaust's four frames RGBA32 32 × 32, the trail I8 128.
+    for (id, bytes) in [
+        (0x235, 4096),
+        (0xE21, 4096),
+        (0x923, 4096),
+        (0x926, 4096),
+        (0xB39, 128),
+    ] {
+        assert_eq!(textures.get(id).unwrap().len(), bytes, "{id:#x}");
+    }
+    let trail = textures.get(0xB39).unwrap();
+    assert_eq!((trail[0], trail[127]), (0, 0));
+    assert_eq!(trail[64], 0xFF);
+    assert!(trail[..64].is_sorted() && trail[64..].iter().rev().is_sorted());
+}
+
+/// The segments `level`'s draws read their texture from.
+fn drawn_segments(level: &extract_level::Level) -> BTreeSet<u32> {
+    (level.meshes.iter().flat_map(|m| &m.ir.draws))
+        .filter_map(|d| match d.material.texture?.image? {
+            extract_gbi::Image::Segment(a) => Some(a >> 24),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The image uri a glTF's material `name` draws.
+fn drawn_uri<'a>(gltf: &'a Value, name: &str) -> &'a str {
+    let m = (gltf["materials"].as_array().unwrap().iter())
+        .find(|m| m["name"] == name)
+        .unwrap_or_else(|| panic!("no material {name}"));
+    let texture = &gltf["textures"][m["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+        .as_u64()
+        .unwrap() as usize];
+    gltf["images"][texture["source"].as_u64().unwrap() as usize]["uri"]
+        .as_str()
+        .unwrap()
+}
+
+/// 0x1A's runtime segments (F4, `../lab/research/mp-original/race-effects-scratch/seg1a.py`): the
+/// 5 ids `func_15100464` binds (V: the ids segments 2-8 draw in hud1-3, bag_dl, bag_ap, bag_dl3,
+/// dm3, dm15, cs2 and cs3), `level.gltf`'s 9 segment materials drawing their first frame (lamps lit)
+/// without merging, the screens' and lamps' frames, a lamp per switching light; and no other packed
+/// map draws a runtime segment.
+#[test]
+fn runtime_segments() {
+    let Some(rom) = rom() else { return };
+    let ids = conker_extract::vault_ids(&rom).unwrap();
+    assert_eq!(ids, [0x60B, 0x60C, 0x60D, 0x16C, 0xC7D]);
+    let level = conker_extract::map_level(&rom, 0x1A).unwrap();
+    let lit = (4..=8).map(|s| (s, 0x16C));
+    let first: BTreeMap<u32, u32> = [(2, 0x60B), (3, 0x60C)].into_iter().chain(lit).collect();
+    assert_eq!(level.segments, first);
+    assert_eq!(drawn_segments(&level), first.keys().copied().collect());
+    let textures = rom.textures().unwrap();
+    let gltf = extract_level::to_gltf(&level, &textures, "level.bin").unwrap();
+    let json: Value = serde_json::from_str(&gltf.json).unwrap();
+    let names: Vec<&str> = (json["materials"].as_array().unwrap().iter())
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 104);
+    let bound: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| n.contains("-seg"))
+        .collect();
+    assert_eq!(bound.len(), 9);
+    let (segments, images) = conker_extract::map_segments(&rom, 0x1A, &textures).unwrap();
+    let file = |id: u32| format!("textures/{id:04}-32x64-rgba16-i.png");
+    let screens = segments.screens.unwrap();
+    assert_eq!(screens.step, 8);
+    let panels: Vec<_> = (screens.panels.iter())
+        .map(|p| (p.material.as_str(), p.frames.clone()))
+        .collect();
+    assert_eq!(
+        panels,
+        [
+            ("m69-seg02000000", [0x60B, 0x60C, 0x60D].map(file).to_vec()),
+            ("m71-seg03000000", [0x60C, 0x60D, 0x60B].map(file).to_vec()),
+        ]
+    );
+    // Light commands 8-0xC in trigger order: lamps on segments 4-8.
+    let lamps: Vec<Vec<&str>> = (segments.lamps.iter())
+        .map(|l| l.materials.iter().map(String::as_str).collect())
+        .collect();
+    assert_eq!(
+        lamps,
+        [
+            vec!["m30-seg04000000", "m31-seg04000000"],
+            vec!["m75-seg05000000"],
+            vec!["m68-seg06000000"],
+            vec!["m70-seg07000000"],
+            vec!["m73-seg08000000", "m74-seg08000000"],
+        ]
+    );
+    for l in &segments.lamps {
+        assert_eq!((&l.on, &l.off), (&file(0x16C), &file(0xC7D)));
+        for m in &l.materials {
+            assert_eq!(drawn_uri(&json, m), l.on);
+        }
+    }
+    for p in &screens.panels {
+        assert_eq!(drawn_uri(&json, &p.material), p.frames[0]);
+    }
+    let pngs: Vec<String> = images.iter().map(|i| i.0.clone()).collect();
+    assert_eq!(pngs, [0x60B, 0x60C, 0x60D, 0x16C, 0xC7D].map(file));
+    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x24] {
+        let level = conker_extract::map_level(&rom, scene).unwrap();
+        assert!(
+            level.segments.is_empty() && drawn_segments(&level).is_empty(),
+            "{scene:#x}"
+        );
+        let (segments, images) = conker_extract::map_segments(&rom, scene, &textures).unwrap();
+        assert_eq!(
+            (segments, images.len()),
+            (Default::default(), 0),
+            "{scene:#x}"
+        );
+    }
+}
+
 /// The pickable and cheat characters (`../lab/research/mp-original/characters.md` §3, M14a): the
 /// picks on the Tedi's rig (its joints, animation slots and bank-02 entry), Conker drawn as #1, every
 /// menu row's hitbox and push body × its class's scale, truncated in f32, as the oracle's obj+0xD2-D6
@@ -1756,6 +1950,24 @@ fn faces_follow_the_oracle() {
         assert!(images(&c).iter().all(|i| !i.contains("Segment")), "{model}");
         assert!(images(&c).contains(&format!("Flat {{ index: {open}, mode: 0 }}")));
     }
+}
+
+/// A textured part whose combiner reads no texel draws its vertex colours (F4; V the client
+/// agent's a1, frame 100: Conker's head and tail, material 11 on texture 3649, orange): its glTF
+/// material has no texture.
+#[test]
+fn parts_ignoring_their_texture_draw_vertex_colours() {
+    let Some(rom) = rom() else { return };
+    let textures = rom.textures().unwrap();
+    let conker = conker_extract::mesh_only(&rom, 0).unwrap();
+    let conker = conker_extract::bind_faces(&rom, conker, &textures)
+        .unwrap()
+        .0;
+    let g = conker.gltf(&textures, false).unwrap().json;
+    let m = &g["materials"][11];
+    assert_eq!(m["extras"]["image"], "flat 3649 mode 0");
+    assert_eq!(m["extras"]["combine"], "fffe8ff517f8ff");
+    assert!(m["pbrMetallicRoughness"]["baseColorTexture"].is_null());
 }
 
 /// The characters' materials draw as the oracle draws them (`../lab/research/mp-original/

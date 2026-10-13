@@ -16,6 +16,7 @@
 pub mod audio;
 pub mod beach;
 pub mod connection;
+pub mod faces;
 pub mod flags;
 pub mod guns;
 pub mod heist;
@@ -28,6 +29,7 @@ pub mod race;
 pub mod raptor;
 pub mod render;
 pub mod results;
+pub mod segments;
 pub mod smooth;
 pub mod tank;
 pub mod traps;
@@ -166,8 +168,8 @@ pub struct Config {
     /// `side=squirrels|tediz|cavemen`: the side to play on (its model), sent when joining; default
     /// the server's pick, the side with fewer players (the Tediz against caveman bots).
     pub side: Option<Side>,
-    /// `character=N`: the menu pick to play (conker-rules' `characters::PICKS`, 0-21), sent when
-    /// joining; default none, the scenario's class.
+    /// `character=N|NAME`: the menu pick to play (conker-rules' `characters::PICKS`, 0-21, or its
+    /// name in [`PICKS`]), sent when joining; default none, the scenario's class.
     pub character: Option<u8>,
     /// `map=2d|30|34|3f|2b`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
@@ -237,7 +239,7 @@ impl Config {
                 "offscreen" => cfg.offscreen = true,
                 "log" => cfg.log = Some(value),
                 "map" => cfg.map = value,
-                "character" => cfg.character = Some(value.parse().map_err(|_| bad())?),
+                "character" => cfg.character = Some(parse_pick(&value).ok_or_else(bad)?),
                 "side" => {
                     cfg.side = Some(match value.as_str() {
                         "squirrels" => Side::Squirrels,
@@ -591,11 +593,47 @@ pub const WISE_GUY: &str = "59";
 pub const CASH: &str = "87";
 pub const DON_WEASO: &str = "134";
 
-/// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
-/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`], the [`CASH`]
-/// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them), on 24 the tank
-/// ([`tank::MODEL`]), on 3f the raptor ([`raptor::MODEL`]), on 33 the bot racers ([`race::MODEL`]).
-pub fn characters(map: &str) -> Vec<&'static str> {
+/// The menu's picks (conker-rules' `characters::PICKS`, by index): each one's character folder
+/// (its model) and its name for `character=` (I: the fan lists' names, characters.md §3; the
+/// racers by helmet, the second of a pair numbered).
+pub const PICKS: [(&str, &str); 22] = [
+    ("128", "squirrel"),
+    ("176", "sergeant"),
+    ("117", "tedi"),
+    ("177", "tediz-leader"),
+    ("59", "wise-guy"),
+    ("152", "weasel"),
+    ("136", "caveman"),
+    ("144", "racer"),
+    ("144", "racer-76"),
+    ("144", "racer-78"),
+    ("83", "raptor"),
+    ("156", "villager"),
+    ("155", "bat"),
+    ("154", "bat-2"),
+    ("144", "racer-77"),
+    ("0", "conker"),
+    ("150", "neo-conker"),
+    ("157", "villager-woman"),
+    ("159", "zombie"),
+    ("160", "zombie-2"),
+    ("178", "gregg"),
+    ("180", "gregg-2"),
+];
+
+/// `character=`'s value: a pick's index (0-21) or its name ([`PICKS`], any case).
+pub fn parse_pick(value: &str) -> Option<u8> {
+    let named = PICKS.iter().position(|p| p.1.eq_ignore_ascii_case(value));
+    let k = value.parse().ok().or(named)?;
+    (k < PICKS.len()).then_some(k as u8)
+}
+
+/// The characters `map`'s own modes draw, loaded before the client connects: the sides'
+/// ([`PACK_CHARACTERS`], in [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the
+/// [`WISE_GUY`], the [`CASH`] and [`DON_WEASO`] (their clips and sounds; no player is drawn as
+/// them), on 24 the tank ([`tank::MODEL`]), on 3f the raptor ([`raptor::MODEL`]), on 33 the bot
+/// racers ([`race::MODEL`]).
+pub fn map_characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
     let vault = (map == "1a").then_some([WISE_GUY, CASH, DON_WEASO]);
     let tank = (map == "24").then_some(tank::MODEL);
@@ -611,24 +649,65 @@ pub fn characters(map: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
-/// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], a tank (24's)
-/// the tank, a raptor (3f's) the raptor, a caveman or Race's human (class 0xB) 136 whatever its
-/// side, a bot racer (33's 0xC-0xF) 144; anyone else is its side's.
-pub fn body(c: &Combat) -> usize {
-    match c.class {
-        0x11..=0x20 => {
-            PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
+/// The characters the client may draw on `map`, its bodies: [`map_characters`], then every pick's
+/// model its select offers with every cheat on (conker-rules' `characters::allowed`; none where
+/// there is no select). Their `character.json` loads at the start; their glTF once the match's
+/// [`MatchView::characters`] allows them or a player plays one (`render`).
+pub fn characters(map: &str) -> Vec<&'static str> {
+    let mut list = map_characters(map);
+    let allowed = map_scene(map).map_or(0, |s| conker_rules::characters::allowed(s, u32::MAX));
+    for (k, (folder, _)) in PICKS.iter().enumerate() {
+        if allowed >> k & 1 != 0 && !list.contains(folder) {
+            list.push(folder);
         }
-        1 | conker_rules::tank::CLASS | conker_rules::raptor::CLASS | 0xC..=0xF => {
-            PACK_CHARACTERS.len()
-        }
-        conker_rules::race::HUMAN => Side::Cavemen as usize,
-        _ => c.side as usize,
+    }
+    list
+}
+
+/// The characters whose `character.json` the client reads: its bodies ([`characters`]), then on 3f
+/// War: Raptor's baby and body (their hidden lists and sounds; no player is drawn as them).
+pub fn character_files(map: &str) -> Vec<&'static str> {
+    let mut list = characters(map);
+    if map == "3f" {
+        list.extend([raptor::BABY, raptor::BODY]);
+    }
+    list
+}
+
+/// The body (of `characters`, [`characters`]' order) a player is drawn as: its class's model
+/// (conker-rules' `characters::model`: the villagers' looks, 1a's Wise Guy, the tank, the raptor,
+/// the racers, every pick), else (the unused classes 5-7) its side's.
+pub fn body(c: &Combat, characters: &[&str]) -> usize {
+    let model = conker_rules::characters::model(c.class);
+    let at = |m: u16| characters.iter().position(|f| f.parse() == Ok(m));
+    model.and_then(at).unwrap_or(c.side as usize)
+}
+
+/// The bodies' folders ([`characters`] of the map), for [`body`], and the body each one's clips
+/// come from (a mesh-only pick's `clips_from`, the Tedi; else none).
+#[derive(Resource, Clone, Debug)]
+pub struct Bodies {
+    pub names: Vec<&'static str>,
+    pub clips_from: Vec<Option<usize>>,
+}
+
+impl Bodies {
+    pub fn new(characters: &[conker_assets::Character], names: Vec<&'static str>) -> Self {
+        let from = |c: &conker_assets::Character| {
+            let i = c.clips_from.as_ref()?;
+            names.iter().position(|n| n == i)
+        };
+        let clips_from = (characters.iter().take(names.len())).map(from).collect();
+        Self { names, clips_from }
+    }
+
+    pub fn of(&self, c: &Combat) -> usize {
+        body(c, &self.names)
     }
 }
 
-/// Each body's character's [`Clips`] (of [`characters`]).
+/// Each body's character's [`Clips`] (of [`characters`]); a pick with no clips of its own
+/// (`clips_from`, mesh only) has the Tedi's.
 #[derive(Resource, Clone, Debug)]
 pub struct BodyClips(pub Vec<Clips>);
 
@@ -636,6 +715,30 @@ impl BodyClips {
     pub fn of(&self, body: usize) -> &Clips {
         &self.0[body]
     }
+
+    /// Each of `characters`' clips (`names`: their folders), a mesh-only pick's from its
+    /// `clips_from`.
+    pub fn new(characters: &[conker_assets::Character], names: &[&str]) -> Self {
+        let from = |c: &conker_assets::Character| {
+            let i = c.clips_from.as_ref()?;
+            characters.get(names.iter().position(|n| n == i)?)
+        };
+        let clips = characters
+            .iter()
+            .map(|c| Clips::new(&from(c).unwrap_or(c).clips));
+        Self(clips.collect())
+    }
+}
+
+/// The local player's view for its follow camera (conker-rules' `Fighter::camera_view`), the head
+/// scaled with a 0.6 model's (the Sergeant's, the Tediz Leader's: V the look-at 81 above the feet,
+/// 67.5 at 0.5; characters.md §1.3). The raptor's own camera is [`raptor::camera`].
+pub fn camera_view(f: &Fighter, tick: u32) -> conker_camera::PlayerView {
+    let mut view = f.camera_view(tick);
+    if f.class != conker_rules::raptor::CLASS {
+        view.head *= conker_rules::characters::scale(f.class) / render::MODEL_SCALE;
+    }
+    view
 }
 
 /// The animation a player shows: the rules' ([`Combat::anim`]), except that the local player shows
@@ -801,17 +904,15 @@ pub fn run(
     let mut app = App::new();
     let scene = map_scene(&cfg.map).expect("a known map");
     app.insert_resource(Collision(scene_world(&slice, scene)));
-    let clips: Vec<_> = slice
-        .characters
-        .iter()
-        .map(|c| Clips::new(&c.clips))
-        .collect();
-    let of = |name| (characters(&cfg.map).iter()).position(|c| *c == name);
+    let names = character_files(&cfg.map);
+    let clips = BodyClips::new(&slice.characters, &names).0;
+    let of = |name| names.iter().position(|c| *c == name);
     let bag = of(CASH)
         .and_then(|i| clips.get(i).cloned())
         .unwrap_or_default();
     let raptor_clips = (of(raptor::MODEL)).and_then(|i| clips.get(i).cloned());
     app.insert_resource(BodyClips(clips));
+    app.insert_resource(Bodies::new(&slice.characters, characters(&cfg.map)));
     app.insert_resource(Spawns(slice.spawns.clone()));
     app.insert_resource(MatchArena::new(&slice.spawns, scene, &slice.triggers));
     app.insert_resource(Shown::default());
@@ -825,6 +926,11 @@ pub fn run(
         raptor,
         raptor_clips.unwrap_or_default(),
     );
+    if !cfg.headless {
+        let crowd = race.as_ref().and_then(|r| r.crowd.as_ref());
+        let screens = slice.segments.screens.as_ref().or(crowd);
+        segments::build(&mut app, &cfg.map, screens, &slice.segments.lamps);
+    }
     race::build(&mut app, !cfg.headless, race, slice.nav.clone());
     lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
@@ -954,7 +1060,7 @@ fn note_shown(timeline: Option<Res<InterpolationTimeline>>, mut shown: ResMut<Sh
 /// the input and the scripts) waits for the timeline sync: ticks before it are renumbered, and
 /// moves predicted then would be rolled back. The camera also cuts to the new record after a lift
 /// ride or a respawn that `predict` did not cut for (the server's count passes this one's).
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn attach(
     timeline: Res<LocalTimeline>,
     sync: Option<Res<LocalTimelineSync>>,
@@ -969,6 +1075,7 @@ fn attach(
     >,
     ours: Query<(Entity, &Player, Option<&Combat>), (With<Predicted>, Without<FollowCamera>)>,
     mut cameras: Query<(&Player, &Combat, &mut FollowCamera)>,
+    game: Query<&MatchView>,
     mut commands: Commands,
 ) {
     for entity in &new {
@@ -990,7 +1097,7 @@ fn attach(
         if combat.lives > cam.lives {
             cam.lives = combat.lives;
             // A racer comes back on the track, not on a spawn record: its camera cuts behind it.
-            match race::racer(combat.class) {
+            match game.iter().any(|m| m.race) {
                 true => cam.tank = None,
                 false => cam.follow = Follow::spawn(spawn_eye(&spawns.0, p.pos), p),
             }
@@ -1345,7 +1452,7 @@ fn predict(
                 cam.tank = Some((cam.follow, tank::Cam::default()));
             }
             let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
-            foot.step_view(f.camera_view(m.tick), &input.0, &world);
+            foot.step_view(camera_view(f, m.tick), &input.0, &world);
             f.take_camera(foot);
             match &mut cam.tank {
                 Some((_, state)) if raptor => raptor::camera(&mut cam.follow, state, f, &world),
@@ -1439,23 +1546,25 @@ fn predict_again(
 #[allow(clippy::type_complexity)]
 fn tick_anims(
     clips: Res<BodyClips>,
+    bodies: Res<Bodies>,
     game: Query<&MatchView>,
     mut players: Query<(
         &Player,
         Option<&Combat>,
         Option<&Fighting>,
+        Option<&PlayerId>,
         Has<Predicted>,
         &mut Anim,
     )>,
 ) {
-    for (p, combat, fighting, predicted, mut anim) in &mut players {
+    for (p, combat, fighting, owner, predicted, mut anim) in &mut players {
         let id = match fighting {
             Some(f) if predicted => f.state.anim,
             _ => shown_anim(p, combat, predicted),
         };
-        // A racer's board states show their clips (the kick's while it runs: the local racer's
-        // predicted board, the others' race table).
-        let racing = combat.is_some_and(|c| race::racer(c.class)) && game.iter().any(|m| m.race);
+        // In Race everyone rides (any pick): the board states show their clips (the kick's while it
+        // runs: the local racer's predicted board, the others' race table).
+        let racing = combat.is_some() && game.iter().any(|m| m.race);
         let id = match (racing, combat) {
             (true, Some(c)) => {
                 let kicking = match fighting {
@@ -1478,7 +1587,7 @@ fn tick_anims(
             (req.rate, req.blend) = (1.0, 4.0);
         }
         if racing {
-            req.rate = combat.map_or(1.0, |c| race::rate(id, c.class));
+            req.rate = race::rate(id, owner.is_some_and(|o| !matches!(o.0, PeerId::Local(_))));
         }
         if anim.0.id == NONE {
             req.blend = 0.0;
@@ -1509,8 +1618,11 @@ fn tick_anims(
             }
             _ => {}
         }
-        let body = combat.map_or(Side::default() as usize, body);
-        anim.0.tick(req, clips.of(body).duration(id));
+        let body = combat.map_or(Side::default() as usize, |c| bodies.of(c));
+        // The Sergeant's and the Tediz Leader's own bazooka and gun clips loop on their lengths.
+        let class = combat.map_or(0, |c| c.class);
+        let drawn = conker_rules::characters::clip(class, id);
+        anim.0.tick(req, clips.of(body).duration(drawn));
         anim.1 = p.speed_percent;
     }
 }
@@ -2014,8 +2126,10 @@ mod tests {
         assert_eq!((clips.duration(15), clips.duration(54)), (52, 1));
     }
 
-    /// Each map's bodies: 1a's class 1 is the Wise Guy, 2b's villagers keep theirs, the sides are
-    /// their own everywhere.
+    /// Each map's bodies by class (conker-rules' `characters::model`): 1a's class 1 is the Wise
+    /// Guy, 2b's villagers keep theirs, every pick its own model wherever its select (with the
+    /// cheats) offers it; a class whose model the map has not (Tank's, the unused 5-7) is drawn as
+    /// its side's.
     #[test]
     fn bodies_by_map_and_class() {
         let c = |side, class| Combat {
@@ -2023,15 +2137,81 @@ mod tests {
             class,
             ..Combat::default()
         };
-        let drawn = |map, c: Combat| characters(map)[body(&c)];
+        let drawn = |map, c: Combat| {
+            let list = characters(map);
+            list[body(&c, &list)]
+        };
         assert_eq!(drawn("1a", c(Side::Squirrels, 1)), "59");
-        assert_eq!(drawn("1a", c(Side::Tediz, 0)), "117");
+        assert_eq!(drawn("1a", c(Side::Tediz, 3)), "117");
         assert_eq!(drawn("2b", c(Side::Squirrels, 0x14)), "156");
         assert_eq!(drawn("2b", c(Side::Squirrels, 0x1D)), "157");
+        assert_eq!(drawn("33", c(Side::Squirrels, 0xB)), "136");
+        assert_eq!(drawn("33", c(Side::Squirrels, 0xE)), "144");
+        let tank = conker_rules::tank::CLASS;
+        assert_eq!(drawn("24", c(Side::Tediz, tank)), "119");
+        assert_eq!(drawn("24", c(Side::Tediz, 0x25)), "117");
+        assert_eq!(drawn("2d", c(Side::Squirrels, 6)), "128");
+        assert_eq!(map_characters("2d"), PACK_CHARACTERS);
+        for map in ["2d", "34", "30", "1a", "3f", "33"] {
+            let scene = map_scene(map).unwrap();
+            let mask = conker_rules::characters::allowed(scene, u32::MAX);
+            for (k, (folder, _)) in PICKS.iter().enumerate() {
+                let class = conker_rules::characters::PICKS[k].0;
+                if mask >> k & 1 != 0 {
+                    assert_eq!(drawn(map, c(Side::Tediz, class)), *folder, "{map} pick {k}");
+                }
+            }
+        }
+        // 2d with every cheat: all but the raptor and the bats; no select on 24 and 2b.
+        let extra = |map| characters(map)[map_characters(map).len()..].to_vec();
+        let want = [
+            "176", "177", "59", "152", "144", "156", "0", "150", "157", "159", "160",
+        ];
+        assert_eq!(extra("2d"), [&want[..], &["178", "180"]].concat());
+        assert!(extra("24").is_empty() && extra("2b").is_empty());
         assert_eq!(
-            drawn("24", c(Side::Tediz, conker_rules::tank::CLASS)),
-            "119"
+            character_files("3f")[characters("3f").len()..],
+            ["165", "22"]
         );
-        assert_eq!(characters("2d"), PACK_CHARACTERS);
+    }
+
+    /// The client's picks are conker-rules' (the folder is the model), named for `character=`.
+    #[test]
+    fn picks_are_the_rules_and_have_names() {
+        for (k, (folder, _)) in PICKS.iter().enumerate() {
+            assert_eq!(*folder, conker_rules::characters::PICKS[k].1.to_string());
+        }
+        assert_eq!(parse_pick("15"), Some(15));
+        assert_eq!(parse_pick("Sergeant"), Some(1));
+        assert_eq!(parse_pick("neo-conker"), Some(0x10));
+        assert_eq!((parse_pick("22"), parse_pick("bear")), (None, None));
+        let cfg = |v: &str| Config::from_pairs(pairs(&[("character", v)])).map(|c| c.character);
+        assert_eq!(cfg("tediz-leader"), Ok(Some(3)));
+        assert!(cfg("x").is_err());
+    }
+
+    /// A mesh-only pick's clips are the Tedi's; the others' their own.
+    #[test]
+    fn mesh_only_picks_take_their_clips_from() {
+        let character = |logical: Option<u16>, from: Option<&str>| {
+            let clips = logical.map(|l| [l]);
+            let clips = clips.iter().map(
+                |l| serde_json::json!({"pair": 0, "logical": l, "frames": 2, "duration_ticks": 9}),
+            );
+            let json = serde_json::json!({"model_lift": 0, "clips": clips.collect::<Vec<_>>(),
+                "root_motion": [], "clips_from": from});
+            serde_json::from_value::<conker_assets::Character>(json).unwrap()
+        };
+        let all = [
+            character(Some(1), None),
+            character(Some(2), None),
+            character(None, Some("117")),
+        ];
+        let names = ["128", "117", "176"];
+        let clips = BodyClips::new(&all, &names);
+        assert_eq!((clips.of(0).duration(1), clips.of(2).duration(2)), (9, 9));
+        assert_eq!(clips.of(2).duration(1), 1);
+        let bodies = Bodies::new(&all, names.to_vec());
+        assert_eq!(bodies.clips_from, [None, None, Some(1)]);
     }
 }

@@ -84,7 +84,7 @@ impl Drawn {
         world: &CollisionWorld,
     ) {
         self.tick(f.body.pos, f.body.facing);
-        let mut view = f.camera_view(tick);
+        let mut view = crate::camera_view(f, tick);
         (view.pos, view.floor_y) = (self.body(view.pos), view.floor_y + self.offset.y);
         let Some(own) = &mut self.camera else {
             return;
