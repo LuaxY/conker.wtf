@@ -17,6 +17,7 @@ use conker_rules::damage;
 use conker_rules::game::TAKEOVER_DELAY;
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
+use conker_rules::race::{self, Op as RaceOp};
 use conker_rules::raptor::{self, Op, Raptor};
 use conker_rules::tank;
 use conker_sim::collision::CollisionWorld;
@@ -215,6 +216,9 @@ pub struct World<'a> {
     pub cash: Option<Heist<'a>>,
     /// War: Raptor's eggs; `None` in the other modes.
     pub raptor: Option<&'a Raptor>,
+    /// Race: the match (its race table: the racers' rides) and the lap's node count; `None` in
+    /// the other modes.
+    pub race: Option<(&'a conker_rules::Match, usize)>,
     /// Per participant, a bit: hit since the script last read it (obj+0x22C bit 0x100, query
     /// 0xD1 reads and clears it; the egg referee reads a carrier's only every third frame).
     pub struck: &'a mut u32,
@@ -490,6 +494,93 @@ impl World<'_> {
         self.cash.is_some() && kind(h) == 2 && index(h) == usize::from(heist::HANDLE)
     }
 
+    /// Race (0xBC): the race table's queries (`0xF000` 8-0x10, `func_15088218`..), the power-ups'
+    /// toucher (props 0x3001-0x3007: the arena's pickups in order, `+0x80` = toucher + 1 on the
+    /// frame after the take) and a racer's item count (0xDF) and its 0xB3 (I: 0).
+    fn race_query(&mut self, h: i32, code: i32, args: &[i32]) -> Option<i32> {
+        let (m, per) = self.race?;
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        let ride = |p: i32| self.slot(p).and_then(|s| m.players.get(s)).map(|f| f.ride);
+        let participant = |s: usize| self.slots.iter().position(|&x| x == Some(s));
+        Some(match (kind(h), code) {
+            (0xF, 8) => 0,
+            (0xF, 9) => ride(a(2)).map_or(0, |r| (r.lateral * 256.0) as i32),
+            (0xF, 0xA) => ride(a(2)).map_or(0, |r| r.progress()),
+            (0xF, 0xB) => (self.slot(a(2)).and_then(|s| m.players.get(s)))
+                .map_or(0, |f| f.body.xz_speed as i32),
+            (0xF, 0xC) => ride(a(2)).map_or(0, |r| i32::from(r.laps(per))),
+            // The racer one place behind (+1) or ahead (−1): (|progress gap| << 8) | its index;
+            // 0x10 none (`func_150882E4`).
+            (0xF, 0xD) => {
+                let Some(me) = ride(a(2)) else {
+                    return Some(0x10);
+                };
+                let want = i32::from(me.place) + a(3);
+                (0..self.slots.len())
+                    .filter(|&k| k as i32 != a(2))
+                    .find_map(|k| {
+                        ride(k as i32)
+                            .filter(|r| i32::from(r.place) == want)
+                            .map(|r| (k, r))
+                    })
+                    .map_or(0x10, |(k, r)| {
+                        ((me.progress() - r.progress()).abs() << 8) | k as i32
+                    })
+            }
+            (0xF, 0xE) => {
+                let go = m.players.iter().map(|f| f.ride.go).min().unwrap_or(0);
+                i32::from(m.tick + race::GO >= go + race::READY)
+            }
+            (0xF, 0xF) => i32::from(m.settings.high),
+            (0xF, 0x10) => match a(2) {
+                2 => i32::from(m.settings.lives),
+                7 => i32::from(m.settings.laps),
+                _ => 0,
+            },
+            (5, 0x27 | 0x28) => 0,
+            (3, 0x21) => {
+                let k = ((h & 0xFFF) as usize).wrapping_sub(1);
+                (m.pickups.get(k).and_then(|p| p.taken))
+                    .filter(|&(_, at)| at + 1 == m.tick)
+                    .and_then(|(who, _)| participant(who))
+                    .map_or(0, |p| p as i32 + 1)
+            }
+            (2, 0xDF) => (self.slot(index(h) as i32).and_then(|s| m.players.get(s)))
+                .map_or(0, |f| i32::from(f.rounds)),
+            (2, 0xB3) => 0,
+            _ => return None,
+        })
+    }
+
+    /// Race (0xBC): the race table's commands (`0xF000` 0x11 the table, 0x12 the frame's update
+    /// and its autopilot speed, 0x13 the route, 0x14 the lateral target, 0x16 the finish: the match
+    /// keeps the table and finishes the racers itself), the countdown's overlay (`0xE01F` 5), the
+    /// props (the barriers and power-ups the match shows), and a racer's set-up and item (0x18,
+    /// 0x20, 0x21, 0x27, 0x76, 0x78: the match's own).
+    fn race_command(&mut self, h: i32, code: i32, args: &[i32]) -> Option<i32> {
+        self.race?;
+        let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        Some(match (kind(h), code) {
+            (0xF, 0x11 | 0x13 | 0x16) => 0,
+            (0xF, 0x12) => {
+                if let Some(s) = self.slot(a(2)) {
+                    let speed = a(3).clamp(0, 255) as u8;
+                    self.effects.push(Effect::Race(RaceOp::Drive(s, speed)));
+                }
+                0
+            }
+            (0xF, 0x14) => {
+                if let Some(s) = self.slot(a(2)) {
+                    self.effects.push(Effect::Race(RaceOp::Lateral(s, a(3))));
+                }
+                0
+            }
+            (0xE, 5) | (3, 0 | 1 | 4) => 1,
+            (2, 0x18 | 0x20 | 0x21 | 0x27 | 0x76 | 0x78) => 0,
+            _ => return None,
+        })
+    }
+
     /// The vacant participants, a mask.
     fn vacant(&self) -> i32 {
         (self.slots.iter().enumerate())
@@ -499,6 +590,9 @@ impl World<'_> {
 
     fn query(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        if let Some(r) = self.race_query(h, code, args) {
+            return r;
+        }
         if self.is_cash(h) {
             return self.cash_query(code, args);
         }
@@ -601,6 +695,9 @@ impl World<'_> {
 
     fn command(&mut self, g: &mut Globals, h: i32, code: i32, args: &[i32]) -> i32 {
         let a = |k: usize| args.get(k).copied().unwrap_or(0);
+        if let Some(r) = self.race_command(h, code, args) {
+            return r;
+        }
         // Colors' flags: 2 (touchable, which the create makes it here) and 0x7D (its radar blip,
         // the client's: not carried) ask nothing of the match; 0x23 clears "just let go of".
         // Heist's bag: 1 clears "thrown" (+0x25C 0x40), 2 (touchable) and 0x7D (radar) ask
@@ -2039,6 +2136,7 @@ mod tests {
             starting: false,
             gunners: Vec::new(),
             plunger: Plunger::default(),
+            race: None,
             appear: 0,
             cash: None,
             raptor: None,
@@ -2105,6 +2203,7 @@ mod tests {
             starting: false,
             gunners: vec![None, Some(1)],
             plunger: Plunger::default(),
+            race: None,
             appear: 0,
             cash: None,
             raptor: None,
@@ -2202,6 +2301,7 @@ mod tests {
                 starting: false,
                 gunners: Vec::new(),
                 plunger: Plunger::default(),
+                race: None,
                 appear: 0,
                 cash: None,
                 raptor: None,

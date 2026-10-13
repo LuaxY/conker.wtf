@@ -6,6 +6,7 @@
 
 use conker_assets::audio::Audio;
 use conker_assets::hud::{End, Hud};
+use conker_assets::raptor::Raptor;
 use conker_assets::{MANIFEST, PACK_WEAPONS, Slice};
 
 #[cfg(not(target_family = "wasm"))]
@@ -53,7 +54,11 @@ fn main() {
             .unwrap_or_else(|e| fail(e)),
         _ => Vec::new(),
     };
-    conker_client::run(cfg, slice, hud, sound, script);
+    let raptor = (cfg.map == "3f")
+        .then(|| Raptor::load(&cfg.map, |p| std::fs::read(dir.join(p))))
+        .transpose()
+        .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    conker_client::run(cfg, slice, hud, sound, script, raptor);
 }
 
 /// wasm-bindgen runs `main` on `init()`; the page then calls [`start`].
@@ -87,6 +92,10 @@ pub async fn start() -> Result<(), String> {
     let characters = conker_client::characters(&cfg.map);
     let mut files = Slice::files(&cfg.map, &characters, PACK_WEAPONS);
     files.extend([conker_assets::hud::HUD, conker_assets::hud::END].map(String::from));
+    let raptor = cfg.map == "3f";
+    if raptor {
+        files.push(conker_assets::raptor::raptor_json(&cfg.map));
+    }
     let requests: Vec<_> = (files.iter())
         .map(|f| conker_client::web::fetch(&format!("{root}/{f}")))
         .collect();
@@ -117,7 +126,11 @@ pub async fn start() -> Result<(), String> {
         }
         false => None,
     };
+    let raptor = raptor
+        .then(|| Raptor::load(&cfg.map, |p| bytes.remove(p).ok_or("not fetched")))
+        .transpose()
+        .map_err(|e| format!("{root}/{e}"))?;
     // `?script` drives the player with the test pattern; script files are native only.
-    conker_client::run(cfg, slice, hud, sound, Vec::new());
+    conker_client::run(cfg, slice, hud, sound, Vec::new(), raptor);
     Ok(())
 }

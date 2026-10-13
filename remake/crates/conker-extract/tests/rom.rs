@@ -1452,8 +1452,8 @@ fn raptor_models_and_outros() {
     assert_eq!(
         summary,
         [
-            (0, 2, 1530, vec!["136"; 3], true),
-            (1, 4, 830, vec!["83", "83", "83", "165"], true)
+            (0, 2, 1500, vec!["136"; 3], true),
+            (1, 4, 750, vec!["83", "83", "83", "165"], true)
         ]
     );
     let voice = outros[0]
@@ -1570,4 +1570,98 @@ fn race_map_and_racers() {
     let tedi = extract_character::Character::load(&rom, 117).unwrap();
     let racer = conker_extract::on_tedi_rig(&rom, conker_extract::RACER, &tedi).unwrap();
     assert_eq!((racer.model.joints.len(), racer.model.lists.len()), (28, 2));
+}
+
+/// The pickable and cheat characters (`../lab/research/mp-original/characters.md` §3, M14a): the
+/// picks on the Tedi's rig (its joints, animation slots and bank-02 entry), Conker drawn as #1, every
+/// menu row's hitbox and push body × its class's scale, truncated in f32, as the oracle's obj+0xD2-D6
+/// and +0xE4-E8 (V `bodies.py`, all 22 rows, the bats as data), and the voice tables' equalities.
+#[test]
+fn pick_characters() {
+    let Some(rom) = rom() else { return };
+    let tedi = extract_character::Character::load(&rom, 117).unwrap();
+    let rig = |c: &extract_character::Character| -> Vec<_> {
+        (c.model.joints.iter())
+            .map(|j| (j.parent, j.matrix, j.anim, j.flags))
+            .collect()
+    };
+    for pick in conker_extract::PICKS {
+        let own = extract_character::Character::load(&rom, pick).unwrap();
+        assert_eq!((own.anim_entry, rig(&own)), (0, rig(&tedi)), "{pick}");
+        let packed = conker_extract::mesh_only(&rom, pick).unwrap();
+        assert_eq!((packed.entry, rig(&packed)), (pick, rig(&tedi)), "{pick}");
+        assert!(packed.clips.is_empty() && packed.gltf(&rom.textures().unwrap(), true).is_ok());
+    }
+    let vertices = |c: &extract_character::Character| -> usize {
+        c.model.lists.iter().map(|l| l.vertices.len()).sum()
+    };
+    let conker = conker_extract::mesh_only(&rom, 0).unwrap();
+    let rep = |n| extract_character::Character::load(&rom, n).unwrap();
+    assert_eq!(
+        (vertices(&conker), vertices(&rep(0)), vertices(&rep(1))),
+        (701, 913, 701)
+    );
+    // `HIDDEN`'s lists: 150's 5-9 load 0-4's vertices again (its second list table); the zombies
+    // have 11 lists.
+    let addresses = |c: &extract_character::Character, k: usize| -> Vec<u32> {
+        c.model.lists[k]
+            .vertices
+            .iter()
+            .map(|v| v.address)
+            .collect()
+    };
+    let neo = rep(150);
+    assert_eq!(neo.model.lists.len(), 10);
+    assert!((0..5).all(|k| addresses(&neo, k) == addresses(&neo, k + 5)));
+    assert_eq!(
+        (rep(159).model.lists.len(), rep(160).model.lists.len()),
+        (11, 11)
+    );
+    // (model, class scale, hitbox, body) of `D_800AB57C`'s rows 0-0x15.
+    let rows: [(usize, f32, [i16; 3], [i16; 3]); 22] = [
+        (128, 0.5, [36, 64, 44], [30, 66, 33]),
+        (176, 0.6, [43, 76, 52], [36, 79, 39]),
+        (117, 0.5, [26, 43, 35], [23, 45, 33]),
+        (177, 0.6, [43, 76, 52], [36, 79, 39]),
+        (59, 0.5, [36, 64, 44], [30, 66, 33]),
+        (152, 0.5, [36, 64, 44], [17, 66, 33]),
+        (136, 0.5, [36, 64, 44], [30, 66, 33]),
+        (144, 0.5, [46, 80, 44], [30, 66, 33]),
+        (144, 0.5, [46, 80, 44], [30, 66, 33]),
+        (144, 0.5, [46, 80, 44], [30, 66, 33]),
+        (83, 0.7, [125, 202, 125], [124, 203, 126]),
+        (156, 0.5, [36, 64, 44], [30, 66, 33]),
+        (155, 0.5, [92, 92, 5], [44, 66, 33]),
+        (154, 0.5, [60, 64, 44], [59, 60, 44]),
+        (144, 0.5, [46, 80, 44], [30, 66, 33]),
+        (0, 0.5, [24, 50, 43], [25, 48, 45]),
+        (150, 0.5, [24, 50, 43], [25, 48, 45]),
+        (157, 0.5, [36, 64, 44], [28, 66, 33]),
+        (159, 0.5, [25, 56, 37], [20, 58, 32]),
+        (160, 0.5, [23, 56, 44], [15, 57, 33]),
+        (178, 0.5, [26, 43, 35], [23, 45, 33]),
+        (180, 0.5, [26, 43, 35], [23, 45, 33]),
+    ];
+    for (model, scale, hitbox, body) in rows {
+        let (h, b) = conker_extract::hitbox_body(&rom, model).unwrap();
+        let at = |v: [i16; 3]| v.map(|x| (f32::from(x) * scale) as i16);
+        assert_eq!((at(h), at(b)), (hitbox, body), "{model}");
+    }
+    // Voice tables `[0x12, model]` (events 2000 on): equal ones share their sounds. 178's and 180's
+    // are all zero (no voice); Conker's reps 1-4 have none.
+    let voices = |m: usize| rom.asset(&[0x12, m]).unwrap().into_owned();
+    for (a, b) in [
+        (176, 128),
+        (177, 117),
+        (152, 59),
+        (150, 0),
+        (178, 180),
+        (144, 136),
+    ] {
+        assert_eq!(voices(a), voices(b), "{a} = {b}");
+    }
+    assert!(voices(178).iter().all(|&b| b == 0) && !voices(178).is_empty());
+    assert!(voices(1).is_empty());
+    let own = [117, 128, 59, 136, 156, 157, 0, 159, 160].map(voices);
+    assert!((0..own.len()).all(|i| (i + 1..own.len()).all(|j| own[i] != own[j])));
 }

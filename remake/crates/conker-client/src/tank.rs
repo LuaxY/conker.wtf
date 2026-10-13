@@ -28,7 +28,7 @@ use conker_rules::Fighter;
 use conker_rules::tank::{BOMB, POST, SCOPE, SHELL_SPEED};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
-use conker_sim::movement::{Input, cos_sin};
+use conker_sim::movement::{Input, PlayerState, cos_sin};
 use conker_sim::net::{Combat, MatchView, Player};
 use lightyear::prelude::LocalTimeline;
 
@@ -51,15 +51,17 @@ const BRAKE_SPEED: f32 = 5.0;
 /// tank; at full speed (48) 400, 135 and 52; reversing, nearer (V t1 530-549: 293 at −14, 256 at
 /// −28, 226 at −40.6). I: straight in the speed's share (−1..1), which follows the speed by a
 /// tenth a frame.
-const CAM_REST: [f32; 3] = [310.0, 159.0, 88.5];
-const CAM_FULL: [f32; 3] = [400.0, 135.0, 52.0];
-const TOP_SPEED: f32 = 48.0;
-const CAM_SHARE: f32 = 0.1;
 /// The camera's heading follows the hull's: this share of the gap a frame standing, plus
-/// `CAM_FOLLOW[1]` at full speed, at least `CAM_FOLLOW[2]` degrees (I, fitted to t1: 86° → 21.6° in
-/// 20 frames standing, 15.3° → 0 in 32, about 35° behind turning at speed 39; turning in place the
+/// `follow[1]` at full speed, at least `follow[2]` degrees (I, fitted to t1: 86° → 21.6° in 20
+/// frames standing, 15.3° → 0 in 32, about 35° behind turning at speed 39; turning in place the
 /// original's lags more, its spring not ported).
-const CAM_FOLLOW: [f32; 3] = [0.067, 0.03, 0.2];
+const CAM: Behind = Behind {
+    rest: [310.0, 159.0, 88.5],
+    full: [400.0, 135.0, 52.0],
+    top: 48.0,
+    share: 0.1,
+    follow: [0.067, 0.03, 0.2],
+};
 /// The camera stops this short of a wall between it and the tank (I).
 const CAM_WALL: f32 = 10.0;
 /// The scope (power-up 0x02 with R held): the eye 27.5 ahead along the turret and 111.6 up, looking
@@ -155,20 +157,44 @@ pub fn camera(
         return;
     }
     c.scope.on = false;
+    behind(follow, cam, b, &CAM, world);
+}
+
+/// A follow camera behind a heading ([`camera`]'s, the raptor's): back, up and the look-at's
+/// height over the feet at rest and at full speed (`top`), in the speed's share (−1..1), which
+/// follows the speed by `share` a frame; the heading follows the facing by `follow` (the gap's
+/// share a frame standing, more at full speed, at least degrees).
+pub struct Behind {
+    pub rest: [f32; 3],
+    pub full: [f32; 3],
+    pub top: f32,
+    pub share: f32,
+    pub follow: [f32; 3],
+}
+
+/// One frame of a [`Behind`] camera into `follow`'s eye and look-at, pulled in front of a wall.
+pub fn behind(
+    follow: &mut Follow,
+    cam: &mut Cam,
+    b: &PlayerState,
+    k: &Behind,
+    world: &CollisionWorld,
+) {
+    let c = &mut follow.cam;
     c.look_offset = 0.0;
     let hull = deg(b.facing);
-    let share = (b.xz_speed / TOP_SPEED).clamp(-1.0, 1.0);
-    let (yaw, k) = match cam.0 {
-        Some((yaw, k)) => {
+    let share = (b.xz_speed / k.top).clamp(-1.0, 1.0);
+    let (yaw, s) = match cam.0 {
+        Some((yaw, s)) => {
             let gap = wrap180(hull - yaw);
-            let gain = CAM_FOLLOW[0] + CAM_FOLLOW[1] * share.abs();
-            let step = (gap.abs() * gain).max(CAM_FOLLOW[2]).min(gap.abs());
-            (yaw + step.copysign(gap), k + (share - k) * CAM_SHARE)
+            let gain = k.follow[0] + k.follow[1] * share.abs();
+            let step = (gap.abs() * gain).max(k.follow[2]).min(gap.abs());
+            (yaw + step.copysign(gap), s + (share - s) * k.share)
         }
         None => (hull, share),
     };
-    cam.0 = Some((yaw.rem_euclid(360.0), k));
-    let [back, up, look] = std::array::from_fn(|i| CAM_REST[i] + (CAM_FULL[i] - CAM_REST[i]) * k);
+    cam.0 = Some((yaw.rem_euclid(360.0), s));
+    let [back, up, look] = std::array::from_fn(|i| k.rest[i] + (k.full[i] - k.rest[i]) * s);
     let (cy, sy) = cos_sin_deg(yaw);
     let at = Vec3::new(b.pos[0], b.pos[1] + look, b.pos[2]);
     let mut eye = Vec3::new(b.pos[0] - back * cy, b.pos[1] + up, b.pos[2] + back * sy);

@@ -140,6 +140,30 @@ pub struct Shown {
     pub heist: Option<Bags>,
     /// Tank: `weapon` is the power-up held, its icon one of [`TANK_ICONS`]; the scope has no dots.
     pub tank: bool,
+    /// War: Raptor: its strip ([`raptor_strip`]); the carried egg's and the held body's icons
+    /// ([`RAPTOR_ICONS`]) shown this frame.
+    pub raptor: Option<[bool; 2]>,
+}
+
+/// War: Raptor's icons (HUD flag 0x4000, C `func_151E89A0`): the carried egg's (`atlas2`) while a
+/// caveman carries one, the held body's (`raptor_teams`, the caveman's head) while a raptor holds
+/// one, each in the blink's shown phase ([`flag_icons`]): texture, texels, rect (centred, on the
+/// top). V h2 DLs 235-247 (the egg: shown 235, 245-247, hidden 240-244), h1 DLs 100-107 (the body:
+/// hidden 100, shown 101-107).
+pub const RAPTOR_ICONS: [(&str, [u16; 4], [i16; 4]); 2] = [
+    ("atlas2", [48, 42, 12, 15], [136, 3, 12, 15]),
+    ("raptor_teams", [0, 16, 12, 15], [148, 3, 12, 15]),
+];
+
+/// War: Raptor's strip: War: Beach's layout (`beach`), the heads `raptor_teams`' (0xD11): the
+/// caveman's (row 16) at x 198 by the cavemen's score, the raptor's (row 0) at x 66 by the raptors'
+/// (`func_151E9D18`, C; V h1 DL 40, h2 DL 200).
+pub fn raptor_strip(beach: &Strip) -> Strip {
+    let mut s = beach.clone();
+    for i in s.kills.iter_mut().chain(&mut s.lives) {
+        i.texture = "raptor_teams".into();
+    }
+    s
 }
 
 /// Tank's power-up icons at the weapon icon's place, in `atlas2`: the boost (0x01), the scope
@@ -841,10 +865,11 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     let untimed = s.lives.is_some();
     let heads = untimed || s.flags.is_some();
     let white = [255; 4];
-    let team_strip = if s.beach {
-        &hud.beach.strip
-    } else {
-        &hud.strip
+    let raptor = s.raptor.map(|_| raptor_strip(&hud.beach.strip));
+    let team_strip = match &raptor {
+        _ if s.beach => &hud.beach.strip,
+        Some(r) => r,
+        None => &hud.strip,
     };
     if let (Some((rows, choice, alpha, vi)), Some(end)) = (&s.results, &hud.end) {
         let mut out = results(
@@ -1025,6 +1050,19 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             let p = &h.bag;
             out.push(quad(&p.image, p.rect.map(f32::from), p.anchor, white, 5.0));
         }
+    }
+    // Raptor: the carried egg's and the held body's icons.
+    let top = Anchor(Horizontal::Centre, Vertical::Top);
+    for (&(texture, rect, at), _) in RAPTOR_ICONS
+        .iter()
+        .zip(s.raptor.iter().flatten())
+        .filter(|i| *i.1)
+    {
+        let p = Picture {
+            texture: texture.into(),
+            rect,
+        };
+        out.push(quad(&p, at.map(f32::from), top, white, 5.0));
     }
     if let Some(secs) = s.secs.filter(|_| s.ending.is_none_or(|k| k < 2)) {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
@@ -1481,10 +1519,17 @@ fn shown(
     // bag's carrier the same, the free bag a steady blip.
     let icons = flag_icons(vi);
     let carrier = m.cash.carrier.filter(|_| m.heist);
+    // Raptor's egg carriers, their blips too (C `0x800E0BCC`'s mask; I not seen).
+    let eggs: Vec<u16> = (m.raptors.eggs.iter())
+        .filter_map(|e| e.1)
+        .filter(|_| m.raptor)
+        .collect();
     let mut blips: Vec<_> = (everyone.iter())
         .filter(|(_, o, predicted)| !predicted && o.health > 0)
         .filter(|(_, o, _)| !hud.radar.hidden_with.contains(&o.weapon))
-        .filter(|(_, o, _)| (o.flag.is_none() && carrier != Some(o.slot)) || !icons)
+        .filter(|(_, o, _)| {
+            (o.flag.is_none() && carrier != Some(o.slot) && !eggs.contains(&o.slot)) || !icons
+        })
         .map(|(o, oc, _)| blip(o.pos, colour(oc)))
         .collect();
     let lying = m.flags.iter().filter(|f| f.shown && f.carrier.is_none());
@@ -1531,12 +1576,16 @@ fn shown(
     }
     Shown {
         health: c.health,
-        // Carrying the bag: no weapon icon (V hud1 DL 341; back at 401).
+        // Carrying the bag or an egg, or a raptor: no weapon icon (V hud1 DL 341, back at 401;
+        // h2 DLs 235-405, back at 420; h1 DL 40).
         weapon: if gun.is_some() {
             conker_camera::GUN
         } else if m.tank {
             c.power
-        } else if carrier == Some(c.slot) {
+        } else if carrier == Some(c.slot)
+            || eggs.contains(&c.slot)
+            || c.class == conker_rules::raptor::CLASS
+        {
             0
         } else {
             c.weapon
@@ -1557,10 +1606,10 @@ fn shown(
         gun,
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
         iris_at: None,
-        lives: (m.time == 0 && !m.colors && !m.beach).then_some(c.lives_left),
+        lives: (m.time == 0 && !m.colors && !m.beach && !m.raptor).then_some(c.lives_left),
         skull: None,
         ending: None,
-        strip: match m.colors || m.beach {
+        strip: match m.colors || m.beach || m.raptor {
             true => Some(m.scores.map(u32::from)),
             false => m.total_war.then_some(strip),
         },
@@ -1581,6 +1630,9 @@ fn shown(
             carrying,
         }),
         tank: m.tank,
+        raptor: m
+            .raptor
+            .then(|| [!eggs.is_empty(), m.raptors.prey != 0].map(|carried| carried && icons)),
     }
 }
 
@@ -1760,7 +1812,11 @@ fn draw(
                 let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach, m.heist);
                 let alpha = stats_alpha(tick - at + 1);
                 shown.results = Some((rows, menu.choice, alpha, 2 * tick));
-                shown.header = teams.then(|| header(&all, own.1.team, m.winner));
+                // Raptor's team headers are not in the pack: "YOU WIN" or "YOU LOSE" (I).
+                shown.header = teams.then(|| match header(&all, own.1.team, m.winner) {
+                    Header::Team(t) if m.raptor => Header::You(t == own.1.team),
+                    h => h,
+                });
             }
             sprites(&a.hud, &shown)
         }
@@ -2891,6 +2947,77 @@ mod tests {
             [[116.0, 34.0, 64.0, 32.0]]
         );
         assert_eq!(rect(&won, "beach_teams").len(), 2);
+    }
+
+    /// War: Raptor's HUD where the original drew it (`lab/research/mp-original/
+    /// raptor-client-scratch`): h1 DL 40 (a raptor at the start: the strip's heads of
+    /// `raptor_teams`, the raptor's row 0 at x 66, the caveman's row 16 at 198, no weapon icon), DL
+    /// 101 (holding a body, the blink shown: the caveman's head at [148, 3]); h2 DL 235 (a caveman
+    /// carrying an egg, shown: `atlas2`'s egg at [136, 3], no weapon icon), DL 240 (hidden: no
+    /// icon). STATS (s1 DL 560): the raptor's row in blue (team 1), 1st, the strip under the rows.
+    #[test]
+    fn raptor_matches_the_originals_draws() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            eprintln!("no pack hud/end.json: skipping");
+            return;
+        };
+        let raptor = Shown {
+            strip: Some([0, 1]),
+            raptor: Some([false, false]),
+            weapon: 0,
+            ..state()
+        };
+        assert_eq!(
+            rects(&hud, &raptor, &texture("raptor_teams")),
+            [
+                ([198.0, 196.0, 16.0, 16.0], [0.0, 16.0, 16.0, 32.0]),
+                ([66.0, 196.0, 16.0, 16.0], [0.0, 0.0, 16.0, 16.0]),
+            ]
+        );
+        assert!(rects(&hud, &raptor, &texture("teams")).is_empty());
+        let grey =
+            (sprites(&hud, &raptor).into_iter()).filter(|q| q.colour == [192, 192, 192, 255]);
+        let x: Vec<_> = grey.map(|q| q.rect[0]).collect();
+        assert_eq!(x, [215.0, 83.0]);
+        let atlas = |s: &Shown| {
+            let a = rects(&hud, s, &texture("atlas")).into_iter();
+            a.chain(rects(&hud, s, &texture("atlas2")))
+                .collect::<Vec<_>>()
+        };
+        assert!(atlas(&raptor).iter().all(|r| r.0[2] == 5.0));
+        let body = Shown {
+            raptor: Some([false, true]),
+            ..raptor.clone()
+        };
+        assert_eq!(
+            rects(&hud, &body, &texture("raptor_teams"))[2],
+            ([148.0, 3.0, 12.0, 15.0], [0.0, 16.0, 12.0, 31.0])
+        );
+        let egg = Shown {
+            raptor: Some([true, false]),
+            ..raptor.clone()
+        };
+        let eggs: Vec<_> = (atlas(&egg).into_iter())
+            .filter(|r| r.0[2] != 5.0)
+            .collect();
+        assert_eq!(eggs, [([136.0, 3.0, 12.0, 15.0], [48.0, 42.0, 60.0, 57.0])]);
+        assert_eq!(rects(&hud, &raptor, &texture("raptor_teams")).len(), 2);
+        // STATS: the human raptor's team won.
+        let c = |slot, team| Combat {
+            slot,
+            team,
+            ..Combat::default()
+        };
+        let (human, bot) = (c(0, 1), c(1, 0));
+        let all = [(true, &human), (false, &bot)];
+        let rows = rows(&all, 0, true, Some(1), false, false);
+        assert_eq!(rows, [(1, [1, 0, 0, 0, 0, 0])]);
+        let over = Shown {
+            results: Some((rows, 0, 255, 0)),
+            header: Some(Header::You(true)),
+            ..raptor.clone()
+        };
+        assert_eq!(rects(&hud, &over, &texture("raptor_teams")).len(), 2);
     }
 
     /// War: Heist's strip where the original drew it (`lab/research/mp-original/

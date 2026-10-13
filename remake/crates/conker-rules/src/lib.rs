@@ -18,6 +18,7 @@ pub mod lift;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod projectile;
+pub mod race;
 pub mod raptor;
 pub mod rng;
 pub mod spawn;

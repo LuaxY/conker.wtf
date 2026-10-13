@@ -29,7 +29,8 @@ pub struct Outro {
     pub winner: u8,
     /// Its cutscene: `[6, scene, cutscene]`.
     pub cutscene: u8,
-    /// VIs (the script's 0xFF record).
+    /// VIs: object 0's 0xFE record unless it is −9999 (Raptor's), else the scripts' longest 0xFF
+    /// record (`func_1501CE54`).
     pub length: u16,
     pub camera: Camera,
     /// The cameras it cuts to (op 3), in order, each from its `from`.

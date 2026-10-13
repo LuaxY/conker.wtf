@@ -1572,6 +1572,7 @@ fn play(
             Default::default()
         },
         respawn: vault.then_some(weapon::VAULT_RESPAWN),
+        ..Default::default()
     };
     let rng = Rng { state: seed };
     let starts = spawn::starts(scene as u16).unwrap();
@@ -1988,6 +1989,7 @@ fn tank_match(
             spots: spots.to_vec(),
         },
         respawn: Some(150),
+        ..Default::default()
     };
     let mut r = Rng { state: seed };
     let fighters = (0..humans.len() + bots.len())
@@ -2148,4 +2150,200 @@ fn tank_bots_bomb_and_fight() {
     assert!(shells >= 1);
     assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
     assert_eq!(ai.faults, 0);
+}
+
+/// Race on 0x33 as the server sets it up: slot 0 an idle human with 99 lives (the oracle's L1/L2
+/// poke), `bots` bots on script 0xBC, 5 laps on route 11 (`high`: 12). Runs to the results (or
+/// `frames`); returns the match, the bots and each racer's lap ticks (`ride.lap` going up).
+fn race_run(
+    rom: &extract_core::Rom,
+    high: bool,
+    bots: usize,
+    seed: u64,
+    frames: u32,
+) -> (
+    conker_rules::Match,
+    conker_bots::Bots,
+    Vec<Vec<u32>>,
+    Vec<u32>,
+) {
+    use conker_bots::{Assets, Bots, DEFAULT_SKILL};
+    use conker_rules::game::Event;
+    use conker_rules::weapon::{Gives, Pickup};
+    use conker_rules::{Arena, Fighter, Match, Rng, Spawn, race, spawn};
+    // `race.json`'s laps (node indices from the start's).
+    const LAPS: [[u8; 33]; 2] = [
+        [
+            19, 89, 20, 21, 22, 23, 24, 25, 84, 26, 86, 27, 28, 0, 1, 82, 2, 3, 4, 5, 6, 7, 8, 9,
+            10, 11, 12, 13, 14, 15, 16, 17, 18,
+        ],
+        [
+            19, 89, 20, 21, 22, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 3, 4, 5, 6, 7, 8,
+            9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+        ],
+    ];
+    let scene = 0x33;
+    let data: Vec<Vec<u8>> = (Assets::paths(scene).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(rom, scene).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let placements = extract_scene::scene_placements(rom, scene).unwrap();
+    // `pickups.json`: canisters on placements 4, 5 and 9, missiles on 6, 7, 8 and 10.
+    let (c, k) = (race::CANISTER, race::MISSILE);
+    let pickups = [(4, c), (5, c), (6, k), (7, k), (8, k), (9, c), (10, k)]
+        .map(|(placement, id)| {
+            let at = placements[usize::from(placement)].position.map(f32::from);
+            let gives = Gives::Weapon(id);
+            (Pickup { placement, gives }, at)
+        })
+        .to_vec();
+    let arena = Arena {
+        spawns,
+        pickups,
+        respawn: Some(race::PICKUP_RESPAWN),
+        track: race::Track::new(&data[0], &LAPS[usize::from(high)]),
+        ..Default::default()
+    };
+    // The barriers the route hides (`race.json`: 11 shows 0 and 3, 12 shows 1 and 2).
+    let mut world = world(rom, scene);
+    for b in if high { [0, 3] } else { [1, 2] } {
+        world.shift(b, 20_000);
+    }
+    let starts = conker_rules::spawn::starts(scene as u16).unwrap();
+    let mut r = Rng { state: seed };
+    let fighters = (0..=bots)
+        .map(|i| {
+            let at = spawn::place(&arena.spawns, usize::from(starts.deathmatch[i]), &mut r);
+            Fighter {
+                bot: i > 0,
+                class: if i > 0 {
+                    race::bot_class(i)
+                } else {
+                    race::HUMAN
+                },
+                extra: if i > 0 { 0 } else { 96 },
+                ride: race::Ride::new(race::GO, i > 0),
+                ..Fighter::new(&at, i as u8, 23)
+            }
+        })
+        .collect();
+    let mut m = Match::new(&arena, fighters, r, 23).with(conker_rules::Settings {
+        race: true,
+        time: None,
+        laps: race::LAPS,
+        high,
+        ..Default::default()
+    });
+    let slots: Vec<usize> = (1..=bots).collect();
+    let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, Rng { state: seed }).unwrap();
+    let mut laps = vec![Vec::new(); bots + 1];
+    let mut deaths = Vec::new();
+    while m.race.results.is_none() && m.tick < frames {
+        let mut inputs = vec![conker_sim::movement::Input::default(); bots + 1];
+        let before: Vec<i8> = m.players.iter().map(|f| f.ride.lap).collect();
+        let fx = ai.tick(&m, &arena, &world, &mut inputs);
+        let mut ev = m.apply(&fx);
+        ai.scopes(&mut m);
+        ev.extend(m.step(&arena, &inputs, &world));
+        ai.observe(&ev, &m);
+        for (i, f) in m.players.iter().enumerate() {
+            if f.ride.lap > before[i] {
+                laps[i].push(m.tick);
+            }
+        }
+        if (ev.iter()).any(|e| {
+            matches!(
+                e,
+                Event::Hit {
+                    victim: 0,
+                    lethal: true,
+                    ..
+                }
+            )
+        }) {
+            deaths.push(m.tick);
+        }
+    }
+    (m, ai, laps, deaths)
+}
+
+/// Script 0xBC races its bots, one idle human with 99 lives as the oracle's L1/L2 (3 bots: laps
+/// 837 frames on route 11, 1063-1081 on route 12; finishes 4178-4230 and 5170-5190 frames after
+/// the go; the human's first 3 deaths) and L7e/L7f (7 bots: finishes 4165-4323 and 4762-4880
+/// frames after the go, means 4249 and 4814): no native unknown, the bots finish (a few may run
+/// out of lives at the chasm after node 8, as L2's bot at 4128), the results follow, the 3 bots'
+/// steady laps stay within 15% of the oracle's and the 7 bots' mean finish within 5%.
+#[test]
+fn race_bots_finish() {
+    use conker_rules::race;
+    let Some(rom) = rom() else { return };
+    for (high, bots, seed, oracle, finish) in [
+        (false, 3, 1, 837, 0),
+        (true, 3, 1, 1066, 0),
+        (false, 7, 2, 0, 4249),
+        (true, 7, 2, 0, 4814),
+    ] {
+        let (m, ai, laps, deaths) = race_run(&rom, high, bots, seed, 9000);
+        let go = race::GO;
+        for (i, f) in m.players.iter().enumerate() {
+            let gaps: Vec<u32> = laps[i].windows(2).map(|w| w[1] - w[0]).collect();
+            eprintln!(
+                "route {} slot {i}: order {} out {} deaths {} laps {:?} (gaps {gaps:?})",
+                11 + u8::from(high),
+                f.ride.order,
+                f.out,
+                f.deaths,
+                laps[i].iter().map(|t| t - go).collect::<Vec<_>>(),
+            );
+        }
+        assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
+        assert_eq!(ai.faults, 0);
+        assert!(m.race.results.is_some());
+        let done = (m.players.iter())
+            .filter(|f| f.bot && f.ride.order > 0)
+            .count();
+        assert!(done + 2 >= bots, "{done} of {bots} finished");
+        // The idle human (facing the line, 99 lives) dies at reads 378, 599 and 845 (V L1).
+        if !high && bots == 3 {
+            let reads: Vec<u32> = deaths.iter().take(3).map(|t| t + 23).collect();
+            for (r, o) in reads.iter().zip([378, 599, 845]) {
+                assert!(r.abs_diff(o) <= 8, "human deaths {reads:?}");
+            }
+        }
+        if oracle > 0 {
+            for l in laps.iter().skip(1) {
+                let lap = l[l.len() - 1] - l[l.len() - 2];
+                assert!(
+                    lap.abs_diff(oracle) * 100 <= oracle * 15,
+                    "lap {lap} vs {oracle}"
+                );
+            }
+        }
+        // The 7 bots' mean finish after the go within 5% of L7e's, L7f's.
+        if finish > 0 {
+            let done: Vec<u32> = (laps.iter().skip(1))
+                .filter_map(|l| l.get(usize::from(race::LAPS)).map(|t| t - go))
+                .collect();
+            let mean = done.iter().sum::<u32>() / done.len().max(1) as u32;
+            assert!(
+                mean.abs_diff(finish) * 100 <= finish * 5,
+                "finish {mean} vs {finish}"
+            );
+        }
+    }
 }

@@ -11,6 +11,8 @@ import {
   type MapId,
   MODES,
   type NewServer,
+  ROUTES,
+  type Route,
   type Settings,
   settingRows,
   SKILLS,
@@ -163,7 +165,17 @@ const DEFAULT: NewServer = {
   name: "Bad Fur Day",
   map: "2d",
   mode: "deathmatch",
-  settings: { bots: 3, skill: "normal", time: 10, lives: 3, kills: 0, score: 20, radar: true },
+  settings: {
+    bots: 3,
+    skill: "normal",
+    time: 10,
+    lives: 3,
+    kills: 0,
+    score: 20,
+    radar: true,
+    laps: 5,
+    route: 11,
+  },
 };
 
 const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
@@ -181,6 +193,7 @@ function CreateServer() {
   const [started, setStarted] = useState("");
   const map = MAPS[form.map];
   const s = form.settings;
+  const { laps } = MODES[form.mode];
   const setting = (change: Partial<Settings>) =>
     setForm({ ...form, settings: { ...s, ...change } });
 
@@ -256,6 +269,21 @@ function CreateServer() {
           value={s.time}
           options={TIMES}
           onChange={(time) => setting({ time })}
+          hint={laps ? `None in ${MODES[form.mode].name}` : undefined}
+        />
+        <Select
+          label="Laps"
+          value={s.laps}
+          options={range(1, 20).map((n) => [n, String(n)])}
+          onChange={(n) => setting({ laps: n })}
+          hint={laps ? undefined : "Only in Race"}
+        />
+        <Select
+          label="Route"
+          value={s.route}
+          options={([11, 12] as const).map((r): [Route, string] => [r, ROUTES[r]])}
+          onChange={(r) => setting({ route: r })}
+          hint={laps ? undefined : "Only in Race"}
         />
         <Select
           label="Lives"
@@ -265,7 +293,7 @@ function CreateServer() {
           hint={
             !MODES[form.mode].lives
               ? `Never lost in ${MODES[form.mode].name}`
-              : s.time === "unlimited"
+              : laps || s.time === "unlimited"
                 ? undefined
                 : "Only with unlimited time"
           }

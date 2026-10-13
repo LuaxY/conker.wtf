@@ -24,6 +24,7 @@ pub mod hud;
 pub mod lights;
 pub mod outro;
 pub mod projectiles;
+pub mod raptor;
 pub mod render;
 pub mod results;
 pub mod smooth;
@@ -490,7 +491,8 @@ impl Aim {
 /// the camera left after each recent tick ([`Aim`], for rollbacks), the respawns it has cut to,
 /// and what the screen draws of the player after a correction ([`smooth::Drawn`]). In Tank,
 /// `follow` is the tank's view ([`tank::camera`]) and `tank` the on-foot camera the rules still
-/// take their aim gate from (as the server's), with the tank camera's state.
+/// take their aim gate from (as the server's), with the tank camera's state; a raptor's the same
+/// with the raptor's view ([`raptor::camera`]).
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FollowCamera {
     pub follow: Follow,
@@ -586,28 +588,30 @@ pub const DON_WEASO: &str = "134";
 /// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
 /// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`], the [`CASH`]
 /// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them), on 24 the tank
-/// ([`tank::MODEL`]).
+/// ([`tank::MODEL`]), on 3f the raptor ([`raptor::MODEL`]).
 pub fn characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
     let vault = (map == "1a").then_some([WISE_GUY, CASH, DON_WEASO]);
     let tank = (map == "24").then_some(tank::MODEL);
+    let raptor = (map == "3f").then_some(raptor::MODEL);
     PACK_CHARACTERS
         .into_iter()
         .chain(villagers)
         .chain(vault.into_iter().flatten())
         .chain(tank)
+        .chain(raptor)
         .collect()
 }
 
 /// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
 /// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], a tank (24's)
-/// the tank, anyone else is its side's.
+/// the tank, a raptor (3f's) the raptor, anyone else is its side's.
 pub fn body(c: &Combat) -> usize {
     match c.class {
         0x11..=0x20 => {
             PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
         }
-        1 | conker_rules::tank::CLASS => PACK_CHARACTERS.len(),
+        1 | conker_rules::tank::CLASS | conker_rules::raptor::CLASS => PACK_CHARACTERS.len(),
         _ => c.side as usize,
     }
 }
@@ -770,8 +774,15 @@ fn spawn_eye(spawns: &[SpawnPoint], pos: [f32; 3]) -> [f32; 3] {
 /// Runs the client on the asset pack's data and the world built from it, as the server builds it
 /// ([`scene_world`]; headless uses the world, spawns and clip lengths; windowed draws the pack's
 /// glTF models too, and the HUD, [`hud`]), with its sound if it has some ([`audio`]; headless only
-/// logs it). `script`: the lines of `script=PATH`.
-pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Vec<ScriptLine>) {
+/// logs it). `script`: the lines of `script=PATH`; `raptor`: on 3f, its `raptor.json` ([`raptor`]).
+pub fn run(
+    cfg: Config,
+    slice: Slice,
+    hud: Hud,
+    sound: Option<Audio>,
+    script: Vec<ScriptLine>,
+    raptor: Option<conker_assets::raptor::Raptor>,
+) {
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
     let scene = map_scene(&cfg.map).expect("a known map");
@@ -781,8 +792,11 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
         .iter()
         .map(|c| Clips::new(&c.clips))
         .collect();
-    let bag = (characters(&cfg.map).iter()).position(|c| *c == CASH);
-    let bag = bag.and_then(|i| clips.get(i).cloned()).unwrap_or_default();
+    let of = |name| (characters(&cfg.map).iter()).position(|c| *c == name);
+    let bag = of(CASH)
+        .and_then(|i| clips.get(i).cloned())
+        .unwrap_or_default();
+    let raptor_clips = (of(raptor::MODEL)).and_then(|i| clips.get(i).cloned());
     app.insert_resource(BodyClips(clips));
     app.insert_resource(Spawns(slice.spawns.clone()));
     app.insert_resource(MatchArena::new(&slice.spawns, scene, &slice.triggers));
@@ -791,6 +805,12 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
     heist::build(&mut app, !cfg.headless, bag);
+    raptor::build(
+        &mut app,
+        !cfg.headless,
+        raptor,
+        raptor_clips.unwrap_or_default(),
+    );
     lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     let triggers = slice.triggers.clone();
@@ -1145,6 +1165,9 @@ pub fn match_settings(m: &MatchView) -> Settings {
         heist: m.heist,
         tank: m.tank,
         raptor: m.raptor,
+        race: m.race,
+        laps: m.racing.laps,
+        high: m.racing.route == 12,
         ..Settings::default()
     }
 }
@@ -1296,18 +1319,21 @@ fn predict(
                 );
             }
             let cam = &mut *camera;
-            if settings.tank && cam.tank.is_none() {
+            let raptor = f.class == conker_rules::raptor::CLASS;
+            if (settings.tank || raptor) && cam.tank.is_none() {
                 cam.tank = Some((cam.follow, tank::Cam::default()));
             }
             let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
             foot.step_view(f.camera_view(m.tick), &input.0, &world);
             f.take_camera(foot);
-            if let Some((_, state)) = &mut cam.tank {
-                tank::camera(&mut cam.follow, state, f, &input.0, &world);
+            match &mut cam.tank {
+                Some((_, state)) if raptor => raptor::camera(&mut cam.follow, state, f, &world),
+                Some((_, state)) => tank::camera(&mut cam.follow, state, f, &input.0, &world),
+                None => {}
             }
             cam.aims[tick as usize % AIMS] = Aim::of(f);
             cam.drawn.step(f, m.tick, &cam.follow, &input.0, &world);
-            // A tank's view follows the predicted hull through a correction.
+            // A tank's (a raptor's) view follows the predicted body through a correction.
             if cam.tank.is_some() {
                 cam.drawn.camera = None;
             }
@@ -1425,11 +1451,20 @@ fn tick_anims(
             req.rate = 1.3;
         }
         // Heist's carrier walks at e/6 + 0.4 and runs at e/26 + 0.5, the target capped at 25.2
-        // (V `heist-presentation.md` §2).
+        // (V `heist-presentation.md` §2); Raptor's egg carrier and the raptor at theirs.
         let e = || conker_anim::effective_speed(p.xz_speed, p.target_speed.min(25.2));
         match id {
             conker_rules::heist::WALK => req.rate = e() / 6.0 + 0.4,
             conker_rules::heist::RUN => req.rate = e() / 26.0 + 0.5,
+            _ => {}
+        }
+        match combat.map(|c| c.class) {
+            Some(conker_rules::raptor::CLASS) => {
+                req.rate = raptor::rate(id, p.xz_speed, anim.0.id != id);
+            }
+            Some(conker_rules::raptor::CAVEMAN) => {
+                req.rate = raptor::carry_rate(id, p.xz_speed, p.target_speed).unwrap_or(req.rate);
+            }
             _ => {}
         }
         let body = combat.map_or(Side::default() as usize, body);

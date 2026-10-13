@@ -317,6 +317,24 @@ pub struct Character {
     pub clips: Vec<ClipInfo>,
     #[serde(rename = "root_motion")]
     pub root_clips: Vec<RootClip>,
+    /// A player model's hitbox (radius, half height, centre height) and push body (radius, height,
+    /// centre height) at full size: its bank-0x11 record's +0x20/+0x22/+0x24 and +0x1A/+0x1C/+0x1E.
+    /// The game uses them × the class's scale (0.5; 0.6 for classes 0x25/0x26, 0.7 for the raptor),
+    /// truncated in f32 (obj+0xD2-D6, +0xE4-E8). Absent for the characters no player is drawn as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hitbox: Option<[i16; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<[i16; 3]>,
+    /// The character folder whose glTF animations drive this one (the same joints and animation
+    /// slots): its own glTF then has none, and `clips` and `root_motion` are empty (read the other
+    /// folder's). A translation key of joint k is the other's less the other's node k translation
+    /// plus this one's. Absent: its own glTF has its clips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clips_from: Option<String>,
+    /// The display lists the game leaves undrawn whatever the class (bit k: the glTF primitives
+    /// whose `extras.list` is k), besides those a class's `looks` hide. Absent: all drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<u16>,
     /// War: Beach's villager looks drawn with this model: class → the display lists it hides (bit
     /// k: the glTF primitives whose `extras.list` is k). Empty (absent) for the other characters.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -1050,6 +1068,10 @@ mod tests {
                     model_lift: 42,
                     clips: vec![],
                     root_clips: vec![],
+                    hitbox: Some([73, 128, 88]),
+                    body: Some([60, -133, 66]),
+                    clips_from: Some("117".into()),
+                    hidden: Some(0x710),
                     looks: [(0x11, 0x3A), (0x1C, 0x0C)].into(),
                     teams: Some(Teams {
                         material: 2,
@@ -1080,6 +1102,10 @@ mod tests {
                         z: vec![0, -32, 4577],
                         end: -9,
                     }],
+                    hitbox: None,
+                    body: None,
+                    clips_from: None,
+                    hidden: None,
                     looks: Default::default(),
                     teams: None,
                     tank: None,
@@ -1319,6 +1345,12 @@ mod tests {
         assert!(
             squirrel.starts_with("{\n  \"model_lift\": 42,"),
             "{squirrel}"
+        );
+        // `hitbox`, `body`, `clips_from` and `hidden` only when set: a file without them (a pack
+        // from before them, the Tedi's here) reads them as None.
+        assert!(squirrel.contains("\"clips_from\": \"117\""), "{squirrel}");
+        assert!(
+            !tedi.contains("hitbox") && !tedi.contains("clips_from") && !tedi.contains("hidden")
         );
         assert_eq!(bits(&back), bits(&slice));
         // Integers stay integers, -0.0 keeps its sign, and one triangle per line.

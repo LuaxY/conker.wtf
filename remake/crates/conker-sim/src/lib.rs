@@ -4,6 +4,7 @@
 //! (each built from its own copy of the ROM). Math is limited to `+ - * / sqrt` so native (server)
 //! and wasm (client) produce bit-identical results.
 
+pub mod board;
 pub mod collision;
 pub mod follow;
 pub mod movement;

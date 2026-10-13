@@ -50,10 +50,10 @@ impl Playing {
     }
 }
 
-/// Whether the match is a War mode (Total War, Colors, Beach, Heist), whose end plays the winning
-/// team's outro (as the server's `results_at` waits for it).
+/// Whether the match is a War mode (Total War, Colors, Beach, Heist, Raptor), whose end plays the
+/// winning team's outro (as the server's `results_at` waits for it).
 pub fn team_mode(m: &MatchView) -> bool {
-    m.total_war || m.colors || m.beach || m.heist
+    m.total_war || m.colors || m.beach || m.heist || m.raptor
 }
 
 /// The [`Outro::winner`] the end plays: the winning team's, Heist's by whether a human's team won

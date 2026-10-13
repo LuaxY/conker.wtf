@@ -78,7 +78,9 @@ use serde::{Deserialize, Serialize};
 /// yaw and the gun's pitch in `PlayerState`).
 /// 29: War: Raptor ([`MatchView::raptor`], [`RaptorView`]; the raptor's class 9 in
 /// [`Combat::class`], its bites and drops in `anim`).
-pub const PROTOCOL_ID: u64 = 29;
+/// 30: Race ([`MatchView::race`], [`RaceView`]; the racer's board and race-table entry in the
+/// fighter, conker-rules' `Fighter::ride`: the board is predicted).
+pub const PROTOCOL_ID: u64 = 30;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -347,6 +349,61 @@ pub struct MatchView {
     /// teams'; `winner` 0 or 1.
     pub raptor: bool,
     pub raptors: RaptorView,
+    /// Race (conker-rules' `Settings::race`, `race`): every player a racer on a hoverboard
+    /// ([`Combat::class`] 0xB a human, 0xC-0xF the bots; `anim` the board's state: 5 riding, 84
+    /// kicking or knocked up, 112 dead; `weapon` the power-up held, 0x31 a canister, 0x33 missiles,
+    /// `rounds` how many); no clock (`time` 0), the lives count.
+    pub race: bool,
+    pub racing: RaceView,
+}
+
+/// Race's route, countdown, race table and missiles as the clients draw them (conker-rules'
+/// `race`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RaceView {
+    /// The route's scenario (11 the low road, 12 the elevated one: `race.json`'s routes) and the
+    /// laps to race.
+    pub route: u8,
+    pub laps: u8,
+    /// The tick the boards go (conker-rules' `race::GO` after the match's start): the countdown's
+    /// stages 1, 2, 3 (`race::stage`; the beeps 0x7687, 0x7687, 0x7688) from 62, 32 and 7 ticks
+    /// before it.
+    pub go: u32,
+    /// The countdown's stage now (0 before the first beep and after the go).
+    pub stage: u8,
+    /// The results in the level (phase 6, HUD off, everyone on the autopilot) from this tick, for
+    /// conker-rules' `race::RESULTS_FOR` ticks before the end fade; `result` the script's (1, or 2
+    /// with a human out).
+    pub results: Option<u32>,
+    pub result: u8,
+    /// Every racer in the match.
+    pub racers: Vec<RacerView>,
+    /// The missiles in flight: where, and the slot each homes on.
+    pub missiles: Vec<([f32; 3], Option<u16>)>,
+}
+
+/// One racer's race-table entry (conker-rules' `race::Ride`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct RacerView {
+    pub slot: u16,
+    /// The lap it is on (0 the first; −1 behind the line before the start), its place (1 the
+    /// first), its finish order (0 racing), and its progress (nodes passed · 16).
+    pub lap: i16,
+    pub place: u8,
+    pub order: u8,
+    pub progress: i32,
+    /// The race clock, the last lap and the best (VIs; −1 none): humans only.
+    pub time: i32,
+    pub last: i32,
+    pub best: i32,
+    /// The canister's boost left (VIs), the board's kick frame (1-29, 0 none), knocked up (frames
+    /// left), mid-jump.
+    pub boost: u16,
+    pub kick: u8,
+    pub knock: u8,
+    pub jumped: bool,
+    /// On the autopilot (a bot, a finished human).
+    pub auto: bool,
 }
 
 /// War: Raptor's eggs, nest and bodies as the clients draw them (conker-rules' `raptor`).

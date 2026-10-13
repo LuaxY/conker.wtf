@@ -4,10 +4,19 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist" | "tank" | "raptor";
+export type Mode =
+  | "deathmatch"
+  | "total-war"
+  | "colors"
+  | "beach"
+  | "heist"
+  | "tank"
+  | "raptor"
+  | "race";
 /** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target,
  * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; War: Raptor's 1-40, default
- * 20, no unlimited; Beach: at most 10 bots, Heist and Tank: 7). */
+ * 20, no unlimited; Beach: at most 10 bots, Heist, Tank and Race: 7); Race's laps and route
+ * instead of a clock. */
 export interface ModeInfo {
   name: string;
   kills: boolean;
@@ -16,6 +25,7 @@ export interface ModeInfo {
   maxScore?: number;
   defaultScore?: number;
   maxBots?: number;
+  laps?: boolean;
 }
 export const MODES: Record<Mode, ModeInfo> = {
   deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
@@ -40,9 +50,10 @@ export const MODES: Record<Mode, ModeInfo> = {
     maxScore: 40,
     defaultScore: 20,
   },
+  race: { name: "Race", kills: false, lives: true, score: false, maxBots: 7, laps: true },
 };
 
-export type MapId = "1a" | "24" | "2b" | "2d" | "30" | "34" | "3f";
+export type MapId = "1a" | "24" | "2b" | "2d" | "30" | "33" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
   "1a": {
@@ -62,6 +73,11 @@ export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }>
   },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
   "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },
+  "33": {
+    name: "Race 0x33",
+    modes: ["race"],
+    note: "Hoverboards, free for all: laps of the low road or the elevated one, canisters and missiles. At most 7 bots.",
+  },
   "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
   "3f": {
     name: "Temple 0x3F",
@@ -88,7 +104,13 @@ export interface Settings {
    * Raptor without none; War: Heist's bags 1-5). */
   score: number | "unlimited";
   radar: boolean;
+  /** Race: 1-20 laps, and the route (`--route`: 11 the low road, 12 the elevated one). */
+  laps: number;
+  route: Route;
 }
+
+export type Route = 11 | 12;
+export const ROUTES: Record<Route, string> = { 11: "Low road", 12: "Elevated" };
 
 /** What POST /api/servers takes. */
 export interface NewServer {
@@ -131,11 +153,11 @@ export function fit(s: Settings, mode: Mode): Settings {
 
 /** The settings that apply to this server's mode, as label and value. */
 export function settingRows({ mode, settings: s }: NewServer): [string, string][] {
-  const rows: [string, string][] = [
-    ["Bots", s.bots ? `${s.bots}, ${s.skill}` : "none"],
-    ["Time", s.time === "unlimited" ? "unlimited" : `${s.time} min`],
-  ];
-  if (s.time === "unlimited" && MODES[mode].lives) rows.push(["Lives", String(s.lives)]);
+  const { laps } = MODES[mode];
+  const rows: [string, string][] = [["Bots", s.bots ? `${s.bots}, ${s.skill}` : "none"]];
+  if (laps) rows.push(["Laps", String(s.laps)], ["Route", ROUTES[s.route]]);
+  else rows.push(["Time", s.time === "unlimited" ? "unlimited" : `${s.time} min`]);
+  if ((laps || s.time === "unlimited") && MODES[mode].lives) rows.push(["Lives", String(s.lives)]);
   if (MODES[mode].kills) rows.push(["Kill limit", s.kills ? String(s.kills) : "none"]);
   if (MODES[mode].score) rows.push(["Score", String(s.score)]);
   rows.push(["Radar", s.radar ? "on" : "off"]);

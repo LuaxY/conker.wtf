@@ -276,12 +276,15 @@ fn show(
             (_, Some(c)) => (c.weapon, c.drawn, c.masked),
             _ => (0, false, false),
         };
+        // A raptor holds nothing (its clips are not the weapons' events').
+        let raptor = combat.is_some_and(|c| c.class == conker_rules::raptor::CLASS);
         for &(i, entity) in &hands.0 {
             let h = &held.0[i];
-            let shown = match h.create.iter().any(|c| c.0 == MASK_ON) {
-                true => mask_shows(h, masked, &anim.0),
-                false => shows(h, weapon_id, drawn, &anim.0),
-            };
+            let shown = !raptor
+                && match h.create.iter().any(|c| c.0 == MASK_ON) {
+                    true => mask_shows(h, masked, &anim.0),
+                    false => shows(h, weapon_id, drawn, &anim.0),
+                };
             if let Ok(mut v) = visibility.get_mut(entity) {
                 v.set_if_neq(match shown {
                     true => Visibility::Inherited,

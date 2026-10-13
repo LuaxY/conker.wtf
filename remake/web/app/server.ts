@@ -61,7 +61,7 @@ const NAME = /^[\p{L}\p{N} _.,'!?-]{1,32}$/u;
 function validate(body: unknown): NewServer | string {
   if (!isObject(body) || !isObject(body.settings)) return "expected {name, map, mode, settings}";
   const { name, map, mode } = body;
-  const { bots, skill, time, lives, kills, score, radar } = body.settings;
+  const { bots, skill, time, lives, kills, score, radar, laps, route } = body.settings;
   if (typeof name !== "string" || !NAME.test(name))
     return "name: 1-32 letters, digits, spaces or _.,'!?-";
   if (!isMap(map)) return `map: one of ${Object.keys(MAPS).sort().join(", ")}`;
@@ -78,7 +78,14 @@ function validate(body: unknown): NewServer | string {
     return `settings.score: 1-${maxScore} in ${modeName}`;
   if (maxBots !== undefined && bots > maxBots) return `settings.bots: 0-${maxBots} in ${modeName}`;
   if (typeof radar !== "boolean") return "settings.radar: true or false";
-  return { name, map, mode, settings: { bots, skill, time, lives, kills, score, radar } };
+  if (!int(laps, 1, 20)) return "settings.laps: 1-20";
+  if (route !== 11 && route !== 12) return "settings.route: 11 or 12";
+  return {
+    name,
+    map,
+    mode,
+    settings: { bots, skill, time, lives, kills, score, radar, laps, route },
+  };
 }
 
 /** Whether TCP `port` and `port + 1` are free (a conker-server holds UDP `port` with its TCP). */
@@ -118,11 +125,12 @@ function spawn({ name, map, mode, settings: s }: NewServer, port: number): Runni
     "digest-file": join(dir, "digest.txt"),
     bots: s.bots,
     skill: s.skill,
-    time: s.time,
     lives: s.lives,
-    kills: s.kills,
-    score: s.score,
     radar: s.radar ? "on" : "off",
+    // Race is untimed, without a kill limit or score: its laps and route instead.
+    ...(MODES[mode].laps
+      ? { laps: s.laps, route: s.route }
+      : { time: s.time, kills: s.kills, score: s.score }),
   }).flatMap(([flag, value]) => [`--${flag}`, String(value)]);
   const proc = Bun.spawn([BINARY, ...argv], {
     cwd: REMAKE,

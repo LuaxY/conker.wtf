@@ -323,6 +323,8 @@ pub enum On {
     /// Race: a racer blowing up (a head-on wall, its last hp, or no floor below), at it: `kind_e`
     /// whether the floor's surface kind (bits 0-4) is 0xE; None: either.
     RaceDeath { kind_e: Option<bool> },
+    /// War: Raptor: an egg splatting on the ground, at it (two cues: both sounds play).
+    RaptorSplat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -595,6 +597,15 @@ mod tests {
                     Cue {
                         on: On::TankGear { coast: true },
                         character: Some("119".into()),
+                        play: play(vec![577]),
+                        then: vec![],
+                        at: None,
+                        delay: 0,
+                        note: "C".into(),
+                    },
+                    Cue {
+                        on: On::RaptorSplat,
+                        character: None,
                         play: play(vec![577]),
                         then: vec![],
                         at: None,

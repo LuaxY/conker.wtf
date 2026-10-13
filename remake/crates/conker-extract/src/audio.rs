@@ -1782,6 +1782,14 @@ pub fn pack_audio(
         for prop in [crate::BABY, crate::BODY] {
             characters.insert(prop.to_string(), clip_sounds(rom, &game_data, prop)?);
         }
+        cues.extend([0x1A6, 0x434].map(|id| {
+            cue(
+                On::RaptorSplat,
+                record([id], 0x7D00, 500, 1000),
+                "an egg's splat: 0x1A6 and 0x434 at it (C script 0xBE 0x476A-0x48C4: obj(0x71A6 / 0x7434, 3, \
+                 0x7D00, egg, 500, 1000); V raptor r4)",
+            )
+        }));
     }
     // No cues for a character the pack leaves out (the Wise Guy's without map 0x1A).
     cues.retain(|c| (c.character.as_ref()).is_none_or(|n| characters.contains_key(n)));

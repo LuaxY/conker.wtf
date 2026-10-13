@@ -507,7 +507,8 @@ fn toggle_debug_camera(
 }
 
 /// Players get their animation clock in the fixed tick ([`crate::Anim`]); give each its body's
-/// model ([`crate::body`]), lifted by its own model lift.
+/// model ([`crate::body`]), lifted by its own model lift, at the players' scale (a raptor at its
+/// own, [`crate::raptor::SCALE`]).
 #[allow(clippy::type_complexity)]
 fn add_player_models(
     players: Query<(Entity, &Combat), (With<Anim>, Without<Model>)>,
@@ -517,11 +518,14 @@ fn add_player_models(
 ) {
     for (entity, combat) in &players {
         let body = body(combat);
+        let scale = match combat.class {
+            conker_rules::raptor::CLASS => crate::raptor::SCALE,
+            _ => MODEL_SCALE,
+        };
         let scene = commands
             .spawn((
                 WorldAssetRoot(characters.of(body).scene.clone()),
-                Transform::from_xyz(0.0, MODEL_SCALE * lift.0[body], 0.0)
-                    .with_scale(Vec3::splat(MODEL_SCALE)),
+                Transform::from_xyz(0.0, scale * lift.0[body], 0.0).with_scale(Vec3::splat(scale)),
                 ChildOf(entity),
             ))
             .observe(rig_ready)
@@ -685,10 +689,16 @@ fn pose_players(
 }
 
 /// The creep clip carries its walk in the root's z (143 model units); the game turns that into
-/// the player's motion instead of drawing it (V: conker-anim), so the root stays at rest here.
-fn pin_creep_root(players: Query<(&Anim, &Rig)>, mut joints: Query<&mut Transform>) {
-    for (anim, rig) in &players {
-        if (anim.0.id == id::CREEP || anim.0.prev == id::CREEP)
+/// the player's motion instead of drawing it (V: conker-anim), so the root stays at rest here. So
+/// do the raptor's braking (1) and running bite (53), which conker-sim's `raptor` moves.
+fn pin_creep_root(players: Query<(&Anim, &Rig, &Combat)>, mut joints: Query<&mut Transform>) {
+    use conker_sim::raptor::clip;
+    for (anim, rig, c) in &players {
+        let pinned: &[u16] = match c.class {
+            conker_rules::raptor::CLASS => &[clip::SLOW, clip::RUN_BITE],
+            _ => &[id::CREEP],
+        };
+        if (pinned.contains(&anim.0.id) || pinned.contains(&anim.0.prev))
             && let Ok(mut root) = joints.get_mut(rig.root)
         {
             root.translation.z = rig.root_z;
@@ -731,8 +741,8 @@ pub fn fov(scope: &conker_camera::Scope) -> f32 {
     conker_camera::VIEW_ANGLES[1] + zoom
 }
 
-/// In War: Total War and Tank, their props, once the characters are in (one glTF load at a time,
-/// see [`load_characters`]).
+/// In War: Total War, Tank and War: Raptor, their props, once the characters are in (one glTF
+/// load at a time, see [`load_characters`]).
 fn add_props(
     game: Query<&MatchView>,
     assets: Res<AssetServer>,
@@ -740,7 +750,11 @@ fn add_props(
     mut added: Local<bool>,
     mut commands: Commands,
 ) {
-    if !*added && game.single().is_ok_and(|m| m.total_war || m.tank) {
+    if !*added
+        && game
+            .single()
+            .is_ok_and(|m| m.total_war || m.tank || m.raptor)
+    {
         *added = true;
         let props = WorldAssetRoot(assets.load(props_scene(&cfg.map)));
         commands.spawn((crate::lights::Lit, props));
@@ -757,6 +771,7 @@ fn show_pickups(
     game: Query<&MatchView>,
     timeline: Res<lightyear::prelude::LocalTimeline>,
     names: Query<(Entity, &Name), Added<Name>>,
+    nest: Option<Res<crate::raptor::Nest>>,
     mut nodes: Local<Vec<(u32, Entity, Option<(Vec3, f32)>, Option<u32>)>>,
     mut shown: Query<(&mut Visibility, &mut Transform)>,
 ) {
@@ -769,8 +784,11 @@ fn show_pickups(
     };
     let tick = timeline.tick().0;
     for (placement, entity, base, at) in nodes.iter_mut() {
-        // Tank's doors, bomb and wrecks are its own ([`crate::tank`]).
-        if m.tank && crate::tank::owns(*placement) {
+        // Tank's doors, bomb and wrecks are its own ([`crate::tank`]), Raptor's cooked eggs and
+        // hidden ones its ([`crate::raptor`]).
+        if m.tank && crate::tank::owns(*placement)
+            || m.raptor && nest.as_ref().is_some_and(|n| n.owns(*placement))
+        {
             continue;
         }
         let Ok((mut v, mut t)) = shown.get_mut(*entity) else {

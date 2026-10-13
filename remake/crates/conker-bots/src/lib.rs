@@ -95,6 +95,7 @@ pub fn script(scene: usize) -> usize {
         // 0x1A's Deathmatch runs Heist's script, its FFA branch (V dm6).
         0x1A => 0xB7,
         0x24 => 0xB8,
+        0x33 => 0xBC,
         _ => 0xBA,
     }
 }
@@ -120,6 +121,8 @@ pub struct Bots {
     hit_by: Vec<u8>,
     /// Per participant, a bit: hit since the script last read it ([`World::struck`]).
     struck: u32,
+    /// Race (0xBC), as of the last frame: its globals are its own ([`Self::leave`]).
+    race: bool,
     /// Per participant: its +0x70 when the AI last zeroed it ([`World::forgiven`]).
     forgiven: Vec<u16>,
     /// Per participant: the point it aims at this frame while R is held.
@@ -167,6 +170,7 @@ impl Bots {
             held: vec![-1; n],
             hit_by: vec![0; n],
             struck: 0,
+            race: false,
             forgiven: vec![0; n],
             aims: vec![None; n],
             scopes: vec![None; n],
@@ -235,8 +239,10 @@ impl Bots {
         if let Some(k) = self.by_slot(slot) {
             self.slots[k] = None;
             self.forget(k);
-            self.g.set(g::TEAM, k, -1);
-            self.g.set_i32(g::SEEN, self.g.i32(g::SEEN) & !(1 << k));
+            if !self.race {
+                self.g.set(g::TEAM, k, -1);
+                self.g.set_i32(g::SEEN, self.g.i32(g::SEEN) & !(1 << k));
+            }
         }
     }
 
@@ -403,6 +409,7 @@ impl Bots {
     ) -> Vec<Effect> {
         let bodies = self.bodies(m);
         self.mirror(m, arena);
+        self.race = m.settings.race;
         let st = &m.settings;
         let ffa = !st.total_war && !st.colors && !st.beach && !st.heist && !st.raptor;
         // The joiners: their team as the script's start writes it (`team << 1` in Total War's
@@ -413,7 +420,10 @@ impl Bots {
             true => (1 << bodies.len()) - 1,
             false => 0,
         };
-        for k in std::mem::take(&mut self.joined) {
+        // Race's globals overlap the frame helper's (0xBC keeps its racers at G+0x18, its route at
+        // G+0x35C): a joiner there is the script's own business.
+        let joined = std::mem::take(&mut self.joined);
+        for k in joined.into_iter().filter(|_| !m.settings.race) {
             let team = i32::from(bodies[k].team);
             let code = match () {
                 _ if ffa => k as i32,
@@ -469,6 +479,7 @@ impl Bots {
                     false => None,
                 },
                 raptor: m.settings.raptor.then_some(&m.raptor),
+                race: m.settings.race.then_some((m, arena.track.nodes.len())),
                 struck: &mut self.struck,
             };
             if !self.started {
@@ -522,7 +533,11 @@ impl Bots {
         } else if m.settings.tank {
             // Tank's bomb countdown (G+0x2008, 300 from the plant).
             effects.push(Effect::Countdown(self.g.i32(g::TANK_COUNTDOWN)));
-        } else if !m.settings.colors && !m.settings.beach && !m.settings.heist && !m.settings.raptor
+        } else if !m.settings.colors
+            && !m.settings.beach
+            && !m.settings.heist
+            && !m.settings.raptor
+            && !m.settings.race
         {
             effects.clear();
         }
@@ -571,6 +586,18 @@ impl Bots {
                 };
                 if let Some(i) = inputs.get_mut(slot) {
                     *i = Input::default();
+                }
+                continue;
+            }
+            // Race: the board's autopilot steers and speeds (the match's); the script's presses (Z
+            // a power-up, B a kick) are the pad.
+            if m.settings.race {
+                let (held, pressed) = n.pad();
+                if let Some(i) = inputs.get_mut(slot) {
+                    *i = Input {
+                        buttons: held | pressed,
+                        ..Input::default()
+                    };
                 }
                 continue;
             }

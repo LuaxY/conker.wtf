@@ -2,14 +2,15 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24] [MODE=deathmatch|total-war|colors|beach|heist|tank|raptor] [SCORE=1-40|unlimited]
-#   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] [SIDE=squirrels|tediz|cavemen]
+# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24|33] [MODE=deathmatch|total-war|colors|beach|heist|tank|raptor|race] [SCORE=1-40|unlimited]
+#   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] [SIDE=squirrels|tediz|cavemen] [ROUTE=11|12] [LAPS=1-20]
 #   crates/conker-server/bots.sh [seconds=150]. SIDE: the side client 1 asks for.
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
 # MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
 # MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
 # MODE=tank (MAP=24) the bombs taken and planted, the deaths by blast and by shell, the power-ups taken.
 # MODE=raptor (MAP=3f) the eggs made, thrown and cooked, the nest drops, the raptor bots and the team scores.
+# MODE=race (MAP=33): a bot need only move; a lap done or a power-up taken, and the race decided; the laps' frames, finishes, deaths and the end.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -24,6 +25,8 @@ mode=(); [[ -n ${MODE:-} ]] && mode=(--mode $MODE)
 [[ -n ${SKILL:-} ]] && mode+=(--skill $SKILL)
 [[ -n ${TIME:-} ]] && mode+=(--time $TIME)
 [[ -n ${SEED:-} ]] && mode+=(--seed $SEED)
+[[ -n ${ROUTE:-} ]] && mode+=(--route $ROUTE)
+[[ -n ${LAPS:-} ]] && mode+=(--laps $LAPS)
 $bin/conker-server --port $port --map ${MAP:-2d} $mode --bots $bots --seconds $((secs + 20)) --digest-file $logs/digest.txt \
   > $logs/server.log 2>&1 &
 server=$!
@@ -53,7 +56,12 @@ for b in $(seq 0 $((bots - 1))); do
   deaths=$(grep -c "EVENT .*Hit { victim: $b, attacker: [0-9]*, damage: [0-9]*, lethal: true" $logs/server.log)
   respawns=$(grep -c "EVENT .*Respawn { player: $b," $logs/server.log)
   report "bot $b moves ($n distinct positions a second)" $((n >= 10))
-  if [[ ${MODE:-} == beach ]]; then
+  if [[ ${MODE:-} == race ]]; then
+    laps=$(grep -c "RACE t=[0-9]* slot $b lap" $logs/server.log)
+    # Not a check: with an idle human of 3 lives the race ends at its elimination (oracle b1,
+    # read 933), before most bots' first lap.
+    echo "     bot $b: $laps laps, $deaths deaths, $(grep -oE "RACE t=[0-9]+ slot $b finishes [0-9]+" $logs/server.log | grep -oE '[0-9]+$' || echo no) finish"
+  elif [[ ${MODE:-} == beach ]]; then
     side=$(grep -oE "bot in slot $b on record .*" $logs/server.log | grep -oE '[A-Za-z]+$')
     if [[ $side == Squirrels ]]; then
       echo "     bot $b villager: dies ($deaths), respawns ($respawns)"
@@ -108,6 +116,24 @@ if [[ ${MODE:-} == raptor ]]; then
     "raptors (slots) $(grep -oE 'bot in slot [0-9]+ on record .*Tediz' $logs/server.log | grep -oE 'slot [0-9]+' | tr '\n' ' ')"
   echo "  scores: $(grep -oE 'RAPTOR t=[0-9]+ scores \[[0-9]+, [0-9]+\]' $logs/server.log | sed 's/RAPTOR //' | tail -4 | tr '\n' ' ')"
   echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
+fi
+if [[ ${MODE:-} == race ]]; then
+  echo "race: laps (t, then the frames each took) per slot:"
+  for slot in $(grep -oE 'RACE t=[0-9]+ slot [0-9]+ lap' $logs/server.log | grep -oE 'slot [0-9]+' | sort -u | grep -oE '[0-9]+' | sort -n); do
+    ts=($(grep -oE "RACE t=[0-9]+ slot $slot lap" $logs/server.log | grep -oE 't=[0-9]+' | tr -d 't='))
+    gaps=(); for k in $(seq 2 ${#ts}); do gaps+=($((ts[k] - ts[k - 1]))); done
+    echo "  slot $slot: ${ts[*]} ($gaps)"
+  done
+  echo "  finishes: $(grep -oE 'RACE t=[0-9]+ slot [0-9]+ finishes [0-9]+' $logs/server.log | sed 's/RACE //' | tr '\n' ' ')"
+  echo "  outs: $(grep -oE 'RACE t=[0-9]+ slot [0-9]+ out' $logs/server.log | sed 's/RACE //' | tr '\n' ' ')"
+  echo "  boosts $(grep -c 'RACE t=[0-9]* slot [0-9]* boosts' $logs/server.log), missiles $(grep -c 'RACE t=[0-9]* slot [0-9]* fires' $logs/server.log)," \
+    "knocks $(grep -c 'RACE t=[0-9]* slot [0-9]* knocked' $logs/server.log), deaths $(grep -c 'RACE t=[0-9]* slot [0-9]* dies' $logs/server.log)"
+  echo "  $(grep -E 'RACE t=[0-9]+ the race is decided|RACE t=[0-9]+ results' $logs/server.log | tr '\n' ' ')"
+  echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
+  # Route 12's first lap outlasts the idle human's 3 lives (oracle L7f: 1088+): power-ups count too.
+  report "the bots race (laps done or power-ups taken)" \
+    $(grep -cE 'RACE t=[0-9]+ slot [0-9]+ (lap|takes)' $logs/server.log)
+  report "the race is decided" $(grep -c 'RACE t=[0-9]* the race is decided' $logs/server.log)
 fi
 report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))
 report "no panics" $(( ! $(cat $logs/*.log | grep -c 'panicked') ))

@@ -41,6 +41,7 @@ use crate::heist::{self, Heist};
 use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
+use crate::race::{self, Race};
 use crate::raptor::{self, Raptor};
 use crate::spawn::{self, Placement, Spawn};
 use crate::tank::{self, Tank};
@@ -113,6 +114,8 @@ pub struct Arena {
     /// Frames a taken pickup is away, if not [`weapon::PICKUP_RESPAWN`] (0x1A's
     /// [`weapon::VAULT_RESPAWN`]).
     pub respawn: Option<u16>,
+    /// Race: the route's lap ([`race::Track`]; empty elsewhere).
+    pub track: race::Track,
 }
 
 impl Arena {
@@ -176,6 +179,12 @@ pub struct Settings {
     /// [`Self::score`] (1-40, default [`raptor::SCORE`]) or as Heist's untimed; lives as
     /// Deathmatch's; teams rank as Heist's.
     pub raptor: bool,
+    /// Race (scenarios 11 and 12, scene 0x33; [`crate::race`]): up to 8 racers on hoverboards,
+    /// [`Self::laps`] laps (opt[7], 1-20) of the route ([`Self::high`]: scenario 12's elevated
+    /// one), untimed with the lives; the end and places are the race's.
+    pub race: bool,
+    pub laps: u8,
+    pub high: bool,
 }
 
 impl Default for Settings {
@@ -193,6 +202,9 @@ impl Default for Settings {
             heist: false,
             tank: false,
             raptor: false,
+            race: false,
+            laps: race::LAPS,
+            high: false,
         }
     }
 }
@@ -389,6 +401,8 @@ pub struct Fighter {
     /// War: Raptor: a body (character 22) in the raptor's jaws (+0x2E4[0]), from its standing
     /// bite's kill to the drop or the nest; kept through hits and its death, gone at its respawn.
     pub prey: bool,
+    /// Race: the racer's board and race-table entry ([`race::Ride`]).
+    pub ride: race::Ride,
 }
 
 impl Fighter {
@@ -447,6 +461,7 @@ impl Fighter {
             climb: weapon::Climb::default(),
             power: 0,
             prey: false,
+            ride: race::Ride::default(),
         }
     }
 
@@ -877,6 +892,8 @@ pub struct Match {
     pub tank: Tank,
     /// War: Raptor's eggs, cooked eggs, baby and dropped bodies ([`crate::raptor`]).
     pub raptor: Raptor,
+    /// Race's missiles, finishes and end ([`crate::race`]).
+    pub race: Race,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -960,6 +977,7 @@ impl Match {
             traps: Traps::default(),
             tank: Tank::default(),
             raptor: Raptor::default(),
+            race: Race::default(),
         }
     }
 
@@ -1048,7 +1066,7 @@ impl Match {
         self.burn_player(i, &mut ev);
         self.fly_grenades(world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
-        if self.players[i].out == 0 && !self.settings.tank {
+        if self.players[i].out == 0 && !self.settings.tank && !self.settings.race {
             animate(&mut self.players[i], world);
         }
         for (s, kind, origin) in rays {
@@ -1118,7 +1136,11 @@ impl Match {
             let input = inputs.get(i).copied().unwrap_or_default();
             self.player(i, &input, arena, world, seen, &mut late, &mut ev);
         }
-        self.cones(&mut ev);
+        // Race: no cone hits (0x33 has kind-0xE floor on its ramps; I: a board's height above
+        // the floor, obj+0x28, is never 0 while it hovers).
+        if !self.settings.race {
+            self.cones(&mut ev);
+        }
         self.mounted_guns(world, seen, &mut ev);
         if self.settings.beach {
             let stood = (self.players.iter().enumerate()).position(|(i, f)| {
@@ -1154,6 +1176,10 @@ impl Match {
         self.fly_rockets(world, seen, &mut ev);
         self.fly_shots(world, seen, &mut ev);
         self.fly_shells(world, seen, &mut ev);
+        if self.settings.race {
+            self.fly_missiles(arena, &mut ev);
+            self.race_end();
+        }
         self.fly_grenades(world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
         // The renderer measures every player's root once the frame's updates are done (conker-sim's
@@ -1163,6 +1189,7 @@ impl Match {
             if !self.free.contains(&i)
                 && f.out == 0
                 && !self.settings.tank
+                && !self.settings.race
                 && f.class != raptor::CLASS
             {
                 animate(f, world);
@@ -1200,8 +1227,11 @@ impl Match {
             }
         }
         self.timer = (self.timer - 2).max(0);
+        // Race: the end fade comes after the results' 40 s in the level.
+        let raced =
+            (self.race.results).is_some_and(|r| self.tick + 1 + END_DELAY >= r + race::RESULTS_FOR);
         if self.ended_at.is_none() {
-            if self.score_end(&scores) || (self.settings.heist && self.score_end(&bags)) {
+            if raced || self.score_end(&scores) || (self.settings.heist && self.score_end(&bags)) {
                 self.ended_at = Some(self.tick);
             } else if self.ends() {
                 self.ended_at = Some(self.tick + 1);
@@ -1301,6 +1331,17 @@ impl Match {
     /// Every slot's place, 1 the best ([`places`]; in the War modes its team's,
     /// [`team_places`]; free slots 0).
     pub fn places(&self) -> Vec<u8> {
+        if self.settings.race {
+            return (self.players.iter().enumerate())
+                .map(|(i, f)| {
+                    if self.free.contains(&i) {
+                        0
+                    } else {
+                        f.ride.place
+                    }
+                })
+                .collect();
+        }
         let all = self.standings();
         if self.teams() > 0 {
             let teams = teams_places(&all, self.teams());
@@ -1400,6 +1441,11 @@ impl Match {
                     Gives::Weapon(beach::ITEM) if t == at + 2 && self.settings.beach => {
                         p.taken = None;
                         self.players[who].boost = beach::BOOST;
+                    }
+                    // Race: the script's pickup loop counts the item on its next frame.
+                    Gives::Weapon(id) if t == at + 1 && self.settings.race => {
+                        p.taken = None;
+                        self.race_take(who, id);
                     }
                     Gives::Weapon(id) if t == at + 2 => {
                         p.taken = None;
@@ -1745,6 +1791,7 @@ impl Match {
                 }
                 Effect::Voice(player, id) => ev.push(Event::Voice { player, id }),
                 Effect::Raptor(op) => self.raptor_op(op),
+                Effect::Race(op) => self.race_op(op),
                 // The capture's poses take over whatever the player was doing, a hit's included
                 // (I; nobody is hurt through them: the script keeps everyone immune).
                 Effect::Pose(i, pose) => {
@@ -1874,6 +1921,9 @@ impl Match {
         }
         if self.settings.tank {
             return self.tank_player(i, input, arena, world, ev);
+        }
+        if self.settings.race {
+            return self.race_player(i, input, arena, world, ev);
         }
         // The match's start item: the manager hands it over whenever the player holds no weapon
         // (`func_1508DC24` with no pickup held: MP+0x1170; V combat6_e40 1214, the frame after

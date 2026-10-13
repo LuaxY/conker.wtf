@@ -358,11 +358,13 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         let all: Vec<(usize, Command)> = (scripts.iter().enumerate())
             .flat_map(|(o, s)| s.1.iter().map(move |c| (o, *c)))
             .collect();
-        let length = scripts
-            .iter()
-            .filter_map(|s| s.0)
-            .max()
-            .context("no length")?;
+        // `func_1501CE54`: object 0's 0xFE record (its record 2) ends the scene unless it is −9999
+        // (Raptor's: cs2 1500, cs4 750, V 750 and 375 frames); else the longest 0xFF record.
+        let cut = (entry(first_script)?.get(0x10..0x14))
+            .filter(|r| r[0] == 0xFE && be16(r, 2) != 0xD8F1)
+            .map(|r| be16(r, 2));
+        let length =
+            (cut.or_else(|| scripts.iter().filter_map(|s| s.0).max())).context("no length")?;
         let of_kind = |want: u16| {
             (0..objects)
                 .filter(|&o| kind(o).is_ok_and(|k| k.0 == want))

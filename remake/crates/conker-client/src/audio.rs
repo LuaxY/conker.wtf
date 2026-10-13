@@ -165,7 +165,11 @@ impl Pack {
         map: &str,
         triggers: &[u8],
     ) -> Self {
-        let characters = crate::characters(map);
+        // On 3f the baby's and the body's events too (no player is drawn as them).
+        let mut characters = crate::characters(map);
+        if map == "3f" {
+            characters.extend([crate::raptor::BABY, crate::raptor::BODY]);
+        }
         let mut clips: Vec<_> = (characters.iter())
             .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
             .collect();
@@ -209,9 +213,10 @@ impl Pack {
         }
     }
 
-    /// War: Heist's bag's clip events ([`crate::CASH`]'s, by its logical clip; [`Sounds::heist`]).
-    fn bag(&self) -> &[ClipSound] {
-        let i = self.characters.iter().position(|c| *c == crate::CASH);
+    /// A character's clip events, by its logical clip: War: Heist's bag's ([`crate::CASH`],
+    /// [`Sounds::heist`]), War: Raptor's baby's and body's ([`Sounds::raptor`]).
+    fn events(&self, character: &str) -> &[ClipSound] {
+        let i = self.characters.iter().position(|c| *c == character);
         i.map_or(&[], |i| &self.clips[i])
     }
 }
@@ -241,6 +246,7 @@ pub fn build(
         hear.after(crate::tick_anims)
             .after(crate::lights::flicker)
             .after(crate::heist::advance)
+            .after(crate::raptor::advance)
             .run_if(not(is_in_rollback)),
     );
     if windowed {
@@ -273,6 +279,9 @@ enum Owner {
     Trap(usize),
     /// War: Heist's bag.
     Cash,
+    /// War: Raptor's baby and the body it is fed.
+    Baby,
+    Body,
     World,
 }
 
@@ -1542,7 +1551,7 @@ impl Sounds {
             ..Src::at(m.cash.pos)
         };
         if let Some(is) = bag.clip {
-            let clips = cx.pack.bag();
+            let clips = cx.pack.events(crate::CASH);
             let first = clips.partition_point(|c| c.clip < u16::from(is.0));
             for e in clips[first..]
                 .iter()
@@ -1578,6 +1587,59 @@ impl Sounds {
         let at = speaker.map_or(Src::at(m.cash.pos), Src::player);
         debug!("VOICE t={} read={} p={slot} id={id}", cx.tick, cx.read);
         self.start(cx, &cue.play, &[id], 1.0, at);
+    }
+
+    /// War: Raptor: the baby's clip events at it and the fed body's ([`bag_passes`] on their clocks,
+    /// [`crate::raptor::Nest`]); an egg's splat, sounds 0x1A6 and 0x434 where it lands (C script
+    /// 0xBE: `obj(0x71A6 / 0x7434, 3, 0x7D00, egg, 500, 1000)`; 0x1A6 is not in the pack).
+    fn raptor(&mut self, cx: &Cx, nest: &crate::raptor::Nest) {
+        let d = &nest.data;
+        let baby = Src {
+            owner: Owner::Baby,
+            ..Src::at(d.baby.at.map(f32::from))
+        };
+        let body = Src {
+            owner: Owner::Body,
+            ..baby
+        };
+        for (character, was, is, src) in [
+            (crate::raptor::BABY, nest.baby_was, nest.baby, baby),
+            (crate::raptor::BODY, nest.body_was, nest.body, body),
+        ] {
+            let Some((clip, time)) = is.and_then(|(c, t)| Some((u8::try_from(c).ok()?, t))) else {
+                continue;
+            };
+            let was = was.and_then(|(c, t)| Some((u8::try_from(c).ok()?, t)));
+            let events = cx.pack.events(character);
+            let first = events.partition_point(|c| c.clip < u16::from(clip));
+            for e in events[first..]
+                .iter()
+                .take_while(|c| c.clip == u16::from(clip))
+            {
+                if let ClipAction::Play(p) = &e.action
+                    && bag_passes(was, (clip, time), e.time)
+                {
+                    self.start(cx, p, &p.sounds, 1.0, src);
+                }
+            }
+        }
+        let splat = Play {
+            sounds: Vec::new(),
+            volume: 0x7D00,
+            own: None,
+            near: 500,
+            far: 1000,
+            channel: Channel::Free,
+            chance: 255,
+            if_idle: false,
+            pitch: [0, 0],
+            ticks: None,
+        };
+        for &at in &nest.splats {
+            for id in crate::raptor::SPLAT_SOUNDS {
+                self.start(cx, &splat, &[id], 1.0, Src::at(at));
+            }
+        }
     }
 
     /// Tank's sounds: each tank's engine (a loop at it, idling or driving, from its creation to its
@@ -1985,7 +2047,11 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
-    (flickers, bag): (Option<Res<crate::lights::Flickers>>, Res<crate::heist::Bag>),
+    (flickers, bag, nest): (
+        Option<Res<crate::lights::Flickers>>,
+        Res<crate::heist::Bag>,
+        Option<Res<crate::raptor::Nest>>,
+    ),
     mut commands: Commands,
 ) {
     let tick = timeline.tick().0;
@@ -2109,6 +2175,9 @@ fn hear(
     s.traps(&cx, m);
     s.colors(&cx, m, &all);
     s.heist(&cx, m, &bag, &all);
+    if let Some(nest) = &nest {
+        s.raptor(&cx, nest);
+    }
     s.tank(&cx, m, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);

@@ -102,6 +102,41 @@ pub const RACE_MAP: usize = 0x33;
 pub const RACER: usize = 144;
 /// Map 0x33's AI script, `[0x14, 0xBC]` (race.md §4.3): conker-bots' `script` does not map 0x33 yet.
 const RACE_AI: usize = 0xBC;
+/// The pickable and cheat characters no mode's map brings (`../lab/research/mp-original/
+/// characters.md` §3): Conker (class 0, model 0), Neo Conker (150), the weasel guard (152), the
+/// zombies (159, 160), the Sergeant and the Tediz Leader (176, 177) and Gregg (178, 180). All on the
+/// Tedi's rig, packed mesh-only ([`mesh_only`]): their `character.json`'s `clips_from` is the Tedi's.
+pub const PICKS: [usize; 9] = [0, 150, 152, 159, 160, 176, 177, 178, 180];
+/// The model a Conker player draws: rep 1 of its reps 0-4 (obj+4 = 1; every G_VTX of a WELLYTOP pick
+/// loads bank 01 #1's vertex bytes, all 701; V `characters-scratch` k15 DLs 150 and 200).
+pub const CONKER_DRAWN: usize = 1;
+/// The picks' display lists the game leaves undrawn (`characters-scratch/drawn.py`, V k15, c16, c18,
+/// c19 DL 200): 150's second list table (lists 5-9, the same vertex loads as 0-4, never run) and
+/// the zombies' lists 4, 8, 9 and 10 (obj+0x94 = 0x710 at the spawn; its source not found).
+/// Raptor's draw list 0 only (V `raptor-client-scratch` h1 DLs 100-102, h2 DLs 200-246): the
+/// raptor's 1-3 (a box and straps on its head, then the second table), the baby's 1 (the second
+/// table) and the body's 1.
+const HIDDEN: [(usize, u16); 6] = [
+    (150, 0x3E0),
+    (159, 0x710),
+    (160, 0x710),
+    (RAPTOR, 0xE),
+    (BABY, 0x2),
+    (BODY, 0x2),
+];
+/// The other player models (characters.md §3's, less the unreachable bats and the [`PICKS`]): their
+/// `character.json` has `hitbox` and `body` too. The tank's record is not its hit test (conker-rules'
+/// `tank::BODY`).
+const PLAYERS: [usize; 8] = [
+    SQUIRREL_SOLDIER,
+    SLICE_CHARACTER,
+    CAVEMAN,
+    VILLAGERS[0],
+    VILLAGERS[1],
+    WISE_GUY,
+    RAPTOR,
+    RACER,
+];
 
 /// Bank-01 model `entry` with every clip it plays: the baby's are the raptor's (its character byte
 /// +6 is 83, V r3 obj+6; its own bank-02 entry is empty), the others' their animation entry's.
@@ -609,6 +644,19 @@ pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Characte
     })
 }
 
+/// Pick `entry` ([`PICKS`]) on the Tedi's rig without clips: its glTF has none (the Tedi's drive
+/// it, `clips_from`). Conker (0) is its drawn [`CONKER_DRAWN`]'s mesh under model 0's number (its
+/// record, voices and class's model).
+pub fn mesh_only(rom: &Rom, entry: usize) -> Result<Character> {
+    let drawn = if entry == 0 { CONKER_DRAWN } else { entry };
+    Ok(Character {
+        entry,
+        anim_entry: 0,
+        model: parse_model(&rom.asset(&[0x01, drawn])?)?,
+        clips: vec![],
+    })
+}
+
 /// Heist's team looks (V `../lab/oracle/map1a/teams/`, run tm4b DL 96/100): the Wise Guy's one
 /// material drawn from segment 0x0A (its image and palette) takes entry 1 + team of the model's
 /// texture table (header word 6: 12-byte entries, the texture id first; C): REDS 7246, BLUES 7230,
@@ -798,7 +846,7 @@ pub fn map_name(scene: usize) -> String {
 /// them (its flags, lights and parts, [`tank`]) and the map's props; with 0x3F, the [`RAPTOR`] last,
 /// War: Raptor's [`BABY`], [`EGG`] and [`BODY`] (every clip), its props and `raptor.json`
 /// ([`raptor_mode`]); with 0x33, Race's bots' [`RACER`] after them (its looks), the board and
-/// helmets as the map's props and `race.json` ([`race_mode`]).
+/// helmets as the map's props and `race.json` ([`race_mode`]); last, the [`PICKS`], mesh-only.
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -823,16 +871,20 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let raptor = (temple.then(|| Character::load(rom, RAPTOR))).transpose()?;
     let race = maps.iter().any(|m| m.scene == RACE_MAP);
     let racer = (race.then(|| on_tedi_rig(rom, RACER, &tedi))).transpose()?;
+    let picks: Vec<_> = (PICKS.iter())
+        .map(|&p| mesh_only(rom, p))
+        .collect::<Result<_>>()?;
     characters.extend(
         ([tedi, caveman].into_iter())
             .chain(villagers)
             .chain(wise_guy)
             .chain(tank)
             .chain(raptor)
-            .chain(racer),
+            .chain(racer)
+            .chain(picks),
     );
-    // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank, the raptor and the racer: each
-    // folder is its bank-01 entry.
+    // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank, the raptor, the racer and the
+    // picks: each folder is its bank-01 entry (Conker's, 0, draws #1).
     let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
     let names: Vec<String> = entries.iter().map(usize::to_string).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -957,8 +1009,9 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         let g = c.gltf(&textures, true)?;
         let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
         let name = c.entry.to_string();
-        // Heist's bag and cs2's Don Weaso are 0x1A's characters too (the client's `characters`).
-        if [CASH, DON_WEASO].contains(&c.entry) {
+        // Heist's bag and cs2's Don Weaso are 0x1A's characters too (the client's `characters`);
+        // Raptor's baby and body carry their `hidden`.
+        if [CASH, DON_WEASO, BABY, BODY].contains(&c.entry) {
             let path = format!("characters/{name}/character.json");
             out.add(path, assets::to_json(&character_file(rom, c)?, 2));
         }
@@ -1797,10 +1850,18 @@ fn pack_data(
 /// `characters/<entry>/character.json` of a packed character.
 fn character_file(rom: &Rom, c: &Character) -> Result<assets::Character> {
     let (clips, root_clips) = clips(c);
+    let pick = PICKS.contains(&c.entry);
+    let player = (pick || PLAYERS.contains(&c.entry))
+        .then(|| hitbox_body(rom, c.entry))
+        .transpose()?;
     Ok(assets::Character {
         model_lift: model_lift(rom, c.entry)?,
         clips,
         root_clips,
+        hitbox: player.map(|p| p.0),
+        body: player.map(|p| p.1),
+        clips_from: pick.then(|| SLICE_CHARACTER.to_string()),
+        hidden: HIDDEN.iter().find(|h| h.0 == c.entry).map(|h| h.1),
         looks: (0x11..=0x20)
             .filter_map(|k| {
                 villager_look(k)
@@ -1826,6 +1887,20 @@ fn model_lift(rom: &Rom, entry: usize) -> Result<i16> {
         .and_then(|at| model.get(at..at + 2))
         .context("short bank-0x11 record")?;
     Ok(i16::from_be_bytes([lift[0], lift[1]]))
+}
+
+/// Model `entry`'s hitbox (radius, half height, centre) and push body (radius, height, centre) at
+/// full size: +0x20/+0x22/+0x24 and +0x1A/+0x1C/+0x1E of its bank-0x11 record (C
+/// `characters-scratch/rec11.py`; × the class's scale, truncated, they are obj+0xD2-D6 and
+/// +0xE4-E8 for every pick, V `bodies.py`).
+pub fn hitbox_body(rom: &Rom, entry: usize) -> Result<([i16; 3], [i16; 3])> {
+    let model = rom.asset(&[0x11, entry])?;
+    let r = (model.get(..4))
+        .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize)
+        .and_then(|at| model.get(at + 0x1A..at + 0x26))
+        .context("short bank-0x11 record")?;
+    let h = |k: usize| i16::from_be_bytes([r[2 * k], r[2 * k + 1]]);
+    Ok(([h(3), h(4), h(5)], [h(0), h(1), h(2)]))
 }
 
 /// (relative path, PNG file) of a glTF's images.

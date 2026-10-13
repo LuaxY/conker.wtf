@@ -147,7 +147,7 @@ pub struct Starts {
 
 /// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
 /// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels; 0x2B: Beach's, the villagers
-/// as the squirrels; 0x1A: Deathmatch's halved; 0x24: Tank's), if known.
+/// as the squirrels; 0x1A: Deathmatch's halved; 0x24: Tank's; 0x33: Race's grid), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -178,6 +178,12 @@ pub const fn starts(scene: u16) -> Option<Starts> {
         0x24 => Some(Starts {
             deathmatch: TANK_START_24,
             sides: [[0, 1, 2, 3, 16, 17, 18, 19], [4, 5, 6, 7, 8, 9, 10, 11]],
+            side_masks: DEATHMATCH_MASKS,
+        }),
+        // Race's grid: slot k on record k (V c_fwd: slots 0 and 1 on records 0 and 1).
+        0x33 => Some(Starts {
+            deathmatch: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            sides: [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15]],
             side_masks: DEATHMATCH_MASKS,
         }),
         0x1A => Some(Starts {

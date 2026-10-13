@@ -49,7 +49,8 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/83/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 83, the raptor: War: Raptor's raptor side (class 9), packed with map 3f. Its own 39 joints and 37 clips (3 with root motion), model lift 0, drawn at 0.7 of its model units (`raptor.json`): `joint_05` the skull, `joint_06` the lower jaw (a carried body hangs at its origin), `joint_07` the crest |
 | `characters/165/`, `characters/171/`, `characters/22/` `character.gltf`, `.bin`, `textures/*.png` | War: Raptor's baby raptor (165: the raptor's 39 joints and its 37 clips, as the game plays them), egg (171: one joint, no clip) and the body a raptor carries (22: 31 joints, 32 clips), packed with map 3f; no `character.json` |
 | `characters/144/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 144: Race's bots (classes 0xC-0xF), packed with map 33 (a human racer, class 0xB, is 136). The Tedi's skeleton and animations; its `looks` hide list 1 on class 0xF. Riding is clip 5 (also jumping and steering), the kick 0x354, knocked up 0x54, dead 0x170 |
-| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, the villagers' and Race's bots' looks, the Wise Guy's team looks and the tank's flags and parts |
+| `characters/0/`, `150/`, `152/`, `159/`, `160/`, `176/`, `177/`, `178/`, `180/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | The picks the cheats and map 1a add (Deathmatch and Race): Conker (0: model 0's pick, drawn as its model 1, 701 vertices), Neo Conker (150), the weasel guard (152), two zombies (159, 160), the Sergeant (176) and the Tediz Leader (177, both drawn at 0.6), Gregg (178, 180). The Tedi's skeleton, **no animations**: their `character.json` says `clips_from` 117 |
+| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, a player model's hitbox and body, the clips' owner and the undrawn lists of the picks, the villagers' and Race's bots' looks, the Wise Guy's team looks and the tank's flags and parts |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), War: Total War's gas mask in the hand and on the head, and Race's kick (bank 09 #0x34 in the hand, clip 0x354): glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
 | `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5; Race's missile, drawn at 1.0), 5 War: Raptor's bone knife (bank 09 #0x7C; the bone crossbow's bolt is 3) (a bullet has none) |
@@ -217,7 +218,9 @@ cutscene `cutscene` of the map's scene (Total War's 2 and 4 on 0x2D, Colors' 1 a
 Beach's 4 and 3 on 0x2B, Heist's 2 and 3 on 0x1A, Raptor's 2 and 4 on 0x3F; the tanks' smoke and
 texture swap are not exported, nor Raptor's speech bubbles). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
 outro shows t = min(2k, `length`), a command at t from the first tick with t ≤ 2k (tick 1 at the
-earliest); the results come up after it, over its last picture. Fields an outro doesn't use are left
+earliest); the results come up after it, over its last picture. `length` is the cutscene's own
+end: its first object's 0xFE record, or where that is −9999 the scripts' longest 0xFF record
+(Raptor's end at 1500 and 750, before their scripts' 1530 and 830). Fields an outro doesn't use are left
 out (Total War's are the simplest case).
 - `camera`: the eye moves along `path` (one point or more, Catmull-Rom, by arc length) by `along`
   (0-100 %), looking along `yaw` + 90° and `pitch` (degrees); 50° vertical field of view. Each
@@ -326,6 +329,18 @@ What Race (scenarios 11 and 12) adds to map 33 (`lab/research/mp-original/race.m
   - `z`: the root's z per stored frame, 32 per model unit;
   - `end`: its value at the loop point;
   - `step`: ticks between stored frames.
+- `hitbox`, `body` (the player models: 0, 59, 83, 117, 128, 136, 144, 150, 152, 156, 157, 159, 160,
+  176-178, 180): the shots' and blasts' ellipsoid (radius, half height, its centre's height above the
+  feet) and the push body (radius, height, centre), in model units at full size: the game uses them
+  × the class's scale (0.5; 0.6 for 176 and 177, 0.7 for the raptor), truncated (the Tedi's
+  [53, 87, 71] is 26, 43, 35).
+- `clips_from` (the picks only): the folder whose glTF animations drive this model, which has none
+  (the same joints, node names and animation slots); `clips` and `root_motion` are empty, read the
+  other's. Its translation keys are the other's joints': draw joint k at the key less the other's
+  node k translation plus this model's.
+- `hidden` (150, 159, 160, 83, 165, 22): display lists never drawn, in `looks`' bits: 150's second
+  list table (lists 5-9), the zombies' lists 4, 8, 9 and 10; Raptor's raptor (83), baby (165) and
+  body (22) draw their list 0 only.
 - `looks` (156, 157 and 144 only): War: Beach's villager classes drawn with this model (class in
   decimal, 17-32, re-drawn at each spawn) → the display lists the class hides: bit k set hides the
   glTF primitives whose `extras.list` is k. 156 has lists 0-5 (0 the body), 157 lists 0-4. On 144
@@ -348,7 +363,7 @@ The characters play the same animations, as in the game (Conker's clips), so the
 `root_motion` are the same. Every player moves by 117's `root_motion` (the others' are for reference); each
 model is drawn with its own `model_lift` and animated by its own glTF's animations, found by `clips`.
 The bodies that shots, blasts and pushes test (the squirrel's and the caveman's are larger) are the game's, built into
-the server and the clients, not in the pack.
+the server and the clients; `hitbox` and `body` hold them for every player model.
 
 ### `weapons/deathmatch/held.json`
 One entry per glTF scene of `held.gltf`, in order:
@@ -454,7 +469,8 @@ Sections:
   hitting, at the kicker) and `race_death` (a blow-up: `kind_e` true over surface kind 0xE, false
   elsewhere, null both); a power-up's use is a `shot` of its item (49 the canister's boost, 51 a
   missile fired), a missile hitting a `hit` of 51, a power-up taken a `pickup`; the kick's swing is
-  clip 0x354's event. Race has no music.
+  clip 0x354's event. Race has no music. Raptor's (map 0x3F): `raptor_splat` (an egg splatting,
+  two cues: both sounds at it).
 - A cue's `at` (if present) is where it plays instead of the event's place, and `delay` (if
   present) the ticks it waits after the event.
 - `maps.<map>.lines` (if present): voice lines the map's mode plays, unpositioned, the music ducked

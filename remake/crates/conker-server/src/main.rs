@@ -61,11 +61,11 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24] [--port 5888] [--digest-file PATH] [--seconds N]
+//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24|33] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor] [--score 1-40|unlimited]
-//!   [--seed N]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor|race] [--score 1-40|unlimited]
+//!   [--route 11|12] [--laps 1-20] [--seed N]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
 //! - `--assets DIR`, else `CONKER_ASSETS`, else `../assets` (the pack next to `remake/`, run from
@@ -124,6 +124,11 @@
 //!   clock; the level's AI script runs the eggs, the baby and the hazard (conker-rules' `raptor`);
 //!   kills, fed bodies (+1) and delivered eggs (+2) score, and the match ends on the clock or at
 //!   `--score` (1-40, default 20). `RAPTOR` lines log the script's egg and nest effects.
+//! - `--mode race`: the original's Race (scenarios 11 and 12), on map 33 (which plays nothing
+//!   else), without `--cavemen`, at most 7 bots: `--route 11` (default, the low road) or `12` (the
+//!   elevated one), `--laps 1-20` (default 5); untimed, 3 lives (`--lives`), no kill limit or score.
+//!   Every player a racer on a hoverboard (class 0xB, bots 0xC-0xF), the level's AI script drives
+//!   the bots (conker-rules' `race`); `RACE` lines log the laps, finishes, power-ups and the end.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -148,15 +153,15 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors, heist, raptor, tank, traps};
+use conker_rules::{beach, colors, heist, race, raptor, tank, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
     BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
-    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, RaptorView, Restart, Saw, TankView,
-    map_scene, scene_world,
+    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, RaceView, RacerView, RaptorView,
+    Restart, Saw, TankView, map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -294,21 +299,52 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--mode" => {
                 let s = &mut setup.settings;
                 let mode = value()?;
-                let modes = ["total-war", "colors", "beach", "heist", "tank", "raptor"];
+                let modes = [
+                    "total-war",
+                    "colors",
+                    "beach",
+                    "heist",
+                    "tank",
+                    "raptor",
+                    "race",
+                ];
                 if mode != "deathmatch" && !modes.contains(&mode.as_str()) {
                     return Err(bad(&mode));
                 }
                 let on = |m: &str| mode == m;
-                (s.total_war, s.colors, s.beach, s.heist, s.tank, s.raptor) = (
+                (
+                    s.total_war,
+                    s.colors,
+                    s.beach,
+                    s.heist,
+                    s.tank,
+                    s.raptor,
+                    s.race,
+                ) = (
                     on("total-war"),
                     on("colors"),
                     on("beach"),
                     on("heist"),
                     on("tank"),
                     on("raptor"),
+                    on("race"),
                 );
             }
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
+            // Race's route (scenario 11, the low road; 12 the elevated one) and laps (opt[7]).
+            "--route" => match value()?.as_str() {
+                "11" => setup.settings.high = false,
+                "12" => setup.settings.high = true,
+                v => return Err(bad(v)),
+            },
+            "--laps" => {
+                let v = value()?;
+                setup.settings.laps = v
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=20).contains(n))
+                    .ok_or_else(|| bad(&v))?;
+            }
             "--seed" => setup.seed = value()?.parse().map_err(|_| bad("seed"))?,
             "--time" | "--lives" | "--kills" | "--skill" | "--radar" | "--score" => {
                 let v = value()?;
@@ -381,6 +417,23 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     if s.raptor && (net.map != "3f" || setup.cavemen || s.score == 0) {
         return Err("--mode raptor: map 3f only, without --cavemen, --score 1-40".into());
     }
+    // Race is scenarios 11 and 12, scene 0x33's, and the map plays nothing else: untimed, no kill
+    // limit or score.
+    let s = &mut setup.settings;
+    if (net.map == "33") != s.race || (s.race && setup.cavemen) {
+        return Err(
+            "--mode race: map 33 only (and map 33 plays Race only), without --cavemen".into(),
+        );
+    }
+    if s.race {
+        if s.time.is_some_and(|t| t != 10) || s.kills > 0 || score_given {
+            return Err("--mode race: untimed, without --time, --kills or --score".into());
+        }
+        s.time = None;
+        if setup.bots > 7 {
+            return Err("--mode race: at most 7 bots (8 racers)".into());
+        }
+    }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
     }
@@ -413,11 +466,12 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24] [--port N] [--digest-file PATH] [--seconds N] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24|33] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor] [--score 1-40|unlimited] [--seed N] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor|race] [--score 1-40|unlimited] \
+             [--route 11|12] [--laps 1-20] [--seed N] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -433,7 +487,7 @@ fn main() {
         .and_then(|s| Some((s, starts(s)?)))
         .unwrap_or_else(|| {
             fail(format!(
-                "--map {}: not 2d, 30, 34, 3f, 2b, 1a or 24",
+                "--map {}: not 2d, 30, 34, 3f, 2b, 1a, 24 or 33",
                 net.map
             ))
         });
@@ -448,8 +502,26 @@ fn main() {
             .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())))
     });
     let pickups = raptor.as_ref().map_or(&pack.pickups, |r| &r.pickups);
-    let arena = arena(&pack, pickups, total_war, setup.settings.tank);
-    let world = scene_world(&pack, scene);
+    let mut arena = arena(&pack, pickups, total_war, setup.settings.tank);
+    let mut world = scene_world(&pack, scene);
+    // Race: the route's lap (`race.json`), its power-ups back 10 frames on, and the barriers it
+    // hides out of the way (only the shown ones are solid).
+    if setup.settings.race {
+        let r = conker_assets::race::Race::load(&net.map, |p| std::fs::read(dir.join(p)))
+            .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+        let scenario = if setup.settings.high { 12 } else { 11 };
+        let route = (r.routes.iter().find(|r| r.scenario == scenario)).unwrap_or_else(|| {
+            fail(format!(
+                "{}: race.json has no route {scenario}",
+                dir.display()
+            ))
+        });
+        arena.track = race::Track::new(&pack.nav, &route.lap);
+        arena.respawn = Some(race::PICKUP_RESPAWN);
+        for &b in r.barriers.iter().filter(|b| !route.shown.contains(b)) {
+            world.shift(b, 20_000);
+        }
+    }
 
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
@@ -573,6 +645,7 @@ fn main() {
         _ if settings.heist => "War: Heist",
         _ if settings.tank => "Tank",
         _ if settings.raptor => "War: Raptor",
+        _ if settings.race => "Race",
         _ => "Deathmatch",
     };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
@@ -659,6 +732,7 @@ fn arena(pack: &Slice, pickups: &[conker_assets::Pickup], total_war: bool, tank:
             spots: roams.map(|p| p.roams.clone()).next().unwrap_or_default(),
         },
         respawn,
+        track: race::Track::default(),
     }
 }
 
@@ -783,6 +857,7 @@ impl Game {
     fn class(&self, side: Side) -> u8 {
         match (self.setup.settings.beach, side) {
             _ if self.setup.settings.tank => tank::CLASS,
+            _ if self.setup.settings.race => race::HUMAN,
             _ if self.setup.settings.raptor => match side {
                 Side::Tediz => raptor::CLASS,
                 _ => raptor::CAVEMAN,
@@ -853,7 +928,7 @@ impl Game {
         let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
         let (bots, humans): (Vec<usize>, Vec<usize>) = taken.partition(|&i| self.m.players[i].bot);
         let s = self.setup.settings;
-        let script = s.total_war || s.colors || s.beach || s.heist || s.tank || s.raptor;
+        let script = s.total_war || s.colors || s.beach || s.heist || s.tank || s.raptor || s.race;
         self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
@@ -874,7 +949,10 @@ impl Game {
             spawn_mask,
             bot: true,
             start: self.start_item(side),
-            class: self.class(side),
+            class: match self.setup.settings.race {
+                true => race::bot_class(slot),
+                false => self.class(side),
+            },
             ..Fighter::new(&place, self.team(slot, side), 0)
         };
         self.m.players.push(fighter);
@@ -999,9 +1077,10 @@ impl Game {
         (self.results_at()).map_or(RESULTS, |r| (r + RESULTS).saturating_sub(t))
     }
 
-    /// 0x1A's Deathmatch and Tank: one side (the squirrels), every slot on its Deathmatch record.
+    /// 0x1A's Deathmatch, Tank and Race: one side (the squirrels), every slot on its Deathmatch
+    /// record (Race's grid).
     fn one_side(&self) -> bool {
-        self.vault || self.setup.settings.tank
+        self.vault || self.setup.settings.tank || self.setup.settings.race
     }
 
     /// The players on `side` in the match.
@@ -1384,6 +1463,11 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
             lethal: true, step, ..
         } if f.class == raptor::CLASS => u16::from(raptor::DOWN_AT.saturating_sub(step)),
         Action::Hurt {
+            reaction: race::DEAD,
+            lethal: true,
+            step,
+        } => u16::from(race::RESPAWN.saturating_sub(step)),
+        Action::Hurt {
             reaction,
             lethal: true,
             step,
@@ -1575,6 +1659,13 @@ fn simulate(
                 class: f.class,
                 ..Fighter::new(&slot.place, f.team, t)
             };
+        }
+        // Race: the boards go `race::GO` ticks after the match's start (read 204).
+        if game.setup.settings.race {
+            let go = (t + race::GO).saturating_sub(since_live);
+            for f in &mut fighters {
+                f.ride = race::Ride::new(go, f.bot);
+            }
         }
         game.m = Match {
             free: std::mem::take(&mut game.m.free),
@@ -1804,6 +1895,9 @@ fn simulate(
             game.m.colors.scores,
             game.m.heist.scores
         );
+    }
+    if game.m.settings.race {
+        log_race(t, &pre, &game.m, &game.arena, &events);
     }
     // Tank: the power-ups taken.
     if game.m.settings.tank {
@@ -2203,7 +2297,112 @@ fn publish(
                 .fold(0, |b, (i, _)| b | 1 << i),
             drops: m.raptor.drops.clone(),
         },
+        race: s.race,
+        racing: match s.race {
+            false => RaceView::default(),
+            true => race_view(m, game.arena.track.nodes.len(), s.high, s.laps),
+        },
     });
+}
+
+/// Race's table for the clients.
+fn race_view(m: &Match, per: usize, high: bool, laps: u8) -> RaceView {
+    let go = (m.players.iter().enumerate())
+        .filter(|(i, _)| !m.free.contains(i))
+        .map(|(_, f)| f.ride.go)
+        .min()
+        .unwrap_or(0);
+    RaceView {
+        route: if high { 12 } else { 11 },
+        laps,
+        go,
+        stage: race::stage((m.tick + race::GO).saturating_sub(go)),
+        results: m.race.results,
+        result: m.race.result,
+        racers: (m.players.iter().enumerate())
+            .filter(|(i, _)| !m.free.contains(i))
+            .map(|(i, f)| {
+                let r = &f.ride;
+                RacerView {
+                    slot: i as u16,
+                    lap: r.laps(per),
+                    place: r.place,
+                    order: r.order,
+                    progress: r.progress(),
+                    time: r.time,
+                    last: r.last,
+                    best: r.best,
+                    boost: f.boost,
+                    kick: r.board.kick,
+                    knock: r.board.knock,
+                    jumped: r.board.jumped,
+                    auto: r.auto,
+                }
+            })
+            .collect(),
+        missiles: (m.race.missiles.iter())
+            .map(|k| (k.pos, k.target.map(|j| j as u16)))
+            .collect(),
+    }
+}
+
+/// Race's `RACE` lines: the go, each lap (with a human's lap time), the finishes, the power-ups
+/// taken and used, the hits (missiles, kicks), deaths and eliminations, the end rule and the
+/// results.
+fn log_race(t: u32, pre: &Match, m: &Match, arena: &Arena, events: &[Event]) {
+    let per = arena.track.nodes.len();
+    for (i, (was, f)) in pre.players.iter().zip(&m.players).enumerate() {
+        if m.free.contains(&i) {
+            continue;
+        }
+        let (a, b) = (&was.ride, &f.ride);
+        if b.lap > a.lap && b.lap > 0 {
+            info!(
+                "RACE t={t} slot {i} lap {} done (place {}, last {} VIs, best {})",
+                b.lap, b.place, b.last, b.best
+            );
+        }
+        if b.order > 0 && a.order == 0 {
+            info!(
+                "RACE t={t} slot {i} finishes {} (bot {}, time {} VIs, laps {})",
+                b.order,
+                f.bot,
+                b.total,
+                b.laps(per)
+            );
+        }
+        if f.out > 0 && was.out == 0 {
+            info!("RACE t={t} slot {i} out (place {})", f.out);
+        }
+        if f.boost > 0 && was.boost == 0 {
+            info!("RACE t={t} slot {i} boosts");
+        }
+    }
+    for e in events {
+        match *e {
+            Event::Pickup { player, pickup } => {
+                let gives = arena.pickups.get(pickup).map(|p| p.0.gives);
+                info!("RACE t={t} slot {player} takes {gives:?}");
+            }
+            Event::Shot { player, .. } => info!("RACE t={t} slot {player} fires a missile"),
+            Event::Hit {
+                victim,
+                attacker,
+                lethal,
+                damage,
+            } if lethal || attacker != victim || damage == 0 => {
+                let what = if lethal { "dies" } else { "knocked up" };
+                info!("RACE t={t} slot {victim} {what} (by {attacker})");
+            }
+            _ => {}
+        }
+    }
+    if m.race.decided.is_some() && pre.race.decided.is_none() {
+        info!("RACE t={t} the race is decided (result {})", m.race.result);
+    }
+    if m.race.results.is_some() && pre.race.results.is_none() {
+        info!("RACE t={t} results: places {:?}", m.places());
+    }
 }
 
 /// `STATE` (position) and `COMBAT` lines per player and tick (debug), `EVENT` lines (info), and a
@@ -2757,6 +2956,56 @@ mod tests {
             );
             assert_eq!(f[s].spawn_mask, !0);
         }
+    }
+
+    /// Race: map 33 only and map 33 Race only, untimed, `--route 11|12` (default 11), `--laps
+    /// 1-20` (default 5), at most 7 bots; the bots on the grid's records in slot order, classes
+    /// 0xC-0xF, the human 0xB.
+    #[test]
+    fn race_flags_grid_and_classes() {
+        let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
+        let r = settings(&["--mode", "race", "--map", "33"]).unwrap();
+        assert!(r.race && !r.high && r.laps == race::LAPS && r.time.is_none());
+        let r12 = settings(&[
+            "--mode", "race", "--map", "33", "--route", "12", "--laps", "20",
+        ]);
+        assert!(
+            r12.as_ref().is_ok_and(|s| s.high && s.laps == 20),
+            "{r12:?}"
+        );
+        for bad in [
+            &["--map", "33"][..],
+            &["--mode", "race"],
+            &["--mode", "race", "--map", "33", "--laps", "21"],
+            &["--mode", "race", "--map", "33", "--laps", "0"],
+            &["--mode", "race", "--map", "33", "--route", "13"],
+            &["--mode", "race", "--map", "33", "--bots", "8"],
+            &["--mode", "race", "--map", "33", "--time", "5"],
+            &["--mode", "race", "--map", "33", "--kills", "5"],
+            &["--mode", "race", "--map", "33", "--cavemen"],
+        ] {
+            assert!(parse_args(args(bad)).is_err(), "{bad:?}");
+        }
+        let arena = Arena {
+            spawns: (0..16).map(|i| record([i * 100, 0, 0], 64)).collect(),
+            ..Default::default()
+        };
+        let setup = Setup {
+            settings: r,
+            bots: 7,
+            ..Setup::default()
+        };
+        let mut g = Game::new(arena, setup);
+        g.starts = starts(0x33).unwrap();
+        for slot in 0..7 {
+            let _ = g.join_bot(slot);
+        }
+        for (s, f) in g.m.players.iter().enumerate() {
+            assert!((f.body.pos[0] - 100.0 * s as f32).abs() <= 40.0);
+            assert_eq!((f.side, f.class), (Side::Squirrels, race::bot_class(s)));
+        }
+        assert_eq!(race::bot_class(1), 0xD);
+        assert_eq!(g.class(Side::Squirrels), race::HUMAN);
     }
 
     /// Raptor: map 3f only, `--score` 1-40 (default 20); bots in slots 2 and 6 of each 8 are

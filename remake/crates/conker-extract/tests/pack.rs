@@ -4,7 +4,7 @@
 //! (`conker-server`'s `scene`) build from the ROM, and its glTF files are valid, self-consistent
 //! and draw the same as the in-memory GLBs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -618,11 +618,12 @@ fn pack_reads_back_as_the_rom_path() {
         ),
         (0, 37, 3)
     );
-    for (name, joints, clips) in [
-        ("83", 39, 37),
-        ("165", 39, 37),
-        ("171", 1, 0),
-        ("22", 31, 32),
+    // `hidden`: each draws its list 0 only (V); the egg has no `character.json`.
+    for (name, joints, clips, hidden) in [
+        ("83", 39, 37, Some(0xE)),
+        ("165", 39, 37, Some(0x2)),
+        ("171", 1, 0, None),
+        ("22", 31, 32, Some(0x2)),
     ] {
         let gltf: Value =
             serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
@@ -630,7 +631,11 @@ fn pack_reads_back_as_the_rom_path() {
         let animations = gltf["animations"].as_array().map_or(0, Vec::len);
         assert_eq!((skin, animations), (joints, clips), "{name}");
         let json = format!("characters/{name}/character.json");
-        assert_eq!(files.contains_key(json.as_str()), name == "83", "{name}");
+        let file = files
+            .get(json.as_str())
+            .map(|f| serde_json::from_slice(f).unwrap());
+        let file: Option<conker_assets::Character> = file;
+        assert_eq!(file.and_then(|c| c.hidden), hidden, "{name}");
     }
     let props: Value = serde_json::from_slice(files["maps/3f/props.gltf"]).unwrap();
     let nodes: Vec<_> = (props["nodes"].as_array().unwrap().iter())
@@ -690,6 +695,57 @@ fn pack_reads_back_as_the_rom_path() {
     let held = |entry| pack.held.iter().find(|h| h.entry == entry).unwrap();
     assert_eq!((held(0x2F).joint, held(0x2F).create[0]), (9, (0x2C8, 21.0)));
     assert_eq!((held(0x7B).joint, held(0x7B).create[0]), (9, (0x2CA, 24.0)));
+
+    // The picks (M14a, `lab/research/mp-original/characters.md` §3) after the racer: mesh-only glTFs
+    // whose skeleton is the Tedi's node for node (names, children, animation slots), so its clips
+    // drive them (`clips_from`); every player model's `hitbox` and `body` (the record's), no other's.
+    let picks = conker_extract::PICKS.map(|p| p.to_string());
+    assert_eq!(manifest.characters[9..18], picks);
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.extend(picks.iter().map(String::as_str));
+    let dm = conker_assets::Slice::load(PACK_MAP, &names, PACK_WEAPONS, read).unwrap();
+    let skeleton = |name: &str| -> Vec<Value> {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        assert_eq!(gltf["skins"][0]["joints"].as_array().unwrap().len(), 28);
+        let nodes = gltf["nodes"].as_array().unwrap()[..28].iter();
+        nodes
+            .map(|n| serde_json::json!([n["name"], n["children"], n["extras"]["animSlot"]]))
+            .collect()
+    };
+    for (name, c) in picks.iter().zip(&dm.characters[3..]) {
+        let gltf: Value =
+            serde_json::from_slice(files[conker_assets::character_gltf(name).as_str()]).unwrap();
+        assert!(gltf.get("animations").is_none(), "{name}");
+        assert_eq!(skeleton(name), skeleton("117"), "{name}");
+        assert_eq!(c.clips_from.as_deref(), Some("117"));
+        assert!(c.clips.is_empty() && c.root_clips.is_empty());
+    }
+    for name in [
+        "128", "117", "136", "156", "157", "59", "83", "144", "119", "87", "134",
+    ]
+    .into_iter()
+    .chain(picks.iter().map(String::as_str))
+    {
+        let json = files[format!("characters/{name}/character.json").as_str()];
+        let c: conker_assets::Character = serde_json::from_slice(json).unwrap();
+        let player = !["119", "87", "134"].contains(&name);
+        let record = player.then(|| conker_extract::hitbox_body(&rom, name.parse().unwrap()));
+        let record = record.map(Result::unwrap);
+        assert_eq!(c.hitbox.zip(c.body), record, "{name}");
+        assert_eq!(c.clips_from.is_some(), picks.iter().any(|p| p == name));
+        let hidden = match name {
+            "150" => Some(0x3E0),
+            "159" | "160" => Some(0x710),
+            "83" => Some(0xE),
+            _ => None,
+        };
+        assert_eq!(c.hidden, hidden, "{name}");
+    }
+    assert_eq!(
+        (dm.characters[1].hitbox, dm.characters[1].body),
+        (Some([53, 87, 71]), Some([47, 91, 66]))
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -767,11 +823,12 @@ fn pack_audio_reads_back() {
     assert_eq!(
         manifest.audio,
         [
-            "characters/117",
             "characters/128",
             "characters/136",
             "characters/156",
             "characters/157",
+            "characters/159",
+            "characters/160",
             "characters/22",
             "characters/59",
             "characters/83",
@@ -991,6 +1048,41 @@ fn pack_audio_reads_back() {
         None,
         "a squirrel has no voice there"
     );
+    // The picks (M14a): the same clips' routes (bank-02 entry 0) and an equal voice table play the
+    // same (177 the Tedi's, so its folder is gone: `common`); 176 has the squirrel's table on the
+    // Tedi's routes (the squirrel's own routes, entry 128, add 1388); 178's and 180's tables are all
+    // zero (no voice); the zombies' own sounds in their folders.
+    assert_eq!(play_at("177", 0x58, 21.0), play_at("117", 0x58, 21.0));
+    assert_eq!(play_at("176", 0x58, 21.0), None);
+    assert_eq!(audio.sounds.sounds[&1254].file, "common/1254.wav");
+    // The hit voices (the pickup voices are code's, by model: 117's bazooka line is not 177's).
+    let hits = |n: &str| -> Vec<_> {
+        (audio.events.cues.iter())
+            .filter(|c| c.character.as_deref() == Some(n) && matches!(c.on, On::Hit { .. }))
+            .map(|c| (c.on.clone(), c.play.sounds.clone()))
+            .collect()
+    };
+    let events = &audio.events.characters;
+    for (a, b) in [("177", "117"), ("152", "59"), ("178", "180")] {
+        assert_eq!((&events[a], hits(a)), (&events[b], hits(b)), "{a} = {b}");
+    }
+    // Conker's two op-9 events for model 0 only (369 on clip 19, 373 on 0x58) are not 150's.
+    assert_eq!(hits("150"), hits("0"));
+    assert!(events["150"].iter().all(|e| events["0"].contains(e)));
+    assert_eq!(events["0"].len(), events["150"].len() + 2);
+    let voices = |name: &str| -> BTreeSet<u16> {
+        (audio.events.characters[name].iter())
+            .filter_map(|e| match &e.action {
+                ClipAction::Play(p) if p.own == Some(24000) => Some(p.sounds.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    assert!(voices("176").is_subset(&voices("128")));
+    assert_eq!(hits("176"), hits("128"));
+    assert!(!voices("0").is_empty() && !voices("159").is_empty());
+    assert_eq!(audio.sounds.sounds[&1519].file, "characters/159/1519.wav");
     assert_eq!(play_at("117", 2, 1.0), Some(ClipAction::Footstep(1)));
     assert_eq!(audio.events.footsteps.surfaces[&5][1], [577, 578, 579, 580]);
     let swing = play_at("117", 0x12A, 0.0);
@@ -1282,6 +1374,30 @@ fn pack_audio_reads_back() {
     assert_eq!(
         cue(&On::Lose { team: 1 }, None),
         Some(vec![0x662, 0x663, 0x664])
+    );
+    // War: Raptor's egg splat: both sounds at it, both in the pack (0x434 also Race's blow-up).
+    let splat: Vec<_> = (audio.events.cues.iter())
+        .filter(|c| c.on == On::RaptorSplat)
+        .map(|c| {
+            (
+                c.play.sounds.clone(),
+                c.play.volume,
+                c.play.near,
+                c.play.far,
+            )
+        })
+        .collect();
+    assert_eq!(
+        splat,
+        [
+            (vec![0x1A6], 0x7D00, 500, 1000),
+            (vec![0x434], 0x7D00, 500, 1000)
+        ]
+    );
+    assert!(
+        [0x1A6, 0x434]
+            .iter()
+            .all(|id| audio.sounds.sounds.contains_key(id))
     );
 }
 

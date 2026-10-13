@@ -258,6 +258,8 @@ pub enum Effect {
     Voice(usize, u16),
     /// War: Raptor's eggs, bodies and cooked eggs ([`crate::raptor::Op`]).
     Raptor(crate::raptor::Op),
+    /// Race's table ([`crate::race::Op`]).
+    Race(crate::race::Op),
 }
 
 #[cfg(test)]

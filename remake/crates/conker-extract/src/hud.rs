@@ -35,8 +35,10 @@ const GLYPHS: usize = 95;
 /// cs3 sends up (0xC01, C `func_150EA11C`'s sprite: CI4 64 × 64 with a 16-entry palette by its size,
 /// read RGBA16 as the atlases; I, no DL of it seen); Race's overview maps of its two routes (C
 /// `func_150918EC`: 0xCF2 when `0x8008FDBC & 0x40`; V k1 DL 250 and b2 DL 150, scenarios 11 and 12:
-/// the RAM's that the map's texrect draws, found by `texfind`).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 35] = [
+/// the RAM's that the map's texrect draws, found by `texfind`); War: Raptor's strip heads and its
+/// carried body's icon (V: the RAM's at 0x80206BC0 that `../lab/research/mp-original/
+/// raptor-client-scratch`'s h1 DL 40 draws, byte for byte the blob's).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 36] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -64,6 +66,7 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 35] = [
     ("gun_tape_heading", 0xFF3, Format::I8, 16, 8, true),
     ("gun_tape_elevation", 0xFF4, Format::I8, 8, 16, true),
     ("beach_teams", 0xD12, Format::Rgba32, 16, 32, false),
+    ("raptor_teams", 0xD11, Format::Rgba32, 16, 32, false),
     ("explosion", 0x78A, Format::Rgba32, 32, 32, true),
     ("smoke", 0xE4A, Format::Rgba32, 32, 32, true),
     ("fire", 0x71F, Format::I8, 32, 32, true),
