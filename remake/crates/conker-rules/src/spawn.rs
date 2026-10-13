@@ -131,6 +131,11 @@ pub const BEACH_START_2B: [[u8; 8]; 2] = [[1, 2, 11, 0, 1, 2, 11, 0], [10, 3, 10
 pub const DEATHMATCH_START_1A: [u8; 16] =
     [0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
 
+/// Scene 0x24 Tank (scenario 1, free for all): slots 0-3 start on records 0-3, 4-7 on 0x10-0x13
+/// (V b1, s0, c1); they respawn on any record (V b1: 12, 15; c1: 16). Tank has no sides (its
+/// `sides` are the records halved, unused).
+pub const TANK_START_24: [u8; 16] = [0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 8, 9, 10, 11];
+
 /// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
 /// record, and the side's respawn mask), from the War mode played on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +147,7 @@ pub struct Starts {
 
 /// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
 /// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels; 0x2B: Beach's, the villagers
-/// as the squirrels; 0x1A: Deathmatch's halved), if known.
+/// as the squirrels; 0x1A: Deathmatch's halved; 0x24: Tank's), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -168,6 +173,11 @@ pub const fn starts(scene: u16) -> Option<Starts> {
         0x2B => Some(Starts {
             deathmatch: DEATHMATCH_START_2B,
             sides: BEACH_START_2B,
+            side_masks: DEATHMATCH_MASKS,
+        }),
+        0x24 => Some(Starts {
+            deathmatch: TANK_START_24,
+            sides: [[0, 1, 2, 3, 16, 17, 18, 19], [4, 5, 6, 7, 8, 9, 10, 11]],
             side_masks: DEATHMATCH_MASKS,
         }),
         0x1A => Some(Starts {

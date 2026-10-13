@@ -461,11 +461,16 @@ fn pack_reads_back_as_the_rom_path() {
     assert_eq!(pngs[0], files[format!("characters/59/{uri}").as_str()]);
     assert!((1..4).all(|t| !pngs[..t].contains(&pngs[t])));
     assert!(pack.characters.iter().all(|c| c.teams.is_none()));
-    // The money bag (87) is drawn on its own rig: 5 joints, 12 clips, no character.json.
+    // The money bag (87) is drawn on its own rig: 5 joints, 12 clips, their table in its
+    // character.json (pair 0 the logical 0, 9 and 10); Don Weaso (134) has its 5 outro clips.
     let cash: Value = serde_json::from_slice(files["characters/87/character.gltf"]).unwrap();
     assert_eq!(cash["skins"][0]["joints"].as_array().unwrap().len(), 5);
     assert_eq!(cash["animations"].as_array().unwrap().len(), 12);
-    assert!(!files.contains_key("characters/87/character.json"));
+    let table: Value = serde_json::from_slice(files["characters/87/character.json"]).unwrap();
+    assert_eq!(table["clips"].as_array().unwrap().len(), 12);
+    assert_eq!(table["clips"][0]["logical"], serde_json::json!([0, 9, 10]));
+    let don: Value = serde_json::from_slice(files["characters/134/character.json"]).unwrap();
+    assert_eq!(don["clips"].as_array().unwrap().len(), 5);
 
     // Map 0x24, Tank (`lab/research/mp-original/tank.md`): script 0xB8, no lift nor kill gate, the
     // bunkers' plant zones (triggers 0x11-0x14); its 8 doors solid at their placements (6 faces

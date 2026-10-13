@@ -70,6 +70,8 @@ pub const WISE_GUY: usize = 59;
 /// Heist's cash, the walking money bag (scene uid 0x11, drawn at 0.4): its own 5-joint rig and
 /// 12 clips (bank-02 #87).
 pub const CASH: usize = 87;
+/// Don Weaso (scene 0x1A's outro cs2, `../lab/research/mp-original/heist-presentation.md`).
+pub const DON_WEASO: usize = 134;
 /// Map 0x1A's AI script, `[0x14, 0xB7]` (G+0x16BC; heist.md §2.4): conker-bots' `script` does not
 /// map 0x1A yet.
 const VAULT_AI: usize = 0xB7;
@@ -932,12 +934,13 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     for c in &outro_characters {
         let g = c.gltf(&textures, true)?;
         let (json, bin, images) = external_images(g.with_uri("character.bin"), &g.bin, "character");
-        gltfs.push((
-            assets::character_gltf(&c.entry.to_string()),
-            json,
-            bin,
-            images,
-        ));
+        let name = c.entry.to_string();
+        // Heist's bag and cs2's Don Weaso are 0x1A's characters too (the client's `characters`).
+        if [CASH, DON_WEASO].contains(&c.entry) {
+            let path = format!("characters/{name}/character.json");
+            out.add(path, assets::to_json(&character_file(rom, c)?, 2));
+        }
+        gltfs.push((assets::character_gltf(&name), json, bin, images));
     }
     gltfs.push((
         assets::held_gltf(PACK_WEAPONS),
@@ -1576,6 +1579,8 @@ fn pack_data(
                     Gives::Weapon(id) => assets::Gives::Weapon(id),
                     Gives::Grenades => assets::Gives::Grenades,
                     Gives::Mask => assets::Gives::Mask,
+                    // Tank's power-ups: the pack keeps their bits as weapons.
+                    Gives::Power(bit) => assets::Gives::Weapon(bit),
                 },
                 position: (spots.get(k).copied())
                     .unwrap_or(placements[usize::from(p.placement)].position)
@@ -1593,27 +1598,9 @@ fn pack_data(
         lights: map_lights(rom, scene)?,
         outros: outros.to_vec(),
         ai: rom.asset(&[0x14, ai_script(scene)])?.into_owned(),
-        class: rom.asset(&[0x0F, 0])?.into_owned(),
+        class: rom.asset(&[0x0F, conker_bots::class(scene)])?.into_owned(),
         characters: (characters.iter())
-            .map(|c| {
-                let (clips, root_clips) = clips(c);
-                Ok(assets::Character {
-                    model_lift: model_lift(rom, c.entry)?,
-                    clips,
-                    root_clips,
-                    looks: (0x11..=0x20)
-                        .filter_map(|k| {
-                            villager_look(k)
-                                .filter(|l| l.0 == c.entry)
-                                .map(|l| (k, l.1))
-                        })
-                        .collect(),
-                    teams: (matches!(c.entry, WISE_GUY | TANK))
-                        .then(|| team_material(c, &team_ids(rom, c.entry)?))
-                        .transpose()?,
-                    tank: (c.entry == TANK).then(|| tank_parts(rom, c)).transpose()?,
-                })
-            })
+            .map(|c| character_file(rom, c))
             .collect::<Result<_>>()?,
         held: (held.iter())
             .map(|h| assets::Held {
@@ -1627,6 +1614,27 @@ fn pack_data(
             .map(|&b| u16::from_be_bytes(b))
             .collect(),
         sink: std::array::from_fn(|k| std::array::from_fn(|j| sink[3 * k + j] as i8)),
+    })
+}
+
+/// `characters/<entry>/character.json` of a packed character.
+fn character_file(rom: &Rom, c: &Character) -> Result<assets::Character> {
+    let (clips, root_clips) = clips(c);
+    Ok(assets::Character {
+        model_lift: model_lift(rom, c.entry)?,
+        clips,
+        root_clips,
+        looks: (0x11..=0x20)
+            .filter_map(|k| {
+                villager_look(k)
+                    .filter(|l| l.0 == c.entry)
+                    .map(|l| (k, l.1))
+            })
+            .collect(),
+        teams: (matches!(c.entry, WISE_GUY | TANK))
+            .then(|| team_material(c, &team_ids(rom, c.entry)?))
+            .transpose()?,
+        tank: (c.entry == TANK).then(|| tank_parts(rom, c)).transpose()?,
     })
 }
 

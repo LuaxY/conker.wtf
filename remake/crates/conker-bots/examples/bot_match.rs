@@ -226,6 +226,7 @@ fn main() {
                         conker_rules::weapon::Gives::Weapon(w) => w,
                         conker_rules::weapon::Gives::Grenades => 0xAA,
                         conker_rules::weapon::Gives::Mask => conker_rules::gas::MASK,
+                        conker_rules::weapon::Gives::Power(bit) => bit,
                     });
                 }
                 _ => {}

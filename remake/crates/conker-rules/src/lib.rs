@@ -21,6 +21,7 @@ pub mod projectile;
 pub mod rng;
 pub mod spawn;
 pub mod surface;
+pub mod tank;
 pub mod traps;
 pub mod weapon;
 

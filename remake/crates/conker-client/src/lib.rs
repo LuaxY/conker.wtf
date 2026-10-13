@@ -539,7 +539,7 @@ pub fn clip_for(clips: &[ClipInfo], logical: u16) -> Option<&ClipInfo> {
 
 /// A character's clip for every logical animation id it has (movement, weapons, hits, deaths),
 /// sorted by id: (id, glTF animation name, loop length in ticks).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Clips(pub Vec<(u16, String, u16)>);
 
 impl Clips {
@@ -574,15 +574,20 @@ pub const VILLAGERS: [&str; 2] = ["156", "157"];
 /// The Wise Guy, model 59: every player's on 1a (class 1, heist.md §1, V t0/dm6), packed with map 1a.
 pub const WISE_GUY: &str = "59";
 
+/// Map 1a's other characters: Heist's bag (87) and outro cs2's Don Weaso (134).
+pub const CASH: &str = "87";
+pub const DON_WEASO: &str = "134";
+
 /// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
-/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`].
+/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`], the [`CASH`]
+/// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them).
 pub fn characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
-    let wise_guy = (map == "1a").then_some(WISE_GUY);
+    let vault = (map == "1a").then_some([WISE_GUY, CASH, DON_WEASO]);
     PACK_CHARACTERS
         .into_iter()
         .chain(villagers)
-        .chain(wise_guy)
+        .chain(vault.into_iter().flatten())
         .collect()
 }
 
@@ -763,15 +768,21 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     let mut app = App::new();
     let scene = map_scene(&cfg.map).expect("a known map");
     app.insert_resource(Collision(scene_world(&slice, scene)));
-    let clips = slice.characters.iter().map(|c| Clips::new(&c.clips));
-    app.insert_resource(BodyClips(clips.collect()));
+    let clips: Vec<_> = slice
+        .characters
+        .iter()
+        .map(|c| Clips::new(&c.clips))
+        .collect();
+    let bag = (characters(&cfg.map).iter()).position(|c| *c == CASH);
+    let bag = bag.and_then(|i| clips.get(i).cloned()).unwrap_or_default();
+    app.insert_resource(BodyClips(clips));
     app.insert_resource(Spawns(slice.spawns.clone()));
     app.insert_resource(MatchArena::new(&slice.spawns, scene, &slice.triggers));
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
-    heist::build(&mut app, !cfg.headless);
+    heist::build(&mut app, !cfg.headless, bag);
     lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     let triggers = slice.triggers.clone();
@@ -1124,6 +1135,7 @@ pub fn match_settings(m: &MatchView) -> Settings {
         score: m.score_limit,
         beach: m.beach,
         heist: m.heist,
+        tank: m.tank,
         ..Settings::default()
     }
 }

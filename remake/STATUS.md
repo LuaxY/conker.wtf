@@ -1,5 +1,143 @@
 # Status after wave 6 (2026-10-10)
 
+## HUD and audio leftovers (2026-10-13)
+**Batch E9. Through a scope the local player's body and weapon hide in its own view. The rank's ties follow the
+original's rule. The death iris is centred on the dying player's head. Weapon 0x16's R view tints the framebuffer, and
+the scope dots turn with the zoom. In a narrow window the page's lines keep clear of the HUD. Sounds: bullets whizz
+past (800-802, 807-811), a cooked grenade hisses 929 in the hand, the grenade's landings draw from a shuffle bag, and
+a lethal head shot pops (1278). Each hit carries its weapon (protocol 27), and the music comes back after RESTART. A
+speaker that is voicing makes no radio call. 87 and 134 have their `character.json`.** Research:
+`../lab/research/mp-original/hud-audio-leftovers-scratch/` (`hud/notes.txt`: runs scopeB, w16B, deathC; `audio/`;
+`pack/`).
+
+| Part | What |
+|---|---|
+| conker-client `outro.rs` (`show`) | The local player's model hides while its scope is up (C `func_1502E4C4`: the view's bit in obj+0x74 while s126+0x197 is set; V scopeB: from the frame the ring shows to the release), not with the free camera. A mounted gun and its gunner were already hidden (`guns.rs`) |
+| `hud.rs` | **Iris:** `Shown::iris_at` is the head joint (`Twisted`'s joint 12) + 30 · scale up, projected with the 3D camera into the frame (`frame_point`); a blast victim (`BLOWN_UP`) uses its own place (C `func_1507E1D0`). The radius stays keyed on the frames before the respawn: the original's respawn is the death's start + 88 for every death (V deathC: a grenade at 181 → 269, a poked death's script command at 376 → 464). **Dots:** `dot_turn(zoom)` = (F + 50) · 0.02 · 2π, F = clamp(the mean of the two zoom angles, −50, 0); dot k at k · 30° + turn, (cx + 55 sin, cy + 55 cos), in quarter pixels (C `func_151CBBE0`, V scopeB DL 230). **0x16's R:** `Tex::Tint` (a multiply quad over the window at z 4, colour (R, 255, 0)), R = `tint(frames since open)`, a triangle wave 0x90 ↔ 0xFF by 4; the ring only, no dots or bar; under the clock, score and ring, over health, icon and radar (C `func_151A5170`/`func_151A5070`, V w16B) |
+| `audio.rs` | **Fly-by:** `MatchView::bullets` (`BulletView`: pos, vel, life, born, owner). A new bullet is armed at its owner's weapon chance (0x09 8, 0x39 1, 0x23 255, 0x1B 50, of 256; none for 0x38); while armed, each step picks one of 8 sounds and its lead, and plays it once the bullet heads at the camera within its lead and its reach; the sound then follows the bullet (C table 0x8008FBE8). **Hiss:** 929 in place of 1299 once the holder's cook (`Combat::cook`) is under 120; it follows the thrower. The grenade's own fuse only from 60 past its birth. **Bounces:** 1447-1449 from `func_1000F568`'s bag (a permutation, never the last again at once) on each bounce up faster than 5. **Head pop:** 1278 on a lethal hit whose reaction is `DEATH_SHOT` (`func_151D4DAC`: a parts-tested bullet on the head under 3 health). **Hits** use `Combat::hit`; the client's guess (`hit_weapon`) is gone. **Music:** RESTART's fade stops it and clears `background`, so the next match starts it again. **Radio:** `voicing(slot)`: a radio line pending or one of the speaker's lose, flag, carry or plunger lines playing stops a new call (I). Everyone hears the radio in every War mode (C: no mode, map or team test), as before |
+| conker-sim `net.rs`, conker-server | `Combat::hit` (the weapon of the tick's hit; 0 for a quiet head −1 above 2 health), `Combat::cook`, `MatchView::bullets: Vec<BulletView>`. **Protocol 27** (Tank's is 28) |
+| conker-assets, conker-extract | `On::Head { weapon }` (the 0x09/0x39 lethal head cues), `On::FlyBy { chances, leads }` (800-802, 807-811 in `audio/common`), `bounce` 1447-1449 with the bag; the grenade's flight cue is gone. `characters/87/character.json` (12 clips) and `characters/134/character.json` (5): `characters("1a")` lists 87 and 134, and `heist.rs` reads the bag's clips from 87's. `hud/bubble_particle.png`: the decode is right (CI4 64 × 64, its TLUT a grey ramp with every alpha bit set; as IA16 the alphas are noise), so cs3's bubbles now draw added (I) |
+| web `play.html` | `--hud` = min(100vh/216, 100vw/292): `#net` sits 35 frame lines up (over the clock, the strips and pips), `#sound` 69 down (under the radar) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| client `the_scope_hides_the_own_body` | the own model hidden with the scope up, the other shown; both shown with the free camera and with the scope down |
+| client `the_dots_turn_0x16_tints_and_the_iris_follows` | turn 177.35° at scopeB read 200's zoom (−27.8, −22.94), 0 at a mean of −62; tint 0x90, 0x94, 0xFC, 0xFF, 0xFB, 0x90, 0x94; dot 0 at [145.5, 50, 6, 6]; 0x16: one tint quad at z 4, the ring's 4 quarters, no dots or bar; the iris at (100, 80) |
+| client audio | `bounces_draw_from_the_shuffle_bag`; `a_bullet_passing_the_camera_whizzes_once` (0x23: one of 800-802; 0x38: none); `a_cooked_hiss_and_a_head_pop` (cook 240 → 1299, 118 → 929; `DEATH_SHOT` → 1278, `HIT` none); the music after RESTART (Deathmatch and Colors); `a_flag_taken_calls_on_the_radio` with `voicing` |
+| client `rows_colour_by_port_and_share_ties` | the tie rule (kills − deaths, fewer shots, shared places) |
+| server `a_hit_names_its_attackers_weapon` | the attacker's weapon on each hit |
+| extract `pack_reads_back_as_the_rom_path` | 87's table (12 clips, pair 0 the logical 0, 9, 10) and 134's 5 clips |
+| Live e_w09 (`combat.sh`, port 5982, `RUST_LOG=conker_client::audio=debug`) | one 802 on the victim's client (read 980, the bullet's own voice); the body kill has no 1278; HIT lines carry 0x09 |
+| Live grenades (port 5986) | an 80-frame cook hisses 929 from throw + 4, and the grenade's own 929 does not play; a 10-frame cook hisses 1299, bounces 1447, 1449, 1447, the grenade's 929 at 676, the blast at 736 |
+| Pack | `bun run pack --force`: 1689 files; `lab/tools/verify-pack.sh`: pack equal |
+| `bun run test` | 456 pass, 1 ignored (with the Tank lane's work in the tree) |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+
+Screens (1280 × 720):
+- `../lab/screens/hud/e9-scope-p1.png`: the sniper scope (0x24) at read 900, with no own body. The ring, the turned
+  dots and the bar show, and the bear in front is player 2.
+- `e9-rview-p1.png`: 0x16's R view with the yellow-green tint, the ring only.
+- `e9-iris-p2.png`: player 2's iris at read 1060, 112 reads after its twin-gun death, centred on its corpse's head.
+- `../lab/screens/heist/cs3-bubbles.png`: the added bubbles.
+
+**Gaps.**
+- **I, the bubbles:** the original's bubble draw is not in any dump (0x1207 is a caustic texture). 0xC01 is a white
+  square with a dark rim, so cs3's bubbles still look like small white squares.
+- **The dots' turn at the open:** the remake's camera zooms use the split screen's view angles (82.416), not the full
+  screen's 60.6/50 (camera lane). So the scope opens at a turn of 136°, where the original's is 177°.
+- **The iris:** the death durations are the rules' (clip death 133 frames against 134; bullet deaths are I).
+- **Rules lane (not touched):**
+  - a corpse's head pop (the original pops a dead head too);
+  - the pistol's bullets test the head: its spawner is `func_150FED30` (arg15 = 1, V e_w39's 1278 at read 970),
+    where `game.rs` (3400-3404) and `bots-fidelity.md` take `func_150FE860` (most likely the tommy gun's, I).
+- **Not run live:** a mounted gun's gunner hide (by `guns.rs`, unchanged), and `#net`/`#sound` in a browser (no
+  browser in this batch).
+
+## Tank: rules, server and bots (2026-10-13)
+**Batch M9. `--mode tank` on `--map 24` plays the original's scenario 1: everyone a tank (class 8, model 119, 6 hp),
+free for all, ranked by kills as Deathmatch (time, lives and the kill limit as Deathmatch's). The hull drives as the
+original (the stick's target ±48, +1.4 a frame toward it, half the speed moved, turning slower with speed); the turret
+turns 3° a frame on C-left/C-right; the gun pitches itself (−20..80) onto the nearest tank in its cone. Z fires a shell
+(296.5, 5/frame² gravity) that hits a tank within 150 for 1 damage and a 50 knock; the next press fires 34 frames on.
+A dead tank leaves a wreck for 330 frames and is back on a record on its 88th frame (6 hp, 150 immune). The four
+power-ups roam six spots (back 150 frames after a take): the shield (immune 900 frames), the boost (A doubles the
+top speed for 300 frames of holding), 3 one-shot shells, and R's scope. Script 0xB8, run by conker-bots, does the
+bomb as Total War's gas: shown on the centre post 300-450 frames in, touched and carried into a bunker, it plants a
+300-frame countdown; the doors shut at 70 left, the gas at 30; at 0 every tank outside a bunker dies, the bomber
+credited. The bots fetch it, plant it, take the power-ups and fight. Protocol 28.** Research:
+`../lab/research/mp-original/tank.md` (runs t1, f1-f3, p1, c1, b1), `tank-scratch/` (the script's listing, the code).
+
+| Part | What |
+|---|---|
+| conker-sim `tank.rs` (new) | **`step(p, input, world, others, drive)`:** the hull (`func_1505A3A8`). Target = stick y · 0.64 (boosting with A: 80 · 1.28); `speed()` +1.4 toward it (0.014 within 1), brake 2.0 (the fire clip's 5); the turn `facing − x · rate`, rate `max(10, (18 − v·0.5)·0.5 + 9)`, at most 1024 a frame, before the move; half the speed moved along the floor; tanks push (`body`, radius 78) with no damage; falls 6 a frame. `Drive::Knock`: a hit's knock (speed −0.1, ×0.9). C-right/C-left turn `turret` ±3°. `movement.rs`: `PlayerState::turret`, `pitch` (degrees; replicated and predicted); `push_body` |
+| conker-rules `tank.rs` (new) | **`Match::tank_player`** in place of the on-foot frame: the hit clip (7: 13 knock frames, 15 in all) or death (immune 255, `down()` at step 88), the power-up's timer, boost and scope, the hull, a bot's turret closing 1/8 of the gap to its camera yaw, the gun's pitch (the best tank within 35° and 7000; `solve_pitch` less the hull's), the shell on a Z press (`ready` + 34). **`fly_shells`:** half the speed a frame, `y += vy/2 − 1.375`, `vy −= 5`; `hits_body` with `BODY` (radius 150); gone at a wall. **`tank_hit`:** 1 damage (all with 0x10), knock 50, immunity kept (not by the bomb, clip 6); the wreck. **`touch_bomb`**, **`doors`** (8 a frame over 350 while +0x80 is 0), **`seat`** (a shut door collides), **`bunker`**, **`wrecks()`**, `CLASS` 8 |
+| conker-rules `game.rs`, `weapon.rs`, `spawn.rs` | `Settings::tank`, `Fighter::power`, `Match::tank`. `Gives::Power(bit)`: a touch sets the bit and its timer (1800/600 VIs, 3 shells). The script's effects: Show/Set reach the bomb (placement 12) through `prop_mut`; `Countdown` from 0 plants in the last carrier's bunker; `Hit` is the blast (lethal, ignores immunity, the bomber's kill; its own death no suicide); `Carry` is 0x4B/0x4C. `TANK_START_24`: slots 0-3 on records 0-3, 4-7 on 0x10-0x13, respawning anywhere |
+| conker-bots | **`script(0x24)` = 0xB8; `class(0x24)` = 119:** the tank's own class data (`[0x0F, 119]`): its script 4 walks the path at 33, 5 waits, 6 chases. On Conker's class (0) the 0x60 command's script 4 is a chase at 10, and the bots stood still. **Natives:** query (3, 0x21) on the bomb (0x3005: `touched[2]`), player query 0xA5 4 (alive), commands 0x4B/0x4C (carry on/off), 0x70 and (0xF, 0xE) no-ops; the countdown is G+0x2008. **`tank_drive`:** the walk target as the hull's stick (x = −gap/18, forward within 45°, y = speed / 0.64: 52 for 33); the turret's target is the script's enemy (G+0x11C) alive, within 4000 and in sight, led by its last step · distance / 100; Z pressed once ready and within 5°; each shot draws the aim error s126+0x12A in −2..2, 10° a unit |
+| conker-assets, conker-extract | `maps/24/class.bin` (the tank's `[0x0F, 119]`, 1280 bytes) in place of `game/class.bin` on map 24; `pack_data` packs it; `Gives::Power` packs as the weapon bit. Copied into `../assets/maps/24/` from a fresh `pack --map 24` (the other files identical) |
+| conker-server | `--mode tank`: map 24 only (it plays nothing else), no `--cavemen`, ≤ 7 bots; one side, class 8, each its own team, on `TANK_START_24`. `arena()` maps the pack's weapon bits to `Power`. The script flag (the AI runs with no bot). `tank::seat` once the effects are in. `combat()`: `respawn_in` = 88 − step; `power`, `power_left`. **TANK lines:** bomb taken, planted (by, bunker), blast kills (bomber), power-up taken. `bots.sh` MODE=tank: bombs taken and planted, blast and shell deaths, power-ups |
+| conker-client | `match_settings` copies `tank`, so the own tank is predicted on the tank's path (without it the on-foot hurt indexed clip 7's sequence and panicked). Nothing drawn (M10) |
+| web | `data.ts`: mode `tank` (kills, lives, no score, ≤ 7 bots) and map `24` ("Tank 0x24", Tank only) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| sim `tank` (7) | t1: drive 48 at +1.4, brake 2.0, reverse, the turns (1024 at rest, 991 at speed 4, 619 at 39); p1: boost 102.4; c1: the fire clip's ±5; f1: the knock 24.95, 44.91, 40.33; push without damage; the turret ±3 |
+| rules `tank` (6) | f1: a shell hits a tank 600 ahead on its third frame, 1 damage; f2: 150 hits, 200 misses; f3: refire at 34, no fire held; c1/f1: death → back at 88 with 6 hp and 150 immune; p1: the shield's 900 frames; the doors' 44 frames |
+| bots rom `tank_bomb_as_c1` | the real 0xB8 with two humans: shown at 300, P1 touches, carries into bunker E: plant 328, doors shut +231, gas +271, blast +300 (P2 dies, P1 +1), doors open +389, bomb back +424; no unknown native |
+| bots rom `tank_bots_bomb_and_fight` | 7 bots + 1 idle human, 9000 frames (seed 1): 6 takes, 3 plants, 16 blast deaths, 20 shell deaths; no unknown native, no fault |
+| server `tank_mode_records_and_class` | the flags' refusals; records 0-3 then 16, 17; class 8; own teams; masks all ones |
+| `bun run test` | 453 pass, 1 ignored, 1 fails: conker-extract `pack_reads_back_as_the_rom_path` line 468 (`characters/87/character.json`, the HUD and audio lane's change in progress) |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+
+**Runs (`bots.sh`, MODE=tank MAP=24, 7 bots + 1 idle human, ports 5970-5976) against oracle b1 (620 s, 7 bots + 1
+idle human).** Every bot moves, fights, dies and respawns; the client sees each move; no fault, no unknown native, no
+panic.
+
+| Run | Bombs planted | Blast deaths | Shell deaths | Power-ups | Kills (slots 0-6; the human 0) |
+|---|---|---|---|---|---|
+| **b1**, 620 s | **7** (6 bomb carriers) | **34** | **23** | **27** | 0, 11, 8, 12, 6, 6, 4, 10 (57) |
+| 600 s, seed 1 | 6 | 30 | 40 | 21 | 12, 5, 14, 8, 5, 10, 14 (68) |
+| 600 s, seed 2 | 4 | 18 | 45 | 26 | 18, 7, 5, 7, 11, 9, 5 (62) |
+| 300 s, seed 3 | 2 | 11 | 21 | 10 | 1, 4, 1, 6, 6, 3, 11 (32) |
+| 300 s, seed 4 | 2 (7 takes) | 9 | 17 | 7 | 0, 1, 2, 9, 8, 2, 4 (26) |
+
+The 600 s runs logged no takes (the line was added after them). The bombs, blasts and power-ups are b1's (blasts kill
+about 5 a bomb as there); the shells kill about twice b1's. A 3-minute match (`TIME=3`, seed 5, 260 s) ends on the
+clock (t 5636, places by Deathmatch's rule), shows the results, starts the next match at 6893, and its bots play on
+(a power-up at 6943, the bomb taken at 7617); no panic.
+
+**Gaps.**
+- **I, the bots' gun:** the original's fire path for tanks is not found. s126+0x129 is taken as the script's enemy
+  (G+0x11C); the 4000 range, the sight test, the 5° gate and the error's −2..2 draw (10° a unit is C) are the
+  remake's, tuned to b1. The shells kill about twice as often.
+- **I:** the hull's radius 78 (fits p1); stick 52 for the class scripts' 33 (33.3); the bot turret's lead (its last
+  step · distance / 100 for the C speed · distance / 200).
+- **C, not done:** the class scripts' ops 0x8A, 0x03, 0x61, 0x70, 0x9B, 0x3B and 0x1A are skipped (`Npc::command`'s
+  default); the pitch error (×400); A and R are never pressed by bots (C: as the original).
+- **I, the ranking:** Deathmatch's (kills − deaths, then fewer shots); tank.md has the ranks undecoded, and b1's
+  winner (12 kills, 6 deaths) wins either way.
+- **Open (tank.md §8):** the scope shot's damage and range (scoped shells are plain); whether the shield stops the
+  bomb (here not); the +5 speed kick after firing while moving; untimed lives and the kill limit not compared.
+- **Not done:** the wrecks do not collide; `hit_weapon` names no weapon for a shell (0).
+- **The pack:** its `format` is not bumped for `maps/24/class.bin` (a pack without it fails to load map 24 only);
+  `../assets/README.md` is not regenerated (the row is in `pack-readme.md`).
+
+**Handoff to M10 (client).**
+- **Wire (protocol 28):**
+  - `MatchView::tank`; `MatchView::tanks: TankView`:
+    - `shells` (pos, yaw, vy/speed);
+    - `bomb` (shown on the post at `tank::POST`), `carrier` (slot), `planted` (bunker 0-3 while the countdown runs);
+    - `wrecks` (slot, pos, facing; placement 18 + slot).
+  - The doors are `lifts[0..8]` (0 shut … 350 open, sliding apart along z); the countdown and the gas are
+    `countdown`, `gas`.
+  - `Combat::power` (0x80, 0x01, 0x10, 0x02) and `power_left` (VIs; shells for 0x10).
+  - `Combat::anim` is the tank's clip: 0 idle, 1 fire (34 frames), 6 bomb death, 7 hit or shell death.
+  - `Combat::class` is 8.
+  - `Player`: `facing` (the hull), `turret` (degrees from the hull), `pitch` (degrees over the hull's floor pitch),
+    `xz_speed`, `target_speed` (braking while below the speed).
+- `body()` maps class 8 to the side's body for now. Draw character 119 with the pack's `tank` parts.
+- The HUD's power-up, the countdown and the haze as Total War's gas.
+- Engine and fire cues per the pack section's handoff.
+
 ## Heist: the client (2026-10-13)
 **Batch M4, the client half. The client draws and plays War: Heist:
 - the HUD: each team's "$" pips, the carrying team's "+1" blinking with the bag icon; skulls for empty or out teams;
@@ -51,11 +189,12 @@ Screens (`../lab/screens/heist/`, 1280 × 720):
   `cs3-stats.png` (REDS WIN, the two humans' rows).
 
 **Gaps.**
-- **Pack fixes (conker-extract's lane):**
-  - `hud/bubble_particle.png` (0xC01) decodes as an opaque white square with a dark rim (CI4 read with an RGBA16 TLUT,
-    I), so cs3's bubbles draw as squares (`cs3-bubbles.png`); its TLUT is likely IA16.
-  - 87 and 134 have no `characters/<id>/character.json`, so `characters("1a")` is not extended. The client
-    hardcodes 87's clip pairs (from the glTF's `logicalIds`) and reads 87's events by id.
+- **Pack fixes (2026-10-13, "HUD and audio leftovers"):**
+  - `hud/bubble_particle.png` (0xC01), not changed: the decode was right (its TLUT read as RGBA16 is a grey ramp,
+    every alpha bit set; read as IA16 its alphas are noise; no row interleave). It is a soft-edged white square.
+    cs3's bubbles now draw added to the view and still look like squares (the original's draw is not found).
+  - 87 and 134 have their `characters/<id>/character.json`; `characters("1a")` lists them, and the bag's clips come
+    from 87's.
 - **I, the bag:**
   - The shadow's radius (24) and constant alpha 0xA0; the oracle's changes with height (0x73, 0x6B, 0x8B).
   - The clip clock is the client's: a state counts from the tick this client saw it, so a client joining mid-stand
@@ -755,7 +894,7 @@ order; 8 left for the Tank mode).
 - **I:** the STATS fade-in (min(255, 8k)) applies to every results screen, Deathmatch's too; it is seen (V) only after the War outros.
 - **I:** 0x8A was recorded on the match song's slot at its 0x4650, where Beach cs4 plays it on slot 1 at 0x4650. In `b4` its first 3 s match at gain 0.62-0.76, not 1. That run's lldb frames (2-4 VIs) blur the comparison; the level is not settled.
 - **V, a choice:** the song plays on into the STATS (15 s against Beach cs4's 325 frames): nothing in the original stops it.
-- **Found, not fixed (pre-existing):** `Sounds.background` is never reset, so after a restart a Deathmatch plays no music; War's keeps playing from the last match.
+- **Found, fixed 2026-10-13:** `Sounds.background` was never reset, so after a restart a Deathmatch played no music; War's kept playing from the last match. RESTART's fade now stops it in every mode.
 
 ## Total War and Colors leftovers: the client (2026-10-13)
 **Batch E5, the client half. The lamps of 0x2D's shelter and 0x2B flicker in random bursts, each flash with its
@@ -1971,8 +2110,8 @@ TMEM simulated, the HUD code `func_150918EC`, `func_15093B58`, `func_150417AC`, 
   window the health stays at the left edge and the radar at the right one, as on the original's split screens.
 - No ammo count, no drawn/away state, no countdown, no messages (V: every weapon, a kill, a death, a pickup), so the new
   HUD has none either; the text readout keeps them.
-- Elements, positions and rules: the table in `../lab/hud/README.md` (V unless noted there: the rank's tie rule, the
-  scope dots' small turn and the iris centre's source are I; 0x16's R view tints the framebuffer, not reproduced).
+- Elements, positions and rules: the table in `../lab/hud/README.md` (V unless noted there; the tie rule, the dots'
+  turn, the iris's centre and 0x16's R view were read on 2026-10-13: "HUD and audio leftovers").
 
 | Step | What |
 |---|---|
@@ -2007,13 +2146,12 @@ width, the clock at the bottom).
 Gaps:
 - The rank on a tie (corrected 2026-10-13): the rule is read (`func_151E565C`, C) and `places` follows it: kills −
   deaths, then fewer shots; equal score and shots share the place. The 1st or 2nd at 0-0 was the shots tie-break.
-- The iris's timing comes from one death (health poked to 0: 134 frames, the iris in the last 88). The remake's deaths
-  differ (twin guns 151 frames, a grenade 87), so the table is keyed on the frames left before the respawn: a grenade
-  death starts it at once and mid-way. Its centre is fixed at the place the original's settled ((150, 91): the dying
-  player's head on screen, I) instead of following the head.
-- Weapon 0x16's R view (a tinted framebuffer copy) is not drawn; the scope dots don't turn with the zoom.
-- In a narrow window the page's `#net` line covers part of the clock, and before the first key press the page's sound
-  hint covers the weapon icon (both kept as they are).
+- (2026-10-13: the `#net` line and the sound hint moved; see "HUD and audio leftovers".)
+- (Corrected 2026-10-13, "HUD and audio leftovers".) The iris is keyed on the frames left before the respawn, as the
+  original (its respawn is the death's start + 88 for every death); its centre follows the dying player's projected
+  head (a blast victim's own place). 0x16's R view tints the framebuffer; the dots turn with the zoom.
+- (Fixed 2026-10-13.) In a narrow window the page's `#net` line covered part of the clock, and before the first key
+  press the page's sound hint covered the weapon icon.
 - The white flat polygons near the camera in some screenshots are the level's own (V: a free-camera view from above
   shows white triangles in the level; the HUD's quads are on their own layer and camera).
 - The bundle is the final code but two doc-comment edits (`Shown`, the crate doc). `kill-*`/`aim-*` and the Chrome
@@ -2076,13 +2214,16 @@ How it plays:
 | Sound files | 184 WAVs, 13,315,904 B, brotli 8,896,890; `background.wav` 7,512,396 B, brotli 4,243,369 (gzip 5,391,137): shipped as is (`deploy/pack.sh` now precompresses WAVs too), no OGG: no decoder in the wasm and no encoder at deploy for 3 MB once (ETag-cached) |
 
 Gaps:
-- **1278 (the killing bullet):** played at the lethal hit (e_w09 read 948); the original plays it at 1004, from a bullet
+- (2026-10-13, "HUD and audio leftovers": 1278 is a bullet's head pop; 802 and the in-hand 929 play.) **1278 (the
+  killing bullet):** played at the lethal hit (e_w09 read 948); the original plays it at 1004, from a bullet
   routine (`func_151D4DAC`), 970 in e_w39 and never in sq_e_w09: its trigger is I.
 - 802 (a bullet passing by) is not played; the in-hand fuse (929 while cooking past 60 ticks left) is not either.
 - Remote players' sounds come 4-5 reads after the original's (their state's trip and the interpolation delay); the
   local player's own are on the read.
-- A hit's weapon is inferred (wrong when another player holding a matching weapon is nearer than the shooter).
-- The original picks the grenade's three landing sounds in a random order; here 1447, 1448, 1449 in turn.
+- (Fixed 2026-10-13: the server sends it, `Combat::hit`.) A hit's weapon is inferred (wrong when another player
+  holding a matching weapon is nearer than the shooter).
+- (Fixed 2026-10-13: a shuffle bag at each bounce.) The original picks the grenade's three landing sounds in a random
+  order; here 1447, 1448, 1449 in turn.
 - Headless clients have no samples: a sound that does not loop ends at once there, so `if_idle` always passes.
 - Bevy's free debug camera also takes M (cursor grab) while it is on.
 - In the browser the WAVs (8.9 MB brotli) load after the first gesture; a sound plays once its file is in (the

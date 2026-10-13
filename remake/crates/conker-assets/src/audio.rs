@@ -201,6 +201,18 @@ pub enum On {
     Fuse { weapon: u8 },
     /// A hit by the weapon (conker-rules `Event::Hit`), at the victim; `lethal` None = any hit.
     Hit { weapon: u8, lethal: Option<bool> },
+    /// A bullet of the weapon popping the victim's head (`func_151D4DAC`: a hit on the head below 3
+    /// health kills), at the victim.
+    Head { weapon: u8 },
+    /// A bullet passing a camera (`func_151C2734`), heard by that camera's player as it passes: a
+    /// bullet whose gun is in `chances` (weapon, out of 256: `func_151C229C`'s roll at its birth)
+    /// plays the k-th of [`Play::sounds`], k picked at random each frame, once that camera is
+    /// between `leads[k]` − 10 and `leads[k]` frames of flight ahead of it, within its range and
+    /// cos 0.9 of its line; one a bullet.
+    FlyBy {
+        chances: Vec<(u8, u8)>,
+        leads: Vec<u8>,
+    },
     /// An explosion of the weapon's projectile (`Event::Explosion`), at the blast.
     Explosion { weapon: u8 },
     /// Body parts landing after a gory death by the weapon: several, over about two seconds,
@@ -211,7 +223,9 @@ pub enum On {
     Flight { weapon: u8, ticks: Vec<u16> },
     /// The projectile hitting a wall, at the impact.
     Impact { weapon: u8 },
-    /// The weapon's projectile bouncing on the floor (the grenade).
+    /// The weapon's projectile bouncing on the floor (the grenade), each bounce leaving it faster
+    /// than 5 a frame upward: one of [`Play::sounds`] from a shuffle bag shared by all (each once
+    /// before any again, the last played not first).
     Bounce { weapon: u8 },
     /// A burning player (the flamethrower's burn), looping at it while it burns.
     Burning,

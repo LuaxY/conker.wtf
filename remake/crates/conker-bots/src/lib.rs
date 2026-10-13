@@ -33,10 +33,13 @@ use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::game::{Action, Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
+use conker_rules::tank;
 use conker_rules::weapon::Gives;
 use conker_rules::{Rng, beach, colors};
 use conker_sim::collision::CollisionWorld;
-use conker_sim::movement::{Input, angle_diff, atan2_u16, cos_sin, deadzone, stick_angle};
+use conker_sim::movement::{
+    BUTTON_Z, Input, angle_diff, atan2_u16, cos_sin, deadzone, stick_angle,
+};
 use nav::Graph;
 use nav::NONE;
 use npc::{AT_GOAL, Npc, Scripts, View};
@@ -57,7 +60,7 @@ pub struct Assets<'a> {
     pub triggers: &'a [u8],
     /// `[0x14, 0xBA]`: the multiplayer AI script.
     pub ai: &'a [u8],
-    /// `[0x0F, 0]`: the characters' class data with their behaviour scripts.
+    /// `[0x0F, class]`: the players' class data with their behaviour scripts ([`class`]).
     pub class: &'a [u8],
 }
 
@@ -68,9 +71,16 @@ impl Assets<'_> {
             vec![0x19, scene],
             vec![0x0C, scene, 5],
             vec![0x14, script(scene)],
-            vec![0x0F, 0],
+            vec![0x0F, class(scene)],
         ]
     }
+}
+
+/// The class data `[0x0F, id]` the scene's players walk by: Tank's tanks their own (model 119:
+/// its script 4 walks the path at 33, 5 waits, 6 chases; V b1's bots cruise at 33), every other
+/// map's characters Conker's, 0.
+pub fn class(scene: usize) -> usize {
+    if scene == 0x24 { 119 } else { 0 }
 }
 
 /// The scene's multiplayer AI script, `[0x14, id]` (V: G+0x16BC in the oracle's RAM; 0x2B's in War: Beach's). Each holds its
@@ -84,6 +94,7 @@ pub fn script(scene: usize) -> usize {
         0x2B => 0xB9,
         // 0x1A's Deathmatch runs Heist's script, its FFA branch (V dm6).
         0x1A => 0xB7,
+        0x24 => 0xB8,
         _ => 0xBA,
     }
 }
@@ -412,12 +423,16 @@ impl Bots {
         }
         let mut unknown = std::mem::take(&mut self.unknown);
         let mut effects = Vec::new();
-        // A canister's toucher, a match slot, as the participant the script indexes by.
-        let touched = [0, 1].map(|c| {
-            (m.gas.toucher(c))
-                .and_then(|s| self.by_slot(s))
-                .map_or(0, |k| k as i32 + 1)
-        });
+        // A canister's or Tank's bomb's toucher, a match slot, as the participant the script
+        // indexes by.
+        let toucher =
+            |s: Option<usize>| s.and_then(|s| self.by_slot(s)).map_or(0, |k| k as i32 + 1);
+        let bomb = usize::try_from(m.tank.bomb.flag - 1).ok();
+        let touched = [
+            toucher(m.gas.toucher(0)),
+            toucher(m.gas.toucher(1)),
+            toucher(bomb),
+        ];
         {
             let mut host = World {
                 bodies: &bodies,
@@ -495,6 +510,9 @@ impl Bots {
                     effects.push(Effect::Carry(slot, carries));
                 }
             }
+        } else if m.settings.tank {
+            // Tank's bomb countdown (G+0x2008, 300 from the plant).
+            effects.push(Effect::Countdown(self.g.i32(g::TANK_COUNTDOWN)));
         } else if !m.settings.colors && !m.settings.beach && !m.settings.heist {
             effects.clear();
         }
@@ -567,6 +585,57 @@ impl Bots {
                 *gun = Scope::default();
             }
             let toward = aim.unwrap_or(steer.toward);
+            if m.settings.tank {
+                // The turret's target (s126+0x129): the script's enemy (G+0x11C, set by the attack
+                // states 4 and 5) while alive, within 4000 (state 5's range) and in sight (I), led
+                // by its last step · distance / 100 (`func_150ED748`'s bot branch: its speed ·
+                // distance / 200 at half-speed steps, C).
+                let k = self.slots.iter().position(|&s| s == Some(slot));
+                let eye = |p: [f32; 3]| [p[0], p[1] + tank::MUZZLE[1], p[2]];
+                let lead = (k.and_then(|k| usize::try_from(self.g.get(g::ENEMY, k)).ok()))
+                    .and_then(|e| bodies.get(e))
+                    .filter(|t| t.health > 0)
+                    .and_then(|t| {
+                        let d =
+                            ((t.pos[0] - b.pos[0]).powi(2) + (t.pos[2] - b.pos[2]).powi(2)).sqrt();
+                        let seen = brain::sight(world, &self.graph, eye(b.pos), eye(t.pos));
+                        (d < 4000.0 && seen.is_some()).then(|| {
+                            let k = d / 100.0;
+                            [
+                                t.pos[0] + (t.pos[0] - t.prev[0]) * k,
+                                t.pos[1],
+                                t.pos[2] + (t.pos[2] - t.prev[2]) * k,
+                            ]
+                        })
+                    });
+                let mut input = tank_drive(b, steer.toward, steer.speed, lead);
+                input.camera_yaw = input
+                    .camera_yaw
+                    .wrapping_add((i32::from(n.error) * 10 * 65536 / 360) as u16);
+                // Z, a press (the rules fire on one), once the gun is ready and the turret within
+                // 5° of the aim (I).
+                let (turret, ready) = m
+                    .players
+                    .get(slot)
+                    .map_or((0.0, false), |f| (f.body.turret, m.tick >= f.ready));
+                let on = |yaw: u16| {
+                    let off = angle_diff(yaw, b.facing) as f32 / 65536.0 * 360.0 - turret;
+                    (off + 180.0).rem_euclid(360.0) - 180.0
+                };
+                let last = inputs.get(slot).map_or(0, |i| i.buttons);
+                if lead.is_some()
+                    && ready
+                    && on(input.camera_yaw).abs() < 5.0
+                    && last & BUTTON_Z == 0
+                {
+                    input.buttons = BUTTON_Z;
+                    n.error = (self.rng.next_u32() % 5) as i8 - 2;
+                }
+                if let Some(i) = inputs.get_mut(slot) {
+                    *i = input;
+                }
+                continue;
+            }
             let mut input = drive(b, toward, steer.speed, aim.is_some(), world);
             input.buttons = held | pressed;
             if matches!(b.drawn, 0x16 | 0x23) {
@@ -657,6 +726,7 @@ impl Bots {
                 Gives::Weapon(w) => i32::from(w),
                 Gives::Grenades => 2222,
                 Gives::Mask => i32::from(gas::MASK),
+                Gives::Power(bit) => i32::from(bit),
             };
             g.set(g::GIVES, k, gives);
             // 0x1A's: 3 the roaming ones (1 in a Heist of at most 4 players, `Match::unique`), 2 the
@@ -691,6 +761,7 @@ impl Bots {
             // 0x20 (C, the script at 0x3E7A).
             let gives = |f: &conker_rules::Fighter| match f.weapon {
                 Some(w) => Some(Gives::Weapon(w)),
+                None if f.power != 0 => Some(Gives::Power(f.power)),
                 None => f.masked.then_some(Gives::Mask),
             };
             match s.and_then(|s| m.players.get(s)).and_then(gives) {
@@ -839,6 +910,32 @@ fn drive(b: Body, toward: [f32; 3], speed: f32, aiming: bool, world: &CollisionW
     }
 }
 
+/// Tank: a walk target and speed as the hull's stick (turned onto it, 18 units a stick unit at
+/// rest; forward while it lies within 45° of the facing, the stick whose target is the speed: 52
+/// for the class scripts' 33, I), and the turret's aim as the camera yaw (conker-rules turns a
+/// bot's turret toward it): `aim`, else ahead.
+fn tank_drive(b: Body, toward: [f32; 3], speed: f32, aim: Option<[f32; 3]>) -> Input {
+    let (dx, dz) = (toward[0] - b.pos[0], toward[2] - b.pos[2]);
+    let (x, y) = if speed >= 0.5 && (dx != 0.0 || dz != 0.0) {
+        let d = angle_diff(atan2_u16(-dz, dx), b.facing);
+        let y = ((speed / conker_sim::tank::DRIVE).round() as i32).min(75);
+        (
+            (-d / 18).clamp(-75, 75),
+            if d.abs() < 0x2000 { y } else { 0 },
+        )
+    } else {
+        (0, 0)
+    };
+    let raw = |v: i32| (v + 7 * v.signum()) as i8;
+    let yaw = aim.map_or(b.facing, |a| atan2_u16(b.pos[2] - a[2], a[0] - b.pos[0]));
+    Input {
+        stick_x: raw(x),
+        stick_y: raw(y),
+        buttons: 0,
+        camera_yaw: yaw,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,7 +995,7 @@ mod tests {
     fn a_grenade_is_heard_and_nothing_else() {
         use conker_rules::game::{BUTTON_B, C_DOWN};
         use conker_rules::{Fighter, Placement};
-        use conker_sim::movement::BUTTON_Z;
+
         let big = 20_000.0;
         let world = CollisionWorld::new([
             ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),

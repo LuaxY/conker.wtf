@@ -1860,3 +1860,224 @@ fn heist_bots_fetch_and_deliver() {
     assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
     assert_eq!(bots.faults, 0);
 }
+
+/// Tank on 0x24 as the server has it (`humans` then `bots`, slot i on record i, from slot 4 on
+/// 0x10 + i − 4; the power-ups roaming tank.md §3's 6 spots, back 150 frames after a take).
+fn tank_match(
+    rom: &extract_core::Rom,
+    humans: &[usize],
+    bots: &[usize],
+    seed: u64,
+) -> (
+    conker_rules::Match,
+    conker_rules::Arena,
+    conker_sim::collision::CollisionWorld,
+    conker_bots::Bots,
+) {
+    use conker_bots::{Assets, Bots, DEFAULT_SKILL};
+    use conker_rules::weapon::{Gives, Pickup, Roaming};
+    use conker_rules::{Arena, Fighter, Match, Rng, Spawn, spawn};
+    let scene = 0x24;
+    let data: Vec<Vec<u8>> = (Assets::paths(scene).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(rom, scene).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let spots = [
+        [2504.0, -108.0, 2585.0],
+        [-2512.0, -58.0, -2450.0],
+        [-3920.0, 100.0, 942.0],
+        [3736.0, 78.0, -1061.0],
+        [-3593.0, -1034.0, -5799.0],
+        [3455.0, -1047.0, 5932.0],
+    ]
+    .map(|[x, y, z]: [f32; 3]| [x, y + 60.0, z]);
+    let powers = [(16, 0x80), (8, 0x01), (10, 0x10), (11, 0x02)];
+    let arena = Arena {
+        spawns,
+        pickups: (powers.iter().enumerate())
+            .map(|(k, &(placement, bit))| {
+                let gives = Gives::Power(bit);
+                (Pickup { placement, gives }, spots[k])
+            })
+            .collect(),
+        roaming: Roaming {
+            count: 4,
+            spots: spots.to_vec(),
+        },
+        respawn: Some(150),
+    };
+    let mut r = Rng { state: seed };
+    let fighters = (0..humans.len() + bots.len())
+        .map(|i| {
+            let record = if i < 4 { i } else { 0x10 + i - 4 };
+            let at = spawn::place(&arena.spawns, record, &mut r);
+            Fighter {
+                bot: bots.contains(&i),
+                ..Fighter::new(&at, i as u8, 23)
+            }
+        })
+        .collect();
+    let m = Match::new(&arena, fighters, r, 23).with(conker_rules::Settings {
+        tank: true,
+        ..Default::default()
+    });
+    let ai = Bots::new(assets, humans, bots, DEFAULT_SKILL, Rng { state: seed }).unwrap();
+    (m, arena, world(rom, scene), ai)
+}
+
+/// One Tank frame as the server runs it: the doors' collision, the AI, its effects, the step.
+fn tank_frame(
+    m: &mut conker_rules::Match,
+    arena: &conker_rules::Arena,
+    world: &mut conker_sim::collision::CollisionWorld,
+    ai: &mut conker_bots::Bots,
+    inputs: &mut [conker_sim::movement::Input],
+) -> Vec<conker_rules::game::Event> {
+    conker_rules::tank::seat(world, m.gas.lifts());
+    let fx = ai.tick(m, arena, world, inputs);
+    let mut ev = m.apply(&fx);
+    ai.scopes(m);
+    ev.extend(m.step(arena, inputs, world));
+    ai.observe(&ev, m);
+    ev
+}
+
+/// Script 0xB8's bomb against oracle c1 (two humans): the bomb shows 300-450 frames in; touched,
+/// it rides its toucher; carried into bunker E it is planted: the doors shut 231 frames on (c1
+/// 123 → 354), the gas haze 271 on, the blast 300 on (423) kills the tank outside and gives its
+/// kill to the bomber, the doors open again 389-390 on (512) and the bomb is back 300-450 after
+/// the plant (519). No native unknown.
+#[test]
+fn tank_bomb_as_c1() {
+    use conker_rules::tank::{BUNKERS, POST};
+    let Some(rom) = rom() else { return };
+    let (mut m, arena, mut world, mut ai) = tank_match(&rom, &[0, 1], &[], 1);
+    let mut inputs = vec![conker_sim::movement::Input::default(); 2];
+    let mut shown = None;
+    while shown.is_none() && m.tick < 1000 {
+        tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
+        shown = m.tank.bomb.shown.then_some(m.tick - 1);
+    }
+    let shown = shown.expect("the bomb shows") - 23;
+    assert!((300..450).contains(&shown), "{shown}");
+    let put = |m: &mut conker_rules::Match, i: usize, pos: [f32; 3]| {
+        let b = &mut m.players[i].body;
+        (b.pos, b.airborne, b.floor, b.y_vel) = (pos, true, None, 0.0);
+    };
+    put(&mut m, 0, [POST[0], -600.0, POST[2]]);
+    put(&mut m, 1, [-2169.0, -140.0, -2462.0]);
+    for _ in 0..3 {
+        tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
+    }
+    assert!(!m.tank.bomb.shown);
+    assert_eq!(m.tank.carrier, Some(0));
+    assert!(m.players[0].carrying);
+    put(&mut m, 0, BUNKERS[3]);
+    let mut plant = None;
+    let (mut doors, mut haze, mut blast, mut open, mut back) = (None, None, None, None, None);
+    while back.is_none() && m.tick < 3000 {
+        tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
+        let t = m.tick - 1;
+        if plant.is_none() && m.gas.countdown == 300 {
+            plant = Some(t);
+        }
+        if doors.is_none() && m.gas.props[0].flag == 1 {
+            doors = Some(t);
+        }
+        if haze.is_none() && m.players[1].gassed.is_some() {
+            haze = Some(t);
+        }
+        if blast.is_none() && m.players[1].health == 0 {
+            blast = Some(t);
+        }
+        if blast.is_some() && open.is_none() && m.gas.props[0].flag == 0 {
+            open = Some(t);
+        }
+        if plant.is_some() && m.tank.bomb.shown {
+            back = Some(t);
+        }
+    }
+    let p = plant.expect("planted");
+    eprintln!(
+        "tank c1: shown {shown}, plant {p}, doors {doors:?}, haze {haze:?}, blast {blast:?}, open {open:?}, back {back:?}; unknown {:?}",
+        ai.unknown
+    );
+    assert_eq!(m.tank.planted, Some(3));
+    assert_eq!(doors, Some(p + 231));
+    assert_eq!(haze, Some(p + 271));
+    assert_eq!(blast, Some(p + 300));
+    assert!(
+        matches!(open, Some(o) if (p + 389..=p + 390).contains(&o)),
+        "{open:?}"
+    );
+    assert!(
+        matches!(back, Some(b) if (p + 300..p + 450).contains(&b)),
+        "{back:?}"
+    );
+    assert_eq!((m.players[0].kills, m.players[0].health), (1, 6));
+    assert_eq!(m.players[1].deaths, 1);
+    assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
+    assert_eq!(ai.faults, 0);
+}
+
+/// Script 0xB8's bots against oracle b1 (7 bots, an idle human; 10 minutes there, 5 here): they
+/// fetch the bomb and plant it, its blasts and their shells kill, no native is unknown.
+#[test]
+fn tank_bots_bomb_and_fight() {
+    let Some(rom) = rom() else { return };
+    let (mut m, arena, mut world, mut ai) = tank_match(&rom, &[0], &[1, 2, 3, 4, 5, 6, 7], 1);
+    let mut inputs = vec![conker_sim::movement::Input::default(); 8];
+    let (mut plants, mut taken, mut shells, mut bomb_kills) = (0, 0, 0, 0);
+    let (mut counting, mut carrier) = (false, None);
+    for _ in 0..9000 {
+        let before: Vec<u8> = m.players.iter().map(|f| f.health).collect();
+        let ev = tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
+        if m.gas.countdown > 0 && !counting {
+            plants += 1;
+        }
+        counting = m.gas.countdown > 0;
+        if m.tank.carrier.is_some() && m.tank.carrier != carrier {
+            taken += 1;
+        }
+        carrier = m.tank.carrier;
+        for e in ev {
+            if let conker_rules::game::Event::Hit {
+                victim,
+                lethal: true,
+                ..
+            } = e
+                && before[victim] > 0
+            {
+                match m.players[victim].body.state {
+                    conker_rules::tank::CLIP_BOMB => bomb_kills += 1,
+                    _ => shells += 1,
+                }
+            }
+        }
+    }
+    let kills: Vec<u16> = m.players.iter().map(|f| f.kills).collect();
+    eprintln!(
+        "tank bots: {taken} pickups, {plants} plants, {bomb_kills} bomb deaths, {shells} shell \
+         deaths, kills {kills:?}; unknown {:?}",
+        ai.unknown
+    );
+    assert!(plants >= 1 && taken >= plants && bomb_kills >= 1);
+    assert!(shells >= 1);
+    assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
+    assert_eq!(ai.faults, 0);
+}

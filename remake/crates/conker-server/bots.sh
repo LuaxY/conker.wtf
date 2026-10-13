@@ -2,11 +2,12 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a] [MODE=deathmatch|total-war|colors|beach|heist] [SCORE=1-40|unlimited]
+# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24] [MODE=deathmatch|total-war|colors|beach|heist|tank] [SCORE=1-40|unlimited]
 #   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] crates/conker-server/bots.sh [seconds=150].
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
 # MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
-# MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team.
+# MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
+# MODE=tank (MAP=24) the bombs taken and planted, the deaths by blast and by shell, the power-ups taken.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -87,6 +88,14 @@ if [[ ${MODE:-} == heist ]]; then
   echo "  takes $(grep -c 'HEIST t=[0-9]* bag taken' $logs/server.log), let-gos $(grep -c 'HEIST t=[0-9]* LetGo' $logs/server.log)" \
     "(deliveries included), voices $(grep -c 'HEIST t=[0-9]* Voice' $logs/server.log)"
   echo "  deliveries $bags: $(grep -oE 'HEIST t=[0-9]+ Score\([0-9]+' $logs/server.log | sed 's/HEIST //; s/Score(/team /' | tr '\n' ' ')"
+  echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
+fi
+if [[ ${MODE:-} == tank ]]; then
+  blasts=$(grep -c 'TANK t=[0-9]* blast kills' $logs/server.log)
+  deaths=$(grep -c 'EVENT .*Hit { victim: [0-9]*, attacker: [0-9]*, damage: [0-9]*, lethal: true' $logs/server.log)
+  echo "tank: bombs taken $(grep -c 'TANK t=[0-9]* bomb taken' $logs/server.log), planted $(grep -c 'TANK t=[0-9]* bomb planted' $logs/server.log)" \
+    "at $(grep -oE 'TANK t=[0-9]+ bomb planted' $logs/server.log | grep -oE '[0-9]+' | tr '\n' ' ')"
+  echo "  blast deaths $blasts, shell deaths $((deaths - blasts)), power-ups taken $(grep -c 'TANK t=[0-9]* slot [0-9]* takes power-up' $logs/server.log)"
   echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
 fi
 report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))

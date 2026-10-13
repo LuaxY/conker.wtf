@@ -42,6 +42,7 @@ use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
 use crate::spawn::{self, Placement, Spawn};
+use crate::tank::{self, Tank};
 use crate::traps::{self, Traps};
 use crate::weapon::{self, Attack, Gives, Pickup, Weapon};
 use std::collections::BTreeSet;
@@ -165,6 +166,9 @@ pub struct Settings {
     /// [`Self::score`] bags (1-5, default [`heist::SCORE`]) or, untimed, once fewer than 2 teams
     /// are in play; teams rank by bags, kills, fewer shots ([`teams_places`]).
     pub heist: bool,
+    /// Tank (scenario 1, scene 0x24; [`crate::tank`]): every player a tank, free for all; ends and
+    /// ranks as Deathmatch (the clock, [`Self::kills`], lives untimed).
+    pub tank: bool,
 }
 
 impl Default for Settings {
@@ -180,6 +184,7 @@ impl Default for Settings {
             score: colors::SCORE,
             beach: false,
             heist: false,
+            tank: false,
         }
     }
 }
@@ -364,11 +369,15 @@ pub struct Fighter {
     /// throws it off.
     pub gun: Option<Mount>,
     /// War: Beach: the record's class (+0, [`beach::model`]: a villager's look, re-rolled at each
-    /// respawn; 0 in the other modes), and s126+0x12C, a bottle's boost in VIs ([`beach::drive`]).
+    /// respawn; 0 in the other modes), and s126+0x12C, a bottle's boost in VIs ([`beach::drive`];
+    /// Tank's power-up timer in VIs, or 0x10's shells left).
     pub class: u8,
     pub boost: u16,
     /// The tommy gun's climb while firing (s126+0x1A2/0x1A4, [`weapon::Climb`]).
     pub climb: weapon::Climb,
+    /// Tank: the power-up held (s126+0x128's bit, [`crate::tank::SHIELD`]..; 0 none), its timer
+    /// or shells in [`Self::boost`].
+    pub power: u8,
 }
 
 impl Fighter {
@@ -425,6 +434,7 @@ impl Fighter {
             class: 0,
             boost: 0,
             climb: weapon::Climb::default(),
+            power: 0,
         }
     }
 
@@ -594,7 +604,7 @@ impl Fighter {
         }
     }
 
-    fn set(&mut self, action: Action, anim: u16, tick: u32) {
+    pub(crate) fn set(&mut self, action: Action, anim: u16, tick: u32) {
         (self.action, self.anim, self.since) = (action, anim, tick);
     }
 
@@ -834,6 +844,8 @@ pub struct Match {
     /// Scene 0x34's pressure plates and traps (`Traps::new`; none elsewhere, and none in a
     /// client's copy: their hits are the server's).
     pub traps: Traps,
+    /// Tank's shells, bomb and wrecks ([`crate::tank`]).
+    pub tank: Tank,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -915,6 +927,7 @@ impl Match {
             guns: Vec::new(),
             plunger: Plunger::default(),
             traps: Traps::default(),
+            tank: Tank::default(),
         }
     }
 
@@ -1003,7 +1016,7 @@ impl Match {
         self.burn_player(i, &mut ev);
         self.fly_grenades(world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
-        if self.players[i].out == 0 {
+        if self.players[i].out == 0 && !self.settings.tank {
             animate(&mut self.players[i], world);
         }
         for (s, kind, origin) in rays {
@@ -1052,7 +1065,12 @@ impl Match {
         }
         self.heist.cash.step(world, self.tick);
         self.pickups(arena, &mut ev);
-        self.gas.step();
+        if self.settings.tank {
+            self.touch_bomb();
+            tank::doors(&mut self.gas);
+        } else {
+            self.gas.step();
+        }
         self.trap_hits(&mut ev);
         for g in &mut self.guns {
             g.leave = g.leave.saturating_sub(1);
@@ -1100,13 +1118,14 @@ impl Match {
         self.fly_bullets(seen, &mut ev);
         self.fly_rockets(world, seen, &mut ev);
         self.fly_shots(world, seen, &mut ev);
+        self.fly_shells(world, seen, &mut ev);
         self.fly_grenades(world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
         // The renderer measures every player's root once the frame's updates are done (conker-sim's
         // `animate`; V: 0x14's shot kills in its own update after the victim's, and the victim's
         // death 0x17E drifts from the third row on, combat4_w14 835).
         for (i, f) in self.players.iter_mut().enumerate() {
-            if !self.free.contains(&i) && f.out == 0 {
+            if !self.free.contains(&i) && f.out == 0 && !self.settings.tank {
                 animate(f, world);
             }
         }
@@ -1291,6 +1310,14 @@ impl Match {
         }
     }
 
+    /// The prop on `placement` the script drives: the gas's, and Tank's bomb.
+    fn prop_mut(&mut self, placement: u16) -> Option<&mut gas::Prop> {
+        match placement {
+            tank::BOMB if self.settings.tank => Some(&mut self.tank.bomb),
+            n => self.gas.prop_mut(n),
+        }
+    }
+
     /// Where pickup k stands: where its holder died, its roaming spot, else its place.
     pub fn pickup_at(&self, arena: &Arena, k: usize) -> [f32; 3] {
         let p = self.pickups.get(k);
@@ -1328,6 +1355,12 @@ impl Match {
                     Gives::Weapon(id) if t == at + 2 => {
                         p.taken = None;
                         self.give(who, id);
+                    }
+                    // Tank: the power-up's bit and timer, replacing the one held (V p1, b1).
+                    Gives::Power(bit) if t == at + 2 => {
+                        p.taken = None;
+                        let f = &mut self.players[who];
+                        (f.power, f.boost) = (bit, tank::power_timer(bit));
                     }
                     // The mask takes the weapon's place (V d2: MP+0xEB0 13 → 19, s126+0x75 0xA1 →
                     // 0xA0, as a weapon's two frames after the touch) and goes on (V e2: state 81
@@ -1510,7 +1543,7 @@ impl Match {
         for &e in effects {
             match e {
                 Effect::Show(n) => {
-                    if let Some(p) = self.gas.prop_mut(n) {
+                    if let Some(p) = self.prop_mut(n) {
                         p.shown = true;
                     }
                 }
@@ -1519,13 +1552,27 @@ impl Match {
                     flag,
                     gate,
                 } => {
-                    if let Some(p) = self.gas.prop_mut(placement) {
+                    if let Some(p) = self.prop_mut(placement) {
                         p.flag = flag.unwrap_or(p.flag);
                         p.gate = gate.unwrap_or(p.gate);
                     }
                 }
-                Effect::Countdown(n) => self.gas.countdown = n,
+                // Tank: the plant starts it; its bunker is its bomber's.
+                Effect::Countdown(n) => {
+                    if self.settings.tank && n > 0 && self.gas.countdown <= 0 {
+                        let at = self.tank.last.and_then(|c| self.players.get(c));
+                        self.tank.planted = at.map(|f| tank::bunker(f.body.pos));
+                    }
+                    self.gas.countdown = n;
+                }
                 Effect::Gas(on) => self.gas.gas = on,
+                // Tank: the detonation (the script's 0x2B with 0x29) kills, immune or not.
+                Effect::Hit { slot, attacker, .. }
+                    if self.settings.tank && slot < self.players.len() =>
+                {
+                    let attacker = attacker.filter(|&a| a < self.players.len());
+                    self.tank_hit(slot, attacker, 0, true, true, &mut ev);
+                }
                 Effect::Hit {
                     slot,
                     kind,
@@ -1547,6 +1594,17 @@ impl Match {
                 Effect::Haze(i) => {
                     if let Some(f) = self.players.get_mut(i) {
                         f.gassed = Some(t);
+                    }
+                }
+                // Tank: the bomb on the tank (the script's 0x4B, item 0x18), off it (0x4C).
+                Effect::Carry(i, on) if self.settings.tank && i < self.players.len() => {
+                    self.players[i].carrying = on && self.players[i].health > 0;
+                    match on {
+                        true => self.tank.carrier = Some(i),
+                        false => {
+                            self.tank.carrier = self.tank.carrier.filter(|&c| c != i);
+                            self.tank.last = Some(i);
+                        }
                     }
                 }
                 // The canister in hand: holstered, and whatever the player was doing ends (I).
@@ -1759,6 +1817,9 @@ impl Match {
         let t = self.tick;
         if self.players[i].out > 0 {
             return;
+        }
+        if self.settings.tank {
+            return self.tank_player(i, input, arena, world, ev);
         }
         // The match's start item: the manager hands it over whenever the player holds no weapon
         // (`func_1508DC24` with no pickup held: MP+0x1170; V combat6_e40 1214, the frame after
@@ -2946,7 +3007,7 @@ impl Match {
     }
 
     /// Players `a` and `v` are on different teams (obj+0x128): in Deathmatch any two players.
-    fn enemies(&self, a: usize, v: usize) -> bool {
+    pub(crate) fn enemies(&self, a: usize, v: usize) -> bool {
         self.players[a].team != self.players[v].team
     }
 
@@ -3150,7 +3211,7 @@ impl Match {
     /// A death's end: on its last life (Deathmatch, Total War) it stays down, out of play, on the
     /// last place of those still in play (the game counts places down from its participants,
     /// `0x800E0AA9`); else it respawns.
-    fn down(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
+    pub(crate) fn down(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
         let lives = !self.settings.colors && !self.settings.beach;
         if lives && self.lives_left(i) == 0 {
             let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();

@@ -4,9 +4,10 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist";
+export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist" | "tank";
 /** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target,
- * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; at most 7 bots). */
+ * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; Heist and Tank: at most 7
+ * bots). */
 export interface ModeInfo {
   name: string;
   kills: boolean;
@@ -30,15 +31,21 @@ export const MODES: Record<Mode, ModeInfo> = {
     defaultScore: 3,
     maxBots: 7,
   },
+  tank: { name: "Tank", kills: true, lives: true, score: false, maxBots: 7 },
 };
 
-export type MapId = "1a" | "2b" | "2d" | "30" | "34" | "3f";
+export type MapId = "1a" | "24" | "2b" | "2d" | "30" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
   "1a": {
     name: "Vault 0x1A",
     modes: ["deathmatch", "heist"],
     note: "Everyone is the Wise Guy, holding the bat. Heist: 4 teams, at most 7 bots, 1-5 bags.",
+  },
+  "24": {
+    name: "Tank 0x24",
+    modes: ["tank"],
+    note: "Everyone is a tank, free for all; the bomb gasses everyone outside a bunker. At most 7 bots.",
   },
   "2b": { name: "Beach 0x2B", modes: ["deathmatch", "beach"] },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },

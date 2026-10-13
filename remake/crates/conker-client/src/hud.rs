@@ -28,7 +28,7 @@ use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamp
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
-use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
+use conker_anim::combat::{BLOWN_UP, GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW};
 use conker_assets::hud::{
     Align, Anchor, End, Flash, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Strip, Text,
     Vertical,
@@ -53,6 +53,8 @@ pub enum Tex {
     Texture(String),
     Glyph(usize),
     Solid,
+    /// A flat colour that multiplies what is under it (weapon 0x16's R view, [`tint`]).
+    Tint,
 }
 
 /// One quad: `uv` the texels shown (x0, y0, x1, y1; x1 < x0 mirrors), `rect` where in the frame
@@ -87,12 +89,18 @@ pub struct Shown {
     pub blips: Vec<([f32; 2], i8, Rgba)>,
     /// The reticle is up (R's aim with a weapon of [`conker_assets::hud::Reticle::weapons`]).
     pub reticle: bool,
-    /// Looking through a scope: its zoom, 0 opened to 1 at the weapon's closest.
+    /// Looking through a scope: its zoom, 0 opened to 1 at the weapon's closest; its dots turned by
+    /// `turn` radians ([`dot_turn`]); weapon 0x16's R view, its red factor ([`tint`]): no dots or
+    /// bar, the view under the clock and the ring tinted.
     pub scope: Option<f32>,
+    pub turn: f32,
+    pub tint: Option<u8>,
     /// On a mounted gun: its sight, in place of the scope's.
     pub gun: Option<Sight>,
-    /// Dead: frames to the respawn.
+    /// Dead: frames to the respawn, and where the iris centres (frame pixels: the head on the
+    /// screen, a blast's victim its feet; `None` the pack's `iris.centre`).
     pub respawn_in: Option<u16>,
+    pub iris_at: Option<[f32; 2]>,
     /// Untimed: the lives left.
     pub lives: Option<u8>,
     /// Out of lives, and through a takeover's cut: the view black over the HUD, the skull centred
@@ -1034,28 +1042,37 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     if let Some(zoom) = s.scope {
         let c = &hud.scope;
         let [cx, cy] = c.centre;
-        out.push(solid(c.back, c.anchor, c.back_colour, 6.0));
-        let half = c.bar_half[0] + c.bar_half[1] * zoom.clamp(0.0, 1.0);
-        out.push(solid(
-            [c.bar_x, cy - half, c.bar_width, 2.0 * half],
-            c.anchor,
-            c.colour,
-            6.5,
-        ));
         out.extend(quarters(
             &c.ring, c.centre, c.quadrant, c.anchor, c.colour, 6.5,
         ));
-        let d = c.dot_size;
-        for k in 0..c.dots {
-            let a = core::f32::consts::TAU * f32::from(k) / f32::from(c.dots);
-            let (x, y) = (cx + c.radius * a.sin(), cy - c.radius * a.cos());
-            out.push(quad(
-                &c.dot,
-                [x - d / 2.0, y - d / 2.0, d, d],
+        // Weapon 0x16: the view copied over itself in strips times (R, 0xFF, 0), after the 3D
+        // scene, the health, weapon icon and radar, before the clock, score and ring (C, V w16B
+        // DL 230: combiner TEXEL0 × PRIM, no blend); no bar or dots.
+        if let Some(red) = s.tint {
+            let all = [-10_000.0, -10_000.0, 20_000.0, 20_000.0];
+            out.push(Sprite {
+                tex: Tex::Tint,
+                ..solid(all, c.anchor, [red, 255, 0, 255], 4.0)
+            });
+        } else {
+            out.push(solid(c.back, c.anchor, c.back_colour, 6.0));
+            let half = c.bar_half[0] + c.bar_half[1] * zoom.clamp(0.0, 1.0);
+            out.push(solid(
+                [c.bar_x, cy - half, c.bar_width, 2.0 * half],
                 c.anchor,
                 c.colour,
                 6.5,
             ));
+            // Each dot's rect: its centre ± half its size, truncated to quarter pixels (V scopeB
+            // DL 230, exact).
+            let (d, q) = (c.dot_size / 2.0, |v: f32| (v * 4.0).trunc() / 4.0);
+            for k in 0..c.dots {
+                let a = core::f32::consts::TAU * f32::from(k) / f32::from(c.dots) + s.turn;
+                let (x, y) = (cx + c.radius * a.sin(), cy + c.radius * a.cos());
+                let [x0, y0] = [q(x - d), q(y - d)];
+                let rect = [x0, y0, q(x + d) - x0, q(y + d) - y0];
+                out.push(quad(&c.dot, rect, c.anchor, c.colour, 6.5));
+            }
         }
     }
     // On a mounted gun (`func_151CC840`, `func_151CC524`, `func_151CB5FC`, `func_151C9F38`): the
@@ -1134,9 +1151,10 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // Dead: black but for a circle (absent past the iris's list), over everything.
     let i = &hud.iris;
     if let Some(&radius) = s.respawn_in.and_then(|n| i.radius.get(usize::from(n))) {
-        let ([cx, cy], r, far) = (i.centre, f32::from(radius), 10_000.0);
+        let centre = s.iris_at.unwrap_or(i.centre);
+        let ([cx, cy], r, far) = (centre, f32::from(radius), 10_000.0);
         let z = 9.0;
-        out.extend(quarters(&i.image, i.centre, r, i.anchor, i.colour, z));
+        out.extend(quarters(&i.image, centre, r, i.anchor, i.colour, z));
         for rect in [
             [-far, -far, 2.0 * far, far + cy - r],
             [-far, cy + r, 2.0 * far, far],
@@ -1167,6 +1185,32 @@ pub fn place(frame: [u16; 2], anchor: Anchor, rect: [f32; 4], window: Vec2) -> [
         Vertical::Bottom => window.y - (frame.y - y) * s,
     };
     [x, y, w * s, h * s]
+}
+
+/// A window point (pixels, y down) in frame pixels, for a centred anchor ([`place`]'s inverse).
+pub fn frame_point(frame: [u16; 2], window: Vec2, at: Vec2) -> [f32; 2] {
+    let frame = Vec2::new(f32::from(frame[0]), f32::from(frame[1]));
+    let s = (window / frame).min_element();
+    (frame / 2.0 + (at - window / 2.0) / s).to_array()
+}
+
+/// The scope dots' turn (radians) at the view's zoom (`cam+0x19C`, `+0x1A0`): their mean F within
+/// −50..0, (F + 50) × 0.02 turns (one view's constants; two views' −62 and 1/62; C, V scopeB DL 230).
+pub fn dot_turn(zoom: [f32; 2]) -> f32 {
+    const LOW: f32 = -50.0;
+    let f = ((zoom[0] + zoom[1]) / 2.0).clamp(LOW, 0.0);
+    (f - LOW) * 0.02 * core::f32::consts::TAU
+}
+
+/// Weapon 0x16's R view: its red factor `n` frames after the scope opened (`func_151A5070`): 0x90,
+/// +4 a frame up to 0xFF, −4 a frame back down to 0x90, and again (V w16B 200-229: 0x90, 0x94, …,
+/// 0xFF, 0xFB).
+pub fn tint(n: u32) -> u8 {
+    let m = n % 56;
+    match m <= 28 {
+        true => (0x90 + 4 * m).min(0xFF) as u8,
+        false => (0xFF - 4 * (m - 28)).max(0x90) as u8,
+    }
 }
 
 /// The HUD's data and loaded pictures.
@@ -1484,8 +1528,11 @@ fn shown(
         reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
         scope: (scope.on && gun.is_none())
             .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
+        turn: dot_turn(scope.zoom),
+        tint: None,
         gun,
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
+        iris_at: None,
         lives: (m.time == 0 && !m.colors && !m.beach).then_some(c.lives_left),
         skull: None,
         ending: None,
@@ -1524,11 +1571,14 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros, blasts, fighting): (
+    (playing, outros, blasts, fighting, view, heads, joints): (
         Res<crate::outro::Playing>,
         Res<crate::outro::Outros>,
         Option<Res<crate::beach::Blasts>>,
         Query<&Fighting, With<FollowCamera>>,
+        Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<HudCamera>)>,
+        Query<&crate::held::Twisted, With<FollowCamera>>,
+        Query<&GlobalTransform>,
     ),
     timeline: Res<LocalTimeline>,
     (mut fading, mut escaped, mut ended): (
@@ -1536,11 +1586,12 @@ fn draw(
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
     ),
-    (mut fired, mut zoomed, mut stats, mut skull): (
+    (mut fired, mut zoomed, mut stats, mut skull, mut opened): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
         Local<(u32, f32, bool, Option<u32>)>,
         Local<Option<u32>>,
         Local<(u32, u8)>,
+        Local<Option<u32>>,
     ),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1569,6 +1620,24 @@ fn draw(
         (None, None) => {
             let tick = timeline.tick().0;
             let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick);
+            // Weapon 0x16's R view: its tint from the frame the scope opened.
+            let scope = own.2.follow.cam.scope;
+            *opened = (scope.on && scope.weapon == 0x16).then(|| opened.unwrap_or(tick));
+            shown.tint = opened.map(|at| tint(tick - at));
+            // Dead: the iris round the head on the screen, every frame (`func_1507E1D0`,
+            // `func_1517F814`: joint 12 × (0, 30 × the scale, 0); C, V deathC), a blast's victim
+            // round its position (V; I: why).
+            if shown.respawn_in.is_some() {
+                let head = (heads.single().ok()).and_then(|t| t.1.and_then(|h| joints.get(h).ok()));
+                let point = match head {
+                    Some(j) if own.1.anim != BLOWN_UP => {
+                        j.translation() + j.rotation() * Vec3::Y * 30.0 * crate::render::MODEL_SCALE
+                    }
+                    _ => Vec3::from(own.0.pos),
+                };
+                let at = (view.single().ok()).and_then(|(c, t)| c.world_to_viewport(t, point).ok());
+                shown.iris_at = at.map(|at| frame_point(a.hud.frame, window, at));
+            }
             // Colors' fade from the tick this client saw it change (the match's tick is not sent);
             // the one already there when this client first sees the match is not replayed.
             match *fading {
@@ -1677,9 +1746,9 @@ fn draw(
             let (texture, size) = match &s.tex {
                 Tex::Texture(name) => a.textures[name].clone(),
                 Tex::Glyph(g) => (a.glyphs[*g].clone(), a.hud.font[*g].size.map(u16::from)),
-                Tex::Solid => (Handle::default(), [1, 1]),
+                Tex::Solid | Tex::Tint => (Handle::default(), [1, 1]),
             };
-            let texture = (s.tex != Tex::Solid).then_some(texture);
+            let texture = (!matches!(s.tex, Tex::Solid | Tex::Tint)).then_some(texture);
             let size = Vec2::from(size.map(f32::from));
             let [x0, y0, x1, y1] = s.uv;
             let [r, g, b, alpha] = s.colour;
@@ -1693,7 +1762,10 @@ fn draw(
                     Vec2::new(x0, y0) / size,
                 ),
                 unlit: true,
-                alpha_mode: AlphaMode::Blend,
+                alpha_mode: match s.tex {
+                    Tex::Tint => AlphaMode::Multiply,
+                    _ => AlphaMode::Blend,
+                },
                 cull_mode: None,
                 ..default()
             })
@@ -1759,7 +1831,7 @@ mod tests {
             .filter(|q| match &q.tex {
                 Tex::Glyph(_) => true,
                 Tex::Texture(name) => name.starts_with("rank_"),
-                Tex::Solid => false,
+                Tex::Solid | Tex::Tint => false,
             })
             .filter(|q| q.colour == [255; 4])
             .map(|q| {
@@ -1935,6 +2007,60 @@ mod tests {
         };
         let iris = rects(&hud, &s, &texture("iris"));
         assert_eq!(iris[0].0, [30.0, -29.0, 120.0, 120.0]);
+    }
+
+    /// The scope's dots turn with the zoom (V scopeB read 200: zoom −27.8, −22.937 → 177.35°;
+    /// clamped at the sniper's closest), each rect truncated to quarter pixels; weapon 0x16's R
+    /// view: the tint at z 4 (over the radar, health and icon, under the clock and ring), its red
+    /// a triangle 0x90-0xFF by 4 (V w16B 200, 201, 229), no dots or bar; the iris round its centre.
+    #[test]
+    fn the_dots_turn_0x16_tints_and_the_iris_follows() {
+        let turn = dot_turn([-27.8, -22.937_294]).to_degrees();
+        assert!((turn - 177.35).abs() < 0.01, "{turn}");
+        assert_eq!(dot_turn([-77.4, -47.0]), 0.0);
+        assert_eq!(
+            [0, 1, 27, 28, 29, 56, 57].map(tint),
+            [0x90, 0x94, 0xFC, 0xFF, 0xFB, 0x90, 0x94]
+        );
+        let window = Vec2::new(1280.0, 720.0);
+        assert_eq!(
+            frame_point([292, 216], window, window / 2.0),
+            [146.0, 108.0]
+        );
+        let Some(hud) = pack_hud() else { return };
+        let scoped = Shown {
+            scope: Some(0.0),
+            turn: dot_turn([-27.8, -22.937_294]),
+            ..state()
+        };
+        let dots = rects(&hud, &scoped, &texture("scope_dot"));
+        assert_eq!(dots.len(), 12);
+        assert_eq!(dots[0].0, [145.5, 50.0, 6.0, 6.0]);
+        let r = Shown {
+            tint: Some(0x90),
+            ..scoped
+        };
+        let quads = sprites(&hud, &r);
+        let tint: Vec<_> = quads.iter().filter(|q| q.tex == Tex::Tint).collect();
+        assert_eq!(
+            (tint.len(), tint[0].colour, tint[0].z),
+            (1, [0x90, 255, 0, 255], 4.0)
+        );
+        assert!(rects(&hud, &r, &texture("scope_dot")).is_empty());
+        assert_eq!(rects(&hud, &r, &texture("scope")).len(), 4);
+        assert!(
+            !quads.iter().any(|q| q.tex == Tex::Solid && q.z >= 6.0),
+            "no bar"
+        );
+        let dead = Shown {
+            respawn_in: Some(54),
+            iris_at: Some([100.0, 80.0]),
+            ..state()
+        };
+        assert_eq!(
+            rects(&hud, &dead, &texture("iris"))[0].0,
+            [-20.0, -40.0, 120.0, 120.0]
+        );
     }
 
     #[test]
@@ -2307,7 +2433,7 @@ mod tests {
                 .filter(|q| match &q.tex {
                     Tex::Glyph(_) => true,
                     Tex::Texture(name) => name.starts_with("rank_") || name == "players",
-                    Tex::Solid => false,
+                    Tex::Solid | Tex::Tint => false,
                 })
                 .map(|q| q.rect)
                 .collect();

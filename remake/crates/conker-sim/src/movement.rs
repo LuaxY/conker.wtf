@@ -240,6 +240,10 @@ pub struct PlayerState {
     /// cleared at the frame's start by `func_1504A730`; C, V `q2f4`). The bots' scripts read it (query
     /// 0xC3) to press Z+A against a wall: the high jump.
     pub walled: bool,
+    /// Tank: s126+0x1BC, the turret's yaw in degrees off the hull's facing (0..360), and s126+0x1B8,
+    /// the gun's pitch in degrees (−20..80, up positive); 0 on foot ([`crate::tank`]).
+    pub turret: f32,
+    pub pitch: f32,
 }
 
 /// Per surface kind (bits 0-4 of the floor's word), the game's table at `0x80099140` (C, `func_1504BA38`;
@@ -333,6 +337,8 @@ impl PlayerState {
             twist: 0,
             scope_yaw: None,
             walled: false,
+            turret: 0.0,
+            pitch: 0.0,
         }
     }
 }
@@ -583,7 +589,12 @@ impl Other {
 /// the bodies the match rules move themselves (hit, dead, burning); returns whether it moved `pos`, the
 /// body of a player of `side`.
 pub fn push_apart(pos: &mut [f32; 3], side: Side, others: &[Other]) -> bool {
-    let me = Other::player(side, *pos);
+    push_body(pos, Other::player(side, *pos), others)
+}
+
+/// [`push_apart`] for a body `me` of any size (a tank's, [`crate::tank::body`]).
+pub fn push_body(pos: &mut [f32; 3], me: Other, others: &[Other]) -> bool {
+    let me = Other { pos: *pos, ..me };
     let start = *pos;
     for o in others {
         let ([mut dx, dy, dz], sum) = me.offset(o);
@@ -1236,7 +1247,12 @@ pub fn walls_on(p: &PlayerState, world: &CollisionWorld) -> bool {
 
 /// The game's wall routine for the player from `old` (the frame's start) to the current position, unless
 /// a zone turns it off ([`walls_on`]); returns the vertical velocity (zeroed by a ceiling).
-fn sweep_walls(p: &mut PlayerState, world: &CollisionWorld, old: [f32; 3], y_vel: f32) -> f32 {
+pub(crate) fn sweep_walls(
+    p: &mut PlayerState,
+    world: &CollisionWorld,
+    old: [f32; 3],
+    y_vel: f32,
+) -> f32 {
     if world.camera.as_ref().is_some_and(|c| c.in_volume(old)) {
         return y_vel;
     }
@@ -1261,7 +1277,7 @@ fn against(move_angle: u16, away: u16) -> bool {
 }
 
 /// The floor's rise per unit of horizontal motion along `(c, -s)`.
-fn rise_along([nx, ny, nz]: [f32; 3], c: f32, s: f32) -> f32 {
+pub(crate) fn rise_along([nx, ny, nz]: [f32; 3], c: f32, s: f32) -> f32 {
     if ny == 0.0 {
         0.0
     } else {
@@ -1271,7 +1287,7 @@ fn rise_along([nx, ny, nz]: [f32; 3], c: f32, s: f32) -> f32 {
 
 /// The floor under the (pushed) position, then snap onto it or start falling. After a push the game
 /// re-queries in full (no last-triangle fast path, `func_1504CB98` at 0x15050074).
-fn follow_floor(
+pub(crate) fn follow_floor(
     p: &mut PlayerState,
     world: &CollisionWorld,
     old: [f32; 3],
@@ -1304,7 +1320,7 @@ fn follow_floor(
     }
 }
 
-fn integrate_y(p: &mut PlayerState) {
+pub(crate) fn integrate_y(p: &mut PlayerState) {
     p.pos[1] += 0.5 * p.y_vel - 0.275 * p.gravity;
     p.y_vel -= p.gravity;
 }

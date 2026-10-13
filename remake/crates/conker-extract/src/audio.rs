@@ -779,20 +779,25 @@ fn code_cues() -> Vec<Cue> {
             "sniper case, 110 VIs after the shot (C func_15065A5C; V e_w24)",
         ),
         cue(
-            On::Hit {
-                weapon: 0x09,
-                lethal: Some(true),
-            },
+            On::Head { weapon: 0x09 },
             splat(),
-            "the killing bullet (C func_15138120; V e_w09)",
+            "a head popped (C func_151D4DAC → func_15138C80; V e_w09 read 1004, a corpse's)",
         ),
         cue(
-            On::Hit {
-                weapon: 0x39,
-                lethal: Some(true),
-            },
+            On::Head { weapon: 0x39 },
             splat(),
-            "the killing bullet (V e_w39)",
+            "a head popped (C func_151D4DAC → func_15138C80; V e_w39 read 970, a corpse's)",
+        ),
+        cue(
+            On::FlyBy {
+                chances: vec![(0x09, 8), (0x39, 1), (0x23, 255), (0x1B, 50)],
+                leads: vec![40, 30, 60, 20, 15, 5, 5, 5],
+            },
+            play([807, 808, 809, 810, 811, 800, 801, 802], 26000, None, 10000, 9999, Channel::Free),
+            "a bullet passing a camera: the table at 0x8008FBE8, 2D at 26000 panned by the bullet (C func_151C2734 → \
+             func_10010F30, func_1000A420); the chances are the spawners' func_151C229C arg16 (twin guns func_151C62D0, \
+             pistol func_150FED30, 0x23 func_150FE320, mounted gun func_150FB8C0; I: the tommy gun's func_150FE860, 0); \
+             V e_w09 read 896: 802",
         ),
         cue(
             On::Hit {
@@ -929,17 +934,10 @@ fn code_cues() -> Vec<Cue> {
             "the fuse's last 120 VIs (C func_15033BDC: cook timer < 0x78 in the hand; func_15054F74 on the grenade; V e_gren 60 ticks before the blast)",
         ),
         cue(
-            On::Flight {
-                weapon: 0x26,
-                ticks: vec![4],
-            },
-            play([1447], 28000, None, 300, 1800, Channel::A),
-            "the grenade in the air (its own clip 0's event at tick 4; V e_gren)",
-        ),
-        cue(
             On::Bounce { weapon: 0x26 },
-            play([1448, 1449], 28000, None, 300, 1800, Channel::A),
-            "bouncing, the two in turn (its clip 1's events at ticks 15 and 23; V e_gren)",
+            play([1447, 1448, 1449], 28000, None, 300, 1800, Channel::A),
+            "a bounce leaving it faster than 5 upward, from the shuffle bag (C func_1505B5F8, func_1000F568; V e_gren, \
+             sq_e_gren, ctlw_k*: the three each once, in every order)",
         ),
         Cue {
             play: Play {

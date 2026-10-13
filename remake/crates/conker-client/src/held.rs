@@ -62,7 +62,7 @@ pub fn build(app: &mut App, held: Vec<Held>, carried: Option<Light>) {
 
 /// A player's upper body (`joint_01`) and head (`joint_12`), which the twist turns.
 #[derive(Component)]
-struct Twisted(Entity, Option<Entity>);
+pub(crate) struct Twisted(Entity, pub(crate) Option<Entity>);
 
 /// The twist as a turn about the body's up axis: the upper body aims along `facing − twist`, as
 /// the camera does (V twin: `joint_01`'s yaw on the root's 5.3° at twist 0, 54.9° at 9000 (49.4°),

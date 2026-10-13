@@ -72,7 +72,11 @@ use serde::{Deserialize, Serialize};
 /// 25: War: Heist ([`MatchView`]'s `heist`, `heist_scores`, `cash`, `human_won`; [`Combat::bags`];
 /// the carrier's `PlayerState::heavy`, predicted).
 /// 26: Heist's voice lines ([`MatchView::voice`]).
-pub const PROTOCOL_ID: u64 = 26;
+/// 27: the weapon of the player's last hit ([`Combat::hit`]), the grenade's cook timer
+/// ([`Combat::cook`]), the bullets' flight ([`BulletView`]).
+/// 28: Tank ([`MatchView::tank`], [`TankView`]; [`Combat::power`], `power_left`; the turret's
+/// yaw and the gun's pitch in `PlayerState`).
+pub const PROTOCOL_ID: u64 = 28;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -159,6 +163,29 @@ pub struct Combat {
     pub deadline: u16,
     /// War: Heist: the bags this player delivered (the STATS' bags column).
     pub bags: u16,
+    /// The weapon of the last hit this player took (0: none, or a hit with no weapon: a doorway,
+    /// the gas, a trap's cone), the server's (conker-server's `hit_weapon`), which the clients'
+    /// hit sounds key (conker-assets' `On::Hit`); kept until the next hit.
+    pub hit: u8,
+    /// The grenade's cook timer (conker-rules' `Fighter::cook`, VIs): the hiss of a grenade let go
+    /// below 120 is the last fuse's (conker-assets' `On::Fuse`).
+    pub cook: u16,
+    /// Tank: the power-up held (conker-rules' `tank::SHIELD`, `BOOST`, `SHELLS`, `SCOPE`; 0 none)
+    /// and what is left of it: the shield's and the boost's VIs, the one-shot shells.
+    pub power: u8,
+    pub power_left: u16,
+}
+
+/// A bullet in flight (conker-rules' `Bullet`): where it is after this frame's step, its velocity
+/// a frame, the frames left before the wall it will hit, its birth tick and owner's slot (with
+/// `vel`, which bullet it is). The clients' fly-by sounds (conker-assets' `On::FlyBy`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct BulletView {
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub life: f32,
+    pub born: u32,
+    pub owner: u16,
 }
 
 /// War: Colors' flag as the clients draw it (conker-rules' `colors::Flag`).
@@ -246,7 +273,7 @@ pub struct MatchView {
     /// script on it; `None` until the server's `--wait` players have joined).
     pub start: Option<u32>,
     pub first_read: u32,
-    pub bullets: Vec<[f32; 3]>,
+    pub bullets: Vec<BulletView>,
     pub grenades: Vec<[f32; 3]>,
     /// Weapon 0x16's rockets and weapon 0x14's aimed shots in flight.
     pub rockets: Vec<[f32; 3]>,
@@ -308,6 +335,26 @@ pub struct MatchView {
     /// ponytail: two lines on one tick, or across updates a lossy link drops, play as the later
     /// only (the script says one per touch, delivery or steal); a list if that ever matters.
     pub voice: Option<(u32, u16, u16)>,
+    /// Tank (conker-rules' `Settings::tank`, `tank`): every player a tank, free for all; the
+    /// bunkers' doors are `lifts` (placements 0-7, 0 shut to 350 open), the bomb's countdown
+    /// `countdown` and its gas `gas`.
+    pub tank: bool,
+    pub tanks: TankView,
+}
+
+/// Tank's shells, bomb and wrecks as the clients draw them (conker-rules' `tank`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct TankView {
+    /// The shells in flight: where after this frame's step, their yaw, and their vertical over
+    /// horizontal speed (the pitch's tangent).
+    pub shells: Vec<([f32; 3], u16, f32)>,
+    /// The bomb (placement 12): on its post at `tank::POST`; carried by a slot; planted in bunker
+    /// 0-3 (S, W, N, E: `tank::BUNKERS`) while its countdown runs.
+    pub bomb: bool,
+    pub carrier: Option<u16>,
+    pub planted: Option<u8>,
+    /// The wrecks (props 18 + slot): the slot that died, where and facing, for 330 frames.
+    pub wrecks: Vec<(u16, [f32; 3], u16)>,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

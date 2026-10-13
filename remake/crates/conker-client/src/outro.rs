@@ -334,7 +334,9 @@ fn actor_ready(
 
 /// While an outro plays (through its STATS): its actors and props show, the actors placed and posed
 /// at its clock (a clip change cross-fading), and the players hide; the view is its camera's
-/// (unless the free debug camera flies), with its near plane.
+/// (unless the free debug camera flies), with its near plane. Through a scope the local player's
+/// body and weapon hide in its own view (C `func_1502E4C4`: the view's bit in obj+0x74 while
+/// s126+0x197 is set; V scopeB: from the frame the ring shows to the release).
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
@@ -347,7 +349,10 @@ pub(crate) fn show(
         (Without<OutroProp>, Without<Actor>, Without<Model>),
     >,
     mut animators: Query<&mut AnimationPlayer>,
-    mut players: Query<&mut Visibility, (With<Model>, Without<OutroProp>, Without<OutroLight>)>,
+    mut players: Query<
+        (&mut Visibility, Option<&crate::FollowCamera>),
+        (With<Model>, Without<OutroProp>, Without<OutroLight>),
+    >,
     camera: Single<
         (
             &mut Transform,
@@ -405,10 +410,12 @@ pub(crate) fn show(
             }
         }
     }
-    for mut v in &mut players {
-        v.set_if_neq(match shown {
-            Some(_) => Visibility::Hidden,
-            None => Visibility::Inherited,
+    let free = camera.2.enabled;
+    for (mut v, own) in &mut players {
+        let scoped = own.is_some_and(|c| c.follow.cam.scope.on) && !free;
+        v.set_if_neq(match shown.is_some() || scoped {
+            true => Visibility::Hidden,
+            false => Visibility::Inherited,
         });
     }
     let (mut transform, mut projection, free) = camera.into_inner();
@@ -458,7 +465,7 @@ fn wear(
 /// An outro's particles ([`script::Particles`]: Heist cs3's bubbles off the sinking Wise Guy):
 /// while an emitter runs, a bubble a frame (I) about its actor, `hud/bubble_particle.png` 3.1-11.8
 /// units big (I: its sizes 31-118, V, over 10), rising 1-2 a frame (I) for 50-156 frames (V),
-/// fading out ([`crate::traps::puffs`]).
+/// fading out ([`crate::traps::puffs`]), added to the view (I).
 #[allow(clippy::too_many_arguments)]
 fn bubbles(
     playing: Res<Playing>,
@@ -500,9 +507,16 @@ fn bubbles(
             life: 50.0 + 106.0 * r(),
             alpha: 1.0,
         };
+        // The texture has no alpha (CI4 over an RGBA16 grey ramp, every entry's alpha bit set;
+        // read as IA16 its alphas would be noise): only an additive blend drops its dark rim (I:
+        // no display list of a bubble seen).
+        let material = StandardMaterial {
+            alpha_mode: AlphaMode::Add,
+            ..crate::traps::material(&texture, [255; 3], 1.0)
+        };
         commands.spawn((
             Mesh3d(mesh),
-            MeshMaterial3d(materials.add(crate::traps::material(&texture, [255; 3], 1.0))),
+            MeshMaterial3d(materials.add(material)),
             Transform::from_translation(at).with_scale(Vec3::splat(size)),
             puff,
         ));
@@ -686,6 +700,46 @@ mod tests {
     fn a_late_client_joins_the_outro_where_the_server_is() {
         let at = |left: u32| start(400, (left + RESULTS) as u16);
         assert_eq!((at(400), at(300), start(400, 30)), (0, 100, 400));
+    }
+
+    /// Through the scope only the local player's own model hides (`func_1502E4C4`), and not while
+    /// the free debug camera flies; it shows again once the scope is down.
+    #[test]
+    fn the_scope_hides_the_own_body() {
+        use bevy::camera_controller::free_camera::FreeCameraState;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Playing>();
+        world.init_resource::<Outros>();
+        let mut free = FreeCameraState::default();
+        free.enabled = false;
+        let camera = (world.spawn((Transform::default(), Projection::default(), free))).id();
+        let follow = conker_sim::follow::Follow::spawn(
+            [0.0, 100.0, 250.0],
+            &conker_sim::movement::PlayerState::spawn([0.0; 3], 0),
+        );
+        let mut own = crate::FollowCamera::new(follow, 0, 0);
+        own.follow.cam.scope.on = true;
+        let model = || Model {
+            body: 0,
+            scene: Entity::PLACEHOLDER,
+        };
+        let me = world.spawn((Visibility::Inherited, model(), own)).id();
+        let other = world.spawn((Visibility::Inherited, model())).id();
+        let seen = |world: &mut World| {
+            world.run_system_once(show).unwrap();
+            [me, other].map(|e| *world.get::<Visibility>(e).unwrap())
+        };
+        assert_eq!(
+            seen(&mut world),
+            [Visibility::Hidden, Visibility::Inherited]
+        );
+        world.get_mut::<FreeCameraState>(camera).unwrap().enabled = true;
+        assert_eq!(seen(&mut world), [Visibility::Inherited; 2], "free camera");
+        world.get_mut::<FreeCameraState>(camera).unwrap().enabled = false;
+        let mut own = world.get_mut::<crate::FollowCamera>(me).unwrap();
+        own.follow.cam.scope.on = false;
+        assert_eq!(seen(&mut world), [Visibility::Inherited; 2], "scope down");
     }
 
     /// The pack's outros of a map; None (the test skips) without them.

@@ -10,6 +10,7 @@ pub mod movement;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod root;
+pub mod tank;
 pub mod trig;
 
 /// Simulation rate. Conker's game logic and animation clips run at 30 Hz (one frame = 2 VIs).

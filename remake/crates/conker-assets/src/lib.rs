@@ -12,7 +12,7 @@
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
-//! - `game/`: `acos.json`, `sink.json`, `class.bin`;
+//! - `game/`: `acos.json`, `sink.json`, `class.bin` (map 24 has its own `class.bin`);
 //! - `audio/`: `sounds.json`, `events.json` and WAV files ([`audio::Audio`]);
 //! - `hud/`: `hud.json` and PNGs ([`hud::Hud`]).
 //!
@@ -388,7 +388,8 @@ pub struct Slice {
     /// `game/sink.json`: per surface kind, the sink table (depth, change with speed, speed %).
     pub sink: [[i8; 3]; 32],
     /// `maps/<map>/ai.bin` (`[0x14, id]`, the scene's multiplayer AI script) and `game/class.bin`
-    /// (`[0x0F, 0]`, the characters' class data): conker-bots' `Assets::ai` and `Assets::class`.
+    /// (`[0x0F, 0]`, the characters' class data; on 0x24 `maps/24/class.bin`, the tank's
+    /// `[0x0F, 119]`): conker-bots' `Assets::ai` and `Assets::class`.
     pub ai: Vec<u8>,
     pub class: Vec<u8>,
 }
@@ -408,7 +409,12 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
         "game/acos.json".into(),
         "game/sink.json".into(),
         format!("maps/{map}/ai.bin"),
-        "game/class.bin".into(),
+        // Tank's tanks walk by their own class data.
+        if map == "24" {
+            format!("maps/{map}/class.bin")
+        } else {
+            "game/class.bin".into()
+        },
         format!("maps/{map}/lights.json"),
         format!("maps/{map}/outros.json"),
     ];

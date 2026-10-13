@@ -505,6 +505,8 @@ pub enum Gives {
     /// War: Total War's gas mask (item 0x20, `gas::MASK`): it takes the pickup slot (MP+0xEB0) a
     /// weapon would, and while worn the gas spares its wearer.
     Mask,
+    /// Tank's power-up: its bit ([`crate::tank::SHIELD`]..).
+    Power(u8),
 }
 
 /// A pickup: the scene placement it sits on and what it gives.

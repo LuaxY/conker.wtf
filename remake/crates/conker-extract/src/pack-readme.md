@@ -28,6 +28,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/triggers.json` | The scene's trigger records: camera volumes and hints, bot zones, lifts |
 | `maps/<map>/nav.json` | The bots' navigation graph |
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
+| `maps/24/class.bin` | The tank's behaviour scripts (game bytecode, raw): Tank's bots walk by them, not by `game/class.bin` |
 | `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, War: Beach's night lights on 0x2B, the level's own 34 on 0x1A and 16 on 0x24, none on the others |
 | `maps/<map>/outros.json` | The victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), Heist's on 0x1A (cutscenes 2 and 3), Raptor's on 0x3F (cutscenes 2 and 4), none on the others |
 | `maps/<map>/outro.gltf`, `outro.bin` | The models the outros show (2d, 30, 2b, 1a): glTF scenes named `09-<entry>` (hex: a bank-09 attachment, in its joint's frame, character model units) and `prop-<placement>` (a placement the level leaves out, at the origin: the outro places it). Textures in `textures/` |
@@ -37,11 +38,11 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
 | `characters/156/`, `characters/157/` `character.gltf`, `.bin`, `textures/*.png` | Characters 156 and 157, the Beach's villagers (War: Beach's team 0; classes 0x11-0x1C the male 156, 0x1D-0x20 the female 157), packed with map 2b. The same skeleton and animations, with a `character.json` that has their `looks` |
-| `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/`, `characters/134/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier), 90 (a stitched Tedi) and 134 (Don Weaso, Heist's, packed with map 1a): the outros' actors, each with the clips they play (`outros.json` says which); no `character.json` |
+| `characters/135/`, `characters/40/`, `characters/88/`, `characters/90/`, `characters/134/` `character.gltf`, `.bin`, `textures/*.png` | Characters 135 (a squirrel officer), 40 (a Tedi tank), 88 (a squirrel soldier), 90 (a stitched Tedi) and 134 (Don Weaso, Heist's, packed with map 1a): the outros' actors, each with the clips they play (`outros.json` says which); only 134 has a `character.json` (one of map 1a's characters) |
 | `characters/169/`, `characters/168/` `character.gltf`, `.bin`, `textures/*.png` | War: Colors' red flag (169) and green flag (168), packed with map 30: 9 joints, the cloth's 4 clips (glTF animation n is pair n: 3 standing, at home or let go of; 0 carried; 1 the carrier walking; 2 running), drawn at half their model units like the players; carried, in the carrier's right hand (`joint_09`); no `character.json` |
 | `characters/138/` `character.gltf`, `.bin`, `textures/*.png` | The mounted machine gun, packed with maps 30, 34 and 2b: 12 joints, drawn at half its model units like the players, turned to the gun's yaw. `joint_03` the seat (the gunner sits there); `joint_04` the barrels' and the camera's pivot, which takes the pitch (the gunner's eye is `joint_04` × (0, 116, 130)); `joint_05` and `joint_07` the barrels, their muzzles at (13, 0, 200) and (−13, 0, 200) from them; `joint_06`, `joint_08` the barrel tips; `joint_09`-`joint_11` a side part. One glTF animation, `pair_0000_anim_0001` (logical clip 1): the 12-frame fire loop, played while the gun fires. `textures/character-15.png` (material 15) is the ammunition belt, which scrolls along its S while the fire loop plays: −40 × the frame's VIs per frame on map 30, in the game's texture-scroll units (I: 1/32 texel); map 34's belt scroll is not exported. No `character.json` |
 | `characters/59/` `character.gltf`, `.bin`, `textures/*.png` | Character 59, the Wise Guy: every Heist player (class 1), packed with map 1a. The same skeleton and animations, with a `character.json` that has its `teams`: `textures/team-0.png` to `team-3.png` are the four teams' looks (REDS, BLUES, GREENS, YELLOWS) |
-| `characters/87/` `character.gltf`, `.bin`, `textures/*.png` | Character 87, Heist's money bag, packed with map 1a: 5 joints, 12 clips (glTF animation n is pair n; the game's logical clips 0, 9 and 10 play pair 0, 1 pair 1, 3 pair 2, 2 pair 3, 4 pair 4, 5 and 6 pair 6, 7 pair 7, 8 pair 8, 11 pair 9, 12 pair 10, 13 pair 11; pair 5 has none); drawn at 0.4 of its model units; no `character.json` |
+| `characters/87/` `character.gltf`, `.bin`, `textures/*.png` | Character 87, Heist's money bag, packed with map 1a: 5 joints, 12 clips (glTF animation n is pair n; the game's logical clips 0, 9 and 10 play pair 0, 1 pair 1, 3 pair 2, 2 pair 3, 4 pair 4, 5 and 6 pair 6, 7 pair 7, 8 pair 8, 11 pair 9, 12 pair 10, 13 pair 11; pair 5 has none, `character.json` lists them); drawn at 0.4 of its model units |
 | `characters/119/` `character.gltf`, `.bin`, `textures/*.png` | Character 119, the tank: every Tank player (class 8), packed with map 24. Its own 14 joints and 8 clips; drawn as the match does (brake lights unlit, headlights lit, the red flag). Its `character.json` has its `teams` (`textures/team-0.png` to `team-3.png`: the antenna's red, blue, green and yellow flags) and its `tank` parts (`textures/brake-lit.png`: the brake lights while it brakes) |
 | `characters/83/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 83, the raptor: War: Raptor's raptor side (class 9), packed with map 3f. Its own 39 joints and 37 clips (3 with root motion), model lift 0, drawn at 0.7 of its model units (`raptor.json`): `joint_05` the skull, `joint_06` the lower jaw (a carried body hangs at its origin), `joint_07` the crest |
 | `characters/165/`, `characters/171/`, `characters/22/` `character.gltf`, `.bin`, `textures/*.png` | War: Raptor's baby raptor (165: the raptor's 39 joints and its 37 clips, as the game plays them), egg (171: one joint, no clip) and the body a raptor carries (22: 31 joints, 32 clips), packed with map 3f; no `character.json` |
@@ -386,14 +387,21 @@ Sections:
 - `cues`: what the game's code plays besides the clips: `on` names the game event (a shot, a hit,
   an explosion, a pickup, a weapon in hand…) with its weapon id in decimal, `character` limits it to
   one character, `then` plays when a firing loop ends; `note` says where it comes from. Every cue
-  whose `on` (and `character`) matches plays: a head shot plays two. War: Total War's: `gas` (a loop
+  whose `on` (and `character`) matches plays: a head shot plays two. `head` is a bullet popping a
+  head (a hit on it below 3 health kills); `bounce` plays one of its sounds at each bounce leaving the
+  grenade faster than 5 upward, from a shuffle bag shared by all (each once before any again, the
+  last not first); `fly_by` is a bullet passing the listener's camera: a bullet of a weapon in
+  `chances` (weapon, out of 256, rolled at its birth) plays its k-th sound, k random each frame, once
+  the camera is `leads[k]` − 10 to `leads[k]` frames of its flight ahead, within its range and cos
+  0.9 of its line, one a bullet, panned. War: Total War's: `gas` (a loop
   while the gas is out) and `carry` (a gas canister taken: `canister` 0 or 1, `bot` a bot's). War:
   Colors': `flag` (a flag taken: `flag` 0 the red, 1 the green, `bot` a bot's: one of its sounds)
   and `lose` (each player of the team that did not score, 30 frames after a capture: `team` the
   loser's, one of its sounds at it). `carry` and `flag` are radio lines: a human's `radio_click`
   with `end` false at once, the line `delay` later, `radio_click` with `end` true once it has
   played, every one heard by everyone, centred (a bot's line is its own, the next id, louder); none
-  while the same `canister` or `flag` spoke in the last 300 frames. The mounted guns
+  while the same `canister` or `flag` spoke in the last 300 frames or the speaker is voicing (a
+  radio line of its own due or playing, or a `lose` voice). The mounted guns
   (maps 30 and 34): `gun` (at the gun, its state going `from` → `to`: 1 free, 2 a player jumping
   on, 3 manned, 4 firing, 11 stopped by B or overheating, 5 left; 3 → 4 starts the firing loop on
   channel `a`; a looping sound plays until the gun's state changes again), `gun_stop` (at the gunner, when its firing stops), `gun_zoom` (the gunner's zoom,

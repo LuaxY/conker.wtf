@@ -17,6 +17,7 @@ use conker_rules::damage;
 use conker_rules::game::TAKEOVER_DELAY;
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
+use conker_rules::tank;
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
 
@@ -86,6 +87,8 @@ pub mod g {
     pub const AIM_RATE: i32 = 0x1868;
     /// Total War's gas (`[0x14, 0xBA]` at 0x3DC6): frames until the gas kills (`conker_rules::gas`).
     pub const COUNTDOWN: i32 = 0x1FE4;
+    /// Tank's (`[0x14, 0xB8]` at 0x1932): frames until the bomb goes off (`conker_rules::tank`).
+    pub const TANK_COUNTDOWN: i32 = 0x2008;
     /// Bytes of the struct plus the scripts' own globals: 0xBB's reach 0x26A8 (its pickup choice
     /// at 0x2658-0x2694); in s5's RAM the next block starts at G+0x26B0.
     pub const SIZE: usize = 0x26B0;
@@ -187,9 +190,9 @@ pub struct World<'a> {
     /// The match slot of each participant; `None`: vacant, its player left (it never appears, of no
     /// team: [`World::frame`]).
     pub slots: &'a [Option<usize>],
-    /// Each gas canister's +0x80 at the frame's start, in participants (+ 1; 0 none), and what the
-    /// script does to the match (`conker_rules::gas`).
-    pub touched: [i32; 2],
+    /// Each gas canister's +0x80 at the frame's start, in participants (+ 1; 0 none), then Tank's
+    /// bomb's; and what the script does to the match (`conker_rules::gas`, `conker_rules::tank`).
+    pub touched: [i32; 3],
     pub effects: &'a mut Vec<Effect>,
     /// War: Colors' flags at the frame's start (their carriers in match slots).
     pub flags: [colors::Flag; 2],
@@ -401,6 +404,10 @@ impl World<'_> {
 
     /// The placement of the prop the script names `h` (`0x30nn`, nn its id), if the gas drives it.
     fn prop(h: i32) -> Option<u16> {
+        // Tank's bomb, 0x3005 (no other script names it).
+        if h & 0xFFF == 0x05 {
+            return Some(tank::BOMB);
+        }
         (gas::PROPS.iter())
             .find(|p| i32::from(p.1) == h & 0xFFF)
             .map(|p| p.0)
@@ -455,8 +462,9 @@ impl World<'_> {
             (3, 0x17) if h & 0xFFF == 0xFF => (self.plunger.toucher)
                 .and_then(|s| self.slots.iter().position(|&x| x == Some(s)))
                 .map_or(0, |p| p as i32 | 0x2000),
-            // 0x21: +0x80, a gas canister's toucher + 1 (0 for the other props here).
+            // 0x21: +0x80, a gas canister's or Tank's bomb's toucher + 1 (0 for the other props).
             (3, 0x21) => match Self::prop(h) {
+                Some(tank::BOMB) => self.touched[2],
                 Some(n) => (gas::CANISTERS.iter())
                     .position(|c| c.0 == n)
                     .map_or(0, |c| self.touched[c]),
@@ -675,6 +683,8 @@ impl World<'_> {
                 0
             }
             (0xF, 1) => 0,
+            // Tank's every bot frame ends with it (meaning unread, I): nothing here.
+            (0xF, 0xE) => 0,
             (k, c) => {
                 let _ = a(0);
                 self.unknown(6, k, c)
@@ -766,6 +776,8 @@ impl World<'_> {
             // ([`Body::lives`]; V t1 425, 438); 1: its +0, the class (War: Beach's voices).
             0xA5 if a(2) == 3 => i32::from(b.lives),
             0xA5 if a(2) == 1 => i32::from(b.class),
+            // 4: alive (Tank's bomb carrier check; I: the stats record's flag, read as hp > 0).
+            0xA5 if a(2) == 4 => i32::from(b.health > 0),
             // s126+0x78, the drawn item (War: Beach's weapon zones).
             0xAA => i32::from(b.drawn),
             // `func_150A2AEC`: the first listed trigger the player is in, | 0x4000; else 0.
@@ -997,6 +1009,11 @@ impl World<'_> {
             // and 0x8B a human's screen fade are the client's (from the escape's freeze).
             (0x1F, Some(s)) => Some(Effect::Start(s, a(2) as u8)),
             (0x27, Some(s)) => Some(Effect::Give(s, a(2) as u8)),
+            // Tank: 0x4B puts item 0x18 (the bomb) on the tank, 0x4C takes it off; 0x70 sets or
+            // clears an s126+0x128 bit (the bomb's 0x20: the carry already says it).
+            (0x4B, Some(s)) => Some(Effect::Carry(s, true)),
+            (0x4C, Some(s)) => Some(Effect::Carry(s, false)),
+            (0x70, _) | (0x4B | 0x4C, None) => return 0,
             (0x3F | 0x54 | 0x8B, _) => return 0,
             // On a vacant participant: no player to act on (the match let its flag go as it left).
             (7 | 0x13 | 0x53 | 0x45 | 0x82 | 0x1F | 0x27, None) => return 0,
@@ -1908,7 +1925,7 @@ mod tests {
             ffa: true,
             forgiven: &mut [],
             slots: &[Some(0), Some(1)],
-            touched: [0; 2],
+            touched: [0; 3],
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
@@ -1972,7 +1989,7 @@ mod tests {
             ffa: true,
             forgiven: &mut [],
             slots: &[Some(0), Some(1)],
-            touched: [0; 2],
+            touched: [0; 3],
             effects: &mut Vec::new(),
             flags: Default::default(),
             starting: false,
@@ -2067,7 +2084,7 @@ mod tests {
                 ffa: true,
                 forgiven: &mut [],
                 slots: &[Some(0), Some(1)],
-                touched: [0; 2],
+                touched: [0; 3],
                 effects: &mut Vec::new(),
                 flags: Default::default(),
                 starting: false,

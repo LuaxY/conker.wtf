@@ -18,19 +18,14 @@ use conker_sim::net::{Collision, Combat, MatchView};
 use lightyear::core::timeline::is_in_rollback;
 use lightyear::prelude::{Interpolated, LocalTimeline, Predicted};
 
-use crate::Anim;
 use crate::outro::{Outros, Playing};
 use crate::render::{MODEL_SCALE, Model, model_yaw};
+use crate::{Anim, Clips};
 
 /// Model 87's scale (conker-rules' `heist::MODEL`; C).
 const SCALE: f32 = 0.4;
 /// The carrier's right hand.
 const HAND: &str = "joint_09";
-/// Each logical clip's glTF animation (its pair; C: the pack's `logicalIds`): 0, 9 and 10 share
-/// pair 0, 5 and 6 pair 6.
-const PAIRS: [usize; 11] = [0, 1, 3, 2, 4, 6, 6, 7, 8, 0, 0];
-/// Each pair's length in ticks (the glTF's `durationTicks`).
-const TICKS: [f32; 9] = [26.0, 46.0, 21.0, 28.0, 58.0, 15.0, 34.0, 40.0, 20.0];
 /// The shadow on the floor: alpha 0xA0 (V) and a radius (I: its size is not read; the bag's body
 /// is 29).
 const SHADOW: f32 = 24.0;
@@ -39,9 +34,16 @@ const SHADOW_ALPHA: f32 = 160.0 / 255.0;
 /// The bag's logical clip and time (ticks) `k` ticks into its state (`CashView::state`: 0
 /// standing, 1 carried, 2 thrown, 3 let go of, 4 sliding, 5 walking), carried by a player in clip
 /// `carrier` (id, time); `slid`: ticks since its slide started, for a stand still untouchable
-/// after it. V `heist-presentation-scratch/bag/bag_timeline.txt` (h1, h2, h3).
-pub fn clip(state: u8, k: u32, carrier: Option<(u16, f32)>, slid: Option<u32>) -> (u8, f32) {
-    let wrap = |c: u8, t: f32| (c, t % TICKS[PAIRS[usize::from(c)]]);
+/// after it; `clips`: 87's (its `character.json`: each logical clip's loop length). V
+/// `heist-presentation-scratch/bag/bag_timeline.txt` (h1, h2, h3).
+pub fn clip(
+    state: u8,
+    k: u32,
+    carrier: Option<(u16, f32)>,
+    slid: Option<u32>,
+    clips: &Clips,
+) -> (u8, f32) {
+    let wrap = |c: u8, t: f32| (c, t % f32::from(clips.duration(u16::from(c))));
     match (state, carrier) {
         // The grab: clip 6 where it lies, at the hand 10 in with clip 5 at 1, then held at 8;
         // then the carrier's idle (6), walk (7) and run (8) at their times, 6 for anything else
@@ -76,6 +78,8 @@ pub fn clip(state: u8, k: u32, carrier: Option<(u16, f32)>, slid: Option<u32>) -
 /// them, the tick it saw a slide start, and where it last lay (position, facing).
 #[derive(Resource, Default)]
 pub struct Bag {
+    /// 87's clips ([`crate::CASH`]'s `character.json`).
+    clips: Clips,
     seen: Option<(u8, u32, u32)>,
     slide: Option<u32>,
     lay: ([f32; 3], u16),
@@ -90,7 +94,7 @@ pub struct Bag {
     pub was_state: Option<u8>,
 }
 
-/// The bag's model and its shadow.
+/// The bag's model and its shadow; its animator's nodes are [`Bag::clips`]' in order.
 #[derive(Component)]
 struct Model87 {
     gltf: Handle<Gltf>,
@@ -100,8 +104,8 @@ struct Model87 {
 #[derive(Component)]
 struct Shadow;
 
-pub fn build(app: &mut App, windowed: bool) {
-    app.init_resource::<Bag>();
+pub fn build(app: &mut App, windowed: bool, clips: Clips) {
+    app.insert_resource(Bag { clips, ..default() });
     app.add_systems(
         FixedUpdate,
         advance.after(crate::tick_anims).run_if(not(is_in_rollback)),
@@ -148,7 +152,7 @@ pub fn advance(
     let carrier = (players.iter())
         .find(|(p, _)| Some(p.slot) == c.carrier)
         .map(|(_, a)| (a.0.id, a.0.time));
-    let clip = clip(c.state, tick.saturating_sub(at), carrier, slid);
+    let clip = clip(c.state, tick.saturating_sub(at), carrier, slid, &bag.clips);
     if c.state != 1 {
         bag.lay = (c.pos, c.yaw);
     }
@@ -196,9 +200,11 @@ fn add(
     ));
 }
 
-/// The bag's scene is in: its `AnimationPlayer` gets every clip.
+/// The bag's scene is in: its `AnimationPlayer` gets every clip of [`Bag::clips`].
+#[allow(clippy::too_many_arguments)]
 fn ready(
     ready: On<WorldInstanceReady>,
+    bag: Res<Bag>,
     children: Query<&Children>,
     animators: Query<(), With<AnimationPlayer>>,
     mut models: Query<&mut Model87>,
@@ -210,10 +216,13 @@ fn ready(
         return;
     };
     let animator = (children.iter_descendants(ready.entity)).find(|&e| animators.contains(e));
-    let handles = gltfs.get(&model.gltf).map(|g| g.animations.clone());
-    let (Some(animator), Some(handles)) = (animator, handles.filter(|h| h.len() >= TICKS.len()))
-    else {
-        warn!("bag: no animation player or too few clips");
+    let handles = gltfs.get(&model.gltf).and_then(|g| {
+        (bag.clips.0.iter())
+            .map(|c| g.named_animations.get(c.1.as_str()).cloned())
+            .collect::<Option<Vec<_>>>()
+    });
+    let (Some(animator), Some(handles)) = (animator, handles.filter(|h| !h.is_empty())) else {
+        warn!("bag: no animation player, or clips missing from its glTF");
         return;
     };
     let (graph, nodes) = AnimationGraph::from_clips(handles);
@@ -292,7 +301,10 @@ fn draw(
     let Ok(mut animator) = animators.get_mut(*animator) else {
         return;
     };
-    let node = nodes[PAIRS[usize::from(c)]];
+    let Ok(i) = (bag.clips.0).binary_search_by_key(&u16::from(c), |c| c.0) else {
+        return;
+    };
+    let node = nodes[i];
     let stale: Vec<_> = (animator.playing_animations())
         .map(|(n, _)| *n)
         .filter(|&n| n != node)
@@ -310,11 +322,37 @@ mod tests {
     use super::*;
     use conker_rules::heist::{IDLE, THROW};
 
+    /// 87's logical clips 0-10 and their loop lengths (the glTF's `durationTicks`), as the pack's
+    /// `characters/87/character.json` has them (checked when the pack is there).
+    fn clips() -> Clips {
+        const TICKS: [u16; 11] = [26, 46, 28, 21, 58, 34, 34, 40, 20, 26, 26];
+        let table = Clips(
+            (0..11)
+                .map(|c| (c, String::new(), TICKS[usize::from(c)]))
+                .collect(),
+        );
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        match std::fs::read(format!("{dir}/characters/87/character.json")) {
+            Ok(json) => {
+                let c: conker_assets::Character = serde_json::from_slice(&json).unwrap();
+                let pack = Clips::new(&c.clips);
+                for c in 0..11 {
+                    assert_eq!(pack.duration(c), table.duration(c), "clip {c}");
+                }
+                pack
+            }
+            Err(_) => table,
+        }
+    }
+
     /// The bag's clips against the oracle's (`bag/bag_timeline.txt`, reads 328-640; k from each
     /// state's first read).
     #[test]
     fn bag_clips_follow_the_oracle() {
         let near = |a: (u8, f32), b: (u8, f32)| a.0 == b.0 && (a.1 - b.1).abs() < 1e-4;
+        let c = clips();
+        let clip = |state, k, carrier, slid| clip(state, k, carrier, slid, &c);
         let cases = [
             // Arrived at 518: clip 0 from 1, wrapping at 26 (543); clip 4 once from 100.
             (clip(0, 0, None, None), (0, 1.0)),

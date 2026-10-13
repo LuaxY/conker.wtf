@@ -61,10 +61,10 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a] [--port 5888] [--digest-file PATH] [--seconds N]
+//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist] [--score 1-40|unlimited]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank] [--score 1-40|unlimited]
 //!   [--seed N]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
@@ -114,6 +114,10 @@
 //!   team, 4 and 1 once 3 humans are in), the Wise Guy with the bat; the level's AI script runs the
 //!   bag (conker-rules' `heist`), and the match ends on the clock, at `--score` bags (1-5, default
 //!   3) or, untimed, once one team is left with lives.
+//! - `--mode tank`: the original's Tank (scenario 1), on map 24 (which plays nothing else), without
+//!   `--cavemen`, at most 7 bots: every player a tank (6 hp), free for all, ranked by kills as
+//!   Deathmatch; the level's AI script runs the bomb, the bunkers' doors and the gas (conker-rules'
+//!   `tank`); `TANK` lines log the bomb, the power-ups and the blasts' kills.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -138,14 +142,15 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors, heist, traps};
+use conker_rules::{beach, colors, heist, tank, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
-    CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID,
-    Player, PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, map_scene, scene_world,
+    BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
+    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, TankView, map_scene,
+    scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -282,12 +287,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--cavemen" => setup.cavemen = true,
             "--mode" => {
                 let s = &mut setup.settings;
-                (s.total_war, s.colors, s.beach, s.heist) = match value()?.as_str() {
-                    "deathmatch" => (false, false, false, false),
-                    "total-war" => (true, false, false, false),
-                    "colors" => (false, true, false, false),
-                    "beach" => (false, false, true, false),
-                    "heist" => (false, false, false, true),
+                (s.total_war, s.colors, s.beach, s.heist, s.tank) = match value()?.as_str() {
+                    "deathmatch" => (false, false, false, false, false),
+                    "total-war" => (true, false, false, false, false),
+                    "colors" => (false, true, false, false, false),
+                    "beach" => (false, false, true, false, false),
+                    "heist" => (false, false, false, true, false),
+                    "tank" => (false, false, false, false, true),
                     v => return Err(bad(v)),
                 }
             }
@@ -351,6 +357,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             return Err("--mode heist: at most 7 bots (8 players)".into());
         }
     }
+    // Tank is scenario 1, scene 0x24's, and the map plays nothing else.
+    if (net.map == "24") != s.tank || (s.tank && setup.cavemen) {
+        return Err(
+            "--mode tank: map 24 only (and map 24 plays Tank only), without --cavemen".into(),
+        );
+    }
+    if s.tank && setup.bots > 7 {
+        return Err("--mode tank: at most 7 bots (8 players)".into());
+    }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
     }
@@ -383,11 +398,11 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a] [--port N] [--digest-file PATH] [--seconds N] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist] [--score 1-40|unlimited] [--seed N] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank] [--score 1-40|unlimited] [--seed N] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -401,13 +416,19 @@ fn main() {
     });
     let (scene, starts) = (map_scene(&net.map))
         .and_then(|s| Some((s, starts(s)?)))
-        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30, 34, 3f, 2b or 1a", net.map)));
+        .unwrap_or_else(|| {
+            fail(format!(
+                "--map {}: not 2d, 30, 34, 3f, 2b, 1a or 24",
+                net.map
+            ))
+        });
     let pack = Slice::load(&net.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
     let total_war = setup.settings.total_war;
-    let (world, arena) = (scene_world(&pack, scene), arena(&pack, total_war));
+    let arena = arena(&pack, total_war, setup.settings.tank);
+    let world = scene_world(&pack, scene);
 
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
@@ -529,6 +550,7 @@ fn main() {
         (_, true, _) => "War: Colors",
         (.., true) => "War: Beach",
         _ if settings.heist => "War: Heist",
+        _ if settings.tank => "Tank",
         _ => "Deathmatch",
     };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
@@ -575,8 +597,9 @@ fn main() {
 }
 
 /// The match's static data from the pack: the spawn records, and the pickups (what each gives, and
-/// where a player touches it; the gas masks only in Total War).
-fn arena(pack: &Slice, total_war: bool) -> Arena {
+/// where a player touches it; the gas masks only in Total War; Tank's power-ups, the pack's
+/// weapons 0x80, 0x01, 0x10 and 0x02, as their bits).
+fn arena(pack: &Slice, total_war: bool, tank: bool) -> Arena {
     let spawns = (pack.spawns.iter())
         .map(|s| Spawn {
             pos: s.position,
@@ -591,6 +614,7 @@ fn arena(pack: &Slice, total_war: bool) -> Arena {
         .filter(|p| total_war || p.gives != conker_assets::Gives::Mask)
         .map(|p| {
             let gives = match p.gives {
+                conker_assets::Gives::Weapon(bit) if tank => Gives::Power(bit),
                 conker_assets::Gives::Weapon(id) => Gives::Weapon(id),
                 conker_assets::Gives::Grenades => Gives::Grenades,
                 conker_assets::Gives::Mask => Gives::Mask,
@@ -739,6 +763,7 @@ impl Game {
 
     fn class(&self, side: Side) -> u8 {
         match (self.setup.settings.beach, side) {
+            _ if self.setup.settings.tank => tank::CLASS,
             (false, _) => u8::from(self.vault),
             (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
             (true, _) => beach::TEDI_CLASS,
@@ -802,7 +827,7 @@ impl Game {
         let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
         let (bots, humans): (Vec<usize>, Vec<usize>) = taken.partition(|&i| self.m.players[i].bot);
         let s = self.setup.settings;
-        let script = s.total_war || s.colors || s.beach || s.heist;
+        let script = s.total_war || s.colors || s.beach || s.heist || s.tank;
         self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
@@ -811,7 +836,7 @@ impl Game {
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
         let side = match self.cavemen {
             true => Side::Cavemen,
-            false if self.vault => Side::Squirrels,
+            false if self.one_side() => Side::Squirrels,
             false => (self.capped([Side::Squirrels, Side::Tediz][slot % 2]))
                 .expect("parse_args caps Beach's bots"),
         };
@@ -866,7 +891,7 @@ impl Game {
                 );
                 return (place, team.iter().fold(0, |m, &r| m | 1 << r));
             }
-            let record = match self.vault {
+            let record = match self.one_side() {
                 true => self.starts.deathmatch[slot % 16],
                 false => self.starts.sides[base][self.members(side) % 8],
             };
@@ -946,6 +971,11 @@ impl Game {
         (self.results_at()).map_or(RESULTS, |r| (r + RESULTS).saturating_sub(t))
     }
 
+    /// 0x1A's Deathmatch and Tank: one side (the squirrels), every slot on its Deathmatch record.
+    fn one_side(&self) -> bool {
+        self.vault || self.setup.settings.tank
+    }
+
     /// The players on `side` in the match.
     fn members(&self, side: Side) -> usize {
         (self.m.players.iter().enumerate())
@@ -956,7 +986,7 @@ impl Game {
     /// The side with fewer players in the match, the squirrels on a tie; the Tediz against the
     /// cavemen; on 0x1A always the squirrels ([`Game::vault`]).
     fn smaller_side(&self) -> Side {
-        match !self.vault
+        match !self.one_side()
             && (self.cavemen || self.members(Side::Tediz) < self.members(Side::Squirrels))
         {
             true => Side::Tediz,
@@ -1157,7 +1187,7 @@ fn join_player(
     let two_sides = s.total_war || s.colors || s.beach;
     let side = (asked.side)
         .filter(|&s| !two_sides || s != Side::Cavemen)
-        .filter(|_| !game.vault)
+        .filter(|_| !game.one_side())
         .unwrap_or_else(|| game.smaller_side());
     let Some(side) = game.capped(side) else {
         // ponytail: the client stays connected with no player; a kick needs netcode's per-client
@@ -1315,6 +1345,9 @@ fn restart_votes(
 fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> Combat {
     let respawn_in = match f.action {
         Action::Hurt {
+            lethal: true, step, ..
+        } if f.class == tank::CLASS => u16::from(tank::RESPAWN.saturating_sub(step)),
+        Action::Hurt {
             reaction,
             lethal: true,
             step,
@@ -1365,6 +1398,51 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         freeze: 0,
         deadline: 0,
         bags: f.bags,
+        hit: 0,
+        cook: f.cook,
+        power: f.power,
+        power_left: if f.power == 0 { 0 } else { f.boost },
+    }
+}
+
+/// The weapon behind a hit on `victim` by `attacker` (the victim itself when the hit has no owner),
+/// for the clients' hit sounds ([`Combat::hit`]), from the match before (`pre`) and after (`m`)
+/// the step: a blast (reactions 0x2B, 0x2C) is the attacker's rocket if one of its rockets went
+/// off, its shotgun's while it holds one and none of its grenades went off, else a grenade; a
+/// burning victim's is the flame; a seated attacker's the mounted gun (0x1B); else the weapon the
+/// attacker held, none for an unowned hit. I: a weapon switched while its bullet flew names the
+/// new one (an exact weapon would need conker-rules' `Event::Hit` to carry it).
+fn hit_weapon(pre: &Match, m: &Match, victim: usize, attacker: usize) -> u8 {
+    let (Some(a), Some(v)) = (pre.players.get(attacker), m.players.get(victim)) else {
+        return 0;
+    };
+    // The attacker's projectiles (birth tick, owner) before the step that are gone after it.
+    let went_off = |was: Vec<(u32, usize)>, is: Vec<(u32, usize)>| {
+        was.into_iter().any(|r| r.1 == attacker && !is.contains(&r))
+    };
+    let rocket = went_off(
+        pre.rockets.iter().map(|r| (r.0, r.1.owner)).collect(),
+        m.rockets.iter().map(|r| (r.0, r.1.owner)).collect(),
+    );
+    let grenade = went_off(
+        pre.grenades.iter().map(|g| (g.0, g.1.owner)).collect(),
+        m.grenades.iter().map(|g| (g.0, g.1.owner)).collect(),
+    );
+    let blast = matches!(
+        v.action,
+        Action::Hurt {
+            reaction: 0x2B | 0x2C,
+            ..
+        }
+    );
+    match () {
+        _ if blast && rocket => 0x16,
+        _ if blast && a.weapon == Some(0x37) && !grenade => 0x37,
+        _ if blast => 0x26,
+        _ if pre.players.get(victim).is_some_and(|v| v.burn.is_some()) => 0x15,
+        _ if a.seated() => 0x1B,
+        _ if attacker == victim => 0,
+        _ => a.weapon.unwrap_or(0),
     }
 }
 
@@ -1378,9 +1456,10 @@ mod beach_g {
     pub const COOLDOWN: i32 = 0x22F4;
 }
 
-/// This tick's events, for [`publish`] and the logs.
+/// This tick's events, for [`publish`] and the logs, and each hit's victim and weapon
+/// ([`hit_weapon`]).
 #[derive(Resource, Default)]
-struct Events(Vec<Event>);
+struct Events(Vec<Event>, Vec<(usize, u8)>);
 
 /// One match frame: the start of a `--wait` match, `--give`s, the step, the cameras, the history.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -1566,6 +1645,7 @@ fn simulate(
         let tag = match () {
             _ if game.m.settings.beach => "BEACH",
             _ if game.m.settings.heist => "HEIST",
+            _ if game.m.settings.tank => "TANK",
             _ => "COLORS",
         };
         for e in &effects {
@@ -1601,8 +1681,34 @@ fn simulate(
                 _ => {}
             }
         }
+        let carrier = game.m.tank.carrier;
         events = game.m.apply(&effects);
         bots.scopes(&mut game.m);
+        // Tank: the bomb taken (the script's 0x4B), the plant, and the blast's kills (the bomber's).
+        if game.m.settings.tank {
+            if let (None, Some(c)) = (carrier, game.m.tank.carrier) {
+                info!("TANK t={t} bomb taken by slot {c}");
+            }
+            if countdown <= 0 && game.m.gas.countdown > 0 {
+                let (by, bunker) = (game.m.tank.last, game.m.tank.planted);
+                info!("TANK t={t} bomb planted by slot {by:?} in bunker {bunker:?}");
+            }
+            for e in &events {
+                if let Event::Hit {
+                    victim,
+                    attacker,
+                    lethal: true,
+                    ..
+                } = *e
+                {
+                    info!("TANK t={t} blast kills slot {victim} (bomber {attacker})");
+                }
+            }
+        }
+    }
+    // Tank: the bunkers' doors collide where they stand (shut: in place; open: gone).
+    if game.m.settings.tank {
+        tank::seat(&mut world.0, game.m.gas.lifts());
     }
     // Scene 0x2D's doors and covers: their collision where the props stand once the script's
     // effects are in (outside Total War the Deathmatch's set).
@@ -1655,6 +1761,15 @@ fn simulate(
             game.m.colors.scores,
             game.m.heist.scores
         );
+    }
+    // Tank: the power-ups taken.
+    if game.m.settings.tank {
+        for e in &events {
+            if let Event::Pickup { player, pickup } = *e {
+                let gives = game.arena.pickups.get(pickup).map(|p| p.0.gives);
+                info!("TANK t={t} slot {player} takes power-up {gives:?}");
+            }
+        }
     }
     // Heist: the bag taken.
     if let (None, Some(c)) = (pre.heist.cash.carrier, game.m.heist.cash.carrier) {
@@ -1742,7 +1857,21 @@ fn simulate(
     }
     let positions = game.m.players.iter().map(|f| f.body.pos).collect();
     game.history.push(t, positions);
-    commands.insert_resource(Events(events));
+    let mut hits = (events.iter())
+        .filter_map(|e| match *e {
+            Event::Hit {
+                victim, attacker, ..
+            } => Some((victim, hit_weapon(&pre, &game.m, victim, attacker))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // A head hit's −1 above 2 health (`func_151D4DAC`) has no event and no sound: no weapon.
+    let quiet = (pre.players.iter().zip(&game.m.players).enumerate())
+        .filter(|(v, (was, is))| is.health < was.health && !hits.iter().any(|h| h.0 == *v))
+        .map(|(v, _)| (v, 0))
+        .collect::<Vec<_>>();
+    hits.extend(quiet);
+    commands.insert_resource(Events(events, hits));
     commands.insert_resource(Rides(rides.iter().map(|r| r.0).collect()));
 }
 
@@ -1874,6 +2003,8 @@ fn publish(
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
         let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
+        let hit = events.1.iter().rev().find(|h| h.0 == slot.index);
+        c.hit = hit.map_or(combat_state.hit, |h| h.1);
         if m.settings.colors || m.settings.beach || m.settings.heist {
             // Colors and Beach: no life is lost; the team's score ranks the player (Heist's too).
             if !m.settings.heist {
@@ -1928,7 +2059,15 @@ fn publish(
         // and idle until it is set (u32::MAX: not every player is in yet).
         start: (game.setup.wait > 0).then(|| game.start.unwrap_or(u32::MAX)),
         first_read: game.setup.first_read,
-        bullets: m.bullets.iter().map(|b| b.1.pos).collect(),
+        bullets: (m.bullets.iter())
+            .map(|&(born, b)| BulletView {
+                pos: b.pos,
+                vel: b.vel,
+                life: b.life,
+                born,
+                owner: b.owner as u16,
+            })
+            .collect(),
         grenades: m.grenades.iter().map(|g| g.1.pos).collect(),
         rockets: m.rockets.iter().map(|r| r.1.pos).collect(),
         shots: m.shots.iter().map(|s| s.1.pos).collect(),
@@ -1998,6 +2137,18 @@ fn publish(
                 _ => None,
             })
             .or(voice),
+        tank: s.tank,
+        tanks: TankView {
+            shells: (m.tank.shells.iter())
+                .map(|sh| (sh.pos, sh.angle, sh.y_vel / sh.speed.max(1.0)))
+                .collect(),
+            bomb: m.tank.bomb.shown,
+            carrier: m.tank.carrier.map(|c| c as u16),
+            planted: m.tank.planted.filter(|_| m.gas.countdown > 0),
+            wrecks: (m.wrecks().into_iter())
+                .map(|(k, pos, facing)| (k as u16, pos, facing))
+                .collect(),
+        },
     });
 }
 
@@ -2514,6 +2665,46 @@ mod tests {
         assert_eq!(human(&mut g), None);
     }
 
+    /// Tank: map 24 only (and it plays nothing else); one side, each a tank (class 8) on its slot's
+    /// record (0-3, then 0x10-0x13), its own team, respawning anywhere.
+    #[test]
+    fn tank_mode_records_and_class() {
+        let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
+        let t = settings(&["--mode", "tank", "--map", "24"]).unwrap();
+        assert!(t.tank && !t.heist);
+        for bad in [
+            &["--map", "24"][..],
+            &["--mode", "tank"],
+            &["--mode", "tank", "--map", "24", "--bots", "8"],
+            &["--mode", "tank", "--map", "24", "--cavemen"],
+        ] {
+            assert!(parse_args(args(bad)).is_err(), "{bad:?}");
+        }
+        let arena = Arena {
+            spawns: (0..20).map(|i| record([i * 100, 0, 0], 64)).collect(),
+            ..Default::default()
+        };
+        let setup = Setup {
+            settings: t,
+            bots: 6,
+            ..Setup::default()
+        };
+        let mut g = Game::new(arena, setup);
+        g.starts = starts(0x24).unwrap();
+        for slot in 0..6 {
+            let _ = g.join_bot(slot);
+        }
+        let f = &g.m.players;
+        for (s, record) in [0u8, 1, 2, 3, 16, 17].into_iter().enumerate() {
+            assert!((f[s].body.pos[0] - 100.0 * f32::from(record)).abs() <= 40.0);
+            assert_eq!(
+                (f[s].side, f[s].class, f[s].team),
+                (Side::Squirrels, 8, s as u8)
+            );
+            assert_eq!(f[s].spawn_mask, !0);
+        }
+    }
+
     /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,
     /// on the side with fewer players unless they ask, on their side's next record; a leaving human
     /// never moves a bot.
@@ -2656,6 +2847,55 @@ mod tests {
         assert_eq!(first_hit(&b, &now, &tedi), Some(2));
         assert_eq!(first_hit(&b, &seen, &tedi), Some(1));
         assert_eq!(first_hit(&b, &[Some([0.0; 3]), None, None], &tedi), None);
+    }
+
+    /// A hit names its attacker's weapon, not the nearest armed player's: its gun, its rocket or
+    /// grenade gone off for a blast (its shotgun's when none went off), the flame on a burning
+    /// victim, none for an unowned hit.
+    #[test]
+    fn a_hit_names_its_attackers_weapon() {
+        let place = |x| Placement {
+            index: 0,
+            pos: [x, 0.0, 0.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let mut pre = game(Setup::default()).m;
+        pre.players = [0.0, 100.0, 900.0]
+            .map(|x| Fighter::new(&place(x), 0, 0))
+            .to_vec();
+        (pre.players[1].weapon, pre.players[2].weapon) = (Some(0x09), Some(0x39));
+        let hurt = |m: &mut Match, reaction| {
+            m.players[0].action = Action::Hurt {
+                reaction,
+                lethal: false,
+                step: 0,
+            };
+        };
+        let mut m = pre.clone();
+        hurt(&mut m, 0x21);
+        assert_eq!(hit_weapon(&pre, &m, 0, 2), 0x39, "the far shooter's");
+        assert_eq!(hit_weapon(&pre, &m, 0, 0), 0, "no attacker");
+        pre.players[0].burn = Some(conker_rules::flame::Burn {
+            acc: 0,
+            life: 10,
+            attacker: Some(2),
+        });
+        assert_eq!(hit_weapon(&pre, &m, 0, 2), 0x15, "a burn");
+        pre.players[0].burn = None;
+        hurt(&mut m, 0x2B);
+        let rocket = conker_rules::projectile::Rocket {
+            pos: [0.0; 3],
+            dir: [1.0, 0.0, 0.0],
+            life: 1.0,
+            owner: 2,
+        };
+        pre.rockets = vec![(5, rocket)];
+        assert_eq!(hit_weapon(&pre, &m, 0, 2), 0x16, "its rocket went off");
+        pre.rockets.clear();
+        assert_eq!(hit_weapon(&pre, &m, 0, 2), 0x26, "a grenade");
+        pre.players[2].weapon = Some(0x37);
+        assert_eq!(hit_weapon(&pre, &m, 0, 2), 0x37, "the shotgun's blast");
     }
 
     #[test]
