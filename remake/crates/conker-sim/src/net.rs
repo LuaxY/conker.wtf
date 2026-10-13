@@ -59,7 +59,8 @@ use serde::{Deserialize, Serialize};
 /// item 0x3E speed is predicted).
 /// 19: [`MatchView::winner`] (the outro and the STATS go by the server's), and over, `restart_in`
 /// counts through the outro too (a client that joins mid-outro starts it there).
-pub const PROTOCOL_ID: u64 = 19;
+/// 20: the high jump (movement state 235, predicted) and `PlayerState::walled`.
+pub const PROTOCOL_ID: u64 = 20;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

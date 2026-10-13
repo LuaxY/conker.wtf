@@ -38,6 +38,9 @@ pub mod id {
     /// Walked off a ledge (more than 60 units above the floor).
     pub const FALL: u16 = 56;
     pub const WALL_PUSH: u16 = 122;
+    /// A with Z held: the high jump (conker-sim's `HIGH_JUMP_Y_VEL`), its clip shared with 404 and
+    /// 741 (pair 21, 54 frames).
+    pub const HIGH_JUMP: u16 = 235;
 }
 
 /// Multiplayer combat ids (u16 obj+0x84) from the oracle's combat traces
@@ -279,6 +282,8 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         JUMP => (1.0, 2.0, 0.0),      // func_1505F298
         RUN_JUMP => (0.8, 2.0, 15.0), // func_1505F298
         LAND => (1.0, 2.0, 0.0),      // func_1505A9AC
+        // func_1505F298: `*0x80099660` (V q2za, q2s5w: 1.08000004 on every row of 235).
+        HIGH_JUMP => (1.08, 2.0, 0.0),
         // Combat (obj+0x4C on the combat traces; blend lengths untraced, I: 4).
         combat::TWIN_DRAW
         | combat::TWIN_HOLSTER

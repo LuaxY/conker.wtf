@@ -75,6 +75,8 @@ pub struct CollisionWorld {
     walls: [Tree; 2],
     /// Wall layer 2: each placement's triangles, in the given (placement) order.
     objects: Vec<std::ops::Range<u32>>,
+    /// Each of `objects`' placement number and how far up it is moved ([`CollisionWorld::shift`]).
+    placed: Vec<(u16, i32)>,
     /// The terrain's surface words: the flag table the wall routine reads for every static layer.
     terrain_words: Vec<u32>,
     /// The game's acos table, from the ROM's `.game` data ([`AcosTable::from_game_data`]): the push angle
@@ -127,9 +129,12 @@ impl CollisionWorld {
                     world.terrain_words.push(world.tris[i].surface);
                 }
                 Layer::Secondary => world.layer_tris[1].push(i as u32),
-                Layer::Placement(_) => match world.objects.last_mut() {
+                Layer::Placement(n) => match world.objects.last_mut() {
                     Some(r) if layers[i - 1] == *layer => r.end += 1,
-                    _ => world.objects.push(i as u32..i as u32 + 1),
+                    _ => {
+                        world.objects.push(i as u32..i as u32 + 1);
+                        world.placed.push((n, 0));
+                    }
                 },
             }
         }
@@ -141,6 +146,20 @@ impl CollisionWorld {
             world.walls[k] = Tree::build(&refs);
         }
         world
+    }
+
+    /// Moves placement `n`'s triangles to `dy` above where they were built (a prop that moves: War:
+    /// Beach's plunger). The floor query and the object walls read the triangles live; the grid is
+    /// XZ only.
+    pub fn shift(&mut self, n: u16, dy: i32) {
+        for (range, (id, at)) in self.objects.iter().zip(&mut self.placed) {
+            if *id == n && *at != dy {
+                for t in &mut self.tris[range.start as usize..range.end as usize] {
+                    t.v.iter_mut().for_each(|v| v[1] += dy - *at);
+                }
+                *at = dy;
+            }
+        }
     }
 
     /// The wall layer `k`'s quadtree (0 terrain, 1 secondary), one node per line in walk order: the game
@@ -361,6 +380,39 @@ mod tests {
         assert_eq!(height(&RAMP, -2291, 5018).unwrap(), -344 * 256 - 673 * 65);
         assert_eq!(height(&RAMP, -1900, 5018), None);
         assert_eq!(height(&RAMP, -2291, 5040), None);
+    }
+
+    /// A placement moved down 60 is floor 60 lower (from its last triangle too), back at 0 where it
+    /// was built; others stay.
+    #[test]
+    fn a_placement_shifts() {
+        let quad = |y: f32, layer| {
+            let [a, b, c, d] = [
+                [-50.0, y, -50.0],
+                [-50.0, y, 50.0],
+                [50.0, y, 50.0],
+                [50.0, y, -50.0],
+            ];
+            [([a, b, c], 5, layer), ([a, c, d], 5, layer)]
+        };
+        let mut w = CollisionWorld::layered(
+            [
+                quad(0.0, Layer::Terrain),
+                quad(100.0, Layer::Placement(5)),
+                quad(200.0, Layer::Placement(3)),
+            ]
+            .concat(),
+        );
+        let at = |w: &CollisionWorld, y| w.floor(0.0, 0.0, y, y, None).map(|f| f.y);
+        w.shift(5, -60);
+        w.shift(5, -60);
+        assert_eq!(
+            (at(&w, 60.0), at(&w, 110.0), at(&w, 300.0)),
+            (Some(40.0), Some(40.0), Some(200.0))
+        );
+        assert_eq!(w.floor(0.0, 0.0, 40.0, 40.0, Some(2)).unwrap().y, 40.0);
+        w.shift(5, 0);
+        assert_eq!(at(&w, 120.0), Some(100.0));
     }
 
     #[test]

@@ -134,7 +134,7 @@ use conker_rules::{beach, colors};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
-use conker_sim::movement::{Input, Side};
+use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
     Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView, PROTOCOL_ID, Player,
     PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, map_scene, scene_world,
@@ -1256,7 +1256,7 @@ struct Events(Vec<Event>);
 /// One match frame: the start of a `--wait` match, `--give`s, the step, the cameras, the history.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn simulate(
-    world: Res<Collision>,
+    mut world: ResMut<Collision>,
     timeline: Res<LocalTimeline>,
     mut game: ResMut<Game>,
     mut players: Query<(
@@ -1386,9 +1386,36 @@ fn simulate(
         };
     }
     game.m.waiting = waiting.iter().map(|s| s.index).collect();
+    // A lift takes only the living, without a death: any other move is a kill gate's.
+    let before: Vec<(u16, u8, [f32; 3])> = (game.m.players.iter())
+        .map(|f| (f.deaths, f.health, f.body.pos))
+        .collect();
     let rides = game.ai.lifts.ride(&mut game.m, &game.arena);
+    for (p, f) in game.m.players.iter().enumerate() {
+        let Some(&(deaths, health, pos)) = before.get(p) else {
+            continue;
+        };
+        let human = matches!(
+            f.action,
+            Action::Hurt {
+                reaction: damage::GATE,
+                ..
+            }
+        ) && f.since == game.m.tick;
+        let bot = rides.iter().any(|r| r.0 == p) && (deaths != f.deaths || health == 0);
+        if human || bot {
+            info!(
+                "t={t} slot {p} falls through a kill gate at {pos:?}: deaths {}, scores {:?}",
+                f.deaths, game.m.colors.scores
+            );
+        }
+    }
     for &(p, place) in &rides {
         info!("t={t} slot {p} takes the lift to record {}", place.index);
+    }
+    // War: Beach's plunger: its collision where the prop is this frame.
+    if game.m.settings.beach {
+        beach::seat(&mut world.0, game.m.plunger.y);
     }
     // The AI script's effects (Total War's gas) go in before the step, its hits' events first.
     let mut events = Vec::new();
@@ -1454,6 +1481,14 @@ fn simulate(
         game.m.step(&game.arena, &inputs, &world)
     });
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
+    for (p, (was, f)) in pre.players.iter().zip(&game.m.players).enumerate() {
+        let high = |f: &Fighter| f.body.state == state::HIGH_JUMP;
+        if high(was) != high(f) {
+            let what = if high(f) { "takes" } else { "ends" };
+            let ([x, y, z], st) = (f.body.pos, f.body.state);
+            info!("t={t} slot {p} {what} a high jump at ({x:.0}, {y:.0}, {z:.0}) state {st}");
+        }
+    }
     // Beach's villager deaths score in the step.
     if game.m.colors.scores != pre.colors.scores && game.m.settings.beach {
         info!(
@@ -1488,6 +1523,13 @@ fn simulate(
     }
     for (i, f) in held {
         game.m.players[i] = f;
+    }
+    // A respawn is no move: the next trigger test starts from the record (a corpse's teleport
+    // could cross a gate).
+    for e in &events {
+        if let Event::Respawn { player, .. } = e {
+            game.ai.lifts.reset(*player);
+        }
     }
     if game.won.is_none() && game.m.phase() == Phase::Over {
         game.won = Some(game.winner());

@@ -115,6 +115,11 @@ pub const SHOTGUN_EDGE: DamageType = ty(0x21, 0x01, 0.0, 0.0, 3.4, 1, 0x80 | 5, 
 /// kills, lying dead 63 frames then 0x18A for 18, as melee 0x21's kill (V combat5_sg_e2 1060+;
 /// I: what the game reads to tell it from a bullet's kill).
 pub const AREA_STAGGER: u8 = 0x80 | 0x21;
+/// The port's reaction for a human taken by a kill gate (`func_1507CD64(p, 9)`, `crate::lift`):
+/// dead where it crossed, still, its clip kept, for [`GATE_FRAMES`], then the respawn (V fall6:
+/// hp 0 at read 91, the respawn at 99; a bot respawns at once, `Match::fall_kill`).
+pub const GATE: u8 = 0x80 | 9;
+pub const GATE_FRAMES: u16 = 8;
 pub const ROCKET_OUTER_R: f32 = 300.0;
 
 /// Total War's gas (`gas` module): the kill's type 0x1F and the doorways' 1 a frame, 0x3B (the
@@ -251,6 +256,8 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         // Beach's strike: the stagger for 40 frames, then its blast (`Match::hurt_frame`).
         (0x47, false) => &[(anim::HIT, 40)],
         (0x0E, true) => &[(anim::DOORWAY_HIT, 59), (anim::DOORWAY_DEAD, 87)],
+        // The clip is the one it fell in (`Match::fall_kill` keeps it); this one is unused.
+        (GATE, _) => &[(anim::DEAD, GATE_FRAMES)],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,
     }

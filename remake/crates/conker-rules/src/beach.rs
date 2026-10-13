@@ -6,6 +6,8 @@
 //! 0x3E ([`drive`]), the bottles, the plunger's prop ([`Plunger`]), the class re-roll at each respawn,
 //! a villager's death scoring for the Tediz and the score end (`Match`).
 
+use conker_sim::collision::CollisionWorld;
+
 /// The teams ([`crate::Fighter::team`]).
 pub const VILLAGERS: u8 = 0;
 pub const TEDIZ: u8 = 1;
@@ -87,11 +89,21 @@ pub struct Plunger {
 pub const HOME: f32 = 392.0;
 pub const SINK: f32 = 4.0;
 pub const DEPTH: f32 = 60.0;
-/// Its top (placement 0's collision, a flat 76 × 158 at y 508): who stands there stands on it.
-/// ponytail: the collision is static, so the presser stays at 508 while the plunger sinks under it
-/// (the original's goes down with it, V ev3: 448); move the placement's triangles if that matters.
+/// Its top (placement 0's collision, a flat 76 × 158 at y 508 at home): who stands there stands on
+/// it, and goes down with it ([`seat`]; V b0-b8: the presser bottoms at 448 in all 14 fires).
 pub const TOP: [[f32; 2]; 2] = [[-1508.0, -1432.0], [2268.0, 2426.0]];
 pub const TOP_Y: f32 = 508.0;
+/// The placements with collision that move with it: 0 (the top) and 5 (the sides, 392 to 508); 4,
+/// the third of its props, has none.
+pub const PROPS: [u16; 2] = [0, 5];
+
+/// Moves the plunger's collision to its `y` (the game's prop carries its model's collision): call
+/// before each frame's moves.
+pub fn seat(world: &mut CollisionWorld, y: f32) {
+    for n in PROPS {
+        world.shift(n, (y - HOME) as i32);
+    }
+}
 
 impl Default for Plunger {
     fn default() -> Self {
@@ -104,12 +116,19 @@ impl Default for Plunger {
 }
 
 impl Plunger {
-    /// Whether a player at `pos`, on the ground, stands on the top.
-    pub fn under(pos: [f32; 3]) -> bool {
+    /// Its top's y with the plunger at `y`.
+    pub fn top(y: f32) -> f32 {
+        TOP_Y + y - HOME
+    }
+
+    /// Whether a player at `pos`, on the ground, stands on the top with the plunger at `y`: from that
+    /// top to the top at home (a world not [`seat`]ed keeps the presser at 508).
+    pub fn under(pos: [f32; 3], y: f32) -> bool {
         let [x, z] = TOP;
         (x[0]..=x[1]).contains(&pos[0])
             && (z[0]..=z[1]).contains(&pos[2])
-            && (pos[1] - TOP_Y).abs() < 1.0
+            && Self::top(y) - 1.0 < pos[1]
+            && pos[1] < TOP_Y + 1.0
     }
 
     /// One frame, `stood` the first player standing on it.
@@ -168,8 +187,8 @@ mod tests {
         p.held = true;
         p.step(None);
         assert_eq!(p.y, 379.0);
-        assert!(
-            Plunger::under([-1470.0, 508.0, 2350.0]) && !Plunger::under([-1470.0, 412.0, 2350.0])
-        );
+        assert!(Plunger::under([-1470.0, 508.0, 2350.0], HOME));
+        assert!(!Plunger::under([-1470.0, 412.0, 2350.0], HOME));
+        assert!(Plunger::under([-1470.0, 448.0, 2350.0], 332.0) && Plunger::top(332.0) == 448.0);
     }
 }

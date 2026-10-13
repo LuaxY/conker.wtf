@@ -942,9 +942,26 @@ impl Match {
                 !self.free.contains(&i)
                     && f.health > 0
                     && !f.body.airborne
-                    && Plunger::under(f.body.pos)
+                    && Plunger::under(f.body.pos, self.plunger.y)
             });
+            let (y, old) = (self.plunger.y, Plunger::top(self.plunger.y));
             self.plunger.step(stood);
+            // Who is on its top goes with it (V b0-b8: the presser at the prop's y + 116 on the
+            // same read), on the collision the next frame's `beach::seat` moves.
+            let top = Plunger::top(self.plunger.y);
+            for (i, f) in self.players.iter_mut().enumerate() {
+                let b = &mut f.body;
+                if !self.free.contains(&i)
+                    && !b.airborne
+                    && Plunger::under(b.pos, y)
+                    && (b.pos[1] - old).abs() < 1.0
+                {
+                    (b.pos[1], b.floor_y) = (top, top);
+                    if let Some(fl) = &mut b.floor {
+                        fl.y = top;
+                    }
+                }
+            }
         }
         self.burn(&mut ev);
         self.fly_bullets(seen, &mut ev);
@@ -1434,6 +1451,8 @@ impl Match {
             self.let_go(i);
         }
         let f = &mut self.players[i];
+        // obj+0xF4 bit 0x10000 clears at every frame's start (`func_1504A730`), a hit's too.
+        f.body.walled = false;
         let (late, late2) = (f.buttons, f.late);
         (f.late, f.buttons) = (f.buttons, input.buttons);
         f.r_off = if late & BUTTON_R != 0 {
@@ -2567,22 +2586,16 @@ impl Match {
         };
         if over {
             let step = step + 1;
-            if lethal && step == 1 && reaction != 0x2C {
+            if lethal && step == 1 && !matches!(reaction, 0x2C | damage::GATE) {
                 self.villager_down(i);
             }
             let f = &mut self.players[i];
             if usize::from(step) == seq.len() {
-                let lives = !self.settings.colors && !self.settings.beach;
                 if (reaction, lethal) == (0x47, false) {
                     // Beach's strike: its blast (I: no one else is hurt).
                     self.hurt(i, &damage::DETONATION, false, false, 0, None, ev);
-                } else if lethal && lives && f.deaths >= u16::from(self.settings.lives()) {
-                    // Out of lives: it stays down, out of play, on the last place of those still in
-                    // play (the game counts places down from its participants, `0x800E0AA9`).
-                    let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
-                    self.players[i].out = place as u8;
                 } else if lethal {
-                    self.respawn(i, arena, ev);
+                    self.down(i, arena, ev);
                 } else {
                     f.recover(t, reaction);
                     if f.burn.is_some() {
@@ -2604,8 +2617,12 @@ impl Match {
                 (f.stun, f.immune) = (STUN_DEAD, 255);
             }
         }
-        // Hit on its seat, a gunner stays there; its gun runs down as if let go (I).
+        // Hit on its seat, a gunner stays there; its gun runs down as if let go (I). A kill gate's
+        // dead lie still.
         let f = &mut self.players[i];
+        if reaction == damage::GATE {
+            return;
+        }
         match f.gun {
             Some(mut m) => {
                 m.step(false, false);
@@ -2616,6 +2633,64 @@ impl Match {
             }
             None => knock(f, reaction, step, world, others),
         }
+    }
+
+    /// A death's end: on its last life (Deathmatch, Total War) it stays down, out of play, on the
+    /// last place of those still in play (the game counts places down from its participants,
+    /// `0x800E0AA9`); else it respawns.
+    fn down(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
+        let lives = !self.settings.colors && !self.settings.beach;
+        if lives && self.players[i].deaths >= u16::from(self.settings.lives()) {
+            let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
+            self.players[i].out = place as u8;
+        } else {
+            self.respawn(i, arena, ev);
+        }
+    }
+
+    /// A kill gate's crossing (`func_150A11C4` → `func_15055C88` → `func_1507CD64(p, 9)`, C;
+    /// `crate::lift`), the living and the dead alike: a death with no killer, and on Beach a
+    /// villager's point for the Tediz at once (V b0 2231 → 2232: bots1's point with no kill). A
+    /// corpse whose point is still to come scores it now, and only now (V b0 7560 → 7562). A bot is
+    /// back on its record the same frame (V b0-b8: the next read shows it there with hp 6); a human
+    /// lies still where it crossed, its clip kept, for [`damage::GATE_FRAMES`] (V fall6). Returns
+    /// where a bot went. In Deathmatch only the death counts: no kill and no +0x70 for anyone (V: a
+    /// drop through 0x2D's 0x4E, scenario 3: `0x800E0AD0` +1, gGameState unchanged, back in 8).
+    pub fn fall_kill(&mut self, i: usize, arena: &Arena) -> Option<Placement> {
+        let t = self.tick;
+        let f = &self.players[i];
+        let pending = matches!(f.action, Action::Hurt { reaction, lethal: true, step: 0 } if reaction != 0x2C);
+        if f.health > 0 || pending {
+            self.villager_down(i);
+        }
+        let f = &mut self.players[i];
+        if f.health > 0 {
+            f.health = 0;
+            f.deaths = f.deaths.saturating_add(1);
+            (f.weapon, f.drawn) = (None, false);
+            (f.carrying, f.masked) = (false, false);
+        }
+        if f.bot {
+            let mut ev = Vec::new();
+            self.down(i, arena, &mut ev);
+            return ev.into_iter().find_map(|e| match e {
+                Event::Respawn { at, .. } => Some(at),
+                _ => None,
+            });
+        }
+        let anim = f.anim;
+        f.set(
+            Action::Hurt {
+                reaction: damage::GATE,
+                lethal: true,
+                step: 0,
+            },
+            anim,
+            t,
+        );
+        (f.stun, f.immune) = (STUN_DEAD, 255);
+        (f.body.y_vel, f.body.xz_speed) = (0.0, 0.0);
+        None
     }
 
     /// Beach: a villager's death registers (`func_1507CD64` with the rules' bit 0x20, C): a point
@@ -3007,7 +3082,16 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             b.y_vel,
         );
         (b.pos, b.y_vel) = (swept.pos, swept.y_vel);
-        if let Some(fl) = world.floor(b.pos[0], b.pos[2], b.pos[1], old[1], None)
+        let floor = world.floor(b.pos[0], b.pos[2], b.pos[1], old[1], None);
+        if let Some(fl) = floor
+            && b.y_vel >= 0.0
+            && b.pos[1] <= fl.y
+        {
+            // Rising into a slope: onto it, still flying (I: the hurt movement's rise is unread; no
+            // oracle body is ever more than 23 below its floor, V bots-beach-club §1.5). Without it
+            // the body sinks below the floor's 50 reach and falls forever.
+            (b.pos[1], b.floor_y) = (fl.y, fl.y);
+        } else if let Some(fl) = floor
             && b.y_vel < 0.0
             && b.pos[1] <= fl.y
         {
@@ -3460,6 +3544,50 @@ mod tests {
         (f.body.pos[1], f.body.y_vel) = (1.0, -3.0);
         knock(f, 0x2B, 1, &w, &[]);
         assert!(!f.body.airborne && f.body.y_vel == 0.0); // 4 < 5
+    }
+
+    /// A body knocked up a slope rising 0.45 a unit (0x2B's (837, −107, 1852) → (888, 2.1, 2090))
+    /// rides onto it instead of sinking under it, and comes down on it (the mounted gun's 0x31; V
+    /// bound: no oracle body is more than 23 below its floor; bots-beach-club §1.5, history B).
+    #[test]
+    fn a_knock_up_a_slope_stays_on_it() {
+        let w = CollisionWorld::new([
+            (
+                [
+                    [-500.0, -900.0, -2000.0],
+                    [-500.0, 1800.0, 4000.0],
+                    [500.0, 1800.0, 4000.0],
+                ],
+                5,
+            ),
+            (
+                [
+                    [-500.0, -900.0, -2000.0],
+                    [500.0, 1800.0, 4000.0],
+                    [500.0, -900.0, -2000.0],
+                ],
+                5,
+            ),
+        ]);
+        let (_, mut m, _) = duel();
+        let f = &mut m.players[1];
+        let b = &mut f.body;
+        (b.pos, b.airborne, b.y_vel, b.gravity) = ([0.0, 0.0, 0.0], true, 12.0, 3.4);
+        (b.xz_speed, b.move_angle, b.floor) = (30.0, 0xC000, None);
+        for _ in 0..60 {
+            knock(f, 0x31, 1, &w, &[]);
+            let b = &f.body;
+            let fl = w.floor(b.pos[0], b.pos[2], 1e4, 1e4, None).unwrap().y;
+            assert!(b.pos[1] >= fl - 1.0, "{:?} under {fl}", b.pos);
+            if !b.airborne {
+                break;
+            }
+        }
+        assert!(
+            !f.body.airborne && f.body.pos[2] < 100.0,
+            "{:?}",
+            f.body.pos
+        );
     }
 
     /// Weapon 0x23 with R held starts nothing (V ctlw_k6); B in a reload's last frame holsters
@@ -4598,38 +4726,47 @@ mod tests {
         assert_eq!(m.players[1].weapon, None);
     }
 
-    /// The plunger sinks 4 a frame under a player on its top, to 332 (V wz 901-917), and the
-    /// script's hold keeps it down.
+    /// The plunger sinks 4 a frame under a player on its top, to 332 (V wz 901-917), its presser
+    /// with it, 508 to 448 (V b0-b8: the prop's y + 116 on the same read), and the script's hold
+    /// keeps it down.
     #[test]
     fn beach_plunger() {
         let (arena, m, _) = duel();
-        let top = beach::TOP_Y;
-        let w = CollisionWorld::new([
-            (
-                [
-                    [-3000.0, top, 0.0],
-                    [-3000.0, top, 5000.0],
-                    [0.0, top, 5000.0],
-                ],
-                5,
-            ),
-            (
-                [[-3000.0, top, 0.0], [0.0, top, 5000.0], [0.0, top, 0.0]],
-                5,
-            ),
-        ]);
+        let (top, [x, z]) = (beach::TOP_Y, beach::TOP);
+        let quad = |y: f32, [x0, x1]: [f32; 2], [z0, z1]: [f32; 2], layer| {
+            let [a, b, c, d] = [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]];
+            [([a, b, c], 5, layer), ([a, c, d], 5, layer)]
+        };
+        let mut w = CollisionWorld::layered(
+            [
+                quad(
+                    0.0,
+                    [-3000.0, 6000.0],
+                    [-1000.0, 5000.0],
+                    conker_sim::collision::Layer::Terrain,
+                ),
+                quad(top, x, z, conker_sim::collision::Layer::Placement(0)),
+            ]
+            .concat(),
+        );
         let mut m = m.with(Settings {
             beach: true,
             ..Settings::default()
         });
         m.players[0].body = PlayerState::spawn([-1470.0, top, 2350.0], 0);
         m.players[1].body.pos = [5000.0, 0.0, 0.0];
-        run(&mut m, &arena, &w, 2, |_| 0);
+        let mut ys = Vec::new();
+        for _ in 0..16 {
+            beach::seat(&mut w, m.plunger.y);
+            run(&mut m, &arena, &w, 1, |_| 0);
+            ys.push((m.plunger.y, m.players[0].body.pos[1]));
+        }
+        assert_eq!(m.plunger.toucher, Some(0));
         assert_eq!(
-            (m.plunger.y, m.plunger.toucher),
-            (beach::HOME - 8.0, Some(0))
+            (ys[0], ys[14], ys[15]),
+            ((388.0, 504.0), (332.0, 448.0), (332.0, 448.0))
         );
-        m.players[0].body.pos[0] = -1000.0;
+        m.players[0].body.pos = [-1000.0, 0.0, 2350.0];
         m.apply(&[Effect::Plunger(true)]);
         run(&mut m, &arena, &w, 20, |_| 0);
         assert_eq!(m.plunger.y, 332.0);

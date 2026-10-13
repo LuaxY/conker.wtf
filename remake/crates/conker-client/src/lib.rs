@@ -513,7 +513,7 @@ pub struct Anim(pub AnimPlayer, pub u8);
 
 /// Every animation id the movement produces (its state byte is the id, V: conker-anim). The local
 /// player shows its predicted state for these, the rules' animation for anything else.
-pub const ANIM_IDS: [u8; 12] = [
+pub const ANIM_IDS: [u8; 13] = [
     state::CREEP,
     state::WALK,
     state::RUN,
@@ -526,6 +526,7 @@ pub const ANIM_IDS: [u8; 12] = [
     state::RUN_JUMP,
     state::FALL,
     state::PUSH_WALL,
+    state::HIGH_JUMP,
 ];
 
 /// The first clip that plays logical animation `logical`.
@@ -828,6 +829,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.add_systems(
         FixedUpdate,
         (
+            seat_plunger,
             predict_again.run_if(is_in_rollback),
             (predict, attach, tick_anims, log_players)
                 .chain()
@@ -1152,6 +1154,15 @@ fn own_tick(
         events.extend(m.step_player(slot, &arena.0, input, world, &seen));
     }
     (m, slot, events)
+}
+
+/// War: Beach's plunger collision where the server last had the prop (`conker_rules::beach::seat`).
+/// ponytail: a predicted presser stands on the server's y, a round trip behind its own; the server
+/// corrects it.
+fn seat_plunger(mut world: ResMut<Collision>, game: Query<&MatchView>) {
+    if let Some(m) = game.iter().next().filter(|m| m.beach) {
+        conker_rules::beach::seat(&mut world.0, m.plunger);
+    }
 }
 
 /// Client-side prediction: [`own_tick`], then the follow camera with what the rules know of the

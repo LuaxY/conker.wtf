@@ -281,7 +281,7 @@ fn camera(r: &Row) -> Follow {
 }
 
 /// The animation ids of the movement's own states (the others are the match rules' actions).
-const MOVEMENT: [u16; 12] = [0, 1, 2, 15, 22, 27, 33, 50, 54, 55, 56, 122];
+const MOVEMENT: [u16; 13] = [0, 1, 2, 15, 22, 27, 33, 50, 54, 55, 56, 122, 235];
 
 /// Per-frame values a replay takes from the oracle instead of simulating them: what the match rules set
 /// (the lock obj+0x89, the drawn weapon s126+0x78, from `CONKER_TRACE_RAW`) and the other player's body,
@@ -1511,5 +1511,95 @@ fn floors_match_the_game_on_other_maps() {
             &off[..off.len().min(3)]
         );
         assert!(rows > 0 && off.len() <= most);
+    }
+}
+
+/// The high jump on scene 0x30 against the research traces (`../lab/research/mp-original/
+/// bots-fidelity-scratch`): `q2za`, the human crouched at the spawn with Z+A pressed at read 50
+/// (`za.txt`), reads 49-79 (the one-player match ends at 80); `q2s5w`, bot 12 running into the wall at
+/// (1048, −624, −494) with the stick full along 50944 and its script's Z+A on the frame after the wall
+/// first moved it (read 111), reads 110-170: the wait, the rise, the ledge at −309, the hard landing
+/// and the run on. State, y and y velocity every row; x and z too.
+#[test]
+fn high_jump_matches_the_game() {
+    const SCRATCH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/bots-fidelity-scratch"
+    );
+    let Some(rom) = std::env::var_os("CONKER_ROM") else {
+        return;
+    };
+    let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
+    let mut world = scene_world(&rom, 0x30);
+    world.acos = AcosTable::from_game_data(&rom.game_data().unwrap());
+    world.camera = Some(CameraLevel::new(
+        0x30,
+        &rom.asset(&[0x0C, 0x30, 5]).unwrap(),
+    ));
+    let za = movement::BUTTON_Z | movement::BUTTON_A;
+    for (name, player, first, last, stick, yaw) in [
+        ("q2za", "0", 49, 79, 0, 0),
+        ("q2s5w", "12", 110, 170, 82, 50944u16.wrapping_sub(0x4000)),
+    ] {
+        let Ok(text) = std::fs::read_to_string(format!("{SCRATCH}/{name}/{name}.csv")) else {
+            return;
+        };
+        let mut lines = text.lines();
+        let header: HashMap<&str, usize> = (lines.next().unwrap().split(',').enumerate())
+            .map(|(i, h)| (h, i))
+            .collect();
+        let rows: HashMap<u32, (u16, PlayerState)> = lines
+            .map(|l| l.split(',').collect::<Vec<_>>())
+            .filter(|c| c[header["player"]] == player && c[header["mp"]] == "1")
+            .map(|c| {
+                let f = |k: &str| c[header[k]].parse::<f32>().unwrap();
+                let u = |k: &str| c[header[k]].parse::<u32>().unwrap();
+                let buttons = u16::from_str_radix(&c[header["in_buttons"]][2..], 16).unwrap();
+                let mut p = PlayerState::spawn(["x", "y", "z"].map(f), u("facing") as u16);
+                (p.y_vel, p.gravity, p.xz_speed) = (f("y_vel"), f("gravity"), f("xz_speed"));
+                (p.target_speed, p.move_angle) = (f("target_speed"), u("move_angle") as u16);
+                (p.state, p.floor_y) = (u("state") as u8, f("floor_y"));
+                (u("read"), (buttons, p))
+            })
+            .collect();
+        let mut p = rows[&first].1;
+        let mut worst = [0.0f32; 2];
+        for read in first..last {
+            let buttons = match name {
+                "q2za" => rows[&read].0,
+                _ if read == 111 => za,
+                _ => 0,
+            };
+            let input = Input {
+                stick_x: 0,
+                stick_y: stick,
+                buttons,
+                camera_yaw: yaw,
+            };
+            movement::step(&mut p, &input, &world);
+            let want = rows[&(read + 1)].1;
+            let xz = ((p.pos[0] - want.pos[0]).powi(2) + (p.pos[2] - want.pos[2]).powi(2)).sqrt();
+            let dy = (p.pos[1] - want.pos[1])
+                .abs()
+                .max((p.y_vel - want.y_vel).abs());
+            worst = [worst[0].max(xz), worst[1].max(dy)];
+            assert!(
+                p.state == want.state && dy < 1e-3 && xz < 0.1,
+                "{name} read {}: {:?} {} vy {} speed {}, want {:?} {} vy {} speed {}",
+                read + 1,
+                p.pos,
+                p.state,
+                p.y_vel,
+                p.xz_speed,
+                want.pos,
+                want.state,
+                want.y_vel,
+                want.xz_speed
+            );
+        }
+        eprintln!(
+            "{name}: reads {first}-{last}, worst xz {:.5}, y/vy {:.5}",
+            worst[0], worst[1]
+        );
     }
 }

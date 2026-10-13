@@ -1023,7 +1023,7 @@ impl Sounds {
             let presser = players
                 .iter()
                 .map(|p| p.1)
-                .find(|p| beach::Plunger::under(p.pos));
+                .find(|p| beach::Plunger::under(p.pos, m.plunger));
             if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS) {
                 self.radio(cx, &p, On::Plunger);
             }

@@ -48,6 +48,8 @@ pub mod state {
     pub const RUN_JUMP: u8 = 55;
     pub const FALL: u8 = 56;
     pub const PUSH_WALL: u8 = 122;
+    /// A with Z held ([`super::HIGH_JUMP_Y_VEL`]).
+    pub const HIGH_JUMP: u8 = 235;
 }
 
 /// Top running speed and the target speed per game stick unit (V).
@@ -110,6 +112,22 @@ pub const STRAFE_PERCENT: u8 = 65;
 pub const TWIST_MAX: i16 = 9000;
 /// The drive while looking through the scope (C: `0x8009920C` at 0x1504D4C4; V: obj+0x44 = 0.1).
 pub const SCOPE_DRIVE: f32 = 0.1;
+/// The high jump, state 235 (`func_1505F298`'s A with Z held, C; V: a human from a crouch, `q2za`, and
+/// a bot pushing a wall, `q2s5w`, in `../lab/research/mp-original/bots-fidelity-scratch`): the press
+/// frame is a plain ground frame, then the state holds (obj+0x83 = 0x64) and the stick is locked
+/// (obj+0x89 = 0x17), so the speed brakes 2.5 a frame while the walls still slide the player; the 10th
+/// frame launches at y velocity 76 with gravity 2, 9 from the 4th to the 7th frame after it; no drive
+/// while it still rises faster than 6, then the stick's; it lands hard (54 for 12 frames). +356 from a
+/// standing start.
+pub const HIGH_JUMP_Y_VEL: f32 = 76.0;
+const HIGH_JUMP_HOLD: u8 = 0x64;
+const HIGH_JUMP_LOCK: u8 = 0x17;
+const HIGH_JUMP_WAIT: u8 = 9;
+
+/// The high jump's gravity for its airborne frame `n` (0 the launch's).
+fn high_jump_gravity(n: u16) -> f32 {
+    if (3..=6).contains(&n) { 9.0 } else { 2.0 }
+}
 
 /// One frame of input. The stick is raw (before the game's deadzone).
 ///
@@ -214,6 +232,10 @@ pub struct PlayerState {
     /// (`conker_camera::Scope::yaw`), which the facing follows. Set after each camera step, as
     /// [`aiming`](Self::aiming) is: `cam.scope.on.then_some(cam.scope.yaw)`.
     pub scope_yaw: Option<f32>,
+    /// obj+0xF4 bit 0x10000: the wall routine moved the player in x or z this frame (`func_15058898`,
+    /// cleared at the frame's start by `func_1504A730`; C, V `q2f4`). The bots' scripts read it (query
+    /// 0xC3) to press Z+A against a wall: the high jump.
+    pub walled: bool,
 }
 
 /// Per surface kind (bits 0-4 of the floor's word), the game's table at `0x80099140` (C, `func_1504BA38`;
@@ -305,6 +327,7 @@ impl PlayerState {
             },
             twist: 0,
             scope_yaw: None,
+            walled: false,
         }
     }
 }
@@ -743,9 +766,17 @@ pub fn step_among(
     let a_held = input.buttons & BUTTON_A != 0;
     let a_pressed = a_held && p.prev_buttons & BUTTON_A == 0;
     p.prev_buttons = input.buttons;
+    p.walled = false;
     let old = p.pos;
 
-    if !p.airborne && a_pressed && can_jump(p.state) {
+    // Z held makes A the high jump, from a crouch too (C: the jump branch tests no state; V q2za from
+    // 22; I: not with a weapon drawn, where Z is the weapon's).
+    let high = !p.airborne
+        && a_pressed
+        && input.buttons & BUTTON_Z != 0
+        && p.armed == 0
+        && (can_jump(p.state) || matches!(p.state, state::CROUCH | state::CROUCH_WALK));
+    if !high && !p.airborne && a_pressed && can_jump(p.state) {
         // func_1505F298 (C): a jump ends a lock and a hold; standing or running is decided on the
         // frame's speed (in `air`).
         p.state = state::RUN_JUMP;
@@ -762,11 +793,23 @@ pub fn step_among(
         && input.buttons & conker_camera::R != 0
         && conker_camera::aims_with_body(p.armed))
     .then(|| deadzone(input.stick_x));
+    let waiting = p.state == state::HIGH_JUMP && !p.airborne;
     let choice = if p.airborne {
         air(p, stick, a_held, world, old, side, others)
     } else {
         ground(p, input, stick, world, old, side, others, twist_x)
     };
+    if high && !p.airborne {
+        // The press frame went as the old state's (V q2s5w 112: the speed and the slide unbraked).
+        (p.state, p.timer, p.lock) = (state::HIGH_JUMP, HIGH_JUMP_HOLD, HIGH_JUMP_LOCK);
+    } else if waiting && p.airborne {
+        // Slid off an edge while waiting: the hold goes with the state (I).
+        p.timer = 0;
+    } else if waiting && p.timer == HIGH_JUMP_HOLD - HIGH_JUMP_WAIT {
+        // The launch ends a ground frame; the rise starts on the next (V: q2s5w 121, q2za 60).
+        (p.airborne, p.jumped, p.jump_held, p.hard_landing) = (true, true, false, true);
+        (p.y_vel, p.gravity, p.air_frames, p.timer) = (HIGH_JUMP_Y_VEL, high_jump_gravity(0), 0, 0);
+    }
     if twist_x.is_none() {
         relax_twist(p);
     }
@@ -803,7 +846,8 @@ impl Stick {
 }
 
 /// States that take off on A (V: from a wall push too, a running jump that lands back into the push,
-/// wall_jump; I: jumps from 54, 22 and 27 are untraced, so A does nothing there).
+/// wall_jump; I: jumps from 54 are untraced, so A does nothing there; 22 and 27 hold Z, so A is the
+/// high jump there, [`HIGH_JUMP_Y_VEL`]).
 fn can_jump(s: u8) -> bool {
     matches!(
         s,
@@ -911,6 +955,7 @@ fn ground(
     push_apart(&mut p.pos, side, others);
     let pre = p.pos;
     let y_vel = sweep_walls(p, world, old, y_vel);
+    p.walled = p.pos[0] != pre[0] || p.pos[2] != pre[2];
     follow_floor(p, world, old, stepped_y, pre, y_vel);
     let wall = !p.airborne && push_wall(p, push_angle(p, pre, world), true);
     p.turning = !p.airborne || p.facing != p.move_angle;
@@ -1265,8 +1310,18 @@ fn air(
     // (V: camera_jump row 234, -1792 at speed 35). A walk off an edge never sets it.
     let takeoff = p.air_frames == 0 && matches!(p.state, state::JUMP | state::RUN_JUMP);
     let jumped = p.jumped && !takeoff;
+    // The high jump's rise: no drive, no speed (V q2s5w 118-141; I: the test, which the traces only
+    // bracket between 7.99994 and 5.99994 after the frame's gravity).
+    let rising = p.state == state::HIGH_JUMP && p.y_vel - p.gravity > 6.0;
+    if rising {
+        p.xz_speed = 0.0;
+    }
     // The ground's turn block with the air's cap ([`turn_steps`]).
-    let drive = if stick.on && !locked { scaled(p) } else { 0.0 };
+    let drive = if stick.on && !locked && !rising {
+        scaled(p)
+    } else {
+        0.0
+    };
     let mut drive = turn_toward(p, stick.target, drive, jumped, None);
     // The facing (func_150599C8 from func_1504CB98 at 0x1504ED60, rate 12: at most 3072, a clockwise
     // turn stops one short): toward the stick's own target, all 16 bits, once 50 or more above the floor
@@ -1307,10 +1362,15 @@ fn air(
     let pre = p.pos;
     p.y_vel = sweep_walls(p, world, old, p.y_vel);
     let pushed = push_angle(p, pre, world);
+    p.walled = pushed.is_some();
     if pushed.is_some_and(|away| against(p.move_angle, away)) && p.xz_speed > WALL_SPEED {
         p.xz_speed = WALL_SPEED;
     }
     p.air_frames += 1;
+    if p.state == state::HIGH_JUMP {
+        // Set for the next frame, as the trace shows it (V q2s5w 124-127: 9).
+        p.gravity = high_jump_gravity(p.air_frames);
+    }
     // The standing-jump clip lasts 24 frames, the fall clip 15 (then the run clip plays in the air) (V).
     if p.state == state::JUMP && p.air_frames >= 25 {
         p.state = state::FALL;
@@ -2044,5 +2104,88 @@ mod tests {
         w.camera = None;
         p.pos[0] = 0.0;
         assert!(walls_on(&p, &w));
+    }
+
+    /// Z+A from a crouch (V q2za rows 51-79, `bots-fidelity-scratch`; the game's floor is at 17.03):
+    /// 235 holds still 9 frames, launches at 76 (gravity 2, then 9 for 4 frames, then 2), rises
+    /// 356 and lands hard.
+    #[test]
+    fn z_and_a_high_jump() {
+        let w = flat();
+        let mut p = PlayerState::spawn([0.0; 3], 50176);
+        let z = Input {
+            buttons: BUTTON_Z,
+            ..Input::default()
+        };
+        run(&mut p, z, 10, &w);
+        assert_eq!(p.state, state::CROUCH);
+        let za = Input {
+            buttons: BUTTON_Z | BUTTON_A,
+            ..z
+        };
+        run(&mut p, za, 1, &w);
+        assert_eq!((p.state, p.timer, p.lock), (state::HIGH_JUMP, 99, 0x17));
+        let mut rows = Vec::new(); // reads 52..
+        for _ in 0..80 {
+            run(&mut p, z, 1, &w);
+            rows.push((p.state, p.pos[1], p.y_vel));
+        }
+        let at = |read: usize| rows[read - 52];
+        assert_eq!(at(59), (state::HIGH_JUMP, 0.0, GROUND_Y_VEL));
+        assert_eq!(at(60), (state::HIGH_JUMP, 0.0, 76.0));
+        for (read, y, vy) in [
+            (61, 37.45, 74.0),
+            (64, 141.875, 61.0),
+            (67, 212.45, 34.0),
+            (79, 343.8497, 10.0),
+        ] {
+            let (s, sy, svy) = at(read);
+            assert!(s == state::HIGH_JUMP && (sy - y).abs() < 1e-3 && (svy - vy).abs() < 1e-3);
+        }
+        let top = rows.iter().map(|r| r.1).fold(0.0, f32::max);
+        assert!((top - 356.1).abs() < 0.1, "{top}");
+        let land = rows.iter().position(|r| r.0 == state::LAND).unwrap();
+        assert!(
+            rows[land..land + 12]
+                .iter()
+                .all(|r| r == &(state::LAND, 0.0, GROUND_Y_VEL))
+        );
+        assert_eq!(rows[land + 12].0, state::CROUCH);
+    }
+
+    /// The wall routine moving the player sets `walled` for that frame only.
+    #[test]
+    fn a_wall_slide_is_walled() {
+        // A wall along x = 50 facing -x, 300 high.
+        let w = CollisionWorld::new([
+            (
+                [
+                    [-5000., 0., -5000.],
+                    [5000., 0., -5000.],
+                    [-5000., 0., 5000.],
+                ],
+                5,
+            ),
+            (
+                [[5000., 0., -5000.], [5000., 0., 5000.], [-5000., 0., 5000.]],
+                5,
+            ),
+            ([[50., 0., -500.], [50., 300., 500.], [50., 300., -500.]], 5),
+            ([[50., 0., -500.], [50., 0., 500.], [50., 300., 500.]], 5),
+        ]);
+        let mut p = PlayerState::spawn([0.0; 3], 0);
+        let east = Input {
+            stick_y: 82,
+            camera_yaw: 0xC000, // forward is +x
+            ..Input::default()
+        };
+        let mut walled = Vec::new();
+        for _ in 0..12 {
+            run(&mut p, east, 1, &w);
+            walled.push(p.walled);
+        }
+        assert!(!walled[0] && walled[11], "{walled:?} {:?}", p.pos);
+        run(&mut p, Input::default(), 30, &w);
+        assert!(!p.walled);
     }
 }

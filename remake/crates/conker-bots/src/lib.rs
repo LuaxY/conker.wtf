@@ -30,7 +30,7 @@ pub mod script;
 use brain::{Body, Unknown, World, g};
 use conker_camera::Scope;
 use conker_camera::volume::{CameraHint, CameraVolume};
-use conker_rules::game::{Arena, BUTTON_R, Event, Match};
+use conker_rules::game::{Action, Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::weapon::Gives;
 use conker_rules::{Rng, beach, colors};
@@ -317,9 +317,9 @@ impl Bots {
     }
 
     /// Takes in what last frame's [`Match::step`] reported: pickups, hits, and the noises the AI
-    /// hears (I: a shot is heard 900 around the shooter, an explosion 900 around it, as the game's
-    /// gun and object noises are; impacts, heard 500 around, are not reported by the rules).
+    /// hears ([`noises`]).
     pub fn observe(&mut self, events: &[Event], m: &Match) {
+        self.noises = noises(m);
         let k = |slot: usize| self.slots.iter().position(|&s| s == Some(slot));
         for e in events {
             match *e {
@@ -336,15 +336,7 @@ impl Bots {
                         self.hit_by[v] = 0x80 | a as u8;
                     }
                 }
-                // Not a mounted gun's: its fire (`func_150FC614`) calls no noise (C, as far as
-                // read), and the gunner hearing its own would press A off the seat (0xBB/0xBD's
-                // noise state) where the oracle's b34 bot fired 144 frames on (V; I).
-                Event::Shot { player, .. } => {
-                    if let Some(f) = m.players.get(player).filter(|f| !f.seated()) {
-                        self.noises.push((f.body.pos, 900.0));
-                    }
-                }
-                Event::Explosion { pos, .. } => self.noises.push((pos, 900.0)),
+                Event::Shot { .. } | Event::Explosion { .. } => {}
                 Event::Respawn { player, .. } => {
                     if let Some(p) = k(player) {
                         self.npcs[p].placed = true;
@@ -574,12 +566,14 @@ impl Bots {
                     facing: f.body.facing,
                     health: f.health,
                     item,
-                    drawn: match f.drawn {
-                        _ if f.seated() => conker_camera::GUN,
+                    // Not `f.drawn`, which lags the draw and the holster: a bot kept counting
+                    // through its holster and its last B, on the holster's end, drew again
+                    // (0x34's state-5 stall: draw 40 frames, drawn 45, holster 29, over and over).
+                    drawn: match () {
                         _ if f.carrying => gas::CANISTER,
-                        true => f.weapon.unwrap_or(0),
-                        false => 0,
+                        _ => f.camera_weapon(),
                     },
+                    burning: f.burn.is_some(),
                     grenades: f.grenades,
                     hit_by: self.hit_by[k],
                     is_bot: self.bot[k],
@@ -590,6 +584,7 @@ impl Bots {
                     buttons: f.buttons,
                     scope: f.body.scope_yaw.map(|y| (y, f.scope_pitch)),
                     class: f.class,
+                    walled: f.body.walled,
                 }
             })
             .collect()
@@ -652,6 +647,31 @@ impl Bots {
             }
         }
     }
+}
+
+/// The noises the AI hears from the frame [`Match::step`] just ran (`func_1508B20C`'s callers,
+/// C), each 900 around: a grenade's wind-up at its thrower, from 18 frames into the pull until it
+/// leaves the hand (`func_15033AD8`), then its fuse at the grenade until it goes off
+/// (`func_15054F74`). V q5gren2: pulled at read 42, the thrower heard 60-84, the grenade 85-203;
+/// q5cook: 60-116, 117-177. No gun is heard, mounted or not, and a blast is silent (V q5m2: 22 MG
+/// shots, no noise; q5gren2, q5cook: none after the fuse; C: no caller under the MG's fire
+/// `func_150FC614`). ponytail: two sources are not ported, the flame stream's (`func_1519A9A4`, V
+/// q3s5b3: at the stream's middle, half its length around, to 352) and 0x34's particle emitters'
+/// (`func_151A6600`, V o34emit: 500 around, 121 frames, their trigger untraced).
+fn noises(m: &Match) -> Vec<([f32; 3], f32)> {
+    /// The throw's release, frames into it (conker-rules' `RELEASE`).
+    const RELEASE: u32 = 14;
+    let t = m.tick.saturating_sub(1);
+    let throwers = m.players.iter().filter_map(|f| {
+        let pull = match f.action {
+            Action::GrenadePull { pull } | Action::GrenadeHold { pull } => pull,
+            Action::GrenadeThrow { pull, .. } if t < f.since + RELEASE => pull,
+            _ => return None,
+        };
+        (t >= pull + 18).then_some((f.body.pos, 900.0))
+    });
+    let fuses = m.grenades.iter().map(|(_, g)| (g.pos, 900.0));
+    throwers.chain(fuses).collect()
 }
 
 /// The yaw and pitch in degrees (the scope's: yaw 0 along +x, 90 along −z; pitch positive down)
@@ -749,6 +769,80 @@ mod tests {
             );
             assert_eq!(p.pos, [0.0; 3], "turning on the spot");
         }
+    }
+
+    /// A grenade's noises against the oracle (q5gren2, q5cook: the pad shows C-down at reads 41-43,
+    /// or 41-101): its thrower is heard from read 60 to the release, then the grenade until it goes
+    /// off, and nothing after. The twin guns' shots are heard nowhere.
+    #[test]
+    fn a_grenade_is_heard_and_nothing_else() {
+        use conker_rules::game::{BUTTON_B, C_DOWN};
+        use conker_rules::{Fighter, Placement};
+        use conker_sim::movement::BUTTON_Z;
+        let big = 20_000.0;
+        let world = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 5),
+        ]);
+        let arena = Arena {
+            spawns: Vec::new(),
+            pickups: Vec::new(),
+        };
+        let start = || {
+            let at = |x| Placement {
+                index: 0,
+                pos: [x, 0.0, 0.0],
+                facing: 0,
+                camera: [0.0; 3],
+            };
+            let players = vec![
+                Fighter::new(&at(0.0), 0, 0),
+                Fighter::new(&at(-5000.0), 1, 0),
+            ];
+            Match::new(&arena, players, Rng::default(), 0)
+        };
+        let cases = [
+            (41..=43, 60..=84, 85..=203),
+            (41..=101, 60..=116, 117..=177),
+        ];
+        for (held, thrower, grenade) in cases {
+            let mut m = start();
+            let (mut heard_thrower, mut heard_grenade) = (Vec::new(), Vec::new());
+            for t in 0..300 {
+                let mut inputs = [Input::default(); 2];
+                if held.contains(&t) {
+                    inputs[0].buttons = C_DOWN;
+                }
+                m.step(&arena, &inputs, &world);
+                for (pos, r) in noises(&m) {
+                    assert_eq!(r, 900.0);
+                    match pos == m.players[0].body.pos {
+                        true => heard_thrower.push(t),
+                        false => heard_grenade.push(t),
+                    }
+                }
+            }
+            assert_eq!(heard_thrower, thrower.collect::<Vec<_>>());
+            assert_eq!(heard_grenade, grenade.collect::<Vec<_>>());
+        }
+        let mut m = start();
+        m.give(0, 0x09);
+        let mut shots = 0;
+        for t in 0..120 {
+            let mut inputs = [Input::default(); 2];
+            inputs[0].buttons = match t {
+                0 => BUTTON_B,
+                30.. => BUTTON_Z,
+                _ => 0,
+            };
+            let ev = m.step(&arena, &inputs, &world);
+            shots += ev
+                .iter()
+                .filter(|e| matches!(e, Event::Shot { .. }))
+                .count();
+            assert!(noises(&m).is_empty(), "frame {t}");
+        }
+        assert!(shots > 0);
     }
 
     #[test]

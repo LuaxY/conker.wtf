@@ -1266,3 +1266,141 @@ fn beach_keeps_its_deadlines_through_a_join_and_a_leave() {
     assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
     assert_eq!(bots.faults, 0);
 }
+
+/// A Deathmatch as `examples/bot_match.rs` plays it: an idle human in slot 0 and `bots` bots on
+/// `scene` with the scene's own AI script, from `seed`; `each` sees the match after every frame,
+/// with the slots a lift moved in it.
+fn deathmatch(
+    rom: &extract_core::Rom,
+    scene: usize,
+    bots: usize,
+    seed: u64,
+    frames: u32,
+    mut each: impl FnMut(&conker_rules::Match, &[usize]),
+) -> conker_bots::Bots {
+    use conker_bots::lift::Lifts;
+    use conker_bots::{Assets, Bots, DEFAULT_SKILL};
+    use conker_rules::{Arena, Fighter, Match, Rng, Spawn, spawn, weapon};
+    use conker_sim::movement::Input;
+    let data: Vec<Vec<u8>> = (Assets::paths(scene).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(rom, scene);
+    let spawns: Vec<Spawn> = (extract_scene::scene_spawns(rom, scene).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let placements = extract_scene::scene_placements(rom, scene).unwrap();
+    let (picks, spots) = weapon::pickups(scene as u16).unwrap();
+    let pickups = (picks.iter().enumerate())
+        .filter(|(_, p)| p.gives != weapon::Gives::Mask)
+        .map(|(k, p)| {
+            let at = spots.get(k).copied();
+            let at = at.unwrap_or(placements[usize::from(p.placement)].position);
+            (*p, at.map(f32::from))
+        })
+        .collect();
+    let arena = Arena { spawns, pickups };
+    let rng = Rng { state: seed };
+    let starts = spawn::starts(scene as u16).unwrap();
+    let mut r = rng;
+    spawn::place(&arena.spawns, 0, &mut r);
+    let fighters = (0..=bots)
+        .map(|i| {
+            let at = usize::from(starts.deathmatch[i % 16]);
+            Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, 23)
+        })
+        .collect();
+    let mut m = Match::new(&arena, fighters, r, 23);
+    let slots: Vec<usize> = (1..=bots).collect();
+    let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, rng).unwrap();
+    let mut lifts = Lifts::new(assets.triggers, scene as u8);
+    for _ in 0..frames {
+        let mut inputs = vec![Input::default(); bots + 1];
+        let lifted: Vec<usize> = (lifts.ride(&mut m, &arena).into_iter())
+            .map(|(slot, _)| slot)
+            .collect();
+        for &slot in &lifted {
+            ai.lifted(slot);
+        }
+        ai.tick(&m, &arena, &world, &mut inputs);
+        ai.scopes(&mut m);
+        let ev = m.step(&arena, &inputs, &world);
+        ai.observe(&ev, &m);
+        each(&m, &lifted);
+    }
+    ai
+}
+
+/// 0x30's lift pair (4 ↔ 7) on its own script 0xBB: no bot rides more than 6 times in a row less
+/// than 60 frames apart (`bots-fidelity.md` Q1: run on 0xBA, whose unarmed-pickup list holds node
+/// 29 inside lift 4's box, bots rode back and forth all match; on 0xBB a ride lands on either side
+/// of the graph's split and the bot leaves, after 2-6 bounces at worst, as the oracle's bounce too).
+#[test]
+fn lift_pair_riders_leave() {
+    let Some(rom) = rom() else { return };
+    let mut rides: Vec<Vec<u32>> = vec![Vec::new(); 16];
+    let bots = deathmatch(&rom, 0x30, 15, 3, 3000, |m, lifted| {
+        for &slot in lifted {
+            rides[slot].push(m.tick);
+        }
+    });
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+    assert!(rides.iter().any(|r| !r.is_empty()), "no one rode");
+    for (slot, r) in rides.iter().enumerate() {
+        let (mut run, mut most) = (1, 1);
+        for w in r.windows(2) {
+            run = if w[1] - w[0] < 60 { run + 1 } else { 1 };
+            most = most.max(run);
+        }
+        assert!(
+            most <= 6,
+            "slot {slot}: {most} quick rides in a row at {r:?}"
+        );
+    }
+}
+
+/// 0x34's corridor by nodes 60-62 (x > 2800, −4150 < z < −2550, y < 200) on its own script 0xBD:
+/// no bot stays there 300 frames jumping (`bots-fidelity.md` Q4: on 0xBA, whose unarmed-pickup
+/// list names the bare corridor nodes 31 and 61, bots walked in, cooled, wandered and jumped there
+/// over and over; the oracle crosses it in at most 74 reads, with no state 55).
+#[test]
+fn no_jump_loop_in_the_0x34_corridor() {
+    use conker_sim::movement::state::RUN_JUMP;
+    let Some(rom) = rom() else { return };
+    let mut stay = [(0u32, false); 4];
+    let bots = deathmatch(&rom, 0x34, 3, 1, 4500, |m, _| {
+        for (slot, f) in m.players.iter().enumerate().skip(1) {
+            let [x, y, z] = f.body.pos;
+            let (frames, jumped) = &mut stay[slot];
+            if x > 2800.0 && -4150.0 < z && z < -2550.0 && y < 200.0 {
+                *frames += 1;
+                *jumped |= f.body.state == RUN_JUMP;
+                assert!(*frames <= 300 || !*jumped, "slot {slot} at {}", m.tick);
+            } else {
+                (*frames, *jumped) = (0, false);
+            }
+        }
+    });
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+}

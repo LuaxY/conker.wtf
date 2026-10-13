@@ -10,6 +10,11 @@
 //! The server rides them for every player and the client's prediction for its own; the bots restart
 //! their paths after a ride. ponytail: run beside `Match::step`, not in it (each player's update
 //! tests the triggers before it moves); move it in if the order ever matters.
+//!
+//! The kill gates ride the same test (C `func_150A11C4` type 1, kind 4 → `func_15055C88`): records of
+//! type 1, shape 3, kind 4 (`+0x17`) kill whoever's last move crosses them, the dead too
+//! ([`Match::fall_kill`]). The pack's: 0x2D's 0x4E and 0x4F (y −185), 0x30's 0x0C (y −2071), 0x2B's
+//! 0x0F (y −1641, the west pit); none on 0x34 and 0x3F. All horizontal (pitch 90), with no floor test.
 
 use crate::game::{Arena, Match};
 use crate::spawn::{self, Placement};
@@ -29,11 +34,21 @@ pub struct Lift {
 
 /// The type-8 records of a trigger table that lead within `scene`, minus disabled ones (`+0x14`).
 pub fn parse(triggers: &[u8], scene: u8) -> Vec<Lift> {
+    records(triggers, |r| r[0x15] >> 2 == 8 && r[0x17] == scene)
+}
+
+/// The kill gates of a trigger table (type 1, shape 3, kind 4), minus disabled ones; their `scene`
+/// and `record` mean nothing.
+pub fn kill_gates(triggers: &[u8]) -> Vec<Lift> {
+    records(triggers, |r| r[0x15] == 1 << 2 | 3 && r[0x17] == 4)
+}
+
+fn records(triggers: &[u8], keep: impl Fn(&[u8; 0x34]) -> bool) -> Vec<Lift> {
     triggers
         .as_chunks::<0x34>()
         .0
         .iter()
-        .filter(|r| r[0x15] >> 2 == 8 && r[0x14] != 1 && r[0x17] == scene)
+        .filter(|r| r[0x14] != 1 && keep(r))
         .map(|r| Lift {
             zone: CameraVolume::parse_record(r),
             shape: r[0x15] & 3,
@@ -57,8 +72,12 @@ impl Lift {
 
     /// Shape 3: the move crosses the box's front plane (its z = 0, turned by the yaw then the
     /// pitch) from behind, within the half-width and between 0 and the height. Offsets from the
-    /// centre are truncated to s16 as the game does.
+    /// centre are truncated to s16 as the game does; one that does not fit (a body fallen out of
+    /// the world) crosses nothing.
     fn gate(&self, old: [f32; 3], pos: [f32; 3]) -> bool {
+        if !self.zone.fits(old) || !self.zone.fits(pos) {
+            return false;
+        }
         let c = self.zone.center.map(f32::from);
         let s16 = |v: f32| v as i32 as i16 as f32;
         let [dx, dy, dz] = std::array::from_fn(|k| s16(pos[k] - c[k]));
@@ -81,11 +100,12 @@ impl Lift {
     }
 }
 
-/// The level's lifts and every player's position before the last [`Match::step`] (`None`: none
-/// to test a ride from, [`Lifts::reset`]).
+/// The level's lifts and kill gates, and every player's position before the last [`Match::step`]
+/// (`None`: none to test a ride from, [`Lifts::reset`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lifts {
     pub lifts: Vec<Lift>,
+    pub gates: Vec<Lift>,
     old: Vec<Option<[f32; 3]>>,
 }
 
@@ -93,18 +113,26 @@ impl Lifts {
     pub fn new(triggers: &[u8], scene: u8) -> Self {
         Self {
             lifts: parse(triggers, scene),
+            gates: kill_gates(triggers),
             old: Vec::new(),
         }
     }
 
     /// Before [`Match::step`] (the game tests the triggers at the start of each player's update):
-    /// every living player whose last move took it into a lift goes onto the lift's record.
-    /// Returns those moved, with where they went.
+    /// every player in play whose last move crossed a kill gate dies ([`Match::fall_kill`]); every
+    /// other living player whose last move took it into a lift goes onto the lift's record.
+    /// Returns those moved (a bot a gate killed included: it is back on its record), with where
+    /// they went.
     pub fn ride(&mut self, m: &mut Match, arena: &Arena) -> Vec<(usize, Placement)> {
         let mut moved = Vec::new();
         for p in 0..m.players.len() {
             let f = &m.players[p];
             let old = self.old.get(p).copied().flatten().unwrap_or(f.body.pos);
+            let gate = m.in_play(p) && !m.waiting.contains(&p);
+            if gate && (self.gates.iter()).any(|g| g.takes(old, f.body.pos, f.body.floor_y)) {
+                moved.extend(m.fall_kill(p, arena).map(|place| (p, place)));
+                continue;
+            }
             let lift = self
                 .lifts
                 .iter()
@@ -134,7 +162,9 @@ impl Lifts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::{Action, Settings};
     use crate::{Fighter, Rng, Spawn};
+    use conker_sim::collision::CollisionWorld;
 
     /// A slot's last player stood behind a gate and the next to join it stands past it: reset, the
     /// joiner does not ride (its first test runs from where it stands); kept, it would.
@@ -177,11 +207,147 @@ mod tests {
         let mut m = Match::new(&arena, vec![Fighter::new(&at, 0, 0)], Rng::default(), 0);
         let kept = Lifts {
             lifts: vec![gate],
+            gates: Vec::new(),
             old: vec![Some([0.0, 10.0, -50.0])],
         };
         let mut reset = kept.clone();
         reset.reset(0);
         assert!(reset.ride(&mut m.clone(), &arena).is_empty());
         assert_eq!(kept.clone().ride(&mut m, &arena).len(), 1);
+    }
+
+    /// War: Beach with a horizontal kill gate (pitch 90) over x in (−1000, 1000), z in [0, 1000) at
+    /// y 0: villager 0 stands at (0, 10, 500), Tedi 1 far off, the only record at z 3000. The first
+    /// ride notes where they stand; then villager 0's move goes to y `to`.
+    fn crossing(bot: bool, to: f32) -> (Lifts, Match, Arena, Vec<(usize, Placement)>) {
+        let zone = CameraVolume {
+            center: [0; 3],
+            size: [1000, 1000, 100],
+            pitch: [1.0, 0.0],
+            yaw: [0.0, 1.0],
+            shape: 3,
+            turned: true,
+            action: 4,
+        };
+        let gate = Lift {
+            zone,
+            shape: 3,
+            floor: false,
+            scene: 4,
+            record: 0,
+        };
+        let spawn = Spawn {
+            pos: [0, 0, 3000],
+            b6: 0,
+            yaw: 0,
+            camera: [0.0; 3],
+            b14: 0,
+            b15: 0,
+        };
+        let arena = Arena {
+            spawns: vec![spawn],
+            pickups: Vec::new(),
+        };
+        let at = |pos| Placement {
+            index: 0,
+            pos,
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let players = vec![
+            Fighter::new(&at([0.0, 10.0, 500.0]), 0, 0),
+            Fighter::new(&at([5000.0, 0.0, 5000.0]), 1, 0),
+        ];
+        let settings = Settings {
+            beach: true,
+            ..Settings::default()
+        };
+        let mut m = Match::new(&arena, players, Rng::default(), 0).with(settings);
+        m.players[0].bot = bot;
+        let mut lifts = Lifts {
+            lifts: Vec::new(),
+            gates: vec![gate],
+            old: Vec::new(),
+        };
+        assert!(lifts.ride(&mut m, &arena).is_empty());
+        m.players[0].body.pos[1] = to;
+        let moved = lifts.ride(&mut m, &arena);
+        (lifts, m, arena, moved)
+    }
+
+    /// A bot that crossed is back on its record the same frame, a death, the Tediz' point (V b1
+    /// 6049 → 6050: hp 6 at its record, S +1); a human lies dead where it crossed, its point
+    /// scored, and respawns 8 frames on (V fall6: hp 0 at read 91, back at 99).
+    #[test]
+    fn a_kill_gate_kills_who_falls_through() {
+        let (_, m, _, moved) = crossing(true, -10.0);
+        let f = &m.players[0];
+        assert_eq!(moved.len(), 1);
+        assert_eq!((f.health, f.deaths, f.body.pos[2]), (6, 1, 3000.0));
+        assert_eq!((m.colors.scores, m.players[1].kills), ([0, 1], 0));
+
+        let (mut lifts, mut m, arena, moved) = crossing(false, -10.0);
+        assert!(moved.is_empty());
+        let world = CollisionWorld::default();
+        for k in 0..9 {
+            let f = &m.players[0];
+            assert_eq!((f.health, f.body.pos), (0, [0.0, -10.0, 500.0]), "{k}");
+            assert_eq!((f.deaths, m.colors.scores), (1, [0, 1]));
+            m.step(&arena, &[], &world);
+            assert!(lifts.ride(&mut m, &arena).is_empty());
+        }
+        let f = &m.players[0];
+        assert_eq!(
+            (f.health, f.body.pos[2], m.colors.scores),
+            (6, 3000.0, [0, 1])
+        );
+        // Climbing up through it, or a body fallen out of the world, crosses nothing.
+        let (_, mut m, arena, _) = crossing(true, 10.0);
+        let mut lifts = Lifts {
+            old: vec![Some([0.0, -10.0, 500.0]); 2],
+            ..crossing(true, 10.0).0
+        };
+        assert!(lifts.ride(&mut m, &arena).is_empty());
+        let mut lifts = Lifts {
+            old: vec![Some([0.0, -60_000.0, 500.0]); 2],
+            ..lifts
+        };
+        m.players[0].body.pos[1] = -70_000.0;
+        assert!(lifts.ride(&mut m, &arena).is_empty());
+        assert_eq!(m.players[0].deaths, 0);
+    }
+
+    /// A corpse blown through it scores its pending point then, once (V b0 7560 → 7562), and is back
+    /// on its record; in Deathmatch the fall is a death and nobody's kill.
+    #[test]
+    fn a_kill_gate_takes_the_dead_and_scores_once() {
+        let (mut lifts, mut m, arena, _) = crossing(true, 10.0);
+        let f = &mut m.players[0];
+        (f.health, f.deaths) = (0, 1);
+        f.action = Action::Hurt {
+            reaction: 0x31,
+            lethal: true,
+            step: 0,
+        };
+        f.body.pos[1] = -10.0;
+        assert_eq!(lifts.ride(&mut m, &arena).len(), 1);
+        assert_eq!((m.players[0].deaths, m.colors.scores), (1, [0, 1]));
+        let world = CollisionWorld::default();
+        for _ in 0..60 {
+            m.step(&arena, &[], &world);
+        }
+        assert_eq!(m.colors.scores, [0, 1]);
+
+        let (_, mut m, arena, _) = crossing(true, 10.0);
+        m.settings.beach = false;
+        let mut lifts = Lifts {
+            old: vec![Some([0.0, 10.0, 500.0]); 2],
+            ..crossing(true, 10.0).0
+        };
+        m.players[0].body.pos[1] = -10.0;
+        assert_eq!(lifts.ride(&mut m, &arena).len(), 1);
+        let (f, other) = (&m.players[0], &m.players[1]);
+        assert_eq!((f.deaths, f.suicides, f.kills, other.kills), (1, 0, 0, 0));
+        assert_eq!(m.colors.scores, [0, 0]);
     }
 }

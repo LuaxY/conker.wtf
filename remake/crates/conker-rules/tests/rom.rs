@@ -70,3 +70,34 @@ fn surface_fields() {
     assert_eq!(set(|s| s.0 >> 12 & 0xF), [0].into());
     assert_eq!(scene_2d.iter().filter(|s| s.slide() != 0).count(), 12);
 }
+
+/// The kill gates (trigger type 1, action 4) of the packed maps: 0x2D's two at y −185, 0x30's at
+/// −2071, 0x2B's west pit at −1641 (record 0x0F); 0x34 and 0x3F have none. fall6's drop at
+/// (−1150, −1614 → −1690, −2430) crosses 0x2B's (V: hp 0 at read 91).
+#[test]
+fn kill_gates_of_the_maps() {
+    let Some(rom) = rom() else { return };
+    let gates =
+        |scene: usize| conker_rules::lift::kill_gates(&rom.asset(&[0x0C, scene, 5]).unwrap());
+    let ys = |scene| {
+        gates(scene)
+            .iter()
+            .map(|g| g.zone.center[1])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ys(0x2D), [-185, -185]);
+    assert_eq!(ys(0x30), [-2071]);
+    assert_eq!(ys(0x2B), [-1641]);
+    assert!(ys(0x34).is_empty() && ys(0x3F).is_empty());
+    let pit = &gates(0x2B)[0];
+    assert!(pit.takes(
+        [-1150.0, -1614.0, -2430.0],
+        [-1150.0, -1689.9, -2430.0],
+        -1689.9
+    ));
+    assert!(!pit.takes(
+        [-1150.0, -1689.9, -2430.0],
+        [-1150.0, -1614.0, -2430.0],
+        -1614.0
+    ));
+}

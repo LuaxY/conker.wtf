@@ -121,9 +121,14 @@ pub struct Body {
     pub heading: f32,
     pub facing: u16,
     pub health: u8,
-    /// s126+0x75 & 0x7F: the held item; s126+0x78: the drawn weapon (0 holstered).
+    /// s126+0x75 & 0x7F: the held item; s126+0x78: the drawn weapon, from the draw's first frame
+    /// and 0 from the holster's (`Fighter::camera_weapon`; V o34draw: the scripts' holster
+    /// counter G+0x2208 restarts 2 reads after it goes 0).
     pub item: u8,
     pub drawn: u8,
+    /// s126+0x1AC: a fire burns on it (set by the flame's reaction 0x10 and the fire's attach,
+    /// cleared at its end: `func_1505E874`, `func_15194FF4`, `func_151906C4`, C).
+    pub burning: bool,
     pub grenades: u8,
     /// 0x80 | the last attacker, set on the frame of a hit (`0x800E0BB8`).
     pub hit_by: u8,
@@ -142,6 +147,8 @@ pub struct Body {
     pub scope: Option<(f32, f32)>,
     /// The record's class (+0, `func_150859AC` 1; War: Beach's voices by it).
     pub class: u8,
+    /// obj+0xF4 bit 0x10000: the wall routine moved it last frame (conker-sim's `walled`).
+    pub walled: bool,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -493,7 +500,12 @@ impl World<'_> {
                 1
             }
             // Props 7: a display flag (+0x73 bit 4); sounds (type 0xA, `func_1509E730`) 3: a fade.
-            (3, 7) | (0xA, 3) => 1,
+            // Props 1 hides a prop: 0xBA's Deathmatch hides the masks' props 0x14-0x19 (0x48DE),
+            // and 0xBD's camera cutaway on 0x34 (0x335C) hides 0xF3-0xF5 while a human's view is
+            // in trigger 0x12-0x14 (C; `(4, 0x10)` here asks for any participant instead, I). The
+            // client's to show; no noise comes of it (V o34emit: G+0x23F0.. stay 1 while 0x34's
+            // emitters come and go).
+            (3, 1 | 7) | (0xA, 3) => 1,
             // War: Beach's plunger: 0xD sets +0x4F's bits a(2) and clears a(3); bit 4 holds it down.
             (3, 0xD) if h & 0xFFF == 0xFF => {
                 match (a(2) & 4 != 0, a(3) & 4 != 0) {
@@ -654,7 +666,9 @@ impl World<'_> {
                 None => 0x7D00,
             },
             0xBF => (b.height as i32 as f32 * 65536.0) as i32,
-            0xC3 => n.f4 as i32,
+            // Bit 0x10000: the wall moved it (C `func_15058898`, V q2f4): the scripts press Z+A then,
+            // the high jump (0xBB at 0x1CA6, 0xBD at 0x10FA, 0xBA at 0x1AEC).
+            0xC3 => n.f4 as i32 | if b.walled { 0x10000 } else { 0 },
             0xC4 => n.flags as i32,
             0xC7 => {
                 if n.goal == NONE {
@@ -1016,6 +1030,10 @@ impl World<'_> {
             if hit_by & 0x80 != 0 || placed {
                 g.set(g::STATE, p, 0);
                 g.set(g::REPLAN, p, 1);
+            }
+            // Burning holds the cooldown (C, `func_1508A6FC` after the placement's test).
+            if b.burning {
+                g.set(g::COOL, p, 0x14);
             }
         }
         g.set_i32(g::SEEN, seen);
@@ -1672,14 +1690,16 @@ mod tests {
     }
 
     /// A placement (match start, respawn, lift) is taken by the next frame: state 0 and a replan,
-    /// once (V: the oracle's 0x30 p6, lifted at read 323, state 6 → 0 at 324).
+    /// once (V: the oracle's 0x30 p6, lifted at read 323, state 6 → 0 at 324). Burning holds the
+    /// cooldown at 0x14 every frame (C, `func_1508A6FC`'s s126+0x1AC test).
     #[test]
     fn a_placement_replans_once() {
-        let bodies = [Body {
+        let mut bodies = [Body {
             health: 6,
             is_bot: true,
             ..Body::default()
         }; 2];
+        bodies[1].burning = true;
         let mut npcs = [Npc::default(); 2];
         npcs[1].placed = true;
         let (graph, world) = (Graph::default(), CollisionWorld::default());
@@ -1710,7 +1730,10 @@ mod tests {
         for frame in 0..2 {
             g.set(g::STATE, 0, 6);
             g.set(g::STATE, 1, 6);
+            g.set(g::COOL, 0, 0x12C);
+            g.set(g::COOL, 1, 0x12C);
             w.frame(&mut g);
+            assert_eq!((g.get(g::COOL, 0), g.get(g::COOL, 1)), (0x12A, 0x14));
             let replan = i32::from(frame == 0);
             assert_eq!((g.get(g::STATE, 0), g.get(g::REPLAN, 0)), (6, 0));
             assert_eq!(

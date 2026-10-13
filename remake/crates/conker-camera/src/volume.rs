@@ -59,6 +59,13 @@ impl CameraVolume {
         }
     }
 
+    /// Whether every offset from the centre fits the s16 the game truncates it to. One that does
+    /// not (a body fallen out of the world, which the game never has) is in no volume, instead of
+    /// wrapping into one (I; bots-beach-club §1.1: an escape fired at y −525,400).
+    pub fn fits(&self, p: [f32; 3]) -> bool {
+        (0..3).all(|k| (p[k] - f32::from(self.center[k])).abs() <= f32::from(i16::MAX))
+    }
+
     /// `func_150A1DA0` for a camera (its `+0x16 & 1` floor test always passes for the eye): the offset
     /// from the centre, truncated to integers, turned by the yaw then the pitch, is strictly inside the
     /// box's half-width and half-depth, or the cylinder's radius (`func_150AD960`'s octagonal distance
@@ -66,6 +73,9 @@ impl CameraVolume {
     ///
     /// ponytail: the sphere (shape 1) and shape 3 read false; no camera volume of scene 0x2D uses them.
     pub fn contains(&self, p: [f32; 3]) -> bool {
+        if !self.fits(p) {
+            return false;
+        }
         let d: [i16; 3] = std::array::from_fn(|k| (p[k] - f32::from(self.center[k])) as i32 as i16);
         let [dx, dy, dz] = d.map(f32::from);
         let ([ps, pc], [ys, yc]) = (self.pitch, self.yaw);
@@ -97,6 +107,9 @@ impl CameraVolume {
     /// crossed within the half-width (x) and between 0 and the height (y). Integers and the f32 order
     /// as in the game.
     pub fn crossed(&self, old: [f32; 3], new: [f32; 3]) -> bool {
+        if !self.fits(old) || !self.fits(new) {
+            return false;
+        }
         let ([ps, pc], [ys, yc]) = (self.pitch, self.yaw);
         let t16 = |v: f32| i32::from(v as i32 as i16);
         let turn = |p: [f32; 3]| {
@@ -272,6 +285,7 @@ mod tests {
         assert!(!crossed([90.0, 10.0, -10.0], [110.0, 10.0, 10.0]));
         assert!(crossed([0.0, -10.0, -10.0], [0.0, 10.0, 10.0]));
         assert!(!crossed([0.0, 50.0, -10.0], [0.0, 50.0, 10.0]));
+        assert!(!crossed([0.0, -65_526.0, -10.0], [0.0, -65_526.0, 10.0]));
     }
 
     #[test]
@@ -296,6 +310,8 @@ mod tests {
         assert!(v.contains([99.9, 1.0, 0.0]));
         assert!(!v.contains([100.0, 1.0, 0.0]) && !v.contains([0.0, 0.5, 0.0]));
         assert!(!v.contains([0.0, 50.0, 0.0]) && !v.contains([0.0, 10.0, 20.0]));
+        // An offset past s16 does not wrap back in: −65,526 truncates to 10.
+        assert!(!v.contains([0.0, -65_526.0, 0.0]) && v.contains([0.0, 10.0, 0.0]));
         // Turned 90 degrees: the long side now runs along z.
         let v = CameraVolume::parse_table(&record([0, 0, 0], [100, 50, 20], 90.0, 0))[0];
         assert!(v.contains([0.0, 10.0, 90.0]) && !v.contains([90.0, 10.0, 0.0]));
