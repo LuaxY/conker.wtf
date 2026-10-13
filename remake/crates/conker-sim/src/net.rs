@@ -62,7 +62,9 @@ use serde::{Deserialize, Serialize};
 /// 20: the high jump (movement state 235, predicted) and `PlayerState::walled`.
 /// 21: Total War's takeover (the fighter's `out_at` and `extra` lives) and the doors' and covers'
 /// heights ([`MatchView::lifts`], their collision predicted).
-pub const PROTOCOL_ID: u64 = 21;
+/// 22: the fighter's mount carries the jump on's seat and the gun's fire process (conker-rules'
+/// `Mount`: the local gunner's shots are predicted).
+pub const PROTOCOL_ID: u64 = 22;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

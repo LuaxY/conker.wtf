@@ -134,6 +134,32 @@ pub struct Background {
     /// Out of 32767 (the recording is at the game's level: play at 1.0 for the original's mix).
     pub volume: u16,
     pub note: String,
+    /// A stem of the same song played with the first background, sample for sample, whose volume
+    /// follows the listener's distance to a point (absent: none, the background itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<Follow>,
+}
+
+/// A song's channels heard by the listener's 3D distance `d` to `at` (`func_100114D0` →
+/// `func_1000A420`, `func_1000E588`): v = clamp(32767·(far − d)/(far − near), 0, 32767) >> 8, the
+/// stem at min(v, 100) %, unpanned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Follow {
+    pub at: [i16; 3],
+    pub near: u16,
+    pub far: u16,
+}
+
+/// A sound zone (a kind-2 trigger, `func_150A11C4` → `func_150A23E4`): the first time any player is
+/// inside trigger record `trigger` (its zone test), `play` starts at `at` and never stops (the record
+/// restarts its voice); heard centred, by the listener's distance to `at` (`horizontal`: in x and z
+/// only) between `play.near` and `play.far`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Zone {
+    pub trigger: u16,
+    pub at: [i16; 3],
+    pub horizontal: bool,
+    pub play: Play,
 }
 
 /// A flickering lamp's buzz (`func_15160954` → `func_151618BC`): it plays at `at` as each of
@@ -206,10 +232,11 @@ pub enum On {
     /// while it keeps changing (from its 10th VI of change, a loop), 1 when it stops.
     GunAim { step: u8 },
     /// War: Beach: a villager walking into the plunger's voice trigger (0x25) while the plunger is
-    /// ready: its radio voice, [`Cue::delay`] after [`On::RadioClick`]'s click on.
-    PlungerReady,
+    /// ready: its radio voice, [`Cue::delay`] after [`On::RadioClick`]'s click on; `bot`: a player
+    /// without a camera.
+    PlungerReady { bot: bool },
     /// War: Beach: a villager setting the plunger off: its radio voice, as [`On::PlungerReady`].
-    Plunger,
+    Plunger { bot: bool },
     /// War: Beach: a radio voice's click on its speaker's voice slot: when the voice is called
     /// (`end` false), and when it has played (`end` true).
     RadioClick { end: bool },
@@ -262,6 +289,9 @@ pub struct MapSounds {
     /// The voice lines the map's mode plays (the game's MP3s), by what plays them (absent: none).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lines: BTreeMap<String, Line>,
+    /// Its sound zones (absent: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<Zone>,
 }
 
 /// A voice line: `file` (relative to `audio/`) played unpositioned at `volume` (out of 32767).
@@ -287,7 +317,10 @@ pub struct Audio {
 impl Events {
     /// Every [`Play`], for checks.
     fn plays(&self) -> impl Iterator<Item = &Play> {
-        let maps = (self.maps.values()).flat_map(|m| m.emitters.iter().map(|e| &e.play));
+        let maps = (self.maps.values()).flat_map(|m| {
+            let zones = m.zones.iter().map(|z| &z.play);
+            m.emitters.iter().map(|e| &e.play).chain(zones)
+        });
         let clips = (self.characters.values().flatten()).filter_map(|c| match &c.action {
             ClipAction::Play(p) => Some(p),
             _ => None,
@@ -426,11 +459,13 @@ mod tests {
                             file: "maps/2d/background.wav".into(),
                             volume: 32767,
                             note: "recorded".into(),
+                            follow: None,
                         }],
                         emitters: vec![Emitter {
                             at: [-1101, -1201, -229],
                             play: play(vec![577]),
                         }],
+                        zones: Vec::new(),
                         lines: BTreeMap::from([(
                             "escape".into(),
                             Line {

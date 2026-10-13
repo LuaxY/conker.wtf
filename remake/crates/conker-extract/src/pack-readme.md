@@ -28,6 +28,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, War: Beach's night lights on 0x2B, none on the others |
 | `maps/<map>/outros.json` | The War victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), none on the others |
 | `maps/<map>/outro.gltf`, `outro.bin` | The models the outros show (2d, 30, 2b): glTF scenes named `09-<entry>` (hex: a bank-09 attachment, in its joint's frame, character model units) and `prop-<placement>` (a placement the level leaves out, at the origin: the outro places it). Textures in `textures/` |
+| `maps/2b/effects.gltf`, `effects.bin` | War: Beach's effect models: scene `09-157`, the detonation's ring (bank 09 #0x157, a sphere of radius 100 at the origin, alpha-blended; the client scales it flat and fades it). Textures in `textures/` |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
@@ -45,9 +46,9 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/events.json` | Which game event plays which sound, at what volume, from where |
 | `audio/common/*.wav` | Sounds anyone makes: weapons, footsteps, hits, pickups, explosions (16-bit mono PCM, the game's own rates) |
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
-| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, and `song-8a.wav`, Beach cs4's song (a recording, `--song`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7) |
+| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, `song-8a.wav`, Beach cs4's song (a recording, `--song`), and `background_stem.wav`, the music's channels 13 and 14 (a recording, `--stem`, cut as `background.wav`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell); War: Beach's strike: `strike_glow.png` (its red floor glow) and `strike_streak.png` (its spinning streak), white with the intensity in alpha, tinted red by the client |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `frenchys.png` (War: Beach's villagers), `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -282,8 +283,14 @@ Volumes are out of 32767; distances in game units; times in 30 Hz ticks. Every `
   stops after that many ticks, or `null`).
 
 Sections:
-- `maps.<map>`: `background` (looped for the whole match) and `emitters` (a flickering lamp's buzz:
-  it plays as each flash of the lamp at `at` starts, `lights.json`'s `flicker`);
+- `maps.<map>`: `background` (looped for the whole match; a second one with `follow` is a stem of
+  the same song, started with the first and looped with it sample for sample, its volume by the
+  listener's 3D distance to `follow.at`: full within `near`, none from `far`; on 0x2B
+  `background_stem.wav`, song 0x4D's channels 13 and 14 with `--stem`), `emitters` (a flickering
+  lamp's buzz: it plays as each flash of the lamp at `at` starts, `lights.json`'s `flicker`) and, if
+  present, `zones` (on 0x2B the escape tunnels' loop: the first time any player is inside trigger
+  record `trigger` of `triggers.json`, `play` starts at `at` and never stops, centred, by the
+  listener's distance to `at`, in x and z only with `horizontal`);
 - `characters.<id>`: the sound events of each clip (`clip` = its logical animation id, as
   `character.json`; `time` in ticks): `play`, `footstep` (a step of that kind, below) or `stop` (a
   channel);
@@ -298,8 +305,8 @@ Sections:
   and `lose` (each player of the team that did not score, 30 frames after a capture: `team` the
   loser's, one of its sounds at it). `carry` and `flag` are radio lines: a human's `radio_click`
   with `end` false at once, the line `delay` later, `radio_click` with `end` true once it has
-  played (a bot's: the line only); none while the same `canister` or `flag` spoke in the last 300
-  frames. The mounted guns
+  played, every one heard by everyone, centred (a bot's line is its own, the next id, louder); none
+  while the same `canister` or `flag` spoke in the last 300 frames. The mounted guns
   (maps 30 and 34): `gun` (at the gun, its state going `from` → `to`: 1 free, 2 a player jumping
   on, 3 manned, 4 firing, 11 stopped by B or overheating, 5 left; 3 → 4 starts the firing loop on
   channel `a`; a looping sound plays until the gun's state changes again), `gun_stop` (at the gunner, when its firing stops), `gun_zoom` (the gunner's zoom,
@@ -308,8 +315,8 @@ Sections:
   change, a loop; 1 when it stops); and character 128's `firing` with weapon 27 (0x1B, the mounted
   gun), the squirrel gunner's battle cry. There is no sound per shot. War: Beach's (map 0x2B):
   `plunger_ready` (a villager walking into the plunger's voice trigger while it is ready) and
-  `plunger` (one setting it off), each its radio voice per character, wrapped in `radio_click` as
-  `carry` (at most one per player in 300 frames); `detonation` (three records, each at its `at`, `delay` after the blast); `debris` (each
+  `plunger` (one setting it off), each its radio voice per character (`bot` a bot's), wrapped in
+  `radio_click` as `carry` (at most one per player in 300 frames); `detonation` (three records, each at its `at`, `delay` after the blast); `debris` (each
   piece landing); `strike_call` (the artillery strike called on a villager whose escape countdown
   ran out, and the villager's voice) and `strike_blast` (40 frames later, at the same spot).
 - A cue's `at` (if present) is where it plays instead of the event's place, and `delay` (if

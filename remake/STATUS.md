@@ -1,5 +1,90 @@
 # Status after wave 6 (2026-10-10)
 
+## War: Beach's environment (2026-10-13)
+**Batch E7. War: Beach has the original's night. The level is lit per vertex, as CBFD lights it: the ambient, the
+lamps with their flicker, the red pulses, a strike's red light, and the sweeping ground lights (a white light crossing
+the map about every 32 frames). The detonation draws three rings at the bunkers' charges and shakes every view with
+the original's six-channel sine; a strike's blast and a rocket's shake the views near them. A strike lays a red glow
+on the floor and spins a red streak. The escape tunnels' loops start on the first entry and never stop. The bots'
+radio lines (their own, the id + 1, at 32700, with the clicks) are heard by everyone, centred. Song 0x4D's channels
+13/14 play as a recorded stem by the distance from the north beach. 0x2D's gate lifts are predicted. No protocol
+change.** Research: `../lab/research/mp-original/beach-environment.md` (items 1-7; 8, the sea, is the rules' batch).
+The relight was checked on one oracle frame first (`beach-environment-scratch/relight/`).
+
+| Part | What |
+|---|---|
+| conker-assets | `audio.rs`: `Background.follow` (`Follow`: a stem's volume by distance, `at`, `near`, `far`), `MapSounds.zones` (`Zone`: trigger, centre, horizontal, play), `On::PlungerReady`/`On::Plunger` carry `bot`. `lib.rs`: `effects_gltf(map)` |
+| conker-extract | `audio.rs`: `zones()` reads the kind-2 sound triggers: id = word 0x1C >> 16, volume = (action & 0x7F)·0x147, near = word 0x1C & 0xFFFF, far = word 0x18. On 2b, 0x23 and 0x24 play 0x4A7 at 17331 and 16350 (451-1385, 601-1487, horizontal). The radio cues for bots are added (the line id + 1, 32700, delay 10). `loop_cut` is the backgrounds' loop cut (frames 1,001,910 + 1,878,088, an 11,010-frame crossfade, round half to even); `STEM_LAG` is 644. `lib.rs`: `PackMap.stem`, and 2b's `effects.gltf` (the ring, bank 09 #0x157). `hud.rs`: `strike_glow.png` (0xE20) and `strike_streak.png` (0xB97). `main.rs`: `--stem [<map>=]<wav>`. `package.json`'s `pack` adds `--stem 2b=../lab/audio/map2b/background_stem.wav`. README updated |
+| extract-character | `parse_effect`: a bank-09 model whose header word 0 is its one display list (the ring 0x157 and the spark 0x132; `parse_attachment` reads word 0 as a part table and fails on them). Both share one resolver |
+| conker-client `audio.rs` (Beach parts) | Zones start when a player is first inside one: a flat voice, its volume by the listener's (horizontal) distance, looped by the bank (0x4A7 loops), restarted if it ends. The stem is a second background voice, started and stopped with the first. Its gain is `follow`: clamp(32767·(far − d)/(far − near)) >> 8, capped at 100/100, over the 3D distance (full within ~3213 of (0, −377, 8227), silent at 4000). The radio: every line and its clicks are flat and heard by all, bots included (`radio`, `clicks_off`, `Src::radio`). `gone` is `pub(crate)` (the rockets' shake). Logs `STEM … gain` once a second |
+| `beach.rs` | `RECORDS` are the explosion records. Rings: `ring(t, a, L)` gives an xz scale of 6.6944·√(t − 1) and alpha a·(1 − ((t − 1)/L)²), with y 2.609, gone after t = 12. Each ring has a random yaw, a = 200 + rand % 56, L = 12 + 4r, and its own material. The detonation keeps its debris, without puffs. `Wave` (`DETONATION`, case 4; `BLAST`, case 5) with `envelope` and `at` (phases from 0, wrapped; each channel stops at its next sign change after the decay), and `shake_share`. `Blasts.shakes` holds the detonation (record 0, 2007/9005), a strike's blast (the strike, 506/1013) and a rocket gone (800/2000). `camera()` adds x, y, z to the eye and pitch, yaw, roll (degrees) to its angles. `glow(k, b)` and `streak(k, b)`: the floor glow (a quad of ±50·s on the floor below y + 100, plus 5) and the streak (1500 × w, spun 0.285, 0.106 and −0.086 rad a frame) |
+| `lights.rs` | `share` has no distance cut; `reach` keeps it for 0x2D's room. `Sweepers` (constants, `tick`, `ground`) are stepped in FixedUpdate, headless too, and log each spawn. `relight` (PostUpdate, 2b only): each unlit draw's vertex colour × min(1, ambient + Σ rgb·share) over up to 10 lights, the nearest to the point 1000 in front of the view. A mesh's colours are read once decoded (its own `AssetEvent::Added` reader) |
+| `lib.rs` (prediction) | `Before` (a local rollback component) holds the body's position before its last step. `own_tick` tests every lift with `takes(old, pos, floor)` (the shape-3 filter is gone), sets `Before` after the ride and clears it on a step's respawn, as `Lifts::ride` and `reset` do. **`lift.rs` is unchanged** |
+| Pack | Re-exported (`--force`). New: `audio/maps/2b/1191.wav` (0x4A7), `audio/maps/2b/background_stem.wav`, the bots' lines `audio/characters/156/1706.wav`, `1708.wav` and `157/1702.wav`, `1704.wav`, `maps/2b/effects.gltf`, `effects.bin` and `textures/3301-32x32-ia16-i.png`, `hud/strike_glow.png`, `hud/strike_streak.png`. Changed: `audio/events.json`, `audio/sounds.json`, `hud/hud.json`, `README.md`. `diff -r assets` against a fresh export into a temp folder is empty |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle relight frame (`ConkerRecomp.e7`, DLs 150-300; `beach-environment-scratch/relight/`) | Every terrain draw has G_LIGHTING (geometry mode 0x00220405, no normals). The pack's vertex colours are the drawn ones (1752 of 1754). FULL = 2048 is exact in world units (clip space × the coordinate modifier is a rotation): a sweeper's share 0.5964 against 0.5977 at 185, a lamp's 0.4916 at 456. A far vertex of colour 111 shades to (49, 62, 93), the remake's ambient-only (48, 61, 92). Up to 10 lights a view (not 7), with no distance cut. The flashes are kind 0x4 |
+| New tests | conker-extract: `loop_cut_is_the_backgrounds` (lab-gated, byte for byte), and `tests/pack.rs` (the zones, the bots' radio ids and volumes, the ring: one draw of 336 indices, BLEND; the strike textures). conker-client: `the_stem_follows_and_zones_fade_by_distance`, `the_prediction_rides_a_gate` (a crossing rides with `Before`, not from None, as `Lifts::ride`), `the_rings_follow_the_original` (`explosion.csv`: the three rings' alpha within 1, scale within 0.001), `the_shakes_follow_the_original` (`shake.csv`: the amplitudes, and all 12 channels' stop frames exactly), `the_strike_marks_follow_the_original` (`strike.csv`), `the_beach_is_lit_as_the_original` (the frame's numbers), `sweepers_cross_the_beach` (the generator's ranges, about 1000 in 32,000 frames; light 0x801BF040 from read 212 to 280), `sweepers_light_the_ground` (the pack's collision against `sweep.csv`'s rays). Updated: `a_flag_taken_calls_on_the_radio` (a bot's lines) |
+| Screens (`beach/shots.sh`, ports 5980/5984; `relit.png` added to `live`) | `blasts.png` (det + 8: a ring at the bunker, the night, the red pulses), `shake.png` (det + 4), `strike-light.png` (call + 20: the glows under three villagers, the streaks), `strike.png` (the blast), `relit.png` (the whole map at night). `relit-sweeper.png` and `relit-dark.png` (port 5986, three clients over the map; a sweeper at (2776, 180, 535), 159 from a vertex, share 0.81: `relit-sweeper-crop.png`, against the same corner without one). `gate-lift.png` (port 5982, 0x2D, one human walked through gate 1): the server's `t=335 slot 0 takes the lift to record 4` and the client's `t=335 predicted respawn on record 4: the camera cuts` on the same tick |
+| Sounds (port 5988, `RUST_LOG=conker_client::audio=debug`, 2 bots, the human on the north beach) | Bot 0 (a villager) on the plunger: 0x5B0 at 25000, its line 0x6A8 (157's 0x6A7 + 1) at 32700 ten ticks later, 0x5B1, all centred and full for the far human. The human into tunnel 0xD: `id=1191 p=Zone(0) vol=17331` on entry. `STEM gain=1.00` on the north beach, 0.00 once away |
+| `bun run test` | pass: 382 tests, 1 ignored |
+| `bun run check` | pass: fmt, clippy on every crate, the web check. `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` passes too |
+
+**Gaps.**
+- **V:** the pack drops the vertex flag's bit 15 (unlit). 97 of 2b's terrain vertices keep their colour in the original (83 black, 2 grey, and the two bulbs' 12 white); here the bulbs dim with their lamp's flicker while it is dark.
+- **V:** the bots' click-off is 25000 in the original; the pack's cue says 30000 (left as is). The stem's lag alternates 552/736 samples; 644 is the midpoint (±92, ±4 ms).
+- **C:** the radio is `func_15103C14` on every War map, so Total War's and Colors' bots are now heard by everyone too.
+- **I:** the streak's geometry (`func_15140410`) is not decoded: a quad centred on the target, turned by the three angles. The glow and streak blend as Bevy's alpha blend (render modes 0x03 and 0x1A not read). The remake's blast is call + 40 (the oracle's + 41), so the glow shrinks a frame earlier.
+- **I:** not ported: the flak (the map's emitter `func_150E9E34`: white lights of size 83-94, V one in DL 250), the far fire and smoke, the strike's 11 sparks (model 0x132; `parse_effect` reads it), the generic blast's light.
+- **I:** the rockets' shake is War: Beach's only (the original's rocket code serves every map). A light's share uses this frame's size (the original's is a frame late). The shake's angles go to Bevy's YXZ (the signs unchecked on a frame).
+- **I:** sweepers and lamps use each client's own random numbers; sweepers move once a tick (not interpolated). On 2b's sparse terrain (1779 vertices) a sweeper lights a vertex only within ~450, as in the original.
+- **I:** a mesh two nodes share (03-5b, placements 6 and 7) is relit at its first node (`ponytail` note). Zone voices are not reset on a match restart (as the emitters).
+- **Lane:** `extract-character` (`held.rs`, `lib.rs`) is the pack's parser, outside both lanes' lists.
+
+## Mounted guns: the leftovers (2026-10-13)
+**Batch E3. The jump onto a gun keeps the speed the player came with and homes on the seat. The leap off follows the
+multiplayer rule: facing 0xB000 at z > 0, else 0x3000, the jump 0x1200 left of it. The press's own frame moves (15
+along, the gun's push), and the air brakes 0.875 a frame from the next. A human gunner's bullets head from the muzzle
+for what the scope's ray meets: e1's first shot knocks player 2 at 210.2° (V 210.4°, was ~220°). A hurt gunner's
+trigger takes Z and B. A capture's respawn wins over `Effect::Gun`, as in the original. The fire process now lives on
+the gunner's mount, so its client predicts the shots: the flash, the kick, the fire's sounds and `Fighter.shots`. The
+release's sound plays again 15 ticks on. The HUD blends its alphas as the N64 does, which removes the flash's pale
+box. Protocol 22.** Oracle runs: `../lab/research/mp-original/mounted-gun-scratch/e3/` (l1, l3, h1-h3, k1-k3).
+
+| Part | What |
+|---|---|
+| conker-sim `movement.rs` | `hop(p, to, world)`: the speed brakes 2.5 a frame along the move angle, then x and z go 0.2 of the way to `to`. `leap(p, angle, world, side, others)`: y-vel 30, speed 30, gravity 4, lock 0xFF, facing = angle − 0x1200. The press's frame moves 15 along `angle`, integrates y once (26 left), pushes out of `others` and sweeps the walls. `air()`: a lock also brakes a jump with the stick released (`func_1504CB98`: obj+0x89 zeroes the drive, C) |
+| conker-rules `gun.rs` | `Mount.to`: the seat's x and z at the touch. The fire process (`firing`, `next`, `barrel`, `rng`) and `Mount::fire()` moved from `Gun`, which keeps yaw, pitch, the wait, `shots` and `last` for the clients. `sight()`: the scope's ray crossed with the muzzle's plane, through the barrel joint's (±50, 0, 200) and (±13, 50, 220) (tables 0x800A1E04 and 0x800A1E1C, read in k3). `SIGHT` (333) is gone |
+| `game.rs` | The touch keeps `xz_speed`, sets `Mount.to` to the seat, continues the gun's barrel and seeds the mount's draws from the match's. A: the MP facing rule (`func_1505F298`: obj+0x1C > 0, C). `fire_gun(i)`: `Mount::fire`, then a human's bullet goes from the muzzle toward the first body part or wall the ray from `sight` meets (`first_part`, `raycast`: the twin guns' aim cast, `func_151C4B0C`), or from that point along the ray if none. A bot's goes along the barrel; `Fighter.shots` counts. `mounted_guns` runs it for each seated gunner after the players, and `step_player` after its player. `hurt_frame` steps the trigger with Z and B. `Effect::Gun`: comment only (below) |
+| conker-client | `hud.rs`: the local gunner's flash and kick come from the predicted `Fighting` (shot count, the mount's barrel), not `GunView`. `display_alpha(l, a)` = l·lin(a) + (1 − l)·(1 − lin(1 − a)), l the colour's luminance. It applies to every HUD quad's alpha and, once loaded, to every HUD texel (`display_space`). `audio.rs`: `Sounds.replays` replays the release 15 ticks on, same id, at the release's spot; the local gunner's gun state and trigger come from the predicted mount |
+| conker-sim `net.rs` | `PROTOCOL_ID` 21 → **22** (`Mount` gains `to`, `firing`, `next`, `barrel`, `rng`) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle | l1 (gun A turned 90°, z < 0) and l3 (0x34, z > 0): the leap's facing 0x3000 / 0xB000, the move 0x1200 left, whatever the yaw. h1-h3 (0x34, P2's twin guns hit the seated P1 at 116): Z held fires on through state 29, budget −2 a frame. Let go at 118, the fire runs its 20 frames. First pressed at 118, it fires at 119. k1/k2 (lldb, e1): the first shot's direction (−0.845, −0.201, 0.495) meets P2's body 146 along the ray; later ones go to (2102.5, 675.39, 862.5) on the floor, 334 along it from the eye, which the fire clip lifts 5 units. bots1 (Colors) 3072/3073: the seated gunner is at its base on the recreate frame |
+| New tests | conker-sim `hop_keeps_the_speed_and_homes` (b30 4896-4910: speed and x, z to 1e-3 toward the undrawn gun's origin; t1 132-155 toward the seat, the facing turning 3072 a frame). conker-bots `mounted_guns_m2_and_e1` extended. m2's leap 1601-1615: facing 0xB000, speed 30 → 18.625, positions and the landing (175.39, 543.95, 6186.73) to 0.05. l1's on gun A turned: facing 0x3000, the landing (−401.42, −388, −3808.90). e1: 13 shots (V 13), the knock 0x9577 (V 0x9595), later shots within 0.011 of V's two directions. From V's eye the floor point is V's to 0.1. conker-rules `a_hurt_gunner_fires_and_a_capture_respawns_it` and `the_gunners_client_predicts_its_shots` (a client match per tick, guns at home: the same Shot events and `Fighter` as the server's, 60 ticks). conker-client `a_gun_release_plays_twice` and `hud_alphas_blend_as_the_console` (a black fade within 8/255 of the console's over grey 0.1-0.9, 28/255 unweighted; white over black exact) |
+| Screens (`guns.sh flash N`, N = 160, 163, 167, 170; ports 5970-5974) | `lab/screens/guns/flash-display-b-164.png` (= `flash-b-163`: slot 1's sight at read 164, barrel 1's flash on the left): the glow fades into the ground with no hard edge. Before: `flash-a-167.png` (kept from the old build) and `own-flash.png`, the pale box with straight sides. The shots now fall on other reads (the mount's own draws), so 167 shows no flash; 163 (slot 0) and 170 show the bullet only. The gunner clients roll back only around their mounts (not predicted), then none from tick 480 to the end: the fire at 554-882, the overheat, the stop and the leap at 954 |
+| `smoke.sh`, map 30 (port 5972) | pass: three clients, 0 rollbacks, prediction error 0 |
+| `bots.sh`, 5 bots at einstein, 150 s | Map 34 (port 5970): every bot moves; the bot that took the gun at t=2494 fired from it to the end (overheat cycles), 2 hits, and so never died (FAIL "dies 0", the gun campers of earlier runs). The others fight, die and respawn. Map 30 (port 5976): pass (4-37 hits, 4-7 deaths each, 27 lift rides); gun A taken twice, its first gunner killed on it at t=1715. Both: no fault, no panic |
+| `bun run test` | pass (382 tests, 1 ignored) |
+| `bun run check` | pass. `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` passes |
+
+**Gaps.**
+- **I:** the fire clip's recoil is not modelled: the eye and muzzle stay at rest, so later shots are within 0.011 of V's
+  directions, not exact.
+- **I:** the jump homes on the seat; the original homes on joint 3 as last drawn (b30 and m2 homed on the origin: the
+  oracle had not drawn those guns yet).
+- **I, unobserved:** A while hurt on the seat (only Z and B were run). The barrels' turn across two mounts. A gunner
+  left on a recreated gun (it falls from the seat, as before).
+- **I:** `display_alpha` is exact for black overlays and for white over black only. A bright overlay over a bright
+  scene comes out up to 25/255 fainter than the console's; the toe of sRGB adds up to 4/255 near black.
+- **I:** the release's replay sits at the release's spot; the original copies the voice's level and pan (no position).
+- **Latency:** the touch is still not predicted (the client's guns are at home), so the mount costs a rollback.
+  e1's knock-back slides 167.7 (V 140.7); that is the knock's physics, outside this batch.
+- **Lane:** `audio.rs` also has the Beach lane's uncommitted edits; this batch touched `guns()`, `Sounds.replays` and
+  the gun state handed to it in `hear()`.
+
 ## Total War and Colors leftovers: the rules (2026-10-13)
 **Batch E5, the rules half. In a lives-mode Total War match, a human out of lives takes over its team-mate bot 13
 frames after its out frame, with no input. It gets the bot's body where it stands (momentum, health, weapon, the bot's

@@ -35,6 +35,7 @@ use conker_assets::hud::{
 };
 use conker_assets::outro::{Outro, tip};
 use conker_rules::game::{Standing, places};
+use conker_rules::net::Fighting;
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
@@ -168,6 +169,49 @@ pub fn kick(k: u32) -> (f32, u8) {
         v += (255.0 - v) * f32::from_bits(0x3F2D_0E57);
     }
     (drop, 255 - v as u8)
+}
+
+/// The weight that blends a colour of display luminance `l` (0-1) at the N64's `alpha` in Bevy's
+/// blend as the console's does: its RDP mixes the gamma-encoded framebuffer, Bevy the linear one,
+/// where a faint alpha shows far brighter (the gun flash's glow, alpha 1-25, made its quad a pale
+/// box). Exact for black over anything (`1 − lin(1 − a)`: the fades) and for white over black
+/// (`lin(a)`: the flash over the night), between them by `l` (I: a bright overlay over a bright
+/// scene comes out fainter than the console's).
+pub fn display_alpha(l: f32, alpha: f32) -> f32 {
+    let lin = Srgba::gamma_function;
+    l * lin(alpha) + (1.0 - l) * (1.0 - lin(1.0 - alpha))
+}
+
+/// A display colour's luminance, 0-1.
+fn luminance([r, g, b]: [u8; 3]) -> f32 {
+    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.0
+}
+
+/// The HUD's pictures blend as the console's: each texel's alpha by [`display_alpha`], once loaded
+/// (the pack's are all RGBA).
+fn display_space(
+    mut events: MessageReader<AssetEvent<Image>>,
+    a: Option<Res<HudAssets>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(a) = a else {
+        return;
+    };
+    for event in events.read() {
+        let AssetEvent::LoadedWithDependencies { id } = event else {
+            continue;
+        };
+        let mut ours = (a.glyphs.iter()).chain(a.textures.values().map(|t| &t.0));
+        if ours.any(|h| h.id() == *id)
+            && let Some(mut image) = images.get_mut(*id)
+            && let Some(data) = image.data.as_mut()
+        {
+            for p in data.as_chunks_mut::<4>().0 {
+                let alpha = display_alpha(luminance([p[0], p[1], p[2]]), f32::from(p[3]) / 255.0);
+                p[3] = (alpha * 255.0).round() as u8;
+            }
+        }
+    }
 }
 
 /// A flash's alpha `k` frames after its shot (`func_15154C90`, C): its `life` VIs (5-8) lose 2 a
@@ -1073,7 +1117,7 @@ pub fn build(app: &mut App, hud: Hud) {
             });
         },
     );
-    app.add_systems(Update, draw);
+    app.add_systems(Update, (display_space, draw));
 }
 
 /// The HUD's camera: orthographic, one unit a window pixel, over the view (into `target` when
@@ -1308,10 +1352,11 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros, blasts): (
+    (playing, outros, blasts, fighting): (
         Res<crate::outro::Playing>,
         Res<crate::outro::Outros>,
         Option<Res<crate::beach::Blasts>>,
+        Query<&Fighting, With<FollowCamera>>,
     ),
     timeline: Res<LocalTimeline>,
     (mut fading, mut escaped, mut ended): (
@@ -1400,18 +1445,24 @@ fn draw(
             shown.strike = (strikes.filter(|s| s.slot == own.1.slot))
                 .find_map(|s| s.blast)
                 .map(|t| tick.saturating_sub(t));
-            // The own gun's shots, by barrel, from the tick this client sees each (the count only
-            // falls when Colors recreates the gun).
-            let manned = (m.guns.iter().enumerate()).find(|g| g.1.gunner == Some(own.1.slot));
+            // The own gun's shots, by barrel, on the tick the prediction fires each (the fighter's
+            // shot count and its mount's next barrel; a rollback that takes one back clears them).
+            let manned = (fighting.single().ok()).and_then(|f| {
+                let g = f
+                    .state
+                    .gun
+                    .filter(|g| g.state != conker_rules::gun::LAUNCH)?;
+                Some((usize::from(g.gun), f.state.shots, g.barrel ^ 1))
+            });
             match (manned, fired.0) {
-                (Some((k, v)), Some((last, n))) if k == last && v.shots >= n => {
-                    if v.shots > n {
-                        fired.1[usize::from(v.barrel.min(1))] = Some((tick, v.shots));
+                (Some((k, shots, b)), Some((last, n))) if k == last && shots >= n => {
+                    if shots > n {
+                        fired.1[usize::from(b)] = Some((tick, shots));
                     }
                 }
                 _ => fired.1 = [None; 2],
             }
-            fired.0 = manned.map(|(k, v)| (k, v.shots));
+            fired.0 = manned.map(|(k, shots, _)| (k, shots));
             if let Some(g) = &mut shown.gun {
                 let Sight { flash, kick, .. } = gun_fire(&a.hud.gun.flash, fired.1, tick);
                 (g.flash, g.kick) = (flash, kick);
@@ -1460,8 +1511,9 @@ fn draw(
             let size = Vec2::from(size.map(f32::from));
             let [x0, y0, x1, y1] = s.uv;
             let [r, g, b, alpha] = s.colour;
+            let alpha = display_alpha(luminance([r, g, b]), f32::from(alpha) / 255.0);
             materials.add(StandardMaterial {
-                base_color: Color::srgba_u8(r, g, b, alpha),
+                base_color: Color::srgb_u8(r, g, b).with_alpha(alpha),
                 base_color_texture: texture,
                 uv_transform: Affine2::from_scale_angle_translation(
                     Vec2::new(x1 - x0, y1 - y0) / size,
@@ -2415,6 +2467,29 @@ mod tests {
             // 4 handle pictures, 2 bars and 9 sight pictures, the tapes and the flashes.
             assert_eq!(seen, 15 + 2 * usize::from(tapes) + flashes, "{dump}");
         }
+    }
+
+    /// Bevy's linear blend with [`display_alpha`]'s weight lands where the N64's display-space
+    /// blend does: a black fade over any scene to 8/255 (28/255 unweighted), white over black. The
+    /// flash's faint glow (alpha 25 and less) shows at 10% over black, as on the console, where
+    /// the plain weight gave 35% (the pale box).
+    #[test]
+    fn hud_alphas_blend_as_the_console() {
+        let (lin, show) = (Srgba::gamma_function, Srgba::gamma_function_inverse);
+        for b in [0.1, 0.2, 0.5, 0.9] {
+            for a in [0.1, 0.25, 0.5, 0.75, 0.9] {
+                let fade = show(lin(b) * (1.0 - display_alpha(0.0, a)));
+                assert!(
+                    (fade - b * (1.0 - a)).abs() < 0.03,
+                    "black {a} over {b}: {fade}"
+                );
+            }
+        }
+        for a in [0.1, 0.25, 0.5, 0.75, 0.9] {
+            assert!((show(display_alpha(1.0, a)) - a).abs() < 1e-5);
+        }
+        let glow = 25.0 / 255.0;
+        assert!((show(display_alpha(1.0, glow)) - glow).abs() < 1e-5 && show(glow) > 0.34);
     }
 
     /// A shot flashes from its frame and kicks its side's handle from the next: barrel 0 the right.

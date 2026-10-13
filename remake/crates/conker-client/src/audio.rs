@@ -49,7 +49,7 @@ use conker_anim::combat::{
 };
 use conker_assets::audio::Line;
 use conker_assets::audio::{
-    Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
+    Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, Follow, On, Play, Sound,
 };
 use conker_assets::outro::{Outro, frame};
 use conker_assets::{Held, Manifest, Pickup};
@@ -94,6 +94,8 @@ const LINES: [(u16, &str); 3] = [
 /// A War outro `n`'s song ([`conker_assets::outro::Outro::song`]) plays as id `SONG - n`: not an
 /// MP3 (it ducks nothing) nor the background (nothing ducks it).
 const SONG: u16 = ESCAPE - 0x100;
+/// The background's stem ([`Follow`]): War: Beach's song 0x4D's channels 13 and 14.
+const STEM: u16 = SONG - 0x100;
 /// Whether a voice is an MP3 line: a map's ([`LINES`]) or an outro's voice.
 fn mp3(id: u16) -> bool {
     id > ESCAPE - LINES.len() as u16
@@ -140,9 +142,13 @@ struct Pack {
     characters: Vec<&'static str>,
     clips: Vec<Vec<ClipSound>>,
     background: Option<Background>,
+    /// The background's stem and the point its volume follows ([`Follow`]).
+    stem: Option<(Background, Follow)>,
     emitters: Vec<Emitter>,
     lines: std::collections::BTreeMap<String, Line>,
     ready_zone: Option<CameraVolume>,
+    /// The map's sound zones ([`conker_assets::audio::Zone`]) and their trigger records' tests.
+    zones: Vec<(conker_assets::audio::Zone, CameraVolume)>,
 }
 
 impl Pack {
@@ -165,9 +171,18 @@ impl Pack {
             .flatten()
             .map(CameraVolume::parse_record);
         let map = audio.events.maps.get(map);
-        let background = map.and_then(|m| m.background.first().cloned());
+        let backgrounds = map.map_or(&[][..], |m| &m.background[..]);
+        let background = backgrounds.iter().find(|b| b.follow.is_none()).cloned();
+        let stem = (backgrounds.iter()).find_map(|b| Some((b.clone(), b.follow.clone()?)));
         let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
         let lines = map.map_or_else(Default::default, |m| m.lines.clone());
+        let records = triggers.as_chunks::<0x34>().0;
+        let zones = (map.iter().flat_map(|m| &m.zones))
+            .filter_map(|z| {
+                let r = records.get(usize::from(z.trigger))?;
+                Some((z.clone(), CameraVolume::parse_record(r)))
+            })
+            .collect();
         Self {
             audio,
             held,
@@ -175,9 +190,11 @@ impl Pack {
             characters,
             clips,
             background,
+            stem,
             emitters,
             lines,
             ready_zone,
+            zones,
         }
     }
 }
@@ -230,17 +247,21 @@ enum Owner {
     Gun(usize),
     /// An outro's script sound (an index of its `sounds`).
     Outro(usize),
+    /// A map's sound zone (an index of its `zones`).
+    Zone(usize),
     World,
 }
 
 /// Where a sound starts from and whose it is: `follows` a player's slot (it moves with it), `tag` the
-/// cue whose condition keeps it playing.
+/// cue whose condition keeps it playing; `flat`: heard centred at its volume wherever it is (the
+/// radio, flag 0x100 with near/far 0x7FFE/0x7FFF).
 #[derive(Clone, Copy)]
 struct Src {
     owner: Owner,
     pos: [f32; 3],
     follows: Option<u16>,
     tag: Option<usize>,
+    flat: bool,
 }
 
 impl Src {
@@ -250,6 +271,7 @@ impl Src {
             pos: p.pos,
             follows: Some(p.slot),
             tag: None,
+            flat: false,
         }
     }
 
@@ -259,6 +281,15 @@ impl Src {
             pos,
             follows: None,
             tag: None,
+            flat: false,
+        }
+    }
+
+    /// The radio at `p`: its owner's, heard centred everywhere.
+    fn radio(p: &Seen) -> Self {
+        Self {
+            flat: true,
+            ..Self::player(p)
         }
     }
 }
@@ -452,6 +483,10 @@ struct Sounds {
     wearers: HashSet<u16>,
     /// The outro's script sounds started (indices of its `sounds`).
     outro: HashSet<usize>,
+    /// The map's sound zones started (indices of [`Pack::zones`]).
+    zones: HashSet<usize>,
+    /// The gun releases' replays due: tick, cue, sound id, where ([`Self::guns`]).
+    replays: Vec<(u32, usize, u16, Src)>,
 }
 
 /// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
@@ -459,6 +494,22 @@ struct Sounds {
 /// over; the music plays at its volume × factor / 0x8000 (V Beach's 0x4650: 0x1E09 at the bottom,
 /// −0x233 and +0x8CA a frame; `b3` 169-187, 686-690; snd ev 103-121, 308-312).
 const DUCK: [f32; 4] = [32768.0, 14000.0, 1024.0, 4096.0];
+
+/// A stem's gain at the listener's distance `d` from its point (`func_1000A420`, `func_1000E588`):
+/// v = clamp(32767·(far − d)/(far − near), 0, 32767) >> 8, then min(v, 100) %.
+pub fn follow(f: &Follow, d: f32) -> f32 {
+    let (near, far) = (f32::from(f.near), f32::from(f.far));
+    let v = (32767.0 * (far - d) / (far - near)).clamp(0.0, 32767.0) as u32 >> 8;
+    v.min(100) as f32 / 100.0
+}
+
+/// A sound zone's volume (out of 32767) at the listener's distance `d` (`func_1000A420`): full
+/// within `near`, linear to none at `far`, silent below [`QUIET`].
+pub fn zone_volume(play: &Play, d: f32) -> f32 {
+    let (near, far) = (f32::from(play.near), f32::from(play.far));
+    let v = f32::from(play.volume) * ((far - d) / (far - near)).clamp(0.0, 1.0);
+    if v < QUIET { 0.0 } else { v }
+}
 
 /// The duck factor a tick on from `level`, a line playing or not ([`DUCK`]).
 pub fn duck(level: f32, line: bool) -> f32 {
@@ -557,7 +608,11 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
 
 /// The projectiles of last tick's list `old` that `new` no longer has. Lists keep their order (new
 /// ones go last), so each one left is the next of `new` within `step` of where it was.
-fn gone(old: &[[f32; 3]], new: &[[f32; 3]], step: f32) -> impl Iterator<Item = [f32; 3]> {
+pub(crate) fn gone(
+    old: &[[f32; 3]],
+    new: &[[f32; 3]],
+    step: f32,
+) -> impl Iterator<Item = [f32; 3]> {
     let mut next = new.iter().peekable();
     old.iter().copied().filter(move |o| {
         let kept = next.peek().is_some_and(|n| dist2(**n, *o) <= step * step);
@@ -604,7 +659,7 @@ impl Sounds {
                 tag: src.tag,
                 pos: src.pos,
                 follows: src.follows,
-                flat: false,
+                flat: src.flat,
                 volume: f32::from(play.volume) * scale,
                 own: play.own.map(|v| f32::from(v) * scale),
                 near: f32::from(play.near),
@@ -964,9 +1019,17 @@ impl Sounds {
 
     /// The mounted guns' sounds (`On::Gun`, at the gun on its own channels: a state change stops
     /// its loops and plays its change's cues; C `func_1507BC14`) and the release (`On::GunStop`, at
-    /// the gunner as the trigger falls; C `func_15065A5C`).
+    /// the gunner as the trigger falls; C `func_15065A5C`), whose sound plays again 15 ticks on, no
+    /// longer following the gunner (its callback `func_1000EC24` after 30 VIs restarts it at the
+    /// voice's level and pan, unpositioned; V gcQ).
     fn guns(&mut self, cx: &Cx, guns: &[GunView], players: &[(Seen, Seen)]) {
         let cues = &cx.pack.audio.events.cues;
+        for (_, i, id, src) in (self.replays)
+            .extract_if(.., |r| r.0 <= cx.tick)
+            .collect::<Vec<_>>()
+        {
+            self.start(cx, &cues[i].play, &[id], 1.0, src);
+        }
         let old = std::mem::replace(&mut self.guns, guns.to_vec());
         for (k, (was, is)) in old.iter().zip(guns).enumerate() {
             let owner = Owner::Gun(k);
@@ -987,8 +1050,18 @@ impl Sounds {
             if was.trigger && !is.trigger {
                 let gunner = (was.gunner).and_then(|s| players.iter().find(|p| p.1.slot == s));
                 let src = gunner.map_or(Src::at(is.pos), |p| Src::player(&p.1));
-                for cue in cues.iter().filter(|c| c.on == On::GunStop) {
-                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+                for (i, cue) in cues.iter().enumerate().filter(|c| c.1.on == On::GunStop) {
+                    let Some(&id) = (cue.play.sounds)
+                        .get(self.rng.next_u32() as usize % cue.play.sounds.len().max(1))
+                    else {
+                        continue;
+                    };
+                    self.start(cx, &cue.play, &[id], 1.0, src);
+                    let again = Src {
+                        follows: None,
+                        ..src
+                    };
+                    self.replays.push((cx.tick + 15, i, id, again));
                 }
             }
         }
@@ -1101,8 +1174,8 @@ impl Sounds {
                 .iter()
                 .map(|p| p.1)
                 .find(|p| beach::Plunger::under(p.pos, m.plunger));
-            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS && !p.bot) {
-                self.radio(cx, &p, On::Plunger, p.slot);
+            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS) {
+                self.radio(cx, &p, On::Plunger { bot: p.bot }, p.slot);
             }
         }
         self.cooldown = m.beach.then_some(m.cooldown);
@@ -1115,9 +1188,8 @@ impl Sounds {
                 self.strikes.push((is.slot, is.pos, cx.tick));
             }
             let ready = cx.pack.ready_zone.is_some_and(|z| z.contains(is.pos));
-            let villager = is.team == beach::VILLAGERS && !is.bot;
-            if ready && m.cooldown == 0 && villager && is.health > 0 {
-                self.radio(cx, is, On::PlungerReady, is.slot);
+            if ready && m.cooldown == 0 && is.team == beach::VILLAGERS && is.health > 0 {
+                self.radio(cx, is, On::PlungerReady { bot: is.bot }, is.slot);
             }
             if is.local && was.freeze == 0 && is.freeze > 0 && is.team == beach::VILLAGERS {
                 self.line(cx, LINES[0]);
@@ -1148,34 +1220,97 @@ impl Sounds {
             if cx.tick <= due || self.voices.iter().any(speaking) {
                 self.radios.push((slot, due, i));
             } else if let Some(p) = players.iter().find(|p| p.1.slot == slot) {
-                self.cues(cx, &p.1, Src::player(&p.1), |on| {
+                self.cues(cx, &p.1, Src::radio(&p.1), |on| {
                     *on == On::RadioClick { end: true }
                 });
             }
         }
     }
 
-    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) or an outro's voice plays.
+    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) or an outro's voice plays; its stem's
+    /// also by the listener's distance ([`follow`]).
     fn duck_music(&mut self, cx: &Cx) {
         let line = (self.voices.iter()).any(|v| !v.stopped && mp3(v.id));
         self.duck = duck(self.duck, line);
         let [full, ..] = DUCK;
-        for v in self.voices.iter_mut().filter(|v| v.id == BACKGROUND) {
-            let b = cx
-                .pack
-                .background
-                .as_ref()
-                .map_or(32767.0, |b| f32::from(b.volume));
-            v.volume = b * self.duck / full;
+        for v in (self.voices.iter_mut()).filter(|v| v.id == BACKGROUND || v.id == STEM) {
+            let (b, gain) = match (v.id, &cx.pack.stem) {
+                (STEM, Some((b, f))) => {
+                    let at = f.at.map(f32::from);
+                    (b, follow(f, dist2(at, cx.ear.pos).sqrt()))
+                }
+                _ => match &cx.pack.background {
+                    Some(b) => (b, 1.0),
+                    None => continue,
+                },
+            };
+            v.volume = f32::from(b.volume) * self.duck / full * gain;
+            if v.id == STEM && cx.tick.is_multiple_of(30) {
+                debug!(
+                    "STEM t={} read={} gain={gain:.2} vol={:.0}",
+                    cx.tick, cx.read, v.volume
+                );
+            }
+        }
+    }
+
+    /// The map's sound zones ([`Pack::zones`]): the first tick any player is inside one, its sound
+    /// starts and plays on for good (restarted whenever it ends: the record's voice), centred, at
+    /// its volume by the listener's distance ([`zone_volume`]).
+    fn zones(&mut self, cx: &Cx, players: &[(Seen, Seen)]) {
+        for (i, (z, zone)) in cx.pack.zones.iter().enumerate() {
+            let inside = || players.iter().any(|p| zone.contains(p.1.pos));
+            if !self.zones.contains(&i) && !inside() {
+                continue;
+            }
+            let at = z.at.map(f32::from);
+            let d = match z.horizontal {
+                true => ((at[0] - cx.ear.pos[0]).powi(2) + (at[2] - cx.ear.pos[2]).powi(2)).sqrt(),
+                false => dist2(at, cx.ear.pos).sqrt(),
+            };
+            let volume = zone_volume(&z.play, d);
+            let owner = Owner::Zone(i);
+            if let Some(v) = self.voices.iter_mut().find(|v| v.owner == owner) {
+                v.volume = volume;
+                continue;
+            }
+            self.zones.insert(i);
+            let sounds = &cx.pack.audio.sounds.sounds;
+            let Some((id, sound)) = (z.play.sounds.first()).and_then(|id| sounds.get_key_value(id))
+            else {
+                continue;
+            };
+            let v = Voice {
+                id: *id,
+                owner,
+                channel: Channel::Free,
+                tag: None,
+                pos: at,
+                follows: None,
+                flat: true,
+                volume,
+                own: None,
+                near: 0.0,
+                far: 0.0,
+                base: MIX * f32::from(sound.volume) / 127.0,
+                speed: 1.0,
+                looped: sound.looped.is_some(),
+                until: None,
+                fade: None,
+                started: cx.tick,
+                stopped: false,
+                control: None,
+            };
+            self.push(cx, v);
         }
     }
 
     /// A radio line `on` (its character's) at `p` (`func_15103C14`), unless slot `busy` spoke one in
-    /// the last [`RADIO_GAP`] ticks: a human's click on at once on its voice slot, the line its
-    /// cue's `delay` later, the click off once that has played (`func_15103910`); a bot's line only
-    /// (`func_15103AA0`: its clicks at volume −25000, I unheard). War: Beach's slots are its
-    /// speakers (its bots' lines are not exported), Total War's and Colors' the canister's and the
-    /// flag's teams.
+    /// the last [`RADIO_GAP`] ticks: the click on at once on its voice slot, the line its cue's
+    /// `delay` later, the click off once that has played (`func_15103910`; a bot's own line and
+    /// clicks, `func_15103AA0`: volume −25000 is 25000 with flag 0x100). All of it heard by
+    /// everyone, centred ([`Src::radio`]; V `beach-environment.md` §6). War: Beach's slots are its
+    /// speakers, Total War's and Colors' the canister's and the flag's teams.
     fn radio(&mut self, cx: &Cx, p: &Seen, on: On, busy: u16) {
         if (self.radio_at.get(&busy)).is_some_and(|&t| cx.tick < t + RADIO_GAP) {
             return;
@@ -1188,19 +1323,15 @@ impl Sounds {
             return;
         };
         self.radio_at.insert(busy, cx.tick);
-        let (tick, src, end) = (cx.tick + u32::from(cue.delay), Src::player(p), false);
+        let (tick, src, end) = (cx.tick + u32::from(cue.delay), Src::radio(p), false);
         self.later.push(Later {
             tick,
             cue: i,
             src,
             end,
         });
-        if !p.bot {
-            self.cues(cx, p, Src::player(p), |o| {
-                *o == On::RadioClick { end: false }
-            });
-            self.radios.push((p.slot, tick, i));
-        }
+        self.cues(cx, p, src, |o| *o == On::RadioClick { end: false });
+        self.radios.push((p.slot, tick, i));
     }
 
     /// War: Colors: a team's score rising is a capture. [`CHEER`] ticks after the tick this client
@@ -1347,32 +1478,38 @@ impl Sounds {
         match (m.phase, &cx.pack.background) {
             (0, Some(b)) if !self.background => {
                 self.background = true;
-                let v = Voice {
-                    id: BACKGROUND,
-                    owner: Owner::World,
-                    channel: Channel::Free,
-                    tag: None,
-                    pos: cx.ear.pos,
-                    follows: None,
-                    flat: true,
-                    volume: f32::from(b.volume),
-                    own: None,
-                    near: 0.0,
-                    far: 0.0,
-                    base: 1.0,
-                    speed: 1.0,
-                    looped: true,
-                    until: None,
-                    fade: None,
-                    started: cx.tick,
-                    stopped: false,
-                    control: None,
-                };
-                self.push(cx, v);
+                // Its stem with it, at its volume from the next tick on ([`Self::duck_music`]).
+                let stem = cx.pack.stem.as_ref().map(|s| (STEM, &s.0));
+                for (id, b) in std::iter::once((BACKGROUND, b)).chain(stem) {
+                    let v = Voice {
+                        id,
+                        owner: Owner::World,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos: cx.ear.pos,
+                        follows: None,
+                        flat: true,
+                        volume: f32::from(b.volume) * f32::from(id == BACKGROUND),
+                        own: None,
+                        near: 0.0,
+                        far: 0.0,
+                        base: 1.0,
+                        speed: 1.0,
+                        looped: true,
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                    };
+                    self.push(cx, v);
+                }
             }
             // The music plays on through a War outro and its STATS (V: no stop from the match's
             // start to the bar scene's songs).
-            (2, _) if !crate::outro::team_mode(m) => self.stop(|v| v.id == BACKGROUND),
+            (2, _) if !crate::outro::team_mode(m) => {
+                self.stop(|v| v.id == BACKGROUND || v.id == STEM)
+            }
             _ => {}
         }
         for &at in flashed {
@@ -1465,6 +1602,10 @@ impl Sounds {
     /// are in (a loop waits for them; a sound that does not loop plays only from its first tick),
     /// at this tick's ear volumes; finished ones go.
     fn upkeep(&mut self, cx: &Cx, players: &[(Seen, Seen)], out: Option<(&Output, &Assets<Pcm>)>) {
+        // The background and its stem go on the mixer together, once both are loaded: their
+        // samples stay aligned.
+        let loaded = |id| out.is_none_or(|(o, p)| o.sounds.get(&id).is_none_or(|h| p.contains(h)));
+        let music = loaded(BACKGROUND) && loaded(STEM);
         for v in &mut self.voices {
             if let Some(p) = (v.follows).and_then(|s| players.iter().find(|p| p.1.slot == s)) {
                 v.pos = p.1.pos;
@@ -1484,6 +1625,7 @@ impl Sounds {
             let ears = v.ears(&cx.ear, cx.tick, self.muted);
             if v.control.is_none()
                 && (v.looped || v.started == cx.tick)
+                && (music || (v.id != BACKGROUND && v.id != STEM))
                 && let Some((out, pcms)) = out
                 && let Some(pcm) = out.sounds.get(&v.id).and_then(|h| pcms.get(h))
             {
@@ -1533,6 +1675,7 @@ fn hear(
     let mut all = std::mem::take(&mut s.players);
     all.clear();
     let mut grenades: &[(u32, Grenade)] = &[];
+    let mut mount = None;
     let guns = game.single().map_or(&[][..], |m| &m.guns[..]);
     for (entity, p, c, anim, fighting, predicted, heard, id) in &mut players {
         // On a mounted gun the weapon is the gun's (its gunner's battle cry, `On::Firing`).
@@ -1551,6 +1694,7 @@ fn hear(
         };
         if let Some(f) = fighting.filter(|_| predicted) {
             grenades = &f.grenades;
+            mount = f.state.gun;
         }
         let bot = id.is_some_and(|i| matches!(i.0, PeerId::Local(_)));
         let seen = Seen {
@@ -1635,6 +1779,7 @@ fn hear(
     let flashed: Vec<[f32; 3]> = lamps.filter(|l| l.flashed).map(|l| l.at).collect();
     s.match_sounds(&cx, m, &all, &flashed);
     s.beach(&cx, m, &all);
+    s.zones(&cx, &all);
     s.colors(&cx, m, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);
@@ -1645,7 +1790,12 @@ fn hear(
         debug!("MUFFLE t={tick} read={read}: off, over");
     }
     MUFFLED.store(s.muffled, Relaxed);
-    s.guns(&cx, &m.guns, &all);
+    // The local gunner's gun as predicted (its fire's sounds on the tick it fires).
+    let mut guns = m.guns.clone();
+    if let Some(g) = mount.and_then(|g| Some((guns.get_mut(usize::from(g.gun))?, g))) {
+        (g.0.state, g.0.trigger) = (g.1.state, g.1.trigger);
+    }
+    s.guns(&cx, &guns, &all);
     let scope = camera.follow.cam.scope;
     let gunner = scope.on && scope.weapon == conker_camera::GUN;
     s.gunner(
@@ -1751,6 +1901,9 @@ fn open(
         .collect();
     if let Some(b) = &pack.background {
         sounds.insert(BACKGROUND, load(&b.file));
+    }
+    if let Some((b, _)) = &pack.stem {
+        sounds.insert(STEM, load(&b.file));
     }
     for (n, o) in outros.0.iter().enumerate() {
         if let Some(v) = &o.voice {
@@ -2501,7 +2654,8 @@ mod tests {
     }
 
     /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);
-    /// none again from that flag's slot within 300 frames; a bot's line is the odd id, unclicked.
+    /// none again from that flag's slot within 300 frames; a bot's line is the odd id, clicked too,
+    /// and heard centred at its volume however far (V `beach-environment.md` §6).
     #[test]
     fn a_flag_taken_calls_on_the_radio() {
         let Some(pack) = colors_pack() else { return };
@@ -2526,13 +2680,91 @@ mod tests {
             s.player(cx, &was, &is, &[])
         });
         assert_eq!(again, [], "busy till 300 frames on");
-        let bot = squirrel(true);
+        let bot = Seen {
+            pos: [20_000.0, 0.0, 0.0],
+            ..squirrel(true)
+        };
+        let mut levels = Vec::new();
         let calls = heard(&mut s, &pack, 400..420, |s, cx| {
             if cx.tick == 400 {
                 s.player(cx, &was, &bot, &[]);
             }
+            s.clicks_off(cx, &[(bot, bot)]);
+            let new = s.voices.iter().filter(|v| v.started == cx.tick);
+            levels.extend(new.map(|v| v.level(&cx.ear)));
         });
-        assert!(matches!(calls[..], [(410, 0x5A4 | 0x5A6)]), "{calls:x?}");
+        assert!(
+            matches!(
+                calls[..],
+                [(400, 0x5B0), (410, 0x5A4 | 0x5A6), (411, 0x5B1)]
+            ),
+            "{calls:x?}"
+        );
+        assert_eq!(
+            levels,
+            [25000.0, 32700.0, 30000.0].map(|v| (v / 32767.0, 0.5))
+        );
+    }
+
+    /// A gun's release (the trigger falling, V gcQ): one of 0x618-0x61A at the gunner, then the same
+    /// one again 15 ticks on where the gunner was, not following it.
+    #[test]
+    fn a_gun_release_plays_twice() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let gunner = at(1, 100.0, 0);
+        let gun = |trigger| GunView {
+            state: gun::IDLE,
+            gunner: Some(1),
+            trigger,
+            ..GunView::default()
+        };
+        let mut released = Vec::new();
+        let calls = heard(&mut s, &pack, 100..130, |s, cx| {
+            let moved = Seen {
+                pos: [500.0, 0.0, 0.0],
+                ..gunner
+            };
+            let p = if cx.tick < 102 { gunner } else { moved };
+            s.guns(cx, &[gun(cx.tick < 101)], &[(p, p)]);
+            let new = s.voices.iter().filter(|v| v.started == cx.tick);
+            released.extend(new.map(|v| (v.pos, v.follows)));
+        });
+        assert!(
+            matches!(calls[..], [(101, a), (116, b)] if a == b && (0x618..0x61B).contains(&a)),
+            "{calls:x?}"
+        );
+        let here = gunner.pos;
+        assert_eq!(released, [(here, Some(1)), (here, None)]);
+    }
+
+    /// The stem's gain (`beach-environment.md` §4: CC 0xFC = v·255/100): full within 3213 of its
+    /// point, 0.99 at 3219, none from 4000. A zone's volume: full within near, half way between,
+    /// silent below 401 (§5: trigger 0x23's 17331, 451, 1385).
+    #[test]
+    fn the_stem_follows_and_zones_fade_by_distance() {
+        let f = Follow {
+            at: [0, -377, 8227],
+            near: 3000,
+            far: 4000,
+        };
+        let gains =
+            [0.0, 3000.0, 3213.0, 3219.0, 3500.0, 3999.0, 4000.0, 9000.0].map(|d| follow(&f, d));
+        assert_eq!(gains, [1.0, 1.0, 1.0, 0.99, 0.63, 0.0, 0.0, 0.0]);
+        let play = Play {
+            sounds: vec![0x4A7],
+            volume: 17331,
+            own: None,
+            near: 451,
+            far: 1385,
+            channel: Channel::Free,
+            chance: 255,
+            if_idle: false,
+            pitch: [0, 0],
+            ticks: None,
+        };
+        let v = [0.0, 451.0, 918.0, 1363.0, 1364.0, 1385.0].map(|d| zone_volume(&play, d).round());
+        assert_eq!(v, [17331.0, 17331.0, 8666.0, 408.0, 0.0, 0.0]);
     }
 
     /// A capture: 30 frames after the score rises, the scorers' jingle (0x1A4 squirrels, 0x1A7

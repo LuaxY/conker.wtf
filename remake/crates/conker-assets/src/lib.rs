@@ -6,7 +6,8 @@
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
 //!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
-//!   `outros.json` ([`outro::Outro`]); on `2d`, `props.gltf` (+ `props.bin`);
+//!   `outros.json` ([`outro::Outro`]); on `2d`, `props.gltf` (+ `props.bin`); on `2b`,
+//!   `effects.gltf` (+ `effects.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
@@ -113,6 +114,11 @@ pub fn props_gltf(map: &str) -> String {
 /// `09-<entry>` (hex, an attachment in its joint's frame) and `prop-<placement>` (at the origin).
 pub fn outro_gltf(map: &str) -> String {
     format!("maps/{map}/outro.gltf")
+}
+
+/// War: Beach's effect models (`2b` only): glTF scene `09-157`, the detonation's ring at the origin.
+pub fn effects_gltf(map: &str) -> String {
+    format!("maps/{map}/effects.gltf")
 }
 
 pub fn character_gltf(character: &str) -> String {

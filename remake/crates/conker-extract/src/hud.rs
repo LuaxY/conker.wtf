@@ -31,7 +31,7 @@ const GLYPHS: usize = 95;
 /// 0x801CE678, 0x801F7540, 0x801F6120, 0x801F7130 and 0x801E4910 that `../lab/research/mp-original/
 /// beach-presentation-scratch`'s det1 DL 318 and ev3 DL 1044 draw, byte for byte the blob's; the
 /// strike's red flash, 0x80202220, is `iris`).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 29] = [
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 31] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -61,6 +61,9 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 29] = [
     ("smoke", 0xE4A, Format::Rgba32, 32, 32, true),
     ("fire", 0x71F, Format::I8, 32, 32, true),
     ("shell", 0x1042, Format::Ia16, 16, 16, true),
+    // War: Beach's strike: its floor glow and its streak (`beach-environment.md` §2).
+    ("strike_glow", 0xE20, Format::I8, 64, 64, true),
+    ("strike_streak", 0xB97, Format::I8, 128, 32, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):

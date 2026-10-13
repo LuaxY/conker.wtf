@@ -5,9 +5,9 @@
 //! death. Research and runs
 //! m1, m2, e1, e2, b30, b34: `../lab/research/mp-original/mounted-gun.md`.
 //!
-//! The gunner's side ([`Mount`], on the [`crate::Fighter`]) is predicted with the rest of its
-//! frame; the guns themselves ([`Gun`], `Match::guns`: the touch, the fire process, the dismount's
-//! wait) are the server's.
+//! The gunner's side ([`Mount`], on the [`crate::Fighter`]: the trigger and the fire process) is
+//! predicted with the rest of its frame; the guns themselves ([`Gun`], `Match::guns`: the touch,
+//! the dismount's wait, the shots the clients see) are the server's.
 
 use crate::projectile::local_to_world;
 use conker_sim::movement::Other;
@@ -47,10 +47,6 @@ pub const SEAT: [f32; 3] = [-62.96, 0.0, 72.145];
 /// lean to −side, toward the sight).
 pub const PIVOT: [f32; 2] = [61.42, 52.265];
 pub const MUZZLE: [f32; 3] = [124.62, 22.175, 57.94];
-/// A human's barrels aim at the point this far along the scope's line from the eye (I: fits e1's
-/// two directions, (−0.629, −0.234, 0.742) and (−0.748, −0.197, 0.633), to 0.002; the game crosses
-/// the camera's ray with a barrel plane).
-pub const SIGHT: f32 = 333.0;
 /// The gun's body (obj+0xE4/0xE8/0xEC, V m2: radius 70, centre 70 up, vertical scale 70/99): it pushes
 /// every player but its gunner out ([`body`]), and a player inside it touches it.
 const BODY: (i16, i16, u32) = (70, 70, 0x3F35_0296);
@@ -107,10 +103,6 @@ pub struct Gun {
     pub pitch10: i32,
     /// Frames left of the dismount's wait (state 5): nobody takes it meanwhile.
     pub leave: u8,
-    /// The fire process (`func_150FC614`): running, its timer, the next barrel.
-    pub firing: bool,
-    pub timer: f32,
-    pub barrel: u8,
     /// Shots fired, and the last one's barrel (the clients' flash).
     pub shots: u16,
     pub last: u8,
@@ -123,9 +115,6 @@ impl Gun {
             yaw: place.yaw,
             pitch10: 0,
             leave: 0,
-            firing: false,
-            timer: 0.0,
-            barrel: 0,
             shots: 0,
             last: 0,
         }
@@ -148,6 +137,8 @@ pub struct Mount {
     /// Its index in `Match::guns`, and its origin.
     pub gun: u8,
     pub at: [f32; 3],
+    /// Where the jump on homes (s126+0x28/0x2C, C `func_1505327C`): the seat's x and z at the touch.
+    pub to: [f32; 2],
     /// [`LAUNCH`] until seated, then [`IDLE`], [`FIRING`] or [`STOPPED`].
     pub state: u8,
     /// Frames left of [`FIRING`] after Z, or of [`STOPPED`].
@@ -156,6 +147,13 @@ pub struct Mount {
     pub lock: u8,
     /// s126+0x199: Z fired it, until let go with the lock off (the release's sound).
     pub trigger: bool,
+    /// The gun's fire process (`func_150FC614`, [`Mount::fire`]): running, its timer, the next
+    /// barrel, and its draws' state (the game's shared `random_float`; the mount's own here, seeded
+    /// at the touch, so the gunner's client predicts its shots).
+    pub firing: bool,
+    pub next: f32,
+    pub barrel: u8,
+    pub rng: u64,
 }
 
 impl Mount {
@@ -163,12 +161,41 @@ impl Mount {
         Self {
             gun: gun as u8,
             at,
+            to: [at[0], at[2]],
             state: LAUNCH,
             timer: 0,
             budget: BUDGET,
             lock: 0,
             trigger: false,
+            firing: false,
+            next: 0.0,
+            barrel: 0,
+            rng: 1,
         }
+    }
+
+    /// One frame of the fire process after its gunner's (`func_150FC614`, C; V e1): off unless
+    /// [`FIRING`]; then a shot in the first frame and one each time the timer, losing 1 a frame,
+    /// drops below 0, which then gains 4 to 8. The barrel of this frame's shot, if any; the barrels
+    /// take turns.
+    pub fn fire(&mut self) -> Option<u8> {
+        if self.state != FIRING {
+            self.firing = false;
+            return None;
+        }
+        if !self.firing {
+            (self.firing, self.next) = (true, 0.0);
+        }
+        self.next -= 1.0;
+        if self.next >= 0.0 {
+            return None;
+        }
+        let mut rng = crate::Rng::new(self.rng);
+        self.next += 4.0 + 4.0 * rng.next_f32();
+        self.rng = rng.state;
+        let b = self.barrel;
+        self.barrel ^= 1;
+        Some(b)
     }
 
     /// One seated frame of the trigger (`func_15065A5C`'s case 0x1B, C; V m2): the lock runs down; B
@@ -228,10 +255,30 @@ fn pitched(pitch: f32, [f, s, u]: [f32; 3]) -> [f32; 3] {
 
 /// Barrel `b`'s muzzle: the gun tilted by [`tilt`], the barrels by the rest of `pitch`.
 pub fn muzzle(at: [f32; 3], yaw: u16, pitch: f32, b: u8) -> [f32; 3] {
-    let [f, s, u] = MUZZLE;
+    barrel(at, yaw, pitch, b, MUZZLE)
+}
+
+/// A point (ahead, side, up) of barrel `b`'s frame from the pivot (barrel 0's side negated).
+fn barrel(at: [f32; 3], yaw: u16, pitch: f32, b: u8, [f, s, u]: [f32; 3]) -> [f32; 3] {
     let s = if b == 0 { -s } else { s };
     let t = tilt(pitch10(pitch));
     local_to_world(at, yaw, tilted(t, pitched(pitch - t, [f, s, u])))
+}
+
+/// Where a human's shot from barrel `b` starts its aim (`func_150FB8C0`, C): the scope's ray from
+/// `eye` along the unit `d` (s126+0x13C, +0x130) crossed with the plane through the muzzle and the
+/// joint's (±50, 0, 200) and (±13, 50, 220) (tables 0x800A1E04 and 0x800A1E1C, V k3), across the
+/// barrel and leaning 22° forward. The shot heads from the muzzle for what the ray meets from
+/// there on, else leaves from this point along `d` (`Match`'s fire; I: neither e1's hit nor its
+/// later shots tell this point apart from the eye's).
+pub fn sight(at: [f32; 3], yaw: u16, pitch: f32, b: u8, eye: [f32; 3], d: [f32; 3]) -> [f32; 3] {
+    let m = muzzle(at, yaw, pitch, b);
+    let [f, s, u] = MUZZLE;
+    let q = barrel(at, yaw, pitch, b, [f + 50.0, s, u - 20.0]);
+    let dot = |a: [f32; 3], c: [f32; 3]| a[0] * c[0] + a[1] * c[1] + a[2] * c[2];
+    let n: [f32; 3] = core::array::from_fn(|j| q[j] - m[j]);
+    let t = dot(n, core::array::from_fn(|j| m[j] - eye[j])) / dot(n, d);
+    core::array::from_fn(|j| eye[j] + d[j] * t)
 }
 
 /// A bot's shot (it has no camera): along barrel `b`, toed in by `toe` (1 to 7 units in 100, C: the

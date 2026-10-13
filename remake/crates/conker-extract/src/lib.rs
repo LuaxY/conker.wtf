@@ -21,7 +21,7 @@ use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
     Character, DEATHMATCH_PLAYER, FPS, SQUIRREL_SOLDIER, bind_pivots, held_models, matrix_slot,
-    parse_attachment, parse_model,
+    parse_attachment, parse_effect, parse_model,
 };
 use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
 use extract_level::{
@@ -52,6 +52,8 @@ pub const CAVEMAN: usize = 136;
 pub const MOUNTED_GUN: usize = 138;
 /// Scene 0x2B, the Beach (War: Beach, scenario 8).
 pub const BEACH: usize = 0x2B;
+/// War: Beach's detonation ring (model 0x54 → bank 09 #0x157, `beach-environment.md` §3.1).
+pub const RING: usize = 0x157;
 /// The Beach's villagers (its team 0): class 0x14 is model 156 (male), 0x1D and 0x1E 157 (female)
 /// (V oracle, `../lab/research/mp-original/modes-and-maps.md`); the Tedi's rig and clips.
 pub const VILLAGERS: [usize; 2] = [156, 157];
@@ -495,12 +497,14 @@ pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Characte
     })
 }
 
-/// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any, and
-/// of the song its outro starts ([`outro::songs`]).
+/// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any, of
+/// the song its outro starts ([`outro::songs`]), and of its song's positional channels (a raw
+/// recording, [`audio::stem`]).
 pub struct PackMap<'a> {
     pub scene: usize,
     pub background: Option<&'a [u8]>,
     pub song: Option<&'a [u8]>,
+    pub stem: Option<&'a [u8]>,
 }
 
 /// A map's folder under `maps/`: its scene in lowercase hex (`2d`, `30`).
@@ -576,6 +580,25 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             let json = parse(&g.json)?;
             gltfs.push((assets::outro_gltf(&name), json, g.bin, g.images));
         }
+        if map.scene == BEACH {
+            let ring = parse_effect(&rom.asset(&[0x09, RING])?, &rom.game_data()?)?;
+            let level = Level {
+                meshes: vec![Mesh {
+                    path: vec![0x09, RING],
+                    ir: ring,
+                }],
+                instances: vec![Instance {
+                    mesh: 0,
+                    placement: None,
+                    matrix: IDENTITY,
+                }],
+                ..Level::default()
+            };
+            let scenes = json!([{ "name": format!("09-{RING:02x}"), "nodes": [0] }]);
+            let g = held_gltf(&level, scenes, &textures, "effects.bin")?;
+            let json = parse(&g.json)?;
+            gltfs.push((assets::effects_gltf(&name), json, g.bin, g.images));
+        }
         if map.scene == SLICE_SCENE {
             let (props, scenes) = props_level(rom)?;
             let props = held_gltf(&props, scenes, &textures, "props.bin")?;
@@ -636,7 +659,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         }
     }
     let backgrounds: Vec<_> = (maps.iter())
-        .map(|m| (map_name(m.scene), m.background))
+        .map(|m| (map_name(m.scene), m.background, m.stem))
         .collect();
     let outro_sounds: Vec<(String, BTreeSet<u16>)> = (maps.iter().zip(&outros))
         .map(|(m, o)| {

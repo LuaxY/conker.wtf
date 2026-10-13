@@ -1048,7 +1048,7 @@ fn mounted_gun_bodies() {
 fn mounted_guns_m2_and_e1() {
     use conker_rules::game::Event;
     use conker_rules::{Arena, Fighter, Match, Placement, Rng, gun};
-    use conker_sim::movement::{BUTTON_Z, Input};
+    use conker_sim::movement::{BUTTON_A, BUTTON_Z, Input};
     let Some(rom) = rom() else { return };
     let arena = Arena {
         spawns: Vec::new(),
@@ -1113,6 +1113,75 @@ fn mounted_guns_m2_and_e1() {
         "{:?}",
         rows[&83]
     );
+    // The leap off (V m2: the barrels 60° up from read 1560, A at 1601-1602): facing 0xB000 at z > 0,
+    // 15 along 0xC200 plus the gun's push on the press's frame, then the brake 0.875 a frame to the
+    // landing. Gun A turned 90° (V l1, z < 0): facing 0x3000, the same jump along 0x4200.
+    let leap = |m: &mut Match, yaw: f32, pitch: f32, a: u32| {
+        let mut rows = std::collections::BTreeMap::new();
+        while m.tick <= a + 14 {
+            let t = m.tick;
+            if m.players[0].seated() {
+                (m.players[0].body.scope_yaw, m.players[0].scope_pitch) = (Some(yaw), pitch);
+            }
+            let buttons = if t == a || t == a + 1 { BUTTON_A } else { 0 };
+            let input = Input {
+                buttons,
+                ..Input::default()
+            };
+            m.step(&arena, &[input, Input::default()], &world);
+            let b = &m.players[0].body;
+            rows.insert(t, (b.pos, b.xz_speed, b.facing, b.airborne));
+        }
+        rows
+    };
+    let rows = leap(&mut m, 87.1875, -60.0, 1601);
+    assert!(near(
+        rows[&1600].0,
+        [166.678955, 611.733215, 6005.60107],
+        0.02
+    ));
+    for (t, at, speed) in [
+        (1601, [167.34343, 626.385742, 6022.86865], 30.0),
+        (1602, [168.057983, 638.285706, 6037.41357], 29.125),
+        (1608, [171.894455, 647.555786, 6115.50635], 23.875),
+        (1614, [174.95813, 545.22583, 6177.86914], 18.625),
+    ] {
+        assert!(
+            near(rows[&t].0, at, 0.05) && rows[&t].1 == speed,
+            "{t} {:?}",
+            rows[&t]
+        );
+        assert_eq!(rows[&t].2, 0xB000);
+    }
+    assert!(near(rows[&1615].0, [175.3936, 543.949219, 6186.7334], 0.05) && !rows[&1615].3);
+    let players = vec![
+        Fighter::new(&place(gun::places(0x30)[0].pos, 0), 0, 150),
+        Fighter::new(&place([-436.0, -914.41, -5917.0], 17152), 1, 150),
+    ];
+    let mut m = Match::new(&arena, players, Rng::default(), 150);
+    m.guns = gun::spawn(0x30);
+    m.players[0].gun = Some(gun::Mount {
+        state: gun::IDLE,
+        ..gun::Mount::new(0, m.guns[0].place.pos)
+    });
+    let rows = leap(&mut m, 354.375, 0.0, 201);
+    assert!(near(
+        rows[&200].0,
+        [-384.657104, -315.227295, -3627.17114],
+        0.05
+    ));
+    assert!(near(
+        rows[&201].0,
+        [-392.251312, -298.095581, -3644.44141],
+        0.05
+    ));
+    assert!(near(
+        rows[&208].0,
+        [-397.918335, -276.310883, -3737.677],
+        0.05
+    ));
+    assert_eq!((rows[&201].2, rows[&208].1), (0x3000, 23.875));
+    assert!(near(rows[&215].0, [-401.41745, -388.0, -3808.90356], 0.05) && !rows[&215].3);
 
     let world = self::world(&rom, 0x34);
     let players = vec![
@@ -1124,7 +1193,7 @@ fn mounted_guns_m2_and_e1() {
     ];
     let mut m = Match::new(&arena, players, Rng::default(), 41);
     m.guns = gun::spawn(0x34);
-    let mut hits = Vec::new();
+    let (mut hits, mut knock, mut later) = (Vec::new(), None, Vec::new());
     while m.tick <= 170 {
         let t = m.tick;
         if m.players[0].seated() {
@@ -1149,7 +1218,11 @@ fn mounted_guns_m2_and_e1() {
             } = e
             {
                 hits.push((t, damage, m.players[1].anim));
+                knock = Some(m.players[1].body.move_angle);
             }
+        }
+        if t >= 110 {
+            later.extend(m.bullets.iter().filter(|b| b.0 == t).map(|b| b.1.dir));
         }
         if t == 65 || t == 66 {
             assert_eq!(m.players[0].seated(), t == 66);
@@ -1164,11 +1237,34 @@ fn mounted_guns_m2_and_e1() {
     );
     assert!(m.guns[0].shots >= 8, "{}", m.guns[0].shots);
     assert_eq!((hits, m.players[1].health), (vec![(101, 2, 0x19C)], 4));
+    // The first shot heads for where the scope's ray meets player 2's body: knocked at 210.4° (V
+    // 0x9595), not along the barrel (~220°). Later ones head for the floor where the ray meets it:
+    // from V's eye (k1, read 115: the fire clip lifts it 5 units) the point V's bullets cross,
+    // (2102.5, 675.39, 862.5); from the gun at rest, V's two barrels' directions to 0.011.
+    let knock = knock.unwrap();
+    assert!(knock.abs_diff(0x9595) < 40, "{knock:#x}");
+    let dirs = [
+        [-0.748279, -0.196937, 0.633478],
+        [-0.632179, -0.208411, 0.746267],
+    ];
+    let off = |v: [f32; 3], d: [f32; 3]| (0..3).map(|j| (v[j] - d[j]).abs()).fold(0.0, f32::max);
+    assert!(!later.is_empty());
+    for d in &later {
+        assert!(off(dirs[0], *d).min(off(dirs[1], *d)) < 0.011, "{d:?}");
+    }
+    let (at, eye) = (gun::places(0x34)[0].pos, [2333.61426, 744.83844, 631.38562]);
+    let ray = [-0.691665113, -0.207842022, 0.691665471];
+    for b in [0, 1] {
+        let p = gun::sight(at, 0xA000, 12.0, b, eye, ray);
+        let hit = conker_rules::projectile::raycast(&world, p, ray, 20_000.0);
+        let to: [f32; 3] = core::array::from_fn(|j| p[j] + ray[j] * hit);
+        assert!(near(to, [2102.5, 675.39, 862.5], 0.1), "{b} {to:?}");
+    }
     let p = m.players[1].body.pos;
     let d = ((p[0] - 2216.0).powi(2) + (p[2] - 749.0).powi(2)).sqrt();
     assert!((110.0..170.0).contains(&d), "{d}");
     eprintln!(
-        "e1: {} shots (V 13), P2 knocked {d:.1} (V 140.7)",
+        "e1: {} shots (V 13), P2 knocked {d:.1} at {knock:#x} (V 140.7 at 0x9595)",
         m.guns[0].shots
     );
 }

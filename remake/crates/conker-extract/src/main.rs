@@ -18,7 +18,8 @@ commands:
                         --map <name>: a map, the scene in hex as its folder (repeatable; default 2d);
                         --background [<name>=]<wav>: a map's background recording (lab/audio), the
                         first map's without a name (repeatable); --song [<name>=]<wav>: the same for
-                        the song its outro starts (op 8)
+                        the song its outro starts (op 8); --stem [<name>=]<wav>: the same for a raw
+                        recording of its song's positional channels (0x2B's 13/14), cut as its loop
 ids are decimal or 0x-prefixed hex (scene 0x2D = scene 45); character names: deathmatch (117), conker (0)
 --rom defaults to env CONKER_ROM; --out defaults to <repo>/lab/extract/slice (outside the source tree)";
 
@@ -67,7 +68,7 @@ fn parse_command(words: &[&str]) -> anyhow::Result<Command> {
 fn main() -> anyhow::Result<()> {
     let mut rom_path = std::env::var_os("CONKER_ROM").map(PathBuf::from);
     let (mut out, mut force, mut maps, mut backgrounds) = (None, false, Vec::new(), Vec::new());
-    let mut songs = Vec::new();
+    let (mut songs, mut stems) = (Vec::new(), Vec::new());
     let mut words = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -78,6 +79,7 @@ fn main() -> anyhow::Result<()> {
             "--map" => maps.push(usize::from_str_radix(&args.next().context(USAGE)?, 16)?),
             "--background" => backgrounds.push(args.next().context(USAGE)?),
             "--song" => songs.push(args.next().context(USAGE)?),
+            "--stem" => stems.push(args.next().context(USAGE)?),
             _ => words.push(arg),
         }
     }
@@ -146,11 +148,13 @@ fn main() -> anyhow::Result<()> {
             };
             let wavs = recordings(&backgrounds, "--background")?;
             let songs = recordings(&songs, "--song")?;
-            let maps: Vec<_> = (maps.iter().zip(wavs.iter().zip(&songs)))
-                .map(|(&scene, (wav, song))| conker_extract::PackMap {
+            let stems = recordings(&stems, "--stem")?;
+            let maps: Vec<_> = (maps.iter().enumerate())
+                .map(|(i, &scene)| conker_extract::PackMap {
                     scene,
-                    background: wav.as_deref(),
-                    song: song.as_deref(),
+                    background: wavs[i].as_deref(),
+                    song: songs[i].as_deref(),
+                    stem: stems[i].as_deref(),
                 })
                 .collect();
             conker_extract::pack(&rom, &maps)?

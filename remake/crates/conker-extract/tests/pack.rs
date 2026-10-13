@@ -116,6 +116,7 @@ fn pack_reads_back_as_the_rom_path() {
         scene,
         background: None,
         song: None,
+        stem: None,
     });
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let dir = temp_dir("pack-test");
@@ -462,6 +463,7 @@ fn pack_audio_reads_back() {
         scene,
         background: Some(wav),
         song: (scene == 0x2B).then_some(song.as_slice()),
+        stem: None,
     });
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())
@@ -562,6 +564,16 @@ fn pack_audio_reads_back() {
             serde_json::from_slice(files[format!("maps/{map}/outro.gltf").as_str()]).unwrap();
         assert!(gltf["scenes"][0]["name"] == "09-57", "{map}");
     }
+    // 0x2B's detonation ring (bank 09 #0x157): one draw of 112 triangles, alpha-blended.
+    let ring: Value = serde_json::from_slice(files["maps/2b/effects.gltf"]).unwrap();
+    assert_eq!(ring["scenes"][0]["name"], "09-157");
+    assert_eq!(ring["materials"][0]["alphaMode"], "BLEND");
+    let indices = &ring["meshes"][0]["primitives"][0]["indices"];
+    assert_eq!(
+        ring["accessors"][indices.as_u64().unwrap() as usize]["count"],
+        336
+    );
+    assert!(!files.contains_key("maps/2d/effects.gltf"));
     // Beach cs4's song 0x8A with 2b's recording; no other outro has one.
     assert_eq!(files["audio/maps/2b/song-8a.wav"], song.as_slice());
     let songs = |map: &str| {
@@ -700,13 +712,67 @@ fn pack_audio_reads_back() {
         rate == 22050 && (4.0..8.0).contains(&length),
         "{rate} Hz {length} s"
     );
-    for (on, male, female) in [
-        (On::PlungerReady, 0x6A9, 0x6A5),
-        (On::Plunger, 0x6AB, 0x6A7),
-    ] {
-        assert_eq!(cue(&on, Some("156")), Some(vec![male]));
-        assert_eq!(cue(&on, Some("157")), Some(vec![female]));
+    // A bot says the next id at 32700 (V radio: 0x6A6), a human at 30000.
+    for bot in [false, true] {
+        let b = u16::from(bot);
+        for (on, male, female) in [
+            (On::PlungerReady { bot }, 0x6A9, 0x6A5),
+            (On::Plunger { bot }, 0x6AB, 0x6A7),
+        ] {
+            assert_eq!(cue(&on, Some("156")), Some(vec![male + b]));
+            assert_eq!(cue(&on, Some("157")), Some(vec![female + b]));
+            let c = (audio.events.cues.iter()).find(|c| c.on == on).unwrap();
+            assert_eq!(
+                (c.play.volume, c.delay),
+                ([30000, 32700][usize::from(bot)], 10)
+            );
+        }
     }
+    // The escape tunnels' sound zones, triggers 0x23 and 0x24 (`beach-environment.md` §5; V the
+    // record at read 600: vol 0x43B3, far 0x569 | 0x8000, near 0x1C3): 0x4A7, centred, horizontal.
+    let zones: Vec<_> = (audio.events.maps["2b"].zones.iter())
+        .map(|z| {
+            let p = &z.play;
+            (
+                z.trigger,
+                z.at,
+                z.horizontal,
+                p.sounds.clone(),
+                p.volume,
+                p.near,
+                p.far,
+            )
+        })
+        .collect();
+    assert_eq!(
+        zones,
+        [
+            (
+                0x23,
+                [-1536, -1434, -3769],
+                true,
+                vec![0x4A7],
+                17331,
+                451,
+                1385
+            ),
+            (
+                0x24,
+                [987, -1434, -4077],
+                true,
+                vec![0x4A7],
+                16350,
+                601,
+                1487
+            )
+        ]
+    );
+    assert_eq!(audio.sounds.sounds[&0x4A7].file, "maps/2b/1191.wav");
+    assert!(
+        ["2d", "30", "34", "3f"]
+            .iter()
+            .all(|m| audio.events.maps[*m].zones.is_empty())
+    );
     assert_eq!(cue(&On::RadioClick { end: false }, None), Some(vec![0x5B0]));
     assert_eq!(cue(&On::RadioClick { end: true }, None), Some(vec![0x5B1]));
     let blasts: Vec<_> = (audio.events.cues.iter())
@@ -790,6 +856,7 @@ fn pack_hud_reads_back() {
         scene: SLICE_SCENE,
         background: None,
         song: None,
+        stem: None,
     }];
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())
@@ -872,6 +939,10 @@ fn pack_hud_reads_back() {
         assert_eq!(size(name), [32, 32], "{name}");
     }
     assert_eq!(size("shell"), [16, 16]);
+    assert_eq!(
+        (size("strike_glow"), size("strike_streak")),
+        ([64, 64], [128, 32])
+    );
     let beach = &hud.beach;
     // A line's glyph rects as the client lays text out: centred on `at[0]` by its glyphs' widths
     // less 1 each, or from it; each glyph at the pen plus its offset.

@@ -1007,8 +1007,9 @@ fn code_cues() -> Vec<Cue> {
         cue(
             On::RadioClick { end: false },
             play([0x5B0], 25000, Some(25000), 100, 120, Channel::B),
-            "the radio's click on, at the call (C func_15103910; V ev2 read 402, c1a read 328). A player without a \
-             camera: its clicks at volume −25000 (C func_15103AA0; I: unheard), not played",
+            "the radio's click on, at the call, heard by everyone, centred (C func_15103910; V ev2 read 402, c1a read \
+             328). A player without a camera clicks too: volume −25000 is 25000 with flag 0x100, centred and \
+             everywhere (C func_15103AA0 → func_10010344; V radio read 102)",
         ),
         cue(
             On::RadioClick { end: true },
@@ -1117,11 +1118,21 @@ fn gun_cues() -> Vec<Cue> {
 /// Its two flickering lamps' buzz is the map's two emitters (`map_sounds`).
 fn beach_cues() -> Vec<Cue> {
     // A radio voice (`func_15103C14`): a record at the speaker heard everywhere (30000, far
-    // 0x7FFF, near 0x7FFE), its callback `func_15103910` clicking on the speaker's channel B first.
-    let radio = |on: On, character: &str, id, note: &str| Cue {
+    // 0x7FFF, near 0x7FFE), its callback `func_15103910` clicking on the speaker's channel B first; a
+    // player without a camera (a bot) says the next id at 32700 (`func_15103AA0`).
+    let radio = |on: On, character: &str, id: u16, bot: bool, note: &str| Cue {
         character: Some(character.into()),
         delay: 10,
-        ..cue(on, record([id], 30000, 0x7FFE, 0x7FFF), note)
+        ..cue(
+            on,
+            record(
+                [id + u16::from(bot)],
+                [30000, 32700][usize::from(bot)],
+                0x7FFE,
+                0x7FFF,
+            ),
+            note,
+        )
     };
     let detonation = |id, at, delay| Cue {
         at: Some(at),
@@ -1133,31 +1144,42 @@ fn beach_cues() -> Vec<Cue> {
              0x2B8 45 VIs later, 0x2B6 90 VIs later, heard in frames 617, 640, 662)",
         )
     };
-    let mut cues = vec![
-        radio(
-            On::PlungerReady,
-            "156",
-            0x6A9,
-            "a male villager in trigger 0x25 while the plunger is ready (C func_1509EFF0; V ev2 read 413, 20 VIs after the click)",
-        ),
-        radio(
-            On::PlungerReady,
-            "157",
-            0x6A5,
-            "a female villager in trigger 0x25 while the plunger is ready (C func_1509EFF0)",
-        ),
-        radio(
-            On::Plunger,
-            "156",
-            0x6AB,
-            "a male villager on the plunger (C; not heard in ev3: the 600-VI cooldown per player, 0x800D9AB0)",
-        ),
-        radio(
-            On::Plunger,
-            "157",
-            0x6A7,
-            "a female villager on the plunger (C)",
-        ),
+    let mut cues = Vec::new();
+    for bot in [false, true] {
+        cues.extend([
+            radio(
+                On::PlungerReady { bot },
+                "156",
+                0x6A9,
+                bot,
+                "a male villager in trigger 0x25 while the plunger is ready (C func_1509EFF0; V ev2 read 413, 20 VIs after \
+                 the click; a bot's 0x6AA by the rule)",
+            ),
+            radio(
+                On::PlungerReady { bot },
+                "157",
+                0x6A5,
+                bot,
+                "a female villager in trigger 0x25 while the plunger is ready (C func_1509EFF0; V radio: a bot's 0x6A6 at \
+                 32700, centred, 10 frames after its click)",
+            ),
+            radio(
+                On::Plunger { bot },
+                "156",
+                0x6AB,
+                bot,
+                "a male villager on the plunger (C; not heard in ev3: the 600-VI cooldown per player, 0x800D9AB0)",
+            ),
+            radio(
+                On::Plunger { bot },
+                "157",
+                0x6A7,
+                bot,
+                "a female villager on the plunger (C)",
+            ),
+        ]);
+    }
+    cues.extend([
         detonation(0x2B7, [-319, -273, -3419], 0),
         detonation(0x2B8, [-2038, 1560, -2631], 23),
         detonation(0x2B6, [1519, 947, -2633], 45),
@@ -1176,7 +1198,7 @@ fn beach_cues() -> Vec<Cue> {
             play([0x69D], 32000, None, 500, 3000, Channel::Free),
             "the strike's blast, 40 frames after the call, at its spot (C func_150FD514; V ev3 read 1044)",
         ),
-    ];
+    ]);
     for character in ["156", "157"] {
         cues.push(Cue {
             character: Some(character.into()),
@@ -1221,18 +1243,103 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     (emitters, sequence, channels, volume)
 }
 
+/// A map's sound zones: its trigger records of kind 2 (`+0x15 >> 2`, `func_150A11C4` → `func_150A23E4`,
+/// C; V on 0x2B's 0x23 and 0x24, `../lab/research/mp-original/beach-environment.md` §5). Each plays
+/// sound `+0x1C >> 16` at its centre at volume (`+0x17` & 0x7F)·0x147, near `+0x1C & 0xFFFF`, far
+/// `+0x18`, centred (flag 0x100), by horizontal distance for shape 0 (bit 0x8000 of the far); only
+/// 0x2B has any.
+fn zones(triggers: &[u8]) -> Vec<conker_assets::audio::Zone> {
+    let records = triggers.as_chunks::<0x34>().0.iter().enumerate();
+    (records.filter(|(_, r)| r[0x15] >> 2 == 2))
+        .map(|(i, r)| {
+            let h = |o: usize| i16::from_be_bytes([r[o], r[o + 1]]);
+            let w = |o: usize| u32::from_be_bytes(r[o..o + 4].try_into().unwrap());
+            conker_assets::audio::Zone {
+                trigger: i as u16,
+                at: [h(0), h(2), h(4)],
+                horizontal: r[0x15] & 3 == 0,
+                play: play(
+                    [(w(0x1C) >> 16) as u16],
+                    u16::from(r[0x17] & 0x7F) * 0x147,
+                    None,
+                    w(0x1C) as u16,
+                    w(0x18) as u16,
+                    Channel::Free,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The raw stem's frames ahead of the south recording's ([`loop_cut`]'s source): it runs 552 or 736
+/// late, by the dumps' 184-frame audio blocks, so the midpoint (V `beach-environment.md` §4).
+pub const STEM_LAG: usize = 644;
+
+/// `../lab/audio/map2b/background_loop.wav`'s cut of `background_south.wav` (V: byte for byte,
+/// `loop_cut_is_the_backgrounds`): from frame 1,001,910 (45.5 s at 22,020 Hz) one period of song
+/// 0x4D, 1,878,088 frames (85.290 s), its first 11,010 (0.5 s) cross-faded with the frames a period
+/// on.
+pub const LOOP_CUT: [usize; 3] = [1_001_910, 1_878_088, 11_010];
+
+/// A 16-bit PCM WAV with the lab recordings' 44-byte header, its first `skip` frames dropped, cut as
+/// [`LOOP_CUT`]: frame n of the loop is frame start + n, the first `fade` mixed with start + period + n
+/// by weights n/fade and 1 − n/fade, rounded half to even.
+pub fn loop_cut(wav: &[u8], skip: usize) -> Result<Vec<u8>> {
+    ensure!(
+        wav.len() >= 44 && &wav[..4] == b"RIFF" && &wav[36..40] == b"data",
+        "not a WAV file"
+    );
+    let word = |at: usize| u32::from_le_bytes(wav[at..at + 4].try_into().unwrap());
+    ensure!(
+        word(20) & 0xFFFF == 1 && word(32) >> 16 == 16,
+        "not 16-bit PCM"
+    );
+    let channels = (word(20) >> 16) as usize;
+    let data = wav
+        .get(44..44 + word(40) as usize)
+        .context("WAV: short data")?;
+    let samples: Vec<i16> = (data.as_chunks::<2>().0.iter())
+        .map(|&b| i16::from_le_bytes(b))
+        .collect();
+    let [start, period, fade] = LOOP_CUT;
+    ensure!(
+        (skip + start + period + fade) * channels <= samples.len(),
+        "WAV: too short for the loop's cut"
+    );
+    let at = |frame: usize, c: usize| f64::from(samples[(skip + frame) * channels + c]);
+    let bytes = (period * channels * 2) as u32;
+    let mut out = wav[..44].to_vec();
+    out[4..8].copy_from_slice(&(36 + bytes).to_le_bytes());
+    out[40..44].copy_from_slice(&bytes.to_le_bytes());
+    for n in 0..period {
+        for c in 0..channels {
+            let v = match n < fade {
+                true => {
+                    let w = n as f64 / fade as f64;
+                    (at(start + n, c) * w + at(start + period + n, c) * (1.0 - w)).round_ties_even()
+                }
+                false => at(start + n, c),
+            };
+            out.extend((v as i16).to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
 /// The pack's sound: `audio/sounds.json`, `audio/events.json` and the WAV files, and the folders
 /// under `audio/` that hold them. `surfaces`: the maps' terrain surface kinds (footsteps); `maps`:
-/// each map's folder name and a recording of its background (`../lab/audio`'s), or None;
-/// `characters`: the bank-01 entries whose clip sounds and hit voices play (each its own folder).
+/// each map's folder name and recordings of its background (`../lab/audio`'s) and of its song's
+/// positional channels ([`STEM_LAG`]), or None; `characters`: the bank-01 entries whose clip sounds
+/// and hit voices play (each its own folder).
+#[allow(clippy::type_complexity)]
 pub fn pack_audio(
     rom: &Rom,
     surfaces: &BTreeSet<u8>,
-    maps: &[(String, Option<&[u8]>)],
+    maps: &[(String, Option<&[u8]>, Option<&[u8]>)],
     characters: &[usize],
     outro_sounds: &[(String, BTreeSet<u16>)],
 ) -> Result<(Files, Vec<String>)> {
-    use conker_assets::audio::{self as pack, Audio, Events, MapSounds};
+    use conker_assets::audio::{self as pack, Audio, Events, Follow, MapSounds};
     let game_data = rom.game_data()?;
     let entries = characters;
     let mut characters = BTreeMap::new();
@@ -1244,12 +1351,14 @@ pub fn pack_audio(
     }
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
-    for (name, background) in maps {
+    for (name, background, stem) in maps {
         let (emitters, sequence, channels, volume) = map_sounds(name);
+        let scene = usize::from_str_radix(name, 16)?;
         let mut map = MapSounds {
             background: vec![],
             emitters,
             lines: BTreeMap::new(),
+            zones: zones(&rom.asset(&[0x0C, scene, 5])?),
         };
         // War: Beach's escape: MP3 0x1A8 for a human escapee (`func_1001263C(0x1A8, 0x7FFF, 0x40)`).
         if name == "2b" {
@@ -1297,8 +1406,29 @@ pub fn pack_audio(
                 file: file.clone(),
                 volume: 32767,
                 note: format!("the game's own output (sequence {sequence}, channels {channels}, at volume {volume}), recorded on the oracle and looped whole"),
+                follow: None,
             });
             files.push((format!("audio/{file}"), wav.to_vec()));
+        }
+        // 0x2B's song 0x4D: channels 13 and 14, which the south recording lacks, follow (0, −377, 8227).
+        if let Some(wav) = stem.filter(|_| name == "2b") {
+            let file = format!("maps/{name}/background_stem.wav");
+            map.background.push(Background {
+                file: file.clone(),
+                volume: 32767,
+                note: "song 0x4D's channels 13 and 14 alone, recorded on the oracle at 100 % (the others muted by \
+                       the start's mask 0x9FFF in place of 0xFC00), cut as background.wav: played with it, its \
+                       volume by the listener's 3D distance to (0, −377, 8227), full within 3000, none from 4000, \
+                       clamped at 100 % (C func_1000BA18 → func_100114D0, func_1000E588: CC 0xFC on channels 13/14; \
+                       V beach-environment.md §4)"
+                    .into(),
+                follow: Some(Follow {
+                    at: [0, -377, 8227],
+                    near: 3000,
+                    far: 4000,
+                }),
+            });
+            files.push((format!("audio/{file}"), loop_cut(wav, STEM_LAG)?));
         }
         map_events.insert(name.clone(), map);
     }
@@ -1329,7 +1459,7 @@ pub fn pack_audio(
     }
     // A sound several maps' emitters play (0x2D's and 0x2B's bubbles) stays in the first map's folder.
     let mut first: BTreeMap<u16, &str> = BTreeMap::new();
-    for (name, _) in maps {
+    for (name, ..) in maps {
         for &id in events.maps[name]
             .emitters
             .iter()
@@ -1338,6 +1468,9 @@ pub fn pack_audio(
             if *first.entry(id).or_insert(name) == name {
                 add(&mut std::iter::once(id), format!("maps/{name}"));
             }
+        }
+        for z in &events.maps[name].zones {
+            add(&mut z.play.sounds.iter().copied(), format!("maps/{name}"));
         }
     }
     for c in &events.cues {
@@ -1425,6 +1558,20 @@ pub fn pack_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`loop_cut`] makes `background_loop.wav` from `background_south.wav` byte for byte (the lab's
+    /// recordings; skipped without them).
+    #[test]
+    fn loop_cut_is_the_backgrounds() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../lab/audio/map2b");
+        let read = |f: &str| std::fs::read(format!("{dir}/{f}")).ok();
+        let (Some(south), Some(cut)) = (read("background_south.wav"), read("background_loop.wav"))
+        else {
+            eprintln!("no 0x2B recordings in {dir}: skipping");
+            return;
+        };
+        assert!(loop_cut(&south, 0).unwrap() == cut);
+    }
 
     #[test]
     fn wav_round_trips() {

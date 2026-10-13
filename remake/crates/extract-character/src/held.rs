@@ -123,22 +123,31 @@ pub fn due(last: &mut f32, time: f32) -> f32 {
 /// normals. Segment 0 addresses the model, segment 1 its vertices, segment 8 the renderer's render
 /// states in `game_data` (the decompressed `.game` data); each part is walked on its own.
 pub fn parse_attachment(data: &[u8], game_data: &[u8]) -> Result<Vec<Ir>> {
-    let states = game_data.get(RENDER_STATES - crate::GAME_DATA_VRAM..);
     let (table, size) = (be32(data, 0)? as usize, be32(data, 4)? as usize);
     (0..size)
         .step_by(4)
-        .map(|k| {
-            Ok(walk(be32(data, table + k)?, |a| {
-                let off = (a & 0xFF_FFFF) as usize;
-                match a >> 24 {
-                    0 => data.get(off..),
-                    1 => data.get(VERTICES + off..),
-                    8 => states?.get(off..),
-                    _ => None,
-                }
-            })?)
-        })
+        .map(|k| walk_model(data, game_data, be32(data, table + k)?))
         .collect()
+}
+
+/// A bank-09 effect model with one display list (the detonation's ring 0x157, the spark 0x132):
+/// header word 0 is the list's offset, word 1 its size (I, from their bytes); addresses as
+/// [`parse_attachment`]'s.
+pub fn parse_effect(data: &[u8], game_data: &[u8]) -> Result<Ir> {
+    walk_model(data, game_data, be32(data, 0)?)
+}
+
+fn walk_model(data: &[u8], game_data: &[u8], list: u32) -> Result<Ir> {
+    let states = game_data.get(RENDER_STATES - crate::GAME_DATA_VRAM..);
+    Ok(walk(list, |a| {
+        let off = (a & 0xFF_FFFF) as usize;
+        match a >> 24 {
+            0 => data.get(off..),
+            1 => data.get(VERTICES + off..),
+            8 => states?.get(off..),
+            _ => None,
+        }
+    })?)
 }
 
 #[cfg(test)]

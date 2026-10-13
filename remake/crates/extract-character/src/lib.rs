@@ -28,7 +28,7 @@ pub use anim::{
     animation_entry, ff_duration, parse_routes, quaternion,
 };
 pub use gltf::Gltf;
-pub use held::{Held, due, held_models, parse_attachment};
+pub use held::{Held, due, held_models, parse_attachment, parse_effect};
 pub use model::{Joint, Model, bind_pivots, matrix_slot, parse_joints, parse_model};
 
 use extract_core::{Rom, Table};

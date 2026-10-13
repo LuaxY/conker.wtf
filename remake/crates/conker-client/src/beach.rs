@@ -4,15 +4,18 @@
 //!   `Character::looks`, each glTF primitive's `extras.list`);
 //! - an escapee fades out, 16 alpha a frame, and stays hidden while frozen ([`escape_alpha`]);
 //! - the plunger (placements 0, 4, 5) at its y, and the water's scroll ([`WATER`]);
-//! - the detonation (`MatchView::cooldown` 0 → 900): explosions and debris at the three records, a
-//!   villager's view cut to the level's camera 0x9002 for 60 frames ([`cut`]), every view shaken
-//!   ([`shake`]);
+//! - the detonation (`MatchView::cooldown` 0 → 900): a ring ([`ring`], the pack's `effects.gltf`)
+//!   and debris at each of the three records, a villager's view cut to the level's camera 0x9002 for
+//!   60 frames ([`cut`]), every view shaken ([`DETONATION`]);
 //! - the strike (a villager's `Combat::deadline` reaching 0): its red light at the villager over the
-//!   40 frames to the blast ([`strike_size`]), then the blast's explosion and debris.
+//!   40 frames to the blast ([`strike_size`]), its red floor glow ([`glow`]) and spinning streak
+//!   ([`streak`]), then the blast's explosion, debris and shake ([`BLAST`]);
+//! - a rocket's blast shakes the views near it too ([`BLAST`], I: the original's rocket code is
+//!   shared by every map; here War: Beach's only).
 //!
-//! The explosions (I: their sizes over time and the particle emitter are not decoded): each a burst of
+//! The strike's explosion (I: the original's 11 sparks, model 0x132, are not drawn): a burst of
 //! camera-facing puffs of the pack's `explosion.png` in the colours the original's draws use (det1 DL
-//! 318: white, grey, black and dark red, alpha 0x64-0xC7), and a few chunks of debris falling.
+//! 318: white, grey, black and dark red, alpha 0x64-0xC7); debris falls at every blast.
 
 use std::collections::BTreeMap;
 
@@ -20,30 +23,68 @@ use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::gltf::{GltfExtras, GltfMaterialName};
 use bevy::math::Affine2;
 use bevy::prelude::*;
+use bevy::world_serialization::WorldAssetRoot;
 use conker_anim::combat::BLOWN_UP;
 use conker_assets::{Character, Light, When};
 use conker_rules::beach;
-use conker_sim::net::{Combat, MatchView, Player};
+use conker_rules::projectile::ROCKET_SPEED;
+use conker_sim::net::{Collision, Combat, MatchView, Player};
 use lightyear::prelude::{Interpolated, LocalTimeline, Predicted};
 
 use crate::FollowCamera;
 use crate::render::{Model, Rig};
 
-/// The detonation's three records (`func_150FCA30`'s `0x800D9AA0`, §6-§7: the bunkers' charges).
+/// The detonation's three records (`func_150FCA30`'s `0x800D9AA0`, the bunkers' charges: (x, y + h/2,
+/// z), V fx2 `beach-environment-scratch/out/explosion.csv`): a ring at each, all on the detonation's
+/// frame (the sounds keep their own places and delays).
 pub const RECORDS: [[f32; 3]; 3] = [
-    [-319.0, -273.0, -3419.0],
-    [-2038.0, 1560.0, -2631.0],
-    [1519.0, 947.0, -2633.0],
+    [-360.0, -290.5, -4165.0],
+    [-2515.0, 1547.5, -3282.0],
+    [1845.0, 875.5, -3369.0],
 ];
+/// The ring (`func_151541B8`, V fx2): xz scale `.0`·√(t − 1), y scale `.1`, shown for frames 0 to
+/// `.2` (V: all three gone after t = 12, whatever their L).
+pub const RING: (f32, f32, u32) = (6.6944, 2.609, 12);
 /// The level camera 0x9002 a villager's view cuts to for [`CUT`] frames after the detonation (V det1
 /// reads 318-377, `det1_camera.csv`): its eye from `EYE`, moving `EYE_STEP` a frame, looking at `AT`.
 pub const EYE: [f32; 3] = [1521.0, 1371.0, -1446.0];
 pub const EYE_STEP: [f32; 3] = [-0.6661, -1.1393, -1.9437];
 pub const AT: [f32; 3] = [1414.43, 1143.14, -1757.01];
 pub const CUT: u32 = 60;
-/// The shake on every view (`func_151D8868 {1, 100, 8, 0xF, −1}`): 8 units for 100 VIs (I: how it
-/// moves the view is not read; here a jitter of up to 8 that dies away).
-pub const SHAKE: (f32, u32) = (8.0, 50);
+/// A shake's six channels (`func_15165628`'s cases, `func_1516489C` a frame; V fx2 `shake.csv`): x, y,
+/// z in units, pitch, yaw, roll in degrees: each channel's amplitude and angular speed (rad a frame),
+/// both × the envelope ([`Wave::envelope`]: up over `attack` frames, held `hold`, down to 1/`decay`
+/// over `decay`); from then on each channel stops at its phase's next sign change.
+#[derive(Debug)]
+pub struct Wave {
+    pub amp: [f32; 6],
+    pub w: [f32; 6],
+    pub attack: u32,
+    pub hold: u32,
+    pub decay: u32,
+}
+
+/// Case 4, the detonation's (at the first record, 2007 then 9005: [`shake_share`]).
+#[allow(clippy::approx_constant)] // 1.5707°: the oracle's yaw amplitude, not π/2.
+pub const DETONATION: Wave = Wave {
+    amp: [8.0, 17.0, 4.0, 0.7614, 1.5707, 1.2668],
+    w: [0.587, 0.906, 0.403, 1.1592, 0.6973, 1.3464],
+    attack: 5,
+    hold: 3,
+    decay: 45,
+};
+/// Case 5, the strike's blast (at the strike, 506 then 1013) and a rocket's (C, at the blast, 800
+/// then 2000).
+pub const BLAST: Wave = Wave {
+    amp: [15.0, 10.0, 19.0, 0.5397, 0.7679, 0.9881],
+    w: [1.045, 0.636, 1.404, 0.4526, 0.485, 0.6843],
+    attack: 5,
+    hold: 5,
+    decay: 25,
+};
+/// The strike's streak: its length and its three angles' steps (rad a frame, about x, y, z; I: how
+/// `func_15140410` builds the quad is not decoded).
+pub const STREAK: (f32, [f32; 3]) = (1500.0, [0.285, 0.106, -0.086]);
 /// The water: placement 1's node and its material 50 (`m50-tex0530`, 32 × 64), whose tile's T origin
 /// rises a quarter texel a frame (V: 0x57E at DL 401 → 0x6A9 at DL 700). v = 1 − (t − origin) / 64
 /// (`extract_gbi`'s `uv`), so v rises 0.25 / 64 a frame.
@@ -91,25 +132,96 @@ pub fn cut(k: u32) -> Option<(Vec3, Vec3)> {
     (k < CUT).then(|| (Vec3::from_array(EYE) + step, Vec3::from_array(AT)))
 }
 
-/// The shake's offset `k` frames after the detonation (I, [`SHAKE`]).
-pub fn shake(k: u32) -> Vec3 {
-    let (size, frames) = SHAKE;
-    if k >= frames {
-        return Vec3::ZERO;
-    }
-    let left = size * (1.0 - k as f32 / frames as f32);
-    let k = k as f32;
-    Vec3::new((k * 12.9898).sin(), (k * 78.233).sin(), (k * 37.719).sin()) * left
+/// A ring's xz scale and alpha `t` frames on, `a` its alpha and `l` its L (`a = 200 + rand % 56`,
+/// `L = 12 + 4r`): alpha a·(1 − ((t − 1)/L)²), a to t = 1; none once over.
+pub fn ring(t: u32, a: f32, l: f32) -> Option<(f32, f32)> {
+    let (k, _, last) = RING;
+    let s = t.saturating_sub(1) as f32;
+    let alpha = a * (1.0 - (s / l).powi(2));
+    (t <= last && alpha > 0.0).then(|| (k * s.sqrt(), alpha))
 }
 
-/// What this client saw go off, by its own ticks: the detonation (for the camera and the shake) and
-/// the strikes (the HUD's flash reads the local player's).
+impl Wave {
+    /// The envelope `k` frames on.
+    pub fn envelope(&self, k: u32) -> f32 {
+        let (a, h, d) = (self.attack, self.hold, self.decay);
+        match k {
+            k if k <= a => k as f32 / a as f32,
+            k if k <= a + h => 1.0,
+            k => (1.0 - (k - a - h) as f32 / d as f32).max(1.0 / d as f32),
+        }
+    }
+
+    /// The channels `k` frames on: amplitude × envelope × sin φ, φ from 0 stepping w × envelope a
+    /// frame (wrapped), a stopped channel 0; none once all six have stopped (V: the stops' frames).
+    pub fn at(&self, k: u32) -> Option<[f32; 6]> {
+        let end = self.attack + self.hold + self.decay;
+        let (mut phase, mut on) = ([0.0f32; 6], [true; 6]);
+        for j in 1..=k {
+            let e = self.envelope(j);
+            for c in 0..6 {
+                if on[c] {
+                    let before = phase[c].sin();
+                    phase[c] = (phase[c] + self.w[c] * e).rem_euclid(std::f32::consts::TAU);
+                    on[c] = j < end || before * phase[c].sin() > 0.0;
+                }
+            }
+        }
+        let e = self.envelope(k);
+        let channel = |c: usize| match on[c] {
+            true => self.amp[c] * e * phase[c].sin(),
+            false => 0.0,
+        };
+        on.contains(&true).then(|| std::array::from_fn(channel))
+    }
+}
+
+/// A shake's share at `d` from its point (`func_15165BB0`): 1 within `near`, down to 0 over `range`.
+pub fn shake_share(near: f32, range: f32, d: f32) -> f32 {
+    (1.0 - (d - near).max(0.0) / range).max(0.0)
+}
+
+/// The strike's floor glow's scale `k` frames after the call, its blast `b` frames after it (V fx2
+/// `strike.csv`): 0 at k = 1, +0.04 a frame to 1.2, held to the blast, then −0.12 a frame, gone at
+/// the blast + 10. Its quad is ±50 × it.
+pub fn glow(k: u32, b: Option<u32>) -> Option<f32> {
+    grow(k, b, [0.04, 1.2, 0.12])
+}
+
+/// The strike's streak's width (V fx2): 0 at k = 1, +2 a frame to 60, held, then −6 a frame.
+pub fn streak(k: u32, b: Option<u32>) -> Option<f32> {
+    grow(k, b, [2.0, 60.0, 6.0])
+}
+
+fn grow(k: u32, b: Option<u32>, [up, cap, down]: [f32; 3]) -> Option<f32> {
+    let at = |k: u32| (up * k.saturating_sub(1) as f32).min(cap);
+    match b {
+        Some(b) if k > b => Some(at(b) - down * (k - b) as f32).filter(|v| k < b + 10 && *v > 0.0),
+        _ => Some(at(k)),
+    }
+}
+
+/// What this client saw go off, by its own ticks: the detonation (for the camera), the strikes (the
+/// HUD's flash reads the local player's), the shakes running, and last tick's rockets.
 #[derive(Resource, Default)]
 pub struct Blasts {
     pub detonation: Option<u32>,
     pub strikes: Vec<Strike>,
+    pub shakes: Vec<Shake>,
     cooldown: Option<u16>,
     deadlines: BTreeMap<u16, u16>,
+    rockets: Option<Vec<[f32; 3]>>,
+}
+
+/// A shake on every view: its wave from tick `from`, and its point, near and range
+/// ([`shake_share`] of the view's distance).
+#[derive(Clone, Copy, Debug)]
+pub struct Shake {
+    pub wave: &'static Wave,
+    pub from: u32,
+    pub at: Vec3,
+    pub near: f32,
+    pub range: f32,
 }
 
 /// A strike on the villager in `slot` at `at`, called at tick `call`, its blast at `blast`.
@@ -121,11 +233,31 @@ pub struct Strike {
     pub blast: Option<u32>,
 }
 
-/// The puffs' quad and texture.
+/// The puffs' quad and texture, the strike's glow and streak textures.
 #[derive(Resource)]
 struct Sprites {
     quad: Handle<Mesh>,
     texture: Handle<Image>,
+    glow: Handle<Image>,
+    streak: Handle<Image>,
+}
+
+/// A detonation ring: its first tick, alpha a and L ([`ring`]), and its own material once its scene
+/// is in.
+#[derive(Component)]
+struct Ring {
+    from: u32,
+    alpha: f32,
+    life: f32,
+    material: Option<Handle<StandardMaterial>>,
+}
+
+/// A strike's floor glow or its streak: the strike's slot and call tick.
+#[derive(Component)]
+struct Mark {
+    slot: u16,
+    call: u32,
+    streak: bool,
 }
 
 /// A puff of an explosion, or a piece of debris (falling): game units and frames.
@@ -164,6 +296,8 @@ pub fn build(app: &mut App, characters: &[Character]) {
             commands.insert_resource(Sprites {
                 quad: meshes.add(Rectangle::new(1.0, 1.0)),
                 texture: assets.load("hud/explosion.png"),
+                glow: assets.load("hud/strike_glow.png"),
+                streak: assets.load("hud/strike_streak.png"),
             });
         },
     );
@@ -174,7 +308,7 @@ pub fn build(app: &mut App, characters: &[Character]) {
             fade_escapees,
             sink_plunger,
             scroll_water,
-            (watch, strike_lights, puffs).chain(),
+            (watch, strike_lights, puffs, rings, marks).chain(),
         ),
     );
 }
@@ -340,22 +474,29 @@ fn scroll_water(
     }
 }
 
-/// The detonation and the strikes as this client sees them ([`Blasts`]): explosions and debris
-/// where they go off.
+/// The detonation, the strikes and the rockets' blasts as this client sees them ([`Blasts`]): rings,
+/// explosions, debris, the strikes' marks and the shakes where they go off.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn watch(
     game: Query<&MatchView>,
     players: Query<(&Player, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     timeline: Res<LocalTimeline>,
     sprites: Option<Res<Sprites>>,
+    world: Res<Collision>,
+    assets: Res<AssetServer>,
     mut blasts: ResMut<Blasts>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut seed: Local<u32>,
+    mut ring_model: Local<Option<Handle<WorldAsset>>>,
     mut commands: Commands,
 ) {
     let (Some(m), Some(sprites)) = (game.single().ok().filter(|m| m.beach), sprites) else {
         return;
     };
+    let ring_model = (ring_model.get_or_insert_with(|| {
+        assets.load(format!("{}#Scene0", conker_assets::effects_gltf("2b")))
+    }))
+    .clone();
     let tick = timeline.tick().0;
     let b = &mut *blasts;
     let mut burst = |at: Vec3, puffs: u32, radius: f32, chunks: u32| {
@@ -405,33 +546,177 @@ fn watch(
             ));
         }
     };
-    if b.cooldown == Some(0) && m.cooldown > 0 {
+    let shake = |wave: &'static Wave, at: [f32; 3], near: f32, range: f32| Shake {
+        wave,
+        from: tick,
+        at: Vec3::from_array(at),
+        near,
+        range,
+    };
+    let detonation = b.cooldown == Some(0) && m.cooldown > 0;
+    if detonation {
         info!("t={tick} beach: the detonation");
         b.detonation = Some(tick);
+        b.shakes
+            .push(shake(&DETONATION, RECORDS[0], 2007.0, 9005.0));
         for at in RECORDS {
-            burst(Vec3::from_array(at), 30, 220.0, 4);
+            burst(Vec3::from_array(at), 0, 220.0, 4);
         }
     }
     b.cooldown = Some(m.cooldown);
+    let mut called = Vec::new();
     for (p, c) in &players {
         let last = b.deadlines.insert(c.slot, c.deadline);
         if last.is_some_and(|d| d > 0) && c.deadline == 0 && c.team == beach::VILLAGERS {
             info!("t={tick} beach: the strike on slot {}", c.slot);
-            b.strikes.push(Strike {
+            let s = Strike {
                 slot: c.slot,
                 at: p.pos,
                 call: tick,
                 blast: None,
-            });
+            };
+            b.strikes.push(s);
+            called.push(s);
         }
         for s in b.strikes.iter_mut().filter(|s| s.slot == c.slot) {
             if s.blast.is_none() && (c.anim == BLOWN_UP || tick >= s.call + STRIKE) {
                 s.blast = Some(tick);
                 burst(Vec3::from_array(s.at), 16, 120.0, 3);
+                b.shakes.push(shake(&BLAST, s.at, 506.0, 1013.0));
             }
         }
     }
     b.strikes.retain(|s| s.blast.is_none_or(|t| tick < t + 60));
+    let old = b.rockets.replace(m.rockets.clone());
+    for at in (old.iter()).flat_map(|old| crate::audio::gone(old, &m.rockets, 2.0 * ROCKET_SPEED)) {
+        b.shakes.push(shake(&BLAST, at, 800.0, 2000.0));
+    }
+    b.shakes
+        .retain(|s| s.wave.at(tick.saturating_sub(s.from)).is_some());
+    // The rings: random yaw, a = 200 + rand % 56, L = 12 + 4r.
+    let mut rng = conker_rules::Rng::new(u64::from(tick) << 8 | 1);
+    for at in RECORDS.into_iter().filter(|_| detonation) {
+        let turn = Quat::from_rotation_y(rng.next_f32() * std::f32::consts::TAU);
+        commands.spawn((
+            Ring {
+                from: tick,
+                alpha: (200 + rng.next_u32() % 56) as f32,
+                life: 12.0 + 4.0 * rng.next_f32(),
+                material: None,
+            },
+            WorldAssetRoot(ring_model.clone()),
+            Transform::from_translation(Vec3::from_array(at)).with_rotation(turn),
+            Visibility::Hidden,
+        ));
+    }
+    // The strike's marks: the glow on the floor below the villager's y + 100 (+ 5), facing up; the
+    // streak at the villager.
+    let mut red = |texture: &Handle<Image>| {
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.0, 0.0),
+            base_color_texture: Some(texture.clone()),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        }))
+    };
+    for s in called {
+        let at = Vec3::from_array(s.at);
+        let mark = |streak| Mark {
+            slot: s.slot,
+            call: s.call,
+            streak,
+        };
+        if let Some(floor) = world.0.floor(at.x, at.z, -1e9, at.y + 50.0, None) {
+            let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            commands.spawn((
+                mark(false),
+                Mesh3d(sprites.quad.clone()),
+                red(&sprites.glow),
+                Transform::from_xyz(at.x, floor.y + 5.0, at.z)
+                    .with_rotation(flat)
+                    .with_scale(Vec3::ZERO),
+            ));
+        }
+        commands.spawn((
+            mark(true),
+            Mesh3d(sprites.quad.clone()),
+            red(&sprites.streak),
+            Transform::from_translation(at).with_scale(Vec3::ZERO),
+        ));
+    }
+}
+
+/// The rings grow and fade ([`ring`]) on their own copies of the model's material; gone once over.
+fn rings(
+    timeline: Res<LocalTimeline>,
+    mut rings: Query<(Entity, &mut Ring, &mut Transform, &mut Visibility)>,
+    children: Query<&Children>,
+    mut shown: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let tick = timeline.tick().0;
+    for (e, mut r, mut t, mut v) in &mut rings {
+        let Some((xz, alpha)) = ring(tick.saturating_sub(r.from), r.alpha, r.life) else {
+            commands.entity(e).despawn();
+            continue;
+        };
+        t.scale = Vec3::new(xz, RING.1, xz);
+        v.set_if_neq(match xz > 0.0 {
+            true => Visibility::Inherited,
+            false => Visibility::Hidden,
+        });
+        if r.material.is_none() {
+            for part in children.iter_descendants(e) {
+                if let Ok(mut m) = shown.get_mut(part) {
+                    let own = match &r.material {
+                        Some(own) => own.clone(),
+                        None => {
+                            let copy = materials.get(&m.0).cloned().unwrap_or_default();
+                            r.material.insert(materials.add(copy)).clone()
+                        }
+                    };
+                    m.0 = own;
+                }
+            }
+        }
+        if let Some(mut m) = r.material.as_ref().and_then(|m| materials.get_mut(m)) {
+            m.base_color.set_alpha(alpha / 255.0);
+        }
+    }
+}
+
+/// The strikes' glows and streaks at their size ([`glow`], [`streak`]); the streak spins
+/// ([`STREAK`]). Gone with their size.
+fn marks(
+    blasts: Res<Blasts>,
+    timeline: Res<LocalTimeline>,
+    mut marks: Query<(Entity, &Mark, &mut Transform)>,
+    mut commands: Commands,
+) {
+    let tick = timeline.tick().0;
+    for (e, m, mut t) in &mut marks {
+        let k = tick.saturating_sub(m.call);
+        let strike = (blasts.strikes.iter()).find(|s| (s.slot, s.call) == (m.slot, m.call));
+        let size = strike.and_then(|s| {
+            let b = s.blast.map(|b| b - s.call);
+            if m.streak { streak(k, b) } else { glow(k, b) }
+        });
+        let Some(size) = size else {
+            commands.entity(e).despawn();
+            continue;
+        };
+        if m.streak {
+            let (length, [x, y, z]) = STREAK;
+            let k = k as f32;
+            t.rotation = Quat::from_euler(EulerRot::XYZ, x * k, y * k, z * k);
+            t.scale = Vec3::new(length, size, 1.0);
+        } else {
+            t.scale = Vec3::new(100.0 * size, 100.0 * size, 1.0);
+        }
+    }
 }
 
 /// Each strike's red light at the villager, until its blast.
@@ -512,8 +797,9 @@ fn puffs(
     }
 }
 
-/// After the follow camera: the detonation's cut for a villager's view, and the shake on every view
-/// (not while the free camera flies).
+/// After the follow camera: the detonation's cut for a villager's view, and the shakes on every view
+/// ([`Blasts::shakes`], each by its share at the view: x, y, z on the eye, pitch, yaw and roll on its
+/// angles; not while the free camera flies).
 pub(crate) fn camera(
     blasts: Res<Blasts>,
     timeline: Res<LocalTimeline>,
@@ -521,14 +807,32 @@ pub(crate) fn camera(
     camera: Single<(&mut Transform, &FreeCameraState)>,
 ) {
     let (mut transform, free) = camera.into_inner();
-    let Some(at) = blasts.detonation.filter(|_| !free.enabled) else {
+    let (Ok(own), false) = (own.single(), free.enabled) else {
         return;
     };
-    let k = timeline.tick().0.saturating_sub(at);
-    if let Some((eye, look)) = cut(k).filter(|_| own.single().is_ok_and(|c| c.team == 0)) {
+    let tick = timeline.tick().0;
+    let k = |from: u32| tick.saturating_sub(from);
+    if let Some((eye, look)) = (blasts.detonation)
+        .and_then(|at| cut(k(at)))
+        .filter(|_| own.team == 0)
+    {
         *transform = Transform::from_translation(eye).looking_at(look, Vec3::Y);
     }
-    transform.translation += shake(k);
+    let mut sum = [0.0f32; 6];
+    for s in &blasts.shakes {
+        let share = shake_share(s.near, s.range, transform.translation.distance(s.at));
+        for (sum, c) in sum.iter_mut().zip(s.wave.at(k(s.from)).unwrap_or_default()) {
+            *sum += c * share;
+        }
+    }
+    if sum == [0.0; 6] {
+        return;
+    }
+    let [x, y, z, pitch, yaw, roll] = sum;
+    transform.translation += Vec3::new(x, y, z);
+    let (y0, x0, z0) = transform.rotation.to_euler(EulerRot::YXZ);
+    let [pitch, yaw, roll] = [pitch, yaw, roll].map(f32::to_radians);
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, y0 + yaw, x0 + pitch, z0 + roll);
 }
 
 #[cfg(test)]
@@ -599,6 +903,113 @@ mod tests {
             "{eye}"
         );
         assert!(cut(60).is_none());
-        assert!(shake(0).length() <= SHAKE.0 * 3f32.sqrt() && shake(50) == Vec3::ZERO);
+    }
+
+    /// The rings against fx2's `explosion.csv` (alpha at t = 0..12, a and L each ring's: 211 and
+    /// 12.556, 230 and 12.232, 223 and 12.012; the xz scale the same for all three), gone after 12.
+    #[test]
+    fn the_rings_follow_the_original() {
+        let rows: [(f32, f32, [u8; 13]); 3] = [
+            (
+                211.0,
+                12.556,
+                [
+                    211, 211, 209, 205, 198, 189, 177, 162, 145, 125, 102, 77, 49,
+                ],
+            ),
+            (
+                230.0,
+                12.232,
+                [
+                    230, 230, 228, 223, 216, 205, 191, 174, 155, 132, 106, 77, 44,
+                ],
+            ),
+            (
+                223.0,
+                12.012,
+                [223, 223, 221, 216, 209, 198, 184, 167, 147, 124, 98, 69, 36],
+            ),
+        ];
+        let scales = [
+            0.0, 0.0, 6.694, 9.467, 11.595, 13.389, 14.969, 16.398, 17.711, 18.934,
+        ];
+        for (a, l, alphas) in rows {
+            for (t, want) in alphas.into_iter().enumerate() {
+                let (xz, alpha) = ring(t as u32, a, l).unwrap();
+                assert!((alpha - f32::from(want)).abs() < 1.0, "{a} t={t}: {alpha}");
+                if let Some(s) = scales.get(t) {
+                    assert!((xz - s).abs() < 0.001, "t={t}: {xz}");
+                }
+            }
+            assert_eq!(ring(13, a, l), None);
+        }
+        assert!((ring(12, 211.0, 12.556).unwrap().0 - 22.203).abs() < 0.001);
+    }
+
+    /// The shakes against fx2's `shake.csv` (frame 0 the creation's): the envelope's amplitudes (x:
+    /// 1.6 a frame up to 8, held to frame 8, 7.8222 at 9, 4.8 at 26, 8/45 from 52), and the frames
+    /// each channel stops at, its angular speed 0 (detonation: pitch 134, roll 157, z 196, y 197, yaw
+    /// 212, x after the dump's last frame 237; the strike's blast: z 38, pitch 55, x 61, roll 108, y
+    /// 152, yaw after 181); the distance share.
+    #[test]
+    fn the_shakes_follow_the_original() {
+        let x = |w: &Wave, k| w.amp[0] * w.envelope(k);
+        for (k, want) in [
+            (0, 0.0),
+            (1, 1.6),
+            (5, 8.0),
+            (8, 8.0),
+            (9, 7.8222),
+            (26, 4.8),
+        ] {
+            assert!((x(&DETONATION, k) - want).abs() < 1e-4, "{k}");
+        }
+        assert!(
+            [52, 53, 237]
+                .iter()
+                .all(|&k| (x(&DETONATION, k) - 8.0 / 45.0).abs() < 1e-4)
+        );
+        assert!((BLAST.amp[2] * BLAST.envelope(1) - 3.8).abs() < 1e-4);
+        assert!((x(&BLAST, 181) - 0.6).abs() < 1e-4);
+        let stops = |w: &Wave| -> [u32; 6] {
+            std::array::from_fn(|c| {
+                (1..400)
+                    .find(|&k| w.at(k).is_none_or(|o| o[c] == 0.0))
+                    .unwrap()
+            })
+        };
+        assert_eq!(stops(&DETONATION), [238, 197, 196, 134, 212, 157]);
+        assert_eq!(stops(&BLAST), [61, 152, 38, 55, 182, 108]);
+        assert!(DETONATION.at(237).is_some() && DETONATION.at(238).is_none());
+        let o = DETONATION.at(5).unwrap();
+        assert!(o[1].abs() <= 17.0 && o[1] != 0.0);
+        assert_eq!(
+            [0.0, 2007.0, 9005.0 + 2007.0].map(|d| shake_share(2007.0, 9005.0, d)),
+            [1.0, 1.0, 0.0]
+        );
+        assert!((shake_share(506.0, 1013.0, 1012.5) - 0.5).abs() < 1e-6);
+    }
+
+    /// The strike's glow and streak against fx2's `strike.csv` (the call at read 304, the blast at
+    /// 345: k = 41): 0 at k = 1, the glow +0.04 and the streak +2 a frame to 1.2 and 60 at k = 31,
+    /// held, then −0.12 and −6 a frame, gone at k = 51.
+    #[test]
+    fn the_strike_marks_follow_the_original() {
+        let b = Some(41);
+        let near = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-4);
+        for (k, g, w) in [
+            (1, 0.0, 0.0),
+            (2, 0.04, 2.0),
+            (16, 0.6, 30.0),
+            (31, 1.2, 60.0),
+        ] {
+            assert!(near(glow(k, None), g) && near(glow(k, b), g), "{k}");
+            assert!(near(streak(k, b), w), "{k}");
+        }
+        for (k, g, w) in [(41, 1.2, 60.0), (42, 1.08, 54.0), (50, 0.12, 6.0)] {
+            assert!(near(glow(k, b), g) && near(streak(k, b), w), "{k}");
+        }
+        assert_eq!((glow(51, b), streak(51, b)), (None, None));
+        assert!(near(glow(200, None), 1.2));
     }
 }

@@ -812,6 +812,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
         ProtocolPlugin,
     ));
     conker_rules::net::register(&mut app);
+    app.local_rollback::<Before>();
     app.insert_resource(PredictionManager::default());
     if !cfg.headless && cfg.at.is_some() {
         app.add_systems(FixedUpdate, screenshot_at_read.run_if(not(is_in_rollback)));
@@ -911,7 +912,7 @@ fn attach(
         let lives = combat.map_or(0, |c| c.lives);
         commands
             .entity(entity)
-            .insert(FollowCamera::new(follow, since, lives));
+            .insert((FollowCamera::new(follow, since, lives), Before::default()));
     }
     for (p, combat, mut cam) in &mut cameras {
         if combat.lives > cam.lives {
@@ -1108,10 +1109,17 @@ pub fn match_settings(m: &MatchView) -> Settings {
     }
 }
 
+/// The predicted body's position before its last step, as the server's lifts keep it (`Lifts::ride`'s
+/// `old`; None: none to test a move from, after a respawn): 0x2D's gates (shape 3) take the move
+/// from there. Rolled back with the body (a local rollback component).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Before(pub Option<[f32; 3]>);
+
 /// The local player's tick as the server runs it: conker-rules' frame for its slot among the others
 /// ([`known_match`], `Match::step_player`, its strikes aimed where `shown` has them), and its events.
 /// None once the match is over, nor before the local timeline is on the server's ticks (the
-/// fighter's frames count in them).
+/// fighter's frames count in them). `before`: the body before its last step ([`Before`]), then
+/// before this one.
 #[allow(clippy::too_many_arguments)]
 fn own_tick(
     tick: u32,
@@ -1124,6 +1132,7 @@ fn own_tick(
     shown: &[(usize, [f32; 3])],
     arena: &MatchArena,
     world: &CollisionWorld,
+    before: &mut Option<[f32; 3]>,
 ) -> (Match, usize, Vec<Event>) {
     let slot = usize::from(fighting.slot);
     let bodies = others.iter().map(|o| (o.0, o.1));
@@ -1135,11 +1144,12 @@ fn own_tick(
     let mut events = Vec::new();
     if !over && fighting.state.since <= tick {
         // A lift before the step, as the server rides them, counted as a respawn (the camera cuts
-        // on its tick): the boxes (0x30's, 0x2B's) by where the player stands; 0x2D's gates need its
-        // last move, which the prediction doesn't keep (the server's ride corrects it). The record's
-        // jitter is this match's draw, not the server's (a correction of up to 40).
+        // on its tick): the boxes (0x30's, 0x2B's) by where the player stands, 0x2D's gates by its
+        // last move (from `before`). The record's jitter is this match's draw, not the server's (a
+        // correction of up to 40).
         let b = m.players[slot].body;
-        let lift = (arena.2.iter()).find(|l| l.shape != 3 && l.takes(b.pos, b.pos, b.floor_y));
+        let old = before.unwrap_or(b.pos);
+        let lift = (arena.2.iter()).find(|l| l.takes(old, b.pos, b.floor_y));
         if let Some(l) = lift.filter(|_| m.players[slot].health != 0) {
             let at = conker_rules::spawn::place(&arena.0.spawns, l.record, &mut m.rng);
             let b = &mut m.players[slot].body;
@@ -1147,12 +1157,18 @@ fn own_tick(
             (b.facing, b.move_angle) = (at.facing, at.facing);
             events.push(Event::Respawn { player: slot, at });
         }
+        *before = Some(m.players[slot].body.pos);
         let seen = |s: usize, v: usize| {
             (s == slot)
                 .then(|| shown.iter().find(|o| o.0 == v).map(|o| o.1))
                 .flatten()
         };
-        events.extend(m.step_player(slot, &arena.0, input, world, &seen));
+        let stepped = m.step_player(slot, &arena.0, input, world, &seen);
+        // A respawn's move is no move (the server's `Lifts::reset` on `Event::Respawn`).
+        if (stepped.iter()).any(|e| matches!(e, Event::Respawn { player, .. } if *player == slot)) {
+            *before = None;
+        }
+        events.extend(stepped);
     }
     (m, slot, events)
 }
@@ -1191,6 +1207,7 @@ fn predict(
             &mut Fighting,
             &ActionState<Input>,
             Option<&mut FollowCamera>,
+            Option<&mut Before>,
         ),
         With<Predicted>,
     >,
@@ -1207,10 +1224,15 @@ fn predict(
     let others = known(&others, slot, tick);
     // Where this screen shows the others this tick: what the server rewinds this tick's strikes to.
     let shown: Positions = others.iter().map(|o| (o.0, o.2)).collect();
-    for (mut player, mut fighting, input, camera) in &mut own {
+    for (mut player, mut fighting, input, camera, before) in &mut own {
+        let mut old = before.as_deref().and_then(|b| b.0);
         let (mut m, i, events) = own_tick(
             tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
+            &mut old,
         );
+        if let Some(mut b) = before {
+            b.set_if_neq(Before(old));
+        }
         let f = &mut m.players[i];
         if let Some(mut camera) = camera {
             if let Some(at) = events.iter().find_map(|e| match e {
@@ -1265,6 +1287,7 @@ fn predict_again(
             &mut Fighting,
             &ActionState<Input>,
             Option<&FollowCamera>,
+            Option<&mut Before>,
         ),
         With<Predicted>,
     >,
@@ -1283,10 +1306,15 @@ fn predict_again(
         || others.iter().map(|o| (o.0, o.2)).collect(),
         |s| s.1.clone(),
     );
-    for (mut player, mut fighting, input, camera) in &mut own {
+    for (mut player, mut fighting, input, camera, before) in &mut own {
+        let mut old = before.as_deref().and_then(|b| b.0);
         let (mut m, i, _) = own_tick(
             tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
+            &mut old,
         );
+        if let Some(mut b) = before {
+            b.set_if_neq(Before(old));
+        }
         let f = &mut m.players[i];
         if let Some(camera) = camera {
             camera.aims[tick as usize % AIMS].give(f);
@@ -1696,6 +1724,7 @@ mod tests {
                 &[],
                 &arena,
                 &world,
+                &mut None,
             );
             let rode = events
                 .iter()
@@ -1706,6 +1735,63 @@ mod tests {
         let off = Vec2::new(b.pos[0] + 2337.0, b.pos[2] + 3894.0).length();
         assert!(rode && off <= 41.0 && b.facing == 175 << 8, "{off} {b:?}");
         assert!(!tick([-827.0, -437.0, -4620.0]).0);
+    }
+
+    /// 0x2D's gate lifts (shape 3) take the last move (`beach-environment.md` §7): a body whose move
+    /// crossed a gate's plane from behind rides on that tick, as the server's `Lifts::ride` on the
+    /// same two positions; past the gate with no earlier position (a respawn's), no ride.
+    #[test]
+    fn the_prediction_rides_a_gate() {
+        let mut r = [0u8; 0x34];
+        for (k, v) in [0i16, 0, 0, 100, 100, 20].into_iter().enumerate() {
+            r[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        (r[0x15], r[0x17], r[0x1B]) = (8 << 2 | 3, 0x2D, 1);
+        let record = |position| SpawnPoint {
+            position,
+            byte_06: 0,
+            yaw: 0,
+            camera: [0.0; 3],
+            byte_14: 0,
+            byte_15: 0,
+        };
+        let arena = MatchArena::new(&[record([0; 3]), record([3000, 0, 3000])], 0x2D, &r);
+        let place = |pos| Placement {
+            index: 0,
+            pos,
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let tick = |pos, before: &mut Option<[f32; 3]>| {
+            let f = Fighter::new(&place(pos), 0, 5);
+            let (fighting, world) = (Fighting::new(0, &f), CollisionWorld::default());
+            let (_, _, events) = own_tick(
+                9,
+                false,
+                Settings::default(),
+                &f.body,
+                &fighting,
+                &Input::default(),
+                &Vec::new(),
+                &[],
+                &arena,
+                &world,
+                before,
+            );
+            (events.iter()).any(|e| matches!(e, Event::Respawn { at, .. } if at.index == 1))
+        };
+        let (behind, past) = ([0.0, 10.0, -5.0], [0.0, 10.0, 5.0]);
+        let mut before = None;
+        assert!(!tick(behind, &mut before));
+        assert_eq!(before, Some(behind));
+        assert!(tick(past, &mut before));
+        assert!(!tick(past, &mut None));
+        let mut lifts = conker_rules::lift::Lifts::new(&r, 0x2D);
+        let players = vec![Fighter::new(&place(behind), 0, 5)];
+        let mut m = Match::new(&arena.0, players, Rng::default(), 0);
+        assert!(lifts.ride(&mut m, &arena.0).is_empty());
+        m.players[0].body.pos = past;
+        assert_eq!(lifts.ride(&mut m, &arena.0).len(), 1);
     }
 
     #[test]

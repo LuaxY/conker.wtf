@@ -686,14 +686,20 @@ pub fn root_motion(p: &mut PlayerState, world: &CollisionWorld) -> bool {
     true
 }
 
-/// One frame of the jump onto a mounted gun (conker-rules' `gun`; V m2, e1): the height by the
-/// velocity and gravity the launch set, x and z 0.2 of the way to `to` (the gun's origin, not its
-/// seat), the facing turned onto the move angle (at most 3072, a clockwise turn one short), and the
+/// One frame of the jump onto a mounted gun (conker-rules' `gun`; `func_1505327C` sets it up, C; V
+/// b30 4896-4916 to 1e-3, t1 132-155): the speed the player came with brakes 2.5 a frame down to 0
+/// and carries it along the move angle (the gun's yaw), then x and z go 0.2 of the way to `to` (the
+/// seat's, s126+0x28/0x2C, fixed at the launch); the height by the velocity and gravity the launch
+/// set, the facing turned onto the move angle (at most 3072, a clockwise turn one short), and the
 /// wall routine as in the air: a ceiling stops the rise (V m2 72: 687, velocity 0).
 pub fn hop(p: &mut PlayerState, to: [f32; 2], world: &CollisionWorld) {
     let old = p.pos;
-    p.pos[0] += (to[0] - old[0]) * 0.2;
-    p.pos[2] += (to[1] - old[2]) * 0.2;
+    p.xz_speed = (p.xz_speed - BRAKE).max(0.0);
+    let (c, s) = cos_sin(p.move_angle);
+    p.pos[0] += 0.5 * p.xz_speed * c;
+    p.pos[2] -= 0.5 * p.xz_speed * s;
+    p.pos[0] += (to[0] - p.pos[0]) * 0.2;
+    p.pos[2] += (to[1] - p.pos[2]) * 0.2;
     integrate_y(p);
     p.facing = turn_facing(p.facing, p.move_angle);
     p.heading = heading_from_facing(p.facing);
@@ -708,18 +714,27 @@ pub fn sit(p: &mut PlayerState, seat: [f32; 3], yaw: u16) {
     (p.airborne, p.y_vel, p.xz_speed, p.target_speed) = (false, GROUND_Y_VEL, 0.0, 0.0);
 }
 
-/// The jump back off a mounted gun on A (V m2 1601-1615): a standing jump at y velocity 26 and speed
-/// 30 along `angle`, A held (gravity 4 until let go, then 6.2), facing 0x1200 short of it until the
-/// landing (V: m1, m2 and c10m, all three at one gun yaw); [`step`] flies it from the next frame. I:
-/// the game's speed drops 0.875 a frame in this jump with the stick released (the remake's jump
-/// keeps it), and its first frame moves 17 (here none).
-pub fn leap(p: &mut PlayerState, angle: u16) {
+/// The jump back off a mounted gun on A (`func_1505F298`'s seat case, C; V m2 1601-1615): a standing
+/// jump at y velocity 30 and speed 30 along `angle`, A held (gravity 4 until let go, then 6.2), the
+/// facing 0x1200 short of it until the landing, and obj+0x89 = 0xFF, which zeroes the drive, so the
+/// air brakes the speed 0.875 a frame from the next ([`air`]). The press's own frame moves already
+/// (the speed's update ran before the jump): 15 along `angle`, the height by the velocity (26 left),
+/// the push out of `others` (the gun's body, the player no longer its gunner) and the walls; [`step`]
+/// flies it from the next frame.
+pub fn leap(p: &mut PlayerState, angle: u16, world: &CollisionWorld, side: Side, others: &[Other]) {
     p.state = state::JUMP;
     (p.airborne, p.jumped, p.jump_held, p.turning) = (true, true, true, false);
-    (p.air_frames, p.lock, p.timer) = (1, 0, 0);
-    (p.y_vel, p.gravity, p.xz_speed, p.move_angle) = (26.0, GRAVITY_HELD, 30.0, angle);
+    (p.air_frames, p.lock, p.timer) = (1, 0xFF, 0);
+    (p.y_vel, p.gravity, p.xz_speed, p.move_angle) = (30.0, GRAVITY_HELD, 30.0, angle);
     p.facing = angle.wrapping_sub(0x1200);
     p.heading = heading_from_facing(p.facing);
+    let old = p.pos;
+    let (c, s) = cos_sin(angle);
+    p.pos[0] += 0.5 * p.xz_speed * c;
+    p.pos[2] -= 0.5 * p.xz_speed * s;
+    integrate_y(p);
+    push_apart(&mut p.pos, side, others);
+    p.y_vel = sweep_walls(p, world, old, p.y_vel);
 }
 
 /// Advances the player by one frame (V for the rules tagged in this module).
@@ -1340,7 +1355,9 @@ fn air(
     if behind >= 0x5B && p.xz_speed > 12.0 && !jumped {
         drive = 0.0;
     }
-    if stick.on || !jumped {
+    // A released stick keeps a jump's speed, unless a lock zeroes the drive (`func_1504CB98`: obj+0x89
+    // set, C; V m2 1602-1614, the jump off a mounted gun brakes 0.875 a frame).
+    if stick.on || !jumped || locked {
         p.xz_speed = accelerate_air(p.xz_speed, drive, jumped, behind);
     }
     if takeoff {
@@ -2187,5 +2204,67 @@ mod tests {
         assert!(!walled[0] && walled[11], "{walled:?} {:?}", p.pos);
         run(&mut p, Input::default(), 30, &w);
         assert!(!p.walled);
+    }
+
+    /// The jump onto a mounted gun ([`hop`]): b30's bot 4 came at 34.9 along the gun's yaw and
+    /// brakes 2.5 a frame while it homes on the gun's origin (its seat, the oracle's gun undrawn);
+    /// t1's player stood and homes on the seat, turning 3072 a frame. x and z as V's to 1e-3.
+    #[test]
+    fn hop_keeps_the_speed_and_homes() {
+        let w = CollisionWorld::default();
+        let mut p = PlayerState::spawn([-337.06015, -387.691406, -3703.08057], 47872);
+        (p.y_vel, p.gravity, p.airborne) = (44.0, 3.2, true);
+        (p.xz_speed, p.move_angle) = (34.8999329, 48128);
+        let b30 = [
+            (32.3999329, -335.31842, -3673.76709),
+            (29.8999329, -333.827026, -3651.31128),
+            (27.3999329, -332.535889, -3634.3418),
+            (24.8999329, -331.404968, -3621.76123),
+            (22.3999329, -330.402191, -3612.69214),
+            (19.8999329, -329.501984, -3606.43213),
+            (17.3999329, -328.683777, -3602.41943),
+            (14.8999329, -327.931213, -3600.20435),
+            (12.3999329, -327.23114, -3599.42725),
+            (9.89993286, -326.573059, -3599.80103),
+            (7.39993286, -325.948578, -3601.09521),
+            (4.89993286, -325.350983, -3603.12549),
+            (2.39993286, -324.774872, -3605.74512),
+            (0.0, -324.21991, -3608.79614),
+            (0.0, -323.77594, -3611.23682),
+        ];
+        for (k, (speed, x, z)) in b30.into_iter().enumerate() {
+            hop(&mut p, [-322.0, -3621.0], &w);
+            let e = (p.pos[0] - x).abs().max((p.pos[2] - z).abs());
+            assert!(
+                p.xz_speed == speed && e < 1e-3,
+                "{k} {:?} {}",
+                p.pos,
+                p.xz_speed
+            );
+        }
+        let mut p = PlayerState::spawn([-233.445694, -387.371094, -3621.0], 17152);
+        (p.y_vel, p.gravity, p.airborne, p.move_angle) = (44.0, 3.2, true, 48128);
+        let seat = [-315.828827, -3683.65723];
+        let mut n = 0;
+        for (t, facing, x, z) in [
+            (132, 20224, -249.922318, -3633.53149),
+            (133, 23296, -263.103607, -3643.55664),
+            (134, 26368, -273.648651, -3651.57666),
+            (141, 47872, -306.983002, -3676.92944),
+            (142, 48128, -308.752167, -3678.2749),
+            (155, 48128, -315.439819, -3683.36157),
+        ] {
+            while n < t - 131 {
+                hop(&mut p, seat, &w);
+                n += 1;
+            }
+            let e = (p.pos[0] - x).abs().max((p.pos[2] - z).abs());
+            assert!(
+                p.facing == facing && e < 1e-3,
+                "{t} {:?} {}",
+                p.pos,
+                p.facing
+            );
+        }
     }
 }
