@@ -101,3 +101,50 @@ fn kill_gates_of_the_maps() {
         -1614.0
     ));
 }
+
+/// Scene 0x2D's cover 2 (placement 2, a wall at x = 548 across mask k22's alcove) stops a player
+/// running in while shown and lets it through hidden; lifted 500 it lets it under ([`gas::seat`];
+/// the pack keeps the doors' and covers' collision, conker-extract's `solid_placements`).
+#[test]
+fn a_cover_is_solid_while_shown() {
+    use conker_rules::gas;
+    use conker_sim::collision::{CollisionWorld, Layer};
+    use conker_sim::movement::{self, Input, PlayerState};
+    use conker_sim::trig::AcosTable;
+    let Some(rom) = rom() else { return };
+    let placements = extract_scene::scene_placements(&rom, 0x2D).unwrap();
+    let collision = extract_scene::scene_collision(&rom, 0x2D, &placements).unwrap();
+    let solid = [&[0, 1][..], extract_scene::deathmatch_solid(0x2D)].concat();
+    let triangles = (collision.triangles.iter())
+        .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
+    let mut world = CollisionWorld::layered(triangles.map(|t| {
+        let layer = match t.layer {
+            extract_scene::Layer::Terrain => Layer::Terrain,
+            extract_scene::Layer::Secondary => Layer::Secondary,
+            extract_scene::Layer::Placement(i) => Layer::Placement(i as u16),
+        };
+        (t.points, t.surface.unwrap_or(0), layer)
+    }));
+    world.acos = AcosTable::from_game_data(&rom.game_data().unwrap());
+    // Full stick toward -x (move angle 0x8000).
+    let run = Input {
+        stick_y: 82,
+        camera_yaw: 0x4000,
+        ..Input::default()
+    };
+    for (shown, lift, through) in [(0xFF, 0, false), (0xFB, 0, true), (0xFF, 500, true)] {
+        gas::seat(&mut world, true, shown, [0, 0, lift, 0, 0, 0, 0, 0]);
+        let mut p = PlayerState::spawn([700.0, -2.0, -5556.0], 0x8000);
+        for _ in 0..30 {
+            movement::step(&mut p, &run, &world);
+        }
+        assert_eq!(p.pos[0] < 500.0, through, "{shown:#x} {lift}: {:?}", p.pos);
+    }
+    // Outside Total War the covers stand home whatever the gas says.
+    gas::seat(&mut world, false, 0, [500; 8]);
+    let mut p = PlayerState::spawn([700.0, -2.0, -5556.0], 0x8000);
+    for _ in 0..30 {
+        movement::step(&mut p, &run, &world);
+    }
+    assert!(p.pos[0] > 548.0, "{:?}", p.pos);
+}

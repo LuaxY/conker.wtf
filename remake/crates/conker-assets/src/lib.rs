@@ -109,6 +109,12 @@ pub fn props_gltf(map: &str) -> String {
     format!("maps/{map}/props.gltf")
 }
 
+/// The models a map's outros show (on maps with an outro attachment or prop): glTF scenes named
+/// `09-<entry>` (hex, an attachment in its joint's frame) and `prop-<placement>` (at the origin).
+pub fn outro_gltf(map: &str) -> String {
+    format!("maps/{map}/outro.gltf")
+}
+
 pub fn character_gltf(character: &str) -> String {
     format!("characters/{character}/character.gltf")
 }
@@ -979,6 +985,28 @@ mod tests {
                 along: vec![],
                 yaw: vec![],
                 plays: vec![],
+                head: Some(Head {
+                    t: 0,
+                    joint: 3,
+                    pitch: vec![key(0, -0.85, false)],
+                    yaw: vec![key(130, 36.0, true)],
+                }),
+                talk: Some(Talk {
+                    jaw: 6,
+                    skew: true,
+                    says: vec![Say {
+                        t: 36,
+                        state: CHATTER,
+                        degrees: 45,
+                    }],
+                }),
+                mask: None,
+                attach: vec![Attach {
+                    t: 0,
+                    entry: 0x57,
+                    joint: 14,
+                    on: true,
+                }],
             },
             cast: vec![Actor {
                 character: "40".into(),
@@ -999,7 +1027,10 @@ mod tests {
                     ticks: 30,
                     rate: 0.5,
                     once: false,
+                    blend: 9,
                 }],
+                mask: Some(0x0E),
+                ..Actor::default()
             }],
             fade: Fade {
                 rgb: [0; 3],
@@ -1009,6 +1040,11 @@ mod tests {
                 t: 30,
                 entry: 0xB3,
                 file: "maps/2d/voice-b3.wav".into(),
+            }),
+            song: Some(Voice {
+                t: 1,
+                entry: 0x8A,
+                file: "maps/2b/song-8a.wav".into(),
             }),
             subtitles: Some(Subtitles {
                 pages: vec![Page {
@@ -1031,6 +1067,21 @@ mod tests {
                     quads: vec![],
                 }],
             }),
+            props: vec![Prop {
+                placement: 3,
+                at: [1076, -29, 257],
+                rotation: [7.0, 174.0],
+            }],
+            sounds: vec![ScriptSound {
+                id: 0x6DE,
+                actor: 2,
+                t: 908,
+                stop: Some(1100),
+                fade_in: None,
+                fade_out: None,
+                cents: 150,
+            }],
+            near: Some(30.0),
         }
     }
 

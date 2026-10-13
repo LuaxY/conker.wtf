@@ -33,7 +33,7 @@ use conker_assets::hud::{
     Align, Anchor, End, Flash, Haze, Horizontal, Hud, Image as Picture, Placed, Rgba, Strip, Text,
     Vertical,
 };
-use conker_assets::outro::Outro;
+use conker_assets::outro::{Outro, tip};
 use conker_rules::game::{Standing, places};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
@@ -94,8 +94,9 @@ pub struct Shown {
     pub respawn_in: Option<u16>,
     /// Untimed: the lives left.
     pub lives: Option<u8>,
-    /// Out of lives: a skull over the view, no radar.
-    pub out: bool,
+    /// Out of lives, and through a takeover's cut: the view black, the skull centred at this
+    /// half-size in px ([`skull_byte`]), no radar.
+    pub skull: Option<u8>,
     /// War: Total War: the team strip's numbers, [0] the squirrels', [1] the Tediz': their kills,
     /// untimed (`lives` shown) their lives left; in place of the own kills and rank. War: Colors:
     /// the team scores.
@@ -623,48 +624,80 @@ fn haze(h: &Haze, k: u32) -> Vec<Sprite> {
         .collect()
 }
 
-/// A War outro's picture at `t` ([`Outro`]), in place of the HUD: its fade over the whole view,
-/// and the page shown in its speech bubble where the bubble is then (its quads, then the lines upper
-/// case in black, left-aligned in a block centred on the text's x, 12 apart around its middle line's
-/// top).
-pub fn outro(hud: &Hud, o: &Outro, t: f32) -> Vec<Sprite> {
+/// A War outro's picture at frame `k` ([`Outro`]), in place of the HUD: its fade over the whole
+/// view and, over it for its first frames, the match's end fade still falling 16 a frame from 255
+/// two frames before the outro's clock 0 (`func_151ED1E0`, 8 a VI; V `fills_tw4.txt` DL 458: 0xAF);
+/// then its speech bubble ([`Outro::bubble`]) where the bubble is then, its quads scaled about the
+/// tail's tip ([`tip`]), and its page's lines upper case in black at the bubble's text alpha,
+/// left-aligned in a block centred on the text's x around its middle line's top, each line below
+/// the last by its own height ([`line_height`]).
+pub fn outro(hud: &Hud, o: &Outro, k: u32) -> Vec<Sprite> {
+    let t = o.t(k);
     let far = 10_000.0;
     let [r, g, b] = o.fade.rgb;
     let whole = [-far, -far, 2.0 * far, 2.0 * far];
     let centre = Anchor(Horizontal::Centre, Vertical::Middle);
     let mut out = vec![solid(whole, centre, [r, g, b, o.fade(t)], 9.0)];
-    let (Some(s), Some(page)) = (&o.subtitles, o.page(t)) else {
+    let end = 255u32.saturating_sub(16 * (k + 2));
+    if end > 0 {
+        out.push(solid(whole, centre, [0, 0, 0, end as u8], FADE_Z));
+    }
+    let (Some(s), Some(bubble)) = (&o.subtitles, o.bubble(k)) else {
         return out;
     };
     let (anchor, at, quads) = s.place(t);
+    let ([tx, ty], scale) = (tip(quads), bubble.scale);
     for (n, q) in quads.iter().enumerate() {
+        let [x, y, w, h] = q.rect.map(f32::from);
         out.push(Sprite {
             tex: Tex::Texture(q.texture.clone()),
             uv: q.uv,
-            rect: q.rect.map(f32::from),
+            rect: [
+                tx + (x - tx) * scale,
+                ty + (y - ty) * scale,
+                w * scale,
+                h * scale,
+            ],
             anchor,
             colour: q.colour,
             z: 5.0 + 0.1 * n as f32,
         });
     }
-    let lines: Vec<String> = page.lines.iter().map(|l| l.to_uppercase()).collect();
+    if bubble.alpha == 0 {
+        return out;
+    }
+    let lines: Vec<String> = (bubble.page.lines.iter())
+        .map(|l| l.to_uppercase())
+        .collect();
     let widest = lines.iter().map(|l| width(hud, l)).fold(0.0, f32::max);
     let [x, y] = at.map(f32::from);
-    let first = y - 6.0 * (lines.len() - 1) as f32;
+    let mut top = y - 6.0 * (lines.len() - 1) as f32;
     for (n, line) in lines.iter().enumerate() {
+        if n > 0 {
+            top += line_height(hud, line);
+        }
         let t = Text {
             anchor,
-            at: [
-                (x - (widest / 2.0).ceil()) as i16,
-                (first + 12.0 * n as f32) as i16,
-            ],
+            at: [(x - (widest / 2.0).ceil()) as i16, top as i16],
             align: Align::Left,
-            colour: [0, 0, 0, 255],
+            colour: [0, 0, 0, bubble.alpha],
             shadow: None,
         };
         out.extend(text(hud, line, None, &t, 6.0));
     }
     out
+}
+
+/// How far a bubble's line sits below the one before (`func_150428D4`): its tallest glyph's top
+/// offset and height, at least 12 if it holds a space (V: TW cs4's "ABOVE-AVERAGE" 11).
+fn line_height(hud: &Hud, line: &str) -> f32 {
+    (items(hud, line).iter())
+        .map(|i| match i {
+            Item::Glyph(g) => f32::from(hud.font[*g].offset[1]) + f32::from(hud.font[*g].size[1]),
+            Item::Suffix(_) => 0.0,
+            Item::Space => 12.0,
+        })
+        .fold(0.0, f32::max)
 }
 
 /// The HUD's quads for `s`, in the frame (the original's draws: `lab/hud/README.md`).
@@ -708,15 +741,23 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         let [x, y] = l.at.map(f32::from);
         out.push(quad(digit, [x, y, w, h], l.anchor, white, 3.0));
     }
-    if let (true, Some(end)) = (s.out, &hud.end) {
-        let k = &end.skull;
-        out.push(quad(&k.image, k.rect.map(f32::from), k.anchor, white, 3.0));
+    // Out: the view black (over its haze and gun, under the HUD), the skull on its rect's centre
+    // (`func_1507DB6C`, V t1d DL 430, 444).
+    if let (Some(half), Some(end)) = (s.skull, &hud.end) {
+        let (k, far) = (&end.skull, 10_000.0);
+        let centre = Anchor(Horizontal::Centre, Vertical::Middle);
+        let whole = [-far, -far, 2.0 * far, 2.0 * far];
+        out.push(solid(whole, centre, [0, 0, 0, 255], 0.7));
+        let [x, y, w, h] = k.rect.map(f32::from);
+        let (cx, cy, half) = (x + w / 2.0, y + h / 2.0, f32::from(half));
+        let rect = [cx - half, cy - half, 2.0 * half, 2.0 * half];
+        out.push(quad(&k.image, rect, k.anchor, white, 3.0));
     }
     // Radar: the disc, then a blip per player in range, with a bar on another level's.
     let r = &hud.radar;
     let [cx, cy] = r.centre;
     let half = r.size / 2.0;
-    let radar = s.radar && !s.out;
+    let radar = s.radar && s.skull.is_none();
     if radar {
         out.push(quad(
             &r.disc,
@@ -1097,6 +1138,12 @@ pub fn end_fade(k: u32) -> u8 {
     (16 * k).min(255) as u8
 }
 
+/// The STATS' alpha on their `k`th frame from 1: +4 a VI from 0 (V tw4 DL 858-880, cs1 990-1002;
+/// I: every mode's STATS, the C site not found).
+pub fn stats_alpha(k: u32) -> u8 {
+    (8 * k).min(255) as u8
+}
+
 /// War: Beach's escape on the escapee's own view (`command(p, 0x8B, …)`, `beach-presentation.md`
 /// §2): for the freeze's last 30 frames a fade to black over 30 VIs, which the script re-sends every
 /// frame, so the view stays at its first step, alpha 0x11 (V e1 DL 235-250: elapsed 2 of 30; the
@@ -1107,6 +1154,17 @@ pub fn escape_fade(freeze: u8, since: Option<u32>) -> Option<u8> {
         (1..=30, _) => Some(capture_fade(true, 30, 1)),
         (0, Some(k)) if k < 50 => Some(capture_fade(false, 100, k)),
         _ => None,
+    }
+}
+
+/// The out view's skull byte (`0x800D18A4[i]`) `frames` on: +4 a frame up to 60 while `out`, −4 a
+/// frame to 0 once taken over (V t1: 4 on the out frame, 52 at the takeover 13 frames on, 0 13
+/// frames after, when the view cuts in, no fade). The skull's half-size in px is (byte + 4) / 4.
+pub fn skull_byte(byte: u8, out: bool, frames: u32) -> u8 {
+    let d = (4 * frames.min(15)) as u8;
+    match out {
+        true => byte.saturating_add(d).min(60),
+        false => byte.saturating_sub(d),
     }
 }
 
@@ -1220,7 +1278,7 @@ fn shown(
         gun,
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
         lives: (m.time == 0 && !m.colors && !m.beach).then_some(c.lives_left),
-        out: c.out > 0,
+        skull: None,
         strip: match m.colors || m.beach {
             true => Some(m.scores.map(u32::from)),
             false => m.total_war.then_some(strip),
@@ -1261,9 +1319,11 @@ fn draw(
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
     ),
-    (mut fired, mut zoomed): (
+    (mut fired, mut zoomed, mut stats, mut skull): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
         Local<(u32, f32, bool, Option<u32>)>,
+        Local<Option<u32>>,
+        Local<(u32, u8)>,
     ),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1283,7 +1343,7 @@ fn draw(
         return;
     }
     let quads = match playing.running(&outros) {
-        Some((o, k)) => outro(&a.hud, o, o.t(k)),
+        Some((o, k)) => outro(&a.hud, o, k),
         None => {
             let tick = timeline.tick().0;
             let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick);
@@ -1327,6 +1387,15 @@ fn draw(
             if let Some(at) = *ended {
                 shown.fade = Some(end_fade(tick.saturating_sub(at) + 1));
             }
+            // Out: the skull from the tick this client sees it, shrinking after a takeover; the
+            // results clear it.
+            let (at, byte) = &mut *skull;
+            *byte = match m.phase {
+                2 => 0,
+                _ => skull_byte(*byte, own.1.out > 0, tick.wrapping_sub(*at)),
+            };
+            *at = tick;
+            shown.skull = (*byte > 0).then(|| (*byte + 4) / 4);
             let strikes = blasts.iter().flat_map(|b| &b.strikes);
             shown.strike = (strikes.filter(|s| s.slot == own.1.slot))
                 .find_map(|s| s.blast)
@@ -1368,7 +1437,15 @@ fn draw(
                 shown.results = Some((rows, menu.choice));
                 shown.header = teams.then(|| header(&all, own.1.team, m.winner));
             }
-            sprites(&a.hud, &shown)
+            let mut quads = sprites(&a.hud, &shown);
+            *stats = shown.results.is_some().then(|| stats.unwrap_or(tick));
+            if let Some(at) = *stats {
+                let alpha = u32::from(stats_alpha(tick - at + 1));
+                quads
+                    .iter_mut()
+                    .for_each(|q| q.colour[3] = (u32::from(q.colour[3]) * alpha / 255) as u8);
+            }
+            quads
         }
     };
     for s in quads {
@@ -1725,6 +1802,28 @@ mod tests {
         assert_eq!(rows(&both, 0, true, None, false)[1].1[0], 1);
     }
 
+    /// The out view's skull (V t1 425-450): its byte 4 on the out frame, +4 a frame to 52 at the
+    /// takeover 13 frames on, then −4 a frame, 0 (the view back) 13 frames later; at most 60.
+    #[test]
+    fn the_out_skull_grows_then_shrinks() {
+        let walk = |from: u8, out: bool| {
+            (0..13)
+                .scan(from, |b, _| {
+                    *b = skull_byte(*b, out, 1);
+                    Some(*b)
+                })
+                .collect::<Vec<u8>>()
+        };
+        let grown = walk(0, true);
+        assert_eq!((grown[0], grown[12]), (4, 52));
+        let shrunk = walk(52, false);
+        assert_eq!((shrunk[0], shrunk[11], shrunk[12]), (48, 4, 0));
+        assert_eq!(
+            (skull_byte(52, true, 2), skull_byte(0, true, u32::MAX)),
+            (60, 60)
+        );
+    }
+
     /// The lives digit, the skull and the results where the oracle drew them (`lab/research/
     /// mp-original/menus-and-flow.md`, "Match end and STATS"); the results replace the HUD.
     #[test]
@@ -1741,13 +1840,21 @@ mod tests {
         let one = ([7.0, 6.0, 5.0, 7.0], [8.0, 0.0, 13.0, 7.0]);
         assert_eq!(rects(&hud, &lives, &tex), [one]);
         let out = Shown {
-            out: true,
+            skull: Some(16),
             ..state()
         };
         assert!(rects(&hud, &out, &texture("radar")).is_empty());
         assert_eq!(
             rects(&hud, &out, &texture("skull"))[0].0,
             [130.0, 92.0, 32.0, 32.0]
+        );
+        let small = Shown {
+            skull: Some(2),
+            ..out
+        };
+        assert_eq!(
+            rects(&hud, &small, &texture("skull"))[0].0,
+            [144.0, 106.0, 4.0, 4.0]
         );
         let over = Shown {
             results: Some((vec![(0, [1, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])], 1)),
@@ -2369,11 +2476,67 @@ mod tests {
         assert_eq!(bar_colour(g, Some(35)), g.bar_colour);
     }
 
+    /// TW cs4's bubble and fills (`outros-leftovers.md` §3, §7, §8): the bubble opens at frame 8 and
+    /// is 1/3, 2/3 and all of its 146 px on the next three; the match's end fade still covers frame
+    /// 3 at 0xAF (DL 458) and is gone at 14; the first page's lines sit 11 then 12 apart (its middle
+    /// line has no space), the third page's 12 and 12; the STATS fade in 8 a frame.
+    #[test]
+    fn outro_bubble_lines_and_fades() {
+        let (Some(hud), Some(json)) = (
+            pack_hud(),
+            std::fs::read(pack_dir().join("maps/2d/outros.json")).ok(),
+        ) else {
+            eprintln!("no pack outros: skipping");
+            return;
+        };
+        let outros: Vec<Outro> = serde_json::from_slice(&json).unwrap();
+        let cs4 = &outros[1];
+        let bubble = |k| {
+            let quads: Vec<_> = (outro(&hud, cs4, k).into_iter())
+                .filter(|q| q.tex == Tex::Texture("bubble".into()) && q.colour == [255; 4])
+                .collect();
+            quads.first().map(|q| q.rect[2])
+        };
+        let widths: Vec<_> = (8..12).map(bubble).collect();
+        let third = 146.0 / 3.0;
+        assert_eq!(widths, [None, Some(third), Some(2.0 * third), Some(146.0)]);
+        let fills = |k| -> Vec<u8> {
+            (outro(&hud, cs4, k).into_iter())
+                .filter(|q| q.tex == Tex::Solid)
+                .map(|q| q.colour[3])
+                .collect()
+        };
+        assert_eq!(fills(3), [cs4.fade(6.0), 0xAF]);
+        assert_eq!((fills(13), fills(14)), (vec![0, 15], vec![0]));
+        let tops = |k| -> Vec<f32> {
+            let mut tops: Vec<f32> = (outro(&hud, cs4, k).into_iter())
+                .filter(|q| matches!(q.tex, Tex::Glyph(_)))
+                .map(|q| q.rect[1])
+                .collect();
+            tops.sort_by(f32::total_cmp);
+            tops.dedup();
+            tops
+        };
+        // The glyphs' own top offsets (the apostrophe, the comma) aside: each line's tops.
+        let first = tops(40);
+        assert!(
+            first.contains(&(first[0] + 11.0)) && first.contains(&(first[0] + 23.0)),
+            "{first:?}"
+        );
+        let third_page = tops(200);
+        assert!(
+            third_page.contains(&(third_page[0] + 12.0))
+                && third_page.contains(&(third_page[0] + 24.0)),
+            "{third_page:?}"
+        );
+        assert_eq!([1, 2, 31, 32, 40].map(stats_alpha), [8, 16, 248, 255, 255]);
+    }
+
     /// The outros' pages against the original's draws (one capture's I8 glyph rects): every glyph
-    /// where the original drew it, but on cs4's first page, whose last two lines the original draws
-    /// a pixel higher (open). Total War: `lab/research/mp-original/total-war-outro-scratch/hw/
-    /// cs*b_dl_*`, one capture a page. Colors' cs1: `colors-outro-scratch/hw/cs1_dl_N` (t = 2 (N −
-    /// 436)), each of the bubble's places, its text settled (around a move it fades out and in).
+    /// where the original drew it, cs4's first page's last two lines a pixel higher (its middle line
+    /// has no space: 11 high). Total War: `lab/research/mp-original/total-war-outro-scratch/hw/
+    /// cs*b_dl_*`, one capture a page (drawn 20 frames into it, its text in). Colors' cs1:
+    /// `colors-outro-scratch/hw/cs1_dl_N` (frame N − 436), each of the bubble's places.
     #[test]
     fn outro_subtitles_match_the_originals_draws() {
         let research = concat!(
@@ -2392,35 +2555,30 @@ mod tests {
             r.sort_by(|a, b| a.partial_cmp(b).unwrap());
             r
         };
-        // (outro, t, capture)
+        // (outro, frame, capture)
         let mut captures = vec![];
         for (o, reads) in war.iter().zip([[482, 560, 650, 760], [470, 600, 700, 800]]) {
             let pages = &o.subtitles.as_ref().unwrap().pages;
             for (page, read) in pages.iter().zip(reads) {
                 let file = format!("total-war-outro-scratch/hw/cs{}b_dl_{read}", o.cutscene);
-                captures.push((o, f32::from(page.t), file));
+                captures.push((o, conker_assets::outro::frame(page.t) + 20, file));
             }
         }
         for n in [461, 536, 636, 666, 756] {
             let file = format!("colors-outro-scratch/hw/cs1_dl_{n}");
-            captures.push((&colors[0], (2 * (n - 436)) as f32, file));
+            captures.push((&colors[0], n - 436, file));
         }
-        for (o, t, file) in captures {
+        for (o, k, file) in captures {
             let Ok(draws) = std::fs::read(format!("{research}/{file}/draws.json")) else {
                 eprintln!("no {file}: skipping");
                 return;
             };
             let draws: Vec<serde_json::Value> = serde_json::from_slice(&draws).unwrap();
-            let first = o.page(t) == o.subtitles.as_ref().and_then(|s| s.pages.first());
-            let want = (draws.iter()).filter(|d| d["format"] == "I8").map(|d| {
-                let r: [f32; 4] = serde_json::from_value(d["rect"].clone()).unwrap();
-                match (o.cutscene, first, r[1] > 25.0) {
-                    (4, true, true) => [r[0], r[1] + 1.0, r[2], r[3] + 1.0],
-                    _ => r,
-                }
-            });
-            let got = (outro(&hud, o, t).into_iter())
-                .filter(|q| matches!(q.tex, Tex::Glyph(_)) && q.colour == [0, 0, 0, 255])
+            let want = (draws.iter())
+                .filter(|d| d["format"] == "I8")
+                .map(|d| serde_json::from_value::<[f32; 4]>(d["rect"].clone()).unwrap());
+            let got = (outro(&hud, o, k).into_iter())
+                .filter(|q| matches!(q.tex, Tex::Glyph(_)))
                 .map(|q| {
                     [
                         q.rect[0],
@@ -2429,7 +2587,7 @@ mod tests {
                         q.rect[1] + q.rect[3],
                     ]
                 });
-            let page = format!("cutscene {} t {t} ({file})", o.cutscene);
+            let page = format!("cutscene {} frame {k} ({file})", o.cutscene);
             assert_eq!(sorted(got.collect()), sorted(want.collect()), "{page}");
         }
     }

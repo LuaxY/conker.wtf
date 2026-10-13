@@ -1230,6 +1230,7 @@ pub fn pack_audio(
     surfaces: &BTreeSet<u8>,
     maps: &[(String, Option<&[u8]>)],
     characters: &[usize],
+    outro_sounds: &[(String, BTreeSet<u16>)],
 ) -> Result<(Files, Vec<String>)> {
     use conker_assets::audio::{self as pack, Audio, Events, MapSounds};
     let game_data = rom.game_data()?;
@@ -1353,6 +1354,10 @@ pub fn pack_audio(
                 .copied(),
             scope,
         );
+    }
+    // The outros' script sounds (`outros.json`), in their map's folder.
+    for (name, ids) in outro_sounds {
+        add(&mut ids.iter().copied(), format!("maps/{name}"));
     }
     for id in events.sound_ids() {
         owner

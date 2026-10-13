@@ -495,10 +495,12 @@ pub fn on_tedi_rig(rom: &Rom, entry: usize, tedi: &Character) -> Result<Characte
     })
 }
 
-/// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any.
+/// A map of the pack: its scene and a recording of its background (`../lab/audio`'s), if any, and
+/// of the song its outro starts ([`outro::songs`]).
 pub struct PackMap<'a> {
     pub scene: usize,
     pub background: Option<&'a [u8]>,
+    pub song: Option<&'a [u8]>,
 }
 
 /// A map's folder under `maps/`: its scene in lowercase hex (`2d`, `30`).
@@ -530,9 +532,12 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     debug_assert_eq!(names[..PACK_CHARACTERS.len()], PACK_CHARACTERS);
     let (held, models, scenes) = held_level(rom)?;
-    let outros: Vec<Vec<_>> = (maps.iter())
+    let mut outros: Vec<Vec<_>> = (maps.iter())
         .map(|m| outro::outros(rom, m.scene))
         .collect::<Result<_>>()?;
+    let songs: Vec<_> = (maps.iter().zip(&mut outros))
+        .flat_map(|(m, o)| outro::songs(o, m.song))
+        .collect();
     let baked: Vec<_> = outros.concat();
     // Beach's outros' villagers (156, 157) are packed with every clip already.
     let mut outro_characters = outro::characters(rom, &baked)?;
@@ -566,6 +571,11 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             level.bin,
             level.images,
         ));
+        if let Some((models, scenes)) = outro::models(rom, map.scene, &outros[i])? {
+            let g = held_gltf(&models, scenes, &textures, "outro.bin")?;
+            let json = parse(&g.json)?;
+            gltfs.push((assets::outro_gltf(&name), json, g.bin, g.images));
+        }
         if map.scene == SLICE_SCENE {
             let (props, scenes) = props_level(rom)?;
             let props = held_gltf(&props, scenes, &textures, "props.bin")?;
@@ -628,13 +638,21 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let backgrounds: Vec<_> = (maps.iter())
         .map(|m| (map_name(m.scene), m.background))
         .collect();
-    let (sound_files, audio) = audio::pack_audio(rom, &surfaces, &backgrounds, &entries)?;
+    let outro_sounds: Vec<(String, BTreeSet<u16>)> = (maps.iter().zip(&outros))
+        .map(|(m, o)| {
+            let ids = o.iter().flat_map(|o| o.sounds.iter().map(|s| s.id));
+            (map_name(m.scene), ids.collect())
+        })
+        .collect();
+    let (sound_files, audio) =
+        audio::pack_audio(rom, &surfaces, &backgrounds, &entries, &outro_sounds)?;
     let wavs = sound_files.iter().filter(|f| f.0.ends_with(".wav")).count();
     out.files.extend(sound_files);
     let (hud_files, hud) = hud::pack_hud(rom)?;
     out.files.extend(hud_files);
     out.files.extend(hud::pack_end(rom)?.0);
     out.files.extend(outro::voices(rom, &baked)?);
+    out.files.extend(songs);
     let outro_characters = outro_characters.iter().map(|c| c.entry.to_string());
     let manifest = Manifest {
         format: FORMAT,
@@ -677,7 +695,7 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
 /// props of its Raptor mode, the bone weapons on the weapon spots (15-22), three at the west nest
 /// (4-6) and four scene objects at (6026, 156, 2188) (0-3); none on 0x34; 0x2B's segments 6 and 7
 /// (placements 2, 3; War: Beach, scenario 8). The pack leaves them out
-/// of the level; the collision keeps only [`deathmatch_solid`] (never hidden ones).
+/// of the level; the collision keeps only [`solid_placements`].
 pub fn hidden_placements(scene: usize) -> &'static [usize] {
     match scene {
         0x2D => &[0, 1, 8, 9, 21, 22, 23, 24, 25, 26, 27, 28, 37],
@@ -691,6 +709,14 @@ pub fn hidden_placements(scene: usize) -> &'static [usize] {
 /// 0x2D's War: Total War props among its [`hidden_placements`]: the shelter's doors (0, 1), the gas
 /// masks (21-26) and the canisters (27, 28), which the client shows by the match.
 pub const TOTAL_WAR_PROPS: [usize; 10] = [0, 1, 21, 22, 23, 24, 25, 26, 27, 28];
+
+/// The placements the pack's collision keeps: [`deathmatch_solid`]'s, and on 0x2D the shelter's
+/// doors (0, 1), solid in War: Total War while shown (V d2, `walls_README`: 23-73) and moved out of
+/// reach in a Deathmatch (conker-rules' `gas::seat`).
+pub fn solid_placements(scene: usize) -> Vec<usize> {
+    let doors: &[usize] = if scene == SLICE_SCENE { &[0, 1] } else { &[] };
+    [doors, deathmatch_solid(scene)].concat()
+}
 
 /// 0x2D's Total War props (`maps/2d/props.gltf`): glTF scene 0 [`TOTAL_WAR_PROPS`] in place (named
 /// `model@placement` as the level's nodes), scene 1 the canister's model (3/85) at the origin, for
@@ -828,9 +854,10 @@ fn pack_data(
     let game_data = rom.game_data()?;
     let table = |at: usize, n: usize| game_data.get(at..at + n).context(".game data too short");
     let sink = table(SINK_AT, 96)?;
+    let solid = solid_placements(scene);
     Ok(assets::Slice {
         collision: (scene_collision(rom, scene, &placements)?.triangles.iter())
-            .filter(|t| !matches!(t.layer, Layer::Placement(i) if !deathmatch_solid(scene).contains(&i)))
+            .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
             .map(|t| assets::Triangle {
                 points: t.points,
                 layer: match t.layer {
@@ -880,7 +907,11 @@ fn pack_data(
                     clips,
                     root_clips,
                     looks: (0x11..=0x20)
-                        .filter_map(|k| villager_look(k).filter(|l| l.0 == c.entry).map(|l| (k, l.1)))
+                        .filter_map(|k| {
+                            villager_look(k)
+                                .filter(|l| l.0 == c.entry)
+                                .map(|l| (k, l.1))
+                        })
                         .collect(),
                 })
             })

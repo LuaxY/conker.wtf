@@ -27,6 +27,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/ai.bin` | The bots' AI script for the map (game bytecode, raw): each map has its own |
 | `maps/<map>/lights.json` | The level's lights the client draws: War: Total War's gas lights on 0x2D, War: Beach's night lights on 0x2B, none on the others |
 | `maps/<map>/outros.json` | The War victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), none on the others |
+| `maps/<map>/outro.gltf`, `outro.bin` | The models the outros show (2d, 30, 2b): glTF scenes named `09-<entry>` (hex: a bank-09 attachment, in its joint's frame, character model units) and `prop-<placement>` (a placement the level leaves out, at the origin: the outro places it). Textures in `textures/` |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
@@ -44,7 +45,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/events.json` | Which game event plays which sound, at what volume, from where |
 | `audio/common/*.wav` | Sounds anyone makes: weapons, footsteps, hits, pickups, explosions (16-bit mono PCM, the game's own rates) |
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
-| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio; on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7) |
+| `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps play the same sounds, kept there) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, and `song-8a.wav`, Beach cs4's song (a recording, `--song`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
 | `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
@@ -73,7 +74,9 @@ A list of runs. Each run has a `layer` and its `triangles`:
 - `"terrain"`: the level's ground and walls. Each triangle carries a surface word (below).
 - `"secondary"`: a second wall layer.
 - `{"placement": N}`: the collision of placed model N, already in world space: only the placements the map's
-  Deathmatch collides with (not its pickups or hidden props). Each is a floor and a wall object.
+  Deathmatch collides with (not its pickups or hidden props), and on 0x2D the shelter's doors (0, 1), which only
+  War: Total War's match shows. Each is a floor and a wall object; the game moves War: Total War's doors and
+  covers (0-7) with their props, and takes them away while hidden.
 
 Each triangle is `[[x, y, z], [x, y, z], [x, y, z], surface]`, where `surface` is `"0x…"` or `null`.
 The point order sets which side faces up (the normal is (p1 − p0) × (p2 − p0)).
@@ -163,8 +166,8 @@ white lamps that flicker and the exits' two red lights pulsing):
 ### `maps/<map>/outros.json`
 The War victory outros, one per winning team (`winner`: 0 the squirrels (on 0x2B the villagers), 1
 the Tediz; a DRAW plays none), from the original's cutscene `cutscene` of the map's scene (Total
-War's 2 and 4 on 0x2D, Colors' 1 and 5 on 0x30, Beach's 4 and 3 on 0x2B; Beach's song 0x8A, near
-plane, actors' part masks and props are not exported). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
+War's 2 and 4 on 0x2D, Colors' 1 and 5 on 0x30, Beach's 4 and 3 on 0x2B; the tanks' smoke and
+texture swap are not exported). Times `t` are the cutscene's clock, 60 a second (2 a tick): tick k of the
 outro shows t = min(2k, `length`), a command at t from the first tick with t ≤ 2k (tick 1 at the
 earliest); the results come up after it, over its last picture. Fields an outro doesn't use are left
 out (Total War's are the simplest case).
@@ -177,16 +180,39 @@ out (Total War's are the simplest case).
   walking `path` by `along` and turning by `yaw` (facing = `yaw` + 90°), drawn `scale` big and
   `lift` model units up. Each plays its clip from tick 1, `rate` clip ticks a tick, looping, or
   `once` (it holds its last tick), then each of `plays` from its `t` (the same clip again goes on
-  where it was);
+  where it was; another cross-fades from the old one's pose over `blend` ticks: its weight 1023
+  less 2 × (500 / `blend`) a tick from the switch). Optional:
+  - `head`: from `t` the `joint`'s own rotation is pitch −`pitch` and yaw `yaw` (degrees, keys as
+    the camera's; the game's rot(−pitch, yaw, 0)), in place of the clip's;
+  - `talk`: the `jaw` joint, each of `says` from its `t`: `state` 0 shuts (openness −60 a tick, of
+    255), 1 chatters (±40-59 a tick between 0 and 255, a new random speed at each end), 2 opens
+    (+60 a tick, held); the jaw turns openness / 255 × `degrees` about x and, with `skew`, a random
+    −10..9 × 1.41° × openness / 255 about y (picked when shut);
+  - `mask`: display lists hidden (bit k hides the primitives whose `extras.list` is k);
+  - `attach`: from each `t`, model `09-<entry>` of `outro.gltf` drawn in `joint`'s frame (`on`), or
+    no longer;
 - `fade`: the picture fades in from `rgb` over `duration`: alpha 255 − elapsed · 255 / `duration`,
   in integers;
 - `voice`: `file` (under `audio/`) plays at `t`;
+- `song`: Beach cs4's song 0x8A (`entry`), `file` (under `audio/`, a recording of the game's own
+  output at the map song's volume, 15 s, once) plays at `t`, as recorded: nothing ducks it, it ducks
+  nothing (only with `conker-extract pack --song`);
 - `subtitles`: the speech bubble, `pages` (each `lines` from its `t`, the last up to `close`),
   drawn in the HUD's frame at `anchor`: the bubble's `quads` (`texture` under `hud.json`'s
   textures, `rect` x, y, width, height, `uv` its texels, x1 < x0 mirrored, `colour`), then the lines
   upper case in the HUD font, black, left-aligned in a block whose left is `text[0]` − ⌈widest / 2⌉
   and 12 pixels a line around the middle line's top at `text[1]`. From each of `moves`' `t`, its
-  `anchor`, `text` and `quads` instead.
+  `anchor`, `text` and `quads` instead. The bubble grows from 1/3 to full over 3 ticks about its
+  tail's tip (the tail quad's bottom corner on the side it points to), its text fading in over 10
+  ticks from the third; a page turn fades the old text out over 10 ticks, then the new one in; the
+  close fades the text out, then shrinks the bubble 0.25 a tick till it is gone. Alpha
+  ⌊25.5 n⌋ for n of 10;
+- `props`: `outro.gltf`'s `prop-<placement>` shown for the outro at `at`, turned `rotation[0]`
+  degrees about x, then `rotation[1]` about y;
+- `sounds`: sound `id` (`sounds.json`) at the actor `actor` (an index of `actor`, then `cast`),
+  following it, from `t` at `cents`; with `stop` it loops till then, fading in linearly up to
+  `fade_in` and out from `fade_out` to `stop` when given; full volume (0x7F7F), panned by place;
+- `near`: the camera's near plane (Beach's cs3: 30).
 
 ### `characters/<id>/character.json`
 - `model_lift`: model units the model is drawn above the player (43 for 117, 42 for 128, 49 for 136).

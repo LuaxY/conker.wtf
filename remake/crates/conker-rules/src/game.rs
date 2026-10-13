@@ -52,6 +52,11 @@ pub const C_BUTTONS: u16 = 0x000F;
 pub const HEALTH: u8 = 6;
 /// Immune frames after a (re)spawn (obj+0x125).
 pub const SPAWN_IMMUNE: u8 = 150;
+/// Total War's takeover ([`Effect::TakeOver`]): it comes this many frames after the out frame,
+/// once the out view's skull byte has grown 4 a frame past 0x32 (V t1: out 424, swap 437), and
+/// leaves the human this many immune frames (obj+0x125 = 90, C; V t1 438: 89).
+pub const TAKEOVER_DELAY: u32 = 13;
+pub const TAKEOVER_IMMUNE: u8 = 90;
 /// The match clock in VIs (10 minutes, the default; `0x8008FD78`), −2 a frame.
 pub const MATCH_TIME: i32 = 36_000;
 /// A timed match's lives (`D_80087260`): only an untimed one counts them.
@@ -62,8 +67,9 @@ pub const STUN_DEAD: u8 = 0xFF;
 /// A bullet that meets a body this high above the feet or higher hits the head, part 0xA (I:
 /// fitted to oracle ohit, 0x30: 12 head hits at +47.3 to +60.6, the living body's at +47.2 or less).
 pub const BULLET_HEAD: f32 = 47.25;
-/// Frames between the clock reaching 0 and the end fade (`func_151E53E8`), and of the fade.
-pub const END_DELAY: u32 = 40;
+/// Frames from the end's latch ([`Match::ended_at`]) to the end fade (`func_151E53E8`, phase 7), and
+/// of the fade (V `menus-and-flow.md`: latch 119, phase 7 at 158; Colors e0 383/422/438).
+pub const END_DELAY: u32 = 39;
 pub const FADE: u32 = 16;
 /// Grenade: pull and throw states, the frame of the release (the fuse is the cook timer,
 /// [`projectile::COOK`]).
@@ -278,6 +284,11 @@ pub struct Fighter {
     pub bot: bool,
     /// The place this player went out on, its last life lost (`0x800E0AB0[i]`); 0 in play.
     pub out: u8,
+    /// The frame it went out (its last life's respawn moment): Total War's takeover waits 13
+    /// frames from it ([`Effect::TakeOver`]).
+    pub out_at: u32,
+    /// Lives over the match's ([`Settings::lives`]): a takeover's, the bot's left.
+    pub extra: u16,
     /// struct126+0x1B0: the record this player last respawned on (not the match-start one).
     pub last_spawn: Option<usize>,
     /// This frame's and last frame's buttons (C-down and R act one frame late).
@@ -367,6 +378,8 @@ impl Fighter {
             headshots: 0,
             bot: false,
             out: 0,
+            out_at: 0,
+            extra: 0,
             last_spawn: None,
             buttons: 0,
             late: 0,
@@ -389,6 +402,35 @@ impl Fighter {
             gun: None,
             class: 0,
             boost: 0,
+        }
+    }
+
+    /// This slot's player in `body`'s object (`func_15062800` swaps the two objects and puts each
+    /// slot's ids back, C): the body and everything it holds and does from `body`; who plays the
+    /// slot, its record and its pad from `self` (the shots too: s126+0x1AA is put back).
+    fn in_body(&self, body: &Fighter) -> Fighter {
+        Fighter {
+            team: self.team,
+            side: self.side,
+            spawn_mask: self.spawn_mask,
+            kills: self.kills,
+            suicides: self.suicides,
+            deaths: self.deaths,
+            shots: self.shots,
+            hits: self.hits,
+            headshots: self.headshots,
+            bot: self.bot,
+            out: self.out,
+            out_at: self.out_at,
+            extra: self.extra,
+            buttons: self.buttons,
+            late: self.late,
+            r_off: self.r_off,
+            z_armed: self.z_armed,
+            start: self.start,
+            gassed: self.gassed,
+            class: self.class,
+            ..*body
         }
     }
 
@@ -446,6 +488,8 @@ impl Fighter {
     pub fn camera_weapon(&self) -> u8 {
         match self.action {
             _ if self.seated() => conker_camera::GUN,
+            // The canister is the item the camera reads (s126+0x78 = 0x25, V t2 1046).
+            _ if self.carrying => gas::CANISTER,
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0x26,
             Action::Holster | Action::GrenadeThrow { .. } => 0,
             Action::Draw => self.weapon.unwrap_or(0),
@@ -579,6 +623,11 @@ pub enum Event {
         pos: [f32; 3],
         owner: usize,
     },
+    /// Total War: the out human `player` took over team-mate bot `from`'s body ([`Effect::TakeOver`]).
+    TakeOver {
+        player: usize,
+        from: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,7 +743,10 @@ pub struct Match {
     pub pickups: Vec<PickupState>,
     /// VIs left (0 untimed).
     pub timer: i32,
-    /// The frame an end condition held ([`Self::ends`]): the clock reached 0, say.
+    /// The frame the original latches the end (`0x800E0C20`, [`Self::ends`]): its check runs after
+    /// the AI script and before the players, so a script's score (Colors' capture, Beach's escape)
+    /// latches on its own frame, and what a frame's step brings (the clock at 0, a kill, a player
+    /// out, Beach's death points) on the next.
     pub ended_at: Option<u32>,
     pub settings: Settings,
     pub rng: Rng,
@@ -916,8 +968,9 @@ impl Match {
         if self.phase() == Phase::Over {
             return ev;
         }
-        // The scores the frame's end tests: the script's (applied before the step) latch in their
-        // own frame, Beach's death points (scored in the step) in the next (V end1 212, bots1 8126).
+        // The scores at the frame's start: the script's (applied before the step) latch in their own
+        // frame (V Colors e0 383, Beach end1 212), Beach's death points (scored in the step) in the
+        // next with everything else the step brings (V bots1 8126; [`Self::ended_at`]).
         let scores = self.colors.scores;
         let was_in: Vec<bool> = (0..self.players.len()).map(|i| self.in_play(i)).collect();
         // Colors: the script's respawns (command 0x82), the flags' fall, then their touch.
@@ -933,7 +986,7 @@ impl Match {
             }
         }
         self.pickups(arena, &mut ev);
-        self.gas.step(self.tick);
+        self.gas.step();
         for g in &mut self.guns {
             g.leave = g.leave.saturating_sub(1);
         }
@@ -1012,8 +1065,12 @@ impl Match {
             }
         }
         self.timer = (self.timer - 2).max(0);
-        if self.ended_at.is_none() && self.ends_with(scores) {
-            self.ended_at = Some(self.tick);
+        if self.ended_at.is_none() {
+            if self.score_end(scores) {
+                self.ended_at = Some(self.tick);
+            } else if self.ends() {
+                self.ended_at = Some(self.tick + 1);
+            }
         }
         self.tick += 1;
         ev
@@ -1054,11 +1111,6 @@ impl Match {
     /// roster ends at once there, which its team screen prevents); players join the remake's
     /// matches as they go, so it waits for an elimination as Deathmatch's does.
     pub fn ends(&self) -> bool {
-        self.ends_with(self.colors.scores)
-    }
-
-    /// [`Self::ends`] with the team scores `scores`.
-    fn ends_with(&self, scores: [u16; 2]) -> bool {
         let s = &self.settings;
         let taken = || (0..self.players.len()).filter(|i| !self.free.contains(i));
         let in_play = || {
@@ -1076,8 +1128,7 @@ impl Match {
         // V e0 383; no score end at 0, and untimed then nothing ends it, I). Beach's the same
         // (`func_151E565C`'s metric for scenario 8, C; V end1, end2, bots1).
         if s.colors || s.beach {
-            let target = u16::from(s.score);
-            return time_up || (target > 0 && scores.iter().any(|&n| n >= target));
+            return time_up || self.score_end(self.colors.scores);
         }
         if s.total_war {
             let teams = [0, 1].iter().filter(|&&t| in_play().any(|f| f.team == t));
@@ -1087,6 +1138,12 @@ impl Match {
         let alone = out().next().is_some() && in_play().count() < 2;
         let no_human = out().any(|f| !f.bot) && in_play().all(|f| f.bot);
         time_up || kills || alone || no_human
+    }
+
+    /// Colors and Beach: a team's score `scores` reaches the target (none at 0).
+    fn score_end(&self, scores: [u16; 2]) -> bool {
+        let (s, target) = (&self.settings, u16::from(self.settings.score));
+        (s.colors || s.beach) && target > 0 && scores.iter().any(|&n| n >= target)
     }
 
     /// Every slot's place, 1 the best ([`places`]; in the War modes its team's,
@@ -1211,7 +1268,7 @@ impl Match {
                     && weapon::touches(pos, f.body.pos, reach(i))
             });
             if let (Some(i), Some(p)) = (toucher, self.gas.prop_mut(placement)) {
-                (p.flag, p.since, p.shown) = (i as i32 + 1, t, false);
+                (p.flag, p.shown) = (i as i32 + 1, false);
             }
         }
         // Colors: a flag is touched by a player of the team that takes it, alive, holding nothing,
@@ -1238,7 +1295,7 @@ impl Match {
                             | Action::Reload { .. }
                     )
                     && colors::takes(k, f.team)
-                    && colors::touches(flag.pos, f.body.pos)
+                    && colors::touches(&flag, &f.body, f.side)
             });
             if let Some(i) = toucher {
                 let f = &mut self.players[i];
@@ -1273,9 +1330,7 @@ impl Match {
                     gate,
                 } => {
                     if let Some(p) = self.gas.prop_mut(placement) {
-                        if let Some(v) = flag.filter(|&v| v != p.flag) {
-                            (p.flag, p.since) = (v, t);
-                        }
+                        p.flag = flag.unwrap_or(p.flag);
                         p.gate = gate.unwrap_or(p.gate);
                     }
                 }
@@ -1405,10 +1460,50 @@ impl Match {
                         (b.airborne, b.floor) = (true, None);
                     }
                 }
+                Effect::TakeOver(i, j) if self.takes_over(i, j) => {
+                    let (h, b) = (self.players[i], self.players[j]);
+                    let left = self.lives_left(j);
+                    self.players[i] = Fighter {
+                        out: 0,
+                        immune: TAKEOVER_IMMUNE,
+                        extra: (h.deaths + left).saturating_sub(self.settings.lives().into()),
+                        ..h.in_body(&b)
+                    };
+                    self.players[j] = Fighter {
+                        out: h.out,
+                        out_at: t,
+                        ..b.in_body(&h)
+                    };
+                    ev.push(Event::TakeOver { player: i, from: j });
+                }
                 _ => {}
             }
         }
         ev
+    }
+
+    /// Lives player `i` has left: the match's and its [`Fighter::extra`] less its deaths; none once
+    /// out (a bot whose body was taken over keeps its deaths, V t1 438: lives 0).
+    pub fn lives_left(&self, i: usize) -> u16 {
+        let f = &self.players[i];
+        let left = (u16::from(self.settings.lives()) + f.extra).saturating_sub(f.deaths);
+        if f.out > 0 { 0 } else { left }
+    }
+
+    /// [`Effect::TakeOver`]`(i, j)` goes ahead: `i` out [`TAKEOVER_DELAY`] frames, `j` its living
+    /// team-mate bot in play (`func_1508E89C` refuses before the skull is grown, C; the script
+    /// picks `j` and sends it every frame from the out frame's next).
+    fn takes_over(&self, i: usize, j: usize) -> bool {
+        let n = self.players.len();
+        if i >= n || j >= n || i == j || !self.in_play(j) || self.free.contains(&i) {
+            return false;
+        }
+        let (h, b) = (&self.players[i], &self.players[j]);
+        h.out > 0
+            && self.tick >= h.out_at + TAKEOVER_DELAY
+            && b.bot
+            && b.health > 0
+            && b.team == h.team
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1434,11 +1529,13 @@ impl Match {
         }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
         // earlier in the slot order where they moved to this frame, and so do the mounted guns (a
-        // gunner and one jumping on move by their own rules).
+        // gunner and one jumping on move by their own rules) and Colors' uncarried flags.
+        let flags = (self.colors.flags.iter()).filter(|f| f.shown && f.carrier.is_none());
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i)
             .map(|(_, p)| Other::player(p.side, p.body.pos))
             .chain(self.guns.iter().map(|g| gun::body(g.place.pos)))
+            .chain(flags.map(|f| colors::body(f.pos)))
             .collect();
         let melee = |f: &Fighter| {
             f.drawn
@@ -1927,15 +2024,19 @@ impl Match {
             (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, mv.buttons & !(C_BUTTONS | BUTTON_A));
             f.body.prev_strafe = false;
         }
-        // The mask's clips: the first frame moves as the one before it, then the stick and buttons
-        // are let go (V e2: speed 3 → 4 → 1.5 → 0 with the stick held, no jump, fire or move in
-        // e3; I: the clip's own state, whose turn to the move angle the remake's idle cuts short).
+        // The mask's clips: the first frame is a full move with the stick, then the stick and
+        // buttons are let go and the state held (obj+0x83 = 0xFF, C; 2 here lapses the frame after
+        // the clip): the speed brakes 2.5 a frame and the facing turns 3072 a frame to the frozen
+        // move angle, which no idle snaps (V e2: speed 3 → 4 → 1.5 → 0, facing to 42496; no jump,
+        // fire or move in e3).
         if matches!(f.action, Action::Mask { .. }) && t > f.since {
             (mv.stick_x, mv.stick_y, mv.buttons) = (0, 0, 0);
+            f.body.timer = 2;
         }
-        // Colors: A and Z do nothing holding a flag (V h2 Z 400, e1 A 350); a pose holds the
-        // player from its first frame (obj+0x89 = 255, V e1 grab, b1 put-down).
-        if f.flag.is_some() {
+        // Colors: A and Z do nothing holding a flag (V h2 Z 400, e1 A 350), nor carrying a canister
+        // (V t2 1080, 1130, 1140); a pose holds the player from its first frame (obj+0x89 = 255, V e1
+        // grab, b1 put-down).
+        if f.flag.is_some() || f.carrying {
             mv.buttons &= !(BUTTON_A | BUTTON_Z);
         }
         if matches!(f.action, Action::Pose(_)) {
@@ -2672,9 +2773,9 @@ impl Match {
     /// `0x800E0AA9`); else it respawns.
     fn down(&mut self, i: usize, arena: &Arena, ev: &mut Vec<Event>) {
         let lives = !self.settings.colors && !self.settings.beach;
-        if lives && self.players[i].deaths >= u16::from(self.settings.lives()) {
+        if lives && self.lives_left(i) == 0 {
             let place = (0..self.players.len()).filter(|&j| self.in_play(j)).count();
-            self.players[i].out = place as u8;
+            (self.players[i].out, self.players[i].out_at) = (place as u8, self.tick);
         } else {
             self.respawn(i, arena, ev);
         }
@@ -2759,7 +2860,7 @@ impl Match {
         self.rng.next_u32();
         self.rng.next_u32();
         let (kills, suicides, deaths, shots, bot) = (f.kills, f.suicides, f.deaths, f.shots, f.bot);
-        let (hits, headshots, gassed) = (f.hits, f.headshots, f.gassed);
+        let (hits, headshots, gassed, extra) = (f.hits, f.headshots, f.gassed, f.extra);
         let (buttons, late, side, spawn_mask, start) =
             (f.buttons, f.late, f.side, f.spawn_mask, f.start);
         // Beach re-rolls a villager's class (I: after the pick's draws); the boost goes (V wz).
@@ -2783,6 +2884,7 @@ impl Match {
             spawn_mask,
             start,
             gassed,
+            extra,
             class,
             last_spawn: Some(at.index),
             ..Fighter::new(&at, team, self.tick)
@@ -4103,8 +4205,8 @@ mod tests {
         let (arena, mut m, w) = duel();
         m.timer = 4;
         run(&mut m, &arena, &w, 2, |_| 0);
-        assert_eq!((m.timer, m.ended_at), (0, Some(1)));
-        run(&mut m, &arena, &w, END_DELAY, |_| 0);
+        assert_eq!((m.timer, m.ended_at), (0, Some(2)));
+        run(&mut m, &arena, &w, END_DELAY + 1, |_| 0);
         assert_eq!(m.phase(), Phase::Fading);
         run(&mut m, &arena, &w, FADE, |_| 0);
         assert_eq!(m.phase(), Phase::Over);
@@ -4144,17 +4246,18 @@ mod tests {
         assert_eq!(pistol_kill(timed).1.timer, 3 * 3600 - 2 * 200);
     }
 
-    /// The kill limit ends the match on the killing frame; the fade follows as after a time-out.
+    /// The kill limit latches the end the frame after the killing frame; the fade follows as after a
+    /// time-out.
     #[test]
     fn the_kill_limit_ends_the_match() {
         let limit = |kills| Settings {
             kills,
             ..Settings::default()
         };
-        assert_eq!(pistol_kill(limit(1)).1.ended_at, Some(20));
+        assert_eq!(pistol_kill(limit(1)).1.ended_at, Some(21));
         assert_eq!(pistol_kill(limit(2)).1.ended_at, None);
         let (arena, mut m, w, _) = pistol_kill(limit(1));
-        m.tick = 20 + END_DELAY + FADE;
+        m.tick = 21 + END_DELAY + FADE;
         assert_eq!(m.phase(), Phase::Fading);
         run(&mut m, &arena, &w, 1, |_| 0);
         assert_eq!(m.phase(), Phase::Over);
@@ -4172,7 +4275,7 @@ mod tests {
         let (_, m, _, ev) = pistol_kill(lives(1));
         assert!(!ev.iter().any(|e| matches!(e.1, Event::Respawn { .. })));
         assert_eq!((m.players[1].out, m.players[1].deaths), (2, 1));
-        assert_eq!((m.ended_at, m.places()), (Some(171), vec![1, 2]));
+        assert_eq!((m.ended_at, m.places()), (Some(172), vec![1, 2]));
         let (_, m, _, ev) = pistol_kill(lives(2));
         assert!(ev.iter().any(|e| matches!(e.1, Event::Respawn { .. })));
         assert_eq!(
@@ -4208,7 +4311,7 @@ mod tests {
             20 => BUTTON_Z,
             _ => 0,
         });
-        assert_eq!((m.players[1].out, m.ended_at), (3, Some(171)));
+        assert_eq!((m.players[1].out, m.ended_at), (3, Some(172)));
     }
 
     /// The original's ranking: kills − deaths, the kill limit's holders first once reached, fewer
@@ -4319,7 +4422,7 @@ mod tests {
         let (_, m, _, _) = pistol_kill(tw(Some(3), 3));
         assert_eq!((m.players[0].kills, m.ended_at), (1, None));
         let (_, m, _, _) = pistol_kill(tw(None, 1));
-        assert_eq!((m.ended_at, m.places()), (Some(171), vec![1, 2]));
+        assert_eq!((m.ended_at, m.places()), (Some(172), vec![1, 2]));
         let (arena, m, w) = duel();
         let mut m = m.with(tw(None, 1));
         let far = Placement {
@@ -4468,6 +4571,109 @@ mod tests {
         assert!(speeds.iter().all(|&s| s <= 28.0), "{speeds:?}");
     }
 
+    /// Colors' flag is a body (V e0, e1 `touch.py`): it pushes a player 0.4 of the overlap a frame
+    /// (e0 404: 7.1 off the falling flag) out to the radii's sum, 60 from a squirrel, 53 from a
+    /// Tedi; it is taken on the overlap, both on the floor: not at 60.0, at 59.
+    #[test]
+    fn the_flag_touch_is_the_bodies_overlap() {
+        let flag = |pos| colors::Flag {
+            shown: true,
+            pos,
+            ..colors::Flag::default()
+        };
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            colors: true,
+            ..Settings::default()
+        });
+        m.players[1].body.pos = [0.0, 0.0, 3000.0];
+        m.players[0].side = Side::Squirrels;
+        // The green flag (team 1's to take), e0's: 31 off and 43.4 up.
+        m.colors.flags[1] = flag([31.0, 43.4, -3.8]);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let p = m.players[0].body.pos;
+        assert!(
+            (p[0] + 7.1).abs() < 0.7 && (p[2] - 0.8).abs() < 0.2,
+            "{p:?}"
+        );
+        for (side, sum) in [(Side::Tediz, 53.0), (Side::Squirrels, 60.0)] {
+            m.players[0].side = side;
+            m.players[0].body.pos = [0.0; 3];
+            m.colors.flags[1] = flag([31.0, 0.0, 0.0]);
+            run(&mut m, &arena, &w, 40, |_| 0);
+            let p = m.players[0].body.pos;
+            assert!((p[0] + sum - 31.0).abs() < 0.06, "{side:?} {p:?}");
+            assert_eq!(m.players[0].flag, None);
+        }
+        // Pushed to its rest off the red flag, team 0's to take, it takes nothing (e0).
+        m.colors.flags.swap(0, 1);
+        run(&mut m, &arena, &w, 40, |_| 0);
+        assert_eq!(m.players[0].flag, None);
+        // At 60.0 no, at 59 yes; not while it falls (30 up) or the player is in the air.
+        m.colors.flags[1].shown = false;
+        for ([x, y], fall, airborne, grab) in [
+            ([60.0, 0.0], None, false, false),
+            ([10.0, 30.0], Some(1.0), false, false),
+            ([40.0, 0.0], None, true, false),
+            ([59.0, 0.0], None, false, true),
+        ] {
+            m.players[0].body.pos = [0.0; 3];
+            m.players[0].body.airborne = airborne;
+            m.colors.flags[0] = colors::Flag {
+                fall,
+                ..flag([x, y, 0.0])
+            };
+            m.step(&arena, &[Input::default(); 2], &w);
+            assert_eq!(m.players[0].flag.is_some(), grab, "{x} {fall:?} {airborne}");
+        }
+    }
+
+    /// The mask's put-on as e2's P2 (pulling back at full stick from standing, facing 16896, the
+    /// mask delivered on frame 1003): its first frame is a full move (speed 3 → 4, the move angle
+    /// +6400), then the speed brakes 2.5 a frame and the facing turns 3072 a frame to the frozen
+    /// move angle, the position still from 1006 (V e2 reads 1001-1011).
+    #[test]
+    fn the_mask_put_on_replays_e2() {
+        let (_, mut m, w) = duel();
+        let arena = Arena {
+            spawns: vec![rec([2000, 0, 0], 0)],
+            pickups: vec![(weapon::PICKUPS_2D[19], [0.0, 0.0, 3000.0])],
+        };
+        m.pickups = vec![PickupState {
+            timer: 600,
+            taken: Some((0, 1)),
+        }];
+        m.players[1].body.pos = [0.0, 0.0, -3000.0];
+        let b = &mut m.players[0].body;
+        (b.facing, b.move_angle) = (16896, 16896);
+        // Full stick toward 49152, past where the move angle stops (I: e2 doesn't log P2's stick).
+        let pull = Input {
+            stick_y: -82,
+            camera_yaw: 0,
+            ..Input::default()
+        };
+        let mut rows = Vec::new();
+        for _ in 1001..=1011 {
+            m.step(&arena, &[pull, Input::default()], &w);
+            let b = m.players[0].body;
+            rows.push((b.xz_speed, b.move_angle, b.facing, b.pos));
+        }
+        assert_eq!(m.players[0].action, Action::Mask { on: true });
+        let speeds: Vec<f32> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(speeds[..6], [1.0, 2.0, 3.0, 4.0, 1.5, 0.0]);
+        let moves: Vec<u16> = rows.iter().map(|r| r.1).collect();
+        assert_eq!(moves[..4], [23296, 29696, 36096, 42496]);
+        assert!(moves[4..].iter().all(|&a| a == 42496), "{moves:?}");
+        let facings: Vec<u16> = rows.iter().map(|r| r.2).collect();
+        assert_eq!(
+            facings[..9],
+            [
+                19968, 23040, 26112, 29184, 32256, 35328, 38400, 41472, 42496
+            ]
+        );
+        assert!(rows[5..].iter().all(|r| r.3 == rows[5].3), "{rows:?}");
+    }
+
     /// Total War's gas on the match: the carrier's speed and lock-out, the masks' gate, the
     /// canister's team gate, and the script's hits' scoring (V d1, d2, d3).
     #[test]
@@ -4497,8 +4703,9 @@ mod tests {
         m.players[1].team = 0;
         m.apply(&[Effect::Countdown(300)]);
         // Player 0 runs off the mask as it touches it: delivered two frames later, it goes on (state
-        // 81, clip 0x151) for 19 frames. That frame moves as before (speed 3), then the stick, A
-        // and Z do nothing: it brakes 2.5 and stays (V e2: 3 → 4 → 1.5 → 0; e3).
+        // 81, clip 0x151) for 19 frames. That frame moves with the stick (speed 3: the run's third
+        // frame), then the stick, A and Z do nothing: it brakes 2.5 and stays, idle once the clip
+        // ends (e2's timing: [`the_mask_put_on_replays_e2`]; e3).
         let run = Input {
             stick_y: 82,
             ..Input::default()
@@ -4526,10 +4733,13 @@ mod tests {
             assert_eq!(m.players[0].anim, anim::MASK_ON);
         }
         assert_eq!(speeds[..3], [0.5, 0.0, 0.0]);
-        let f = m.players[0];
-        assert_eq!((f.body.pos[1], f.body.state), (0.0, movement::state::IDLE));
+        assert_eq!(m.players[0].body.pos[1], 0.0);
         m.step(&arena, &[Input::default(); 2], &w);
-        assert_eq!(m.players[0].action, Action::Free);
+        let f = m.players[0];
+        assert_eq!(
+            (f.action, f.body.state),
+            (Action::Free, movement::state::IDLE)
+        );
         // The script takes it off: state 78, clip 0x14E, as long.
         m.apply(&[Effect::Release(0)]);
         let f = m.players[0];
@@ -4556,24 +4766,25 @@ mod tests {
             (None, [Some(1), Some(2), Some(150), None])
         );
 
-        // The carrier: holstered, no draw, no crouch, 80 % of the run's 35 (d1: +1 a frame to within
-        // 1 of 28, then +0.01; 35 without the canister).
+        // The carrier: holstered, no draw, no crouch, no jump, 80 % of the run's 35 (d1: +1 a frame
+        // to within 1 of 28, then +0.01; 35 without the canister); the camera reads 0x25 (V t2).
         m.give(1, 0x39);
         m.apply(&[Effect::Carry(1, true)]);
-        let run = Input {
-            stick_y: 82,
-            buttons: BUTTON_B | BUTTON_Z,
-            ..Input::default()
-        };
         let mut speeds = Vec::new();
-        for _ in 0..40 {
+        for k in 0..40 {
+            let run = Input {
+                stick_y: 82,
+                buttons: BUTTON_B | BUTTON_Z | if k % 2 == 0 { BUTTON_A } else { 0 },
+                ..Input::default()
+            };
             m.step(&arena, &[Input::default(), run], &w);
             speeds.push(m.players[1].body.xz_speed);
+            assert_eq!(m.players[1].body.pos[1], 0.0, "no jump");
         }
         let f = m.players[1];
         assert_eq!(
-            (f.action, f.drawn, f.item(m.tick)),
-            (Action::Free, false, 0xA5)
+            (f.action, f.drawn, f.item(m.tick), f.camera_weapon()),
+            (Action::Free, false, 0xA5, gas::CANISTER)
         );
         assert_eq!(
             (f.body.state, f.anim),
@@ -4583,7 +4794,12 @@ mod tests {
         assert!(top > 27.0 && top <= 28.0, "{speeds:?}");
         assert!((speeds[39] - speeds[38] - 0.01).abs() < 1e-4, "{speeds:?}");
         m.apply(&[Effect::Carry(1, false)]);
-        let run = Input { buttons: 0, ..run };
+        let f = m.players[1];
+        assert_eq!((f.weapon, f.camera_weapon()), (Some(0x39), 0));
+        let run = Input {
+            stick_y: 82,
+            ..Input::default()
+        };
         for _ in 0..12 {
             m.step(&arena, &[Input::default(), run], &w);
         }
@@ -4621,6 +4837,68 @@ mod tests {
         assert_eq!((m.players[2].hits, m.players[2].suicides), (0, 0));
     }
 
+    /// Total War's takeover (V t1: out 424, swap 437): from 13 frames after the out frame the
+    /// script's TakeOver puts the human in its team-mate bot's body where it stands (its momentum,
+    /// health and lives: speed 12 → 9.5), 90 frames immune; the bot's slot gets the corpse and is
+    /// out on the human's place; each slot keeps its stats. Not before, nor into an enemy.
+    #[test]
+    fn an_out_human_takes_over_a_bot() {
+        let (arena, m, w) = duel();
+        let mut m = m.with(Settings {
+            time: None,
+            lives: 2,
+            total_war: true,
+            ..Settings::default()
+        });
+        let far = Placement {
+            index: 0,
+            pos: [-3000.0, 0.0, 0.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        m.players.push(Fighter {
+            bot: true,
+            health: 4,
+            kills: 3,
+            ..Fighter::new(&far, 0, 0)
+        });
+        m.players[0].deaths = 1;
+        m.apply(&[Effect::Hit {
+            slot: 0,
+            kind: damage::GAS,
+            attacker: Some(1),
+        }]);
+        while m.players[0].out == 0 {
+            run(&mut m, &arena, &w, 1, |_| 0);
+        }
+        let (t0, place, corpse) = (m.players[0].out_at, m.players[0].out, m.players[0].body.pos);
+        assert_eq!((m.tick, m.lives_left(0)), (t0 + 1, 0));
+        while m.tick < t0 + TAKEOVER_DELAY {
+            assert!(m.apply(&[Effect::TakeOver(0, 2)]).is_empty());
+            run(&mut m, &arena, &w, 1, |_| 0);
+        }
+        assert!(m.apply(&[Effect::TakeOver(0, 1)]).is_empty(), "an enemy");
+        m.players[2].body.xz_speed = 12.0;
+        let bot = m.players[2];
+        let ev = m.apply(&[Effect::TakeOver(0, 2)]);
+        assert_eq!(ev, [Event::TakeOver { player: 0, from: 2 }]);
+        let (h, b) = (m.players[0], m.players[2]);
+        assert_eq!((h.body, h.health, h.out, h.immune), (bot.body, 4, 0, 90));
+        assert_eq!(
+            (h.deaths, h.kills, h.bot, m.lives_left(0)),
+            (2, 0, false, 2)
+        );
+        assert_eq!(
+            (b.body.pos, b.health, b.out, b.out_at),
+            (corpse, 0, place, m.tick)
+        );
+        assert_eq!((b.deaths, b.kills, b.bot, m.lives_left(2)), (0, 3, true, 0));
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let h = m.players[0];
+        assert_eq!((h.body.xz_speed, h.immune), (9.5, 89));
+        assert!(m.ended_at.is_none());
+    }
+
     /// The gas's kill ends as any kill, 86 + 52 + 55 frames on: untimed with 1 life the victim is
     /// out and Total War ends; with a life left it respawns.
     #[test]
@@ -4642,7 +4920,7 @@ mod tests {
             let respawn = (ev.iter()).find(|e| matches!(e.1, Event::Respawn { .. }));
             let end = (m.players[1].out, m.ended_at, respawn.map(|e| e.0));
             match lives {
-                1 => assert_eq!(end, (2, Some(193), None)),
+                1 => assert_eq!(end, (2, Some(194), None)),
                 _ => assert_eq!(end, (0, None, Some(193))),
             }
         }
@@ -4757,9 +5035,7 @@ mod tests {
         run(&mut m, &arena, &w, 35, |_| 0);
         assert_eq!(m.colors.scores, [0, 0]);
         run(&mut m, &arena, &w, 1, |_| 0);
-        assert_eq!((m.colors.scores, m.ended_at), ([0, 1], None));
-        run(&mut m, &arena, &w, 1, |_| 0);
-        assert_eq!(m.ended_at, Some(t + 36));
+        assert_eq!((m.colors.scores, m.ended_at), ([0, 1], Some(t + 36)));
         assert_eq!(m.places(), [2, 1]);
         // A blast's: when BLOWN_UP (88) ends, with the respawn; never out of lives.
         let (arena, m, w) = duel();

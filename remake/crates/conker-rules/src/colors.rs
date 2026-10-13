@@ -10,6 +10,7 @@
 
 use conker_anim::combat as anim;
 use conker_sim::collision::CollisionWorld;
+use conker_sim::movement::{self, Other, PlayerState, Side};
 
 /// A flag: the handle the script names it by (its object index, `0x20nn`), the scene uid its
 /// create native `obj(0x20uu)` takes, its model (bank 01) and its home (C, V e1).
@@ -43,10 +44,6 @@ pub const FLAGS: [FlagDef; 2] = [
 pub const SCORE: u8 = 20;
 /// Lives in Colors: 6, never lost, timed or not (the rules flags 0x1; V u1, e0).
 pub const LIVES: u8 = 6;
-/// The touch: within this many units horizontally (picked up at 15-40, not at 48-62: V h2, e0, e1;
-/// I the exact radius) and the flag's height within 100 of the player's 90-unit body (I, as a
-/// pickup's).
-pub const TOUCH: f32 = 45.0;
 /// Frames a released flag can't be touched: +0x25C bit 8 is back 50 frames after the release's
 /// (V b1 371 → 421).
 pub const UNTOUCHABLE: u32 = 50;
@@ -64,12 +61,22 @@ pub fn takes(f: usize, team: u8) -> bool {
     (team == 0) == (f == 0)
 }
 
-/// The touch test, before the player moves that frame.
-pub fn touches(flag: [f32; 3], player: [f32; 3]) -> bool {
-    let (dx, dz) = (flag[0] - player[0], flag[2] - player[2]);
-    dx * dx + dz * dz < TOUCH * TOUCH
-        && flag[1] - 100.0 < player[1] + 90.0
-        && player[1] < flag[1] + 100.0
+/// A flag's body, a squirrel's: radius 30, centre 33 up, scale 0x3EE8BA2F (V e1 RAM). It pushes
+/// the players out of it as theirs do (V e0 403-421: to 60 from a squirrel, e1 to 53 from a Tedi).
+pub fn body(pos: [f32; 3]) -> Other {
+    Other::player(Side::Squirrels, pos)
+}
+
+/// The touch test, before the player moves that frame: the overlap the engine's push finds
+/// (`func_1505D408`'s touch bits, C), with the player where the push measures it, a ground frame's
+/// fall step below its floor, and both on the floor (+0x28 = 0). So the push's own rest, 59.97 out,
+/// takes nothing (V e0: held at 60.0 off the red flag once touchable, no grab).
+pub fn touches(flag: &Flag, player: &PlayerState, side: Side) -> bool {
+    let [x, y, z] = player.pos;
+    let low = y + 0.5 * (movement::GROUND_Y_VEL - movement::GRAVITY_FALL);
+    flag.fall.is_none()
+        && !player.airborne
+        && body(flag.pos).overlaps(&Other::player(side, [x, low, z]))
 }
 
 /// Where a carrier at `pos` facing `facing` holds its flag ([`HELD`]).

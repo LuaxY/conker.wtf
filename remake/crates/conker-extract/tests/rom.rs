@@ -519,9 +519,8 @@ fn colors_outros_follow_the_oracle() {
 /// actors}.csv`, `fade_cs{3,4}.csv`, runs cs4/cs3: read 298 (cs4) or 147 (cs3) is the outro's frame
 /// 0), every frame from 1 through the STATS, as Colors' are checked; the lengths, cameras, actors,
 /// characters (156 and 157 play clips the pack's villagers carry: the Tedi's), voices (cs4 0x163 at
-/// t 200, cs3 0x161 at 40), no subtitles. Left out by the decoder (not in the CSVs): song 0x8A (op
-/// 8), cs3's near plane 30 (op 5 b=0x25), the actors' part masks (op 5 b=0x3C), the kind-3 props
-/// 0xFC/0xFD, the Tediz' attachment set 0x70 (op 0x0D), the head turn (op 0x11).
+/// t 200, cs3 0x161 at 40), no subtitles. Left out by the decoder: song 0x8A (op 8). The rest
+/// (`outros-leftovers.md`) is [`outro_commands_follow_the_research`].
 #[test]
 fn beach_outros_follow_the_oracle() {
     let Some(rom) = rom() else { return };
@@ -764,4 +763,174 @@ fn mounted_gun_model() {
         .map(|c| (c.pair, c.logical.clone(), c.duration))
         .collect();
     assert_eq!(clips, [(0, vec![1], 12)]);
+}
+
+/// What the six outros' other commands give (`../lab/research/mp-original/outros-leftovers.md`):
+/// heads (op 0x11: Colors cs1's officer's at t −1 never runs), talk (op 5 b=0x17), part masks (op
+/// 5 b=0x3C), attachments (op 0x0D through the action table), blends (op 2's e − 1), props (kind
+/// 3: the placement by its uid, posed by channels 7/8), script sounds (no 0x4A9: its starts are
+/// before t 0) and cs3's near plane.
+#[test]
+fn outro_commands_follow_the_research() {
+    use conker_assets::outro::{Attach, CHATTER, Outro, Prop, SHUT};
+    let Some(rom) = rom() else { return };
+    let get = |scene| conker_extract::outro::outros(&rom, scene).unwrap();
+    let (tw, colors, beach) = (get(0x2D), get(0x30), get(0x2B));
+    let actors = |o: &Outro| o.actors().cloned().collect::<Vec<_>>();
+    let head = |o: &Outro| -> Vec<Option<(u16, u8)>> {
+        o.actors()
+            .map(|a| a.head.as_ref().map(|h| (h.t, h.joint)))
+            .collect()
+    };
+    // Heads: TW cs2's 135 (joint 4) and cs4's 90 (joint 3) at 0; cs5's 90s; none for cs1.
+    assert_eq!(head(&tw[0]), [Some((0, 4))]);
+    assert_eq!(head(&tw[1]), [Some((0, 3))]);
+    assert!(head(&colors[0]).iter().all(Option::is_none));
+    let cs5_turns: Vec<_> = head(&colors[1])
+        .into_iter()
+        .map(|h| h.map(|h| h.0))
+        .collect();
+    let none = None;
+    assert_eq!(
+        cs5_turns,
+        [
+            Some(198),
+            Some(196),
+            Some(198),
+            Some(198),
+            none,
+            Some(300),
+            Some(303),
+            none,
+            Some(697)
+        ]
+    );
+    assert_eq!(head(&beach[0])[2..], [Some((0, 12)), Some((0, 12))]);
+    let h = tw[1].actor.head.as_ref().unwrap();
+    assert!(!h.yaw.is_empty() && !h.pitch.is_empty());
+    // Talk: TW cs4's 90 chatters from 36 at 45° (e 0), shuts at 153; cs2's and cs1's 135 at 20°.
+    let talk = tw[1].actor.talk.as_ref().unwrap();
+    assert_eq!((talk.jaw, talk.skew, talk.says.len()), (6, true, 14));
+    assert_eq!(
+        (talk.says[0].t, talk.says[0].state, talk.says[0].degrees),
+        (36, CHATTER, 45)
+    );
+    assert_eq!((talk.says[1].t, talk.says[1].state), (153, SHUT));
+    let cs1_talk = colors[0].actor.talk.as_ref().unwrap();
+    assert_eq!(
+        (cs1_talk.jaw, cs1_talk.skew, cs1_talk.says[0].degrees),
+        (7, false, 20)
+    );
+    assert!(tw[0].actor.talk.is_some() && actors(&colors[1]).iter().all(|a| a.talk.is_none()));
+    // Masks: cs3's villagers (uids 0x14-0x17) and cs4's (0x14 has none).
+    let masks = |o: &Outro| -> Vec<Option<u8>> {
+        o.actors()
+            .filter(|a| a.character != "90")
+            .map(|a| a.mask)
+            .collect()
+    };
+    assert_eq!(
+        masks(&beach[1]),
+        [Some(0x0E), Some(0x14), Some(0x36), Some(0x0A)]
+    );
+    assert_eq!(masks(&beach[0]), [None, Some(0x16), Some(0x2C), Some(0x0A)]);
+    // Attachments: 0x57 on joint 14 for the Tediz (cs4, cs5 but the standing officer, cs3); the
+    // 88s' 0x92 on 18, then obj 4's 0x64 on 23.
+    let on = |t, entry, joint, on| Attach {
+        t,
+        entry,
+        joint,
+        on,
+    };
+    assert_eq!(tw[1].actor.attach, [on(0, 0x57, 14, true)]);
+    let cs5 = actors(&colors[1]);
+    for (n, a) in cs5.iter().enumerate() {
+        let want = match n {
+            1 => vec![on(0, 0x57, 14, true), on(799, 0x57, 14, false)],
+            4 | 7 | 8 => vec![],
+            _ => vec![on(0, 0x57, 14, true), on(1150, 0x57, 14, false)][..1].to_vec(),
+        };
+        assert_eq!(a.attach, want, "cs5 actor {n}");
+    }
+    let cs1 = actors(&colors[0]);
+    assert_eq!(
+        cs1[1].attach,
+        [
+            on(0, 0x92, 18, true),
+            on(502, 0x92, 18, false),
+            on(599, 0x64, 23, true)
+        ]
+    );
+    assert_eq!(cs1[2].attach, [on(0, 0x92, 18, true)]);
+    let tediz: Vec<_> = beach[1].actors().filter(|a| a.character == "90").collect();
+    assert!(tediz.iter().all(|a| a.attach[0] == on(0, 0x57, 14, true)));
+    // Blends: cs1's officer's e 0xA (9) and e 0 (5).
+    let blends: Vec<u8> = cs1[0].plays.iter().map(|p| p.blend).collect();
+    assert_eq!(blends[..2], [9, 5]);
+    // Props: Beach cs4's 0xFC (placement 3), cs3's 0xFD (2), Colors cs5's 0xFF (0).
+    let prop = |placement, at, rotation| Prop {
+        placement,
+        at,
+        rotation,
+    };
+    assert_eq!(beach[0].props, [prop(3, [1076, -29, 257], [7.0, 174.0])]);
+    assert_eq!(beach[1].props.len(), 1);
+    assert_eq!(
+        (beach[1].props[0].placement, beach[1].props[0].at),
+        (2, [1929, -634, -1468])
+    );
+    assert_eq!(
+        (colors[1].props[0].placement, colors[1].props[0].at),
+        (0, [-52, -350, 3692])
+    );
+    assert_eq!(
+        (beach[1].props[0].rotation, colors[1].props[0].rotation),
+        ([0.0, -85.0], [0.0, -108.0])
+    );
+    assert!(tw.iter().chain(&colors[..1]).all(|o| o.props.is_empty()));
+    // Sounds: cs5's tanks' 0x4A8 from 0 (in to 297, out from 788, stop 1045; in to 612, stop
+    // 1091), the march 0x6DE from 1 and from 908 at +150 cents to 1100, 0x633 and 0x631 once.
+    let s: Vec<_> = (colors[1].sounds.iter())
+        .map(|s| (s.id, s.actor, s.t, s.stop, s.fade_in, s.fade_out, s.cents))
+        .collect();
+    assert_eq!(
+        s,
+        [
+            (0x6DE, 1, 1, Some(1100), None, None, 0),
+            (0x6DE, 1, 908, Some(1100), None, None, 150),
+            (0x4A8, 4, 0, Some(1045), Some(297), Some(788), 0),
+            (0x4A8, 7, 0, Some(1091), Some(612), None, 0),
+            (0x633, 7, 1028, None, None, None, 0),
+            (0x631, 7, 1085, None, None, None, 0),
+        ]
+    );
+    assert!(
+        tw.iter()
+            .chain(&beach)
+            .chain(&colors[..1])
+            .all(|o| o.sounds.is_empty())
+    );
+    // The near plane: Beach cs3 only.
+    let near: Vec<_> = tw
+        .iter()
+        .chain(&colors)
+        .chain(&beach)
+        .map(|o| o.near)
+        .collect();
+    assert_eq!(near, [None, None, None, None, None, Some(30.0)]);
+    // The models: the three attachments and Beach's two props, Colors' one.
+    let names = |scene, outros: &[Outro]| -> Vec<String> {
+        let (_, scenes) = conker_extract::outro::models(&rom, scene, outros)
+            .unwrap()
+            .unwrap();
+        scenes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(0x2D, &tw), ["09-57"]);
+    assert_eq!(names(0x30, &colors), ["09-57", "09-64", "09-92", "prop-0"]);
+    assert_eq!(names(0x2B, &beach), ["09-57", "prop-2", "prop-3"]);
 }

@@ -124,7 +124,7 @@ use conker_bots::{Assets, Bots, DEFAULT_SKILL};
 use conker_rules::damage::{self, Hitbox};
 use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
 use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, team_result};
-use conker_rules::gas::Effect;
+use conker_rules::gas::{self, Effect};
 use conker_rules::net::Fighting;
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
@@ -1224,7 +1224,7 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
             0
         } else {
             let dying = matches!(f.action, Action::Hurt { lethal: true, .. });
-            (u16::from(start_lives) + u16::from(dying)).saturating_sub(f.deaths) as u8
+            (u16::from(start_lives) + f.extra + u16::from(dying)).saturating_sub(f.deaths) as u8
         },
         hits: f.hits,
         headshots: f.headshots,
@@ -1464,6 +1464,18 @@ fn simulate(
         events = game.m.apply(&effects);
         bots.scopes(&mut game.m);
     }
+    // Scene 0x2D's doors and covers: their collision where the props stand once the script's
+    // effects are in (outside Total War the Deathmatch's set).
+    // ponytail: the step's own slide (up 10 or 40, down 2 or 8, the hide) collides a frame late.
+    if game.ai.scene == 0x2D {
+        let g = &game.m.gas;
+        gas::seat(
+            &mut world.0,
+            game.m.settings.total_war,
+            g.shown(),
+            g.lifts(),
+        );
+    }
     // A waiting player is restored after the step, so nothing moves it meanwhile (and nothing hurts
     // it: `Match::waiting`).
     let held: Vec<(usize, Fighter)> = (waiting.iter())
@@ -1525,10 +1537,16 @@ fn simulate(
         game.m.players[i] = f;
     }
     // A respawn is no move: the next trigger test starts from the record (a corpse's teleport
-    // could cross a gate).
+    // could cross a gate); nor is a takeover, for either body.
     for e in &events {
-        if let Event::Respawn { player, .. } = e {
-            game.ai.lifts.reset(*player);
+        match *e {
+            Event::Respawn { player, .. } => game.ai.lifts.reset(player),
+            Event::TakeOver { player, from } => {
+                info!("TW t={t} slot {player} takes over bot {from}'s body");
+                game.ai.lifts.reset(player);
+                game.ai.lifts.reset(from);
+            }
+            _ => {}
         }
     }
     if game.won.is_none() && game.m.phase() == Phase::Over {
@@ -1554,6 +1572,11 @@ fn simulate(
         });
         if let Some(at) = respawn {
             cam.0 = Follow::spawn(at.camera, &f.body);
+        }
+        // A takeover snaps the camera behind the new body (`func_15128774`, V t1 438).
+        let took = |e: &Event| matches!(e, Event::TakeOver { player, .. } if *player == slot.index);
+        if events.iter().any(took) {
+            cam.0 = Follow::spawn(f.body.pos, &f.body);
         }
         cam.0.step_view(f.camera_view(next), &action.0, &world);
         f.take_camera(&cam.0);
@@ -1682,10 +1705,11 @@ fn publish(
         let Some(f) = m.players.get(slot.index) else {
             continue;
         };
-        let respawned = events
-            .0
-            .iter()
-            .any(|e| matches!(e, Event::Respawn { player, .. } if *player == slot.index));
+        // A takeover moves the camera as a respawn does (the client cuts on `lives`).
+        let respawned = events.0.iter().any(|e| match *e {
+            Event::Respawn { player, .. } | Event::TakeOver { player, .. } => player == slot.index,
+            _ => false,
+        });
         let rode = rides.0.contains(&slot.index);
         let lives = combat_state.lives + u16::from(respawned) + u16::from(rode);
         player.set_if_neq(Player(f.body));
@@ -1746,6 +1770,7 @@ fn publish(
         countdown: m.gas.countdown,
         gas: m.gas.gas,
         props: m.gas.shown(),
+        lifts: m.gas.lifts(),
         colors: s.colors,
         score_limit: s.score,
         scores: m.colors.scores,

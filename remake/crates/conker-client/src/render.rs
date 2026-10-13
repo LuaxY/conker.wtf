@@ -715,13 +715,14 @@ fn add_props(
 /// The level glTF draws every placement, pickups included, as a node named `model@placement`, and
 /// so do War: Total War's props: a taken pickup's node shrinks away ([`shrink`]) and hides until it
 /// is back; in Total War, a prop the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`]
-/// says so (a canister taken shrinks too, the doors and covers just go).
+/// says so (a canister taken shrinks too, the doors and covers slide by [`MatchView::lifts`] and
+/// just go).
 #[allow(clippy::type_complexity)]
 fn show_pickups(
     game: Query<&MatchView>,
     timeline: Res<lightyear::prelude::LocalTimeline>,
     names: Query<(Entity, &Name), Added<Name>>,
-    mut nodes: Local<Vec<(u32, Entity, Option<Vec3>, Option<u32>)>>,
+    mut nodes: Local<Vec<(u32, Entity, Option<(Vec3, f32)>, Option<u32>)>>,
     mut shown: Query<(&mut Visibility, &mut Transform)>,
 ) {
     nodes.extend(
@@ -742,7 +743,14 @@ fn show_pickups(
         let canister = gas::CANISTERS.iter().any(|c| u32::from(c.0) == *placement);
         // Hidden since tick `at`; one already hidden at first sight, or a door, just hides.
         let first = base.is_none();
-        let full = *base.get_or_insert(t.scale);
+        let (full, y) = *base.get_or_insert((t.scale, t.translation.y));
+        let lift = match *placement {
+            n @ 0..8 if driven => f32::from(m.lifts[n as usize]),
+            _ => 0.0,
+        };
+        if t.translation.y != y + lift {
+            t.translation.y = y + lift;
+        }
         *at = match (taken || gone, *at) {
             (false, _) => None,
             (true, None) if first || !(taken || canister) => Some(tick.wrapping_sub(3)),

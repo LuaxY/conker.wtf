@@ -51,6 +51,7 @@ use conker_assets::audio::Line;
 use conker_assets::audio::{
     Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, On, Play, Sound,
 };
+use conker_assets::outro::{Outro, frame};
 use conker_assets::{Held, Manifest, Pickup};
 use conker_camera::volume::CameraVolume;
 use conker_rules::net::Fighting;
@@ -90,6 +91,16 @@ const LINES: [(u16, &str); 3] = [
     (ESCAPE - 1, "jingle-squirrels"),
     (ESCAPE - 2, "jingle-tediz"),
 ];
+/// A War outro `n`'s song ([`conker_assets::outro::Outro::song`]) plays as id `SONG - n`: not an
+/// MP3 (it ducks nothing) nor the background (nothing ducks it).
+const SONG: u16 = ESCAPE - 0x100;
+/// Whether a voice is an MP3 line: a map's ([`LINES`]) or an outro's voice.
+fn mp3(id: u16) -> bool {
+    id > ESCAPE - LINES.len() as u16
+}
+/// The outros' script sounds' volume and distances (`func_1000FA64(id, …, 0x7F7F, 0x7D00, 0x7918,
+/// …)`: full volume within 31000, so only the pan tells where; I: the near/far reading).
+const SCRIPT: [f32; 3] = [32639.0, 31000.0, 32000.0];
 /// Ticks from a capture to its jingle and the losers' voices (script 0xBB's timer; V c1a, c1b:
 /// capture 382, the calls 412).
 const CHEER: u32 = 30;
@@ -217,6 +228,8 @@ enum Owner {
     Grenade(u32, usize),
     Shot(usize),
     Gun(usize),
+    /// An outro's script sound (an index of its `sounds`).
+    Outro(usize),
     World,
 }
 
@@ -437,13 +450,17 @@ struct Sounds {
     /// (s126+0x94).
     muffled: bool,
     wearers: HashSet<u16>,
+    /// The outro's script sounds started (indices of its `sounds`).
+    outro: HashSet<usize>,
 }
 
-/// War: Beach's music volume while the escape's radio line plays: from 0x4650 down to 0x1E0A at
-/// 0x233 a frame, back at 0x1000 a frame once it is over (V snd ev 103-121, 308-312).
-const DUCK: [f32; 4] = [18000.0, 7690.0, 563.0, 4096.0];
+/// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
+/// outro's voice): 0x8000 down to 0x36B0 at −0x400 a frame, back at +0x1000 a frame once it is
+/// over; the music plays at its volume × factor / 0x8000 (V Beach's 0x4650: 0x1E09 at the bottom,
+/// −0x233 and +0x8CA a frame; `b3` 169-187, 686-690; snd ev 103-121, 308-312).
+const DUCK: [f32; 4] = [32768.0, 14000.0, 1024.0, 4096.0];
 
-/// The music's volume a tick on from `level`, the line playing or not ([`DUCK`]).
+/// The duck factor a tick on from `level`, a line playing or not ([`DUCK`]).
 pub fn duck(level: f32, line: bool) -> f32 {
     let [full, low, down, up] = DUCK;
     match line {
@@ -1138,9 +1155,9 @@ impl Sounds {
         }
     }
 
-    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) plays.
+    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) or an outro's voice plays.
     fn duck_music(&mut self, cx: &Cx) {
-        let line = (self.voices.iter()).any(|v| !v.stopped && LINES.iter().any(|l| l.0 == v.id));
+        let line = (self.voices.iter()).any(|v| !v.stopped && mp3(v.id));
         self.duck = duck(self.duck, line);
         let [full, ..] = DUCK;
         for v in self.voices.iter_mut().filter(|v| v.id == BACKGROUND) {
@@ -1353,7 +1370,9 @@ impl Sounds {
                 };
                 self.push(cx, v);
             }
-            (2, _) => self.stop(|v| v.id == BACKGROUND),
+            // The music plays on through a War outro and its STATS (V: no stop from the match's
+            // start to the bar scene's songs).
+            (2, _) if !crate::outro::team_mode(m) => self.stop(|v| v.id == BACKGROUND),
             _ => {}
         }
         for &at in flashed {
@@ -1364,6 +1383,80 @@ impl Sounds {
                 .filter(|e| e.at.map(f32::from) == at)
             {
                 self.start(cx, &e.play, &e.play.sounds, 1.0, Src::at(at));
+            }
+        }
+    }
+
+    /// An outro's script sounds at frame `k` (none: they stop): each at its actor, a loop from its
+    /// `t` (a late client's from where the outro is) to its `stop` with its linear fades (V cs5b:
+    /// 0x4A8's bank loop repeats every 1.40 s from 17.6 s to 27.4 s), a one-shot on its frame, at
+    /// `cents`.
+    fn outro_sounds(&mut self, cx: &Cx, playing: Option<(&Outro, u32)>) {
+        let Some((o, k)) = playing else {
+            self.stop(|v| matches!(v.owner, Owner::Outro(_)));
+            self.outro.clear();
+            return;
+        };
+        let t = o.t(k);
+        for (i, s) in o.sounds.iter().enumerate() {
+            let owner = Owner::Outro(i);
+            let Some(a) = o.actors().nth(usize::from(s.actor)) else {
+                continue;
+            };
+            let level = match s.stop {
+                Some(stop) if t >= f32::from(stop) => None,
+                Some(stop) => {
+                    let ramp =
+                        |from: f32, to: f32| ((t - from) / (to - from).max(1.0)).clamp(0.0, 1.0);
+                    let fade_in = s
+                        .fade_in
+                        .map_or(1.0, |f| ramp(f32::from(s.t), f32::from(f)));
+                    let fade_out = s
+                        .fade_out
+                        .map_or(1.0, |f| 1.0 - ramp(f32::from(f), f32::from(stop)));
+                    (t >= f32::from(s.t)).then_some(fade_in * fade_out)
+                }
+                None => (k == frame(s.t)).then_some(1.0),
+            };
+            let Some(level) = level else {
+                if s.stop.is_some() {
+                    self.stop(|v| v.owner == owner);
+                }
+                continue;
+            };
+            let pos = a.place(t);
+            let live = self
+                .voices
+                .iter_mut()
+                .find(|v| v.owner == owner && !v.stopped);
+            match (live, cx.pack.audio.sounds.sounds.get(&s.id)) {
+                (Some(v), _) => (v.pos, v.volume) = (pos, SCRIPT[0] * level),
+                (None, Some(sound)) if self.outro.insert(i) => {
+                    let [volume, near, far] = SCRIPT;
+                    let v = Voice {
+                        id: s.id,
+                        owner,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos,
+                        follows: None,
+                        flat: false,
+                        volume: volume * level,
+                        own: None,
+                        near,
+                        far,
+                        base: MIX * f32::from(sound.volume) / 127.0,
+                        speed: (f32::from(s.cents) / 1200.0).exp2(),
+                        looped: s.stop.is_some() && sound.looped.is_some(),
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                    };
+                    self.push(cx, v);
+                }
+                _ => {}
             }
         }
     }
@@ -1499,11 +1592,26 @@ fn hear(
         .start
         .filter(|&st| st != u32::MAX && tick >= st)
         .map_or(-1, |st| i64::from(m.first_read + (tick - st)));
+    // While an outro runs the listener is its camera.
+    let running = playing.running(&outros);
+    let ear = match running {
+        Some((o, k)) => {
+            let (eye, at) = o.camera(o.t(k));
+            let ahead = Vec2::new(at[0] - eye[0], at[2] - eye[2]);
+            let right = Vec2::new(-ahead.y, ahead.x).normalize_or_zero();
+            Ear {
+                slot: u16::MAX,
+                pos: eye,
+                right: right.to_array(),
+            }
+        }
+        None => Ear::new(c.slot, p.pos, camera),
+    };
     let cx = Cx {
         pack: &pack,
         tick,
         read,
-        ear: Ear::new(c.slot, p.pos, camera),
+        ear,
     };
     if !s.primed {
         s.primed = true;
@@ -1529,6 +1637,7 @@ fn hear(
     s.beach(&cx, m, &all);
     s.colors(&cx, m, &all);
     s.clicks_off(&cx, &all);
+    s.outro_sounds(&cx, running);
     s.duck_music(&cx);
     // The muffle ends with the match (I: the original's sound mode with its scene).
     if m.phase == 2 && s.muffled {
@@ -1543,32 +1652,36 @@ fn hear(
         &cx,
         gunner.then_some([scope.zoom[0], scope.yaw_target * scope.pitch_target]),
     );
-    if let Some((i, _)) =
-        (playing.0).filter(|&(i, k)| outros.0.get(i).is_some_and(|o| Some(k) == o.voice_frame()))
-    {
-        let v = Voice {
-            id: VOICE - i as u16,
-            owner: Owner::World,
-            channel: Channel::Free,
-            tag: None,
-            pos: cx.ear.pos,
-            follows: None,
-            flat: true,
-            volume: 32767.0,
-            own: None,
-            near: 0.0,
-            far: 0.0,
-            base: MIX,
-            speed: 1.0,
-            looped: false,
-            until: None,
-            fade: None,
-            started: tick,
-            stopped: false,
-            control: None,
-        };
+    let flat = |id, base| Voice {
+        id,
+        owner: Owner::World,
+        channel: Channel::Free,
+        tag: None,
+        pos: cx.ear.pos,
+        follows: None,
+        flat: true,
+        volume: 32767.0,
+        own: None,
+        near: 0.0,
+        far: 0.0,
+        base,
+        speed: 1.0,
+        looped: false,
+        until: None,
+        fade: None,
+        started: tick,
+        stopped: false,
+        control: None,
+    };
+    let outro = (playing.0).and_then(|(i, k)| Some((i, k, outros.0.get(i)?)));
+    if let Some((i, ..)) = outro.filter(|&(_, k, o)| Some(k) == o.voice_frame()) {
         s.stop(|v| LINES[1..].iter().any(|l| l.0 == v.id));
-        s.push(&cx, v);
+        s.push(&cx, flat(VOICE - i as u16, MIX));
+    }
+    // The song plays as recorded (the slot's 0x4650 is in the recording, as the background's).
+    let song = |&(_, k, o): &(usize, u32, &Outro)| o.song.as_ref().is_some_and(|s| k == frame(s.t));
+    if let Some((i, ..)) = outro.filter(song) {
+        s.push(&cx, flat(SONG - i as u16, 1.0));
     }
     let out = output.as_deref().zip(pcms.as_deref());
     s.upkeep(&cx, &all, out);
@@ -1642,6 +1755,9 @@ fn open(
     for (n, o) in outros.0.iter().enumerate() {
         if let Some(v) = &o.voice {
             sounds.insert(VOICE - n as u16, load(&v.file));
+        }
+        if let Some(s) = &o.song {
+            sounds.insert(SONG - n as u16, load(&s.file));
         }
     }
     for (id, name) in LINES {
@@ -2185,6 +2301,101 @@ mod tests {
         );
         assert_eq!(gone(&old, &[], 400.0).count(), 3);
     }
+    /// The duck factor (`func_1000D758`): Beach's 18000 falls to 7690 in 19 frames of a line (V b3:
+    /// 0x464F → 0x1E09) and comes back 2250 a frame (+0x8CA), all of it 5 frames after.
+    #[test]
+    fn the_music_ducks_by_the_factor_law() {
+        let music = |f: f32| 18000.0 * f / DUCK[0];
+        let mut f = DUCK[0];
+        let down: Vec<f32> = (0..19)
+            .map(|_| {
+                music({
+                    f = duck(f, true);
+                    f
+                })
+            })
+            .collect();
+        assert!((down[0] - (18000.0 - 562.5)).abs() < 0.1 && down[17] > 7700.0);
+        assert!((down[18] - 7690.0).abs() < 1.0);
+        let up: Vec<f32> = (0..5)
+            .map(|_| {
+                music({
+                    f = duck(f, false);
+                    f
+                })
+            })
+            .collect();
+        assert!((up[0] - 7690.0 - 2250.0).abs() < 1.0 && up[3] < 18000.0 && up[4] == 18000.0);
+    }
+
+    /// The end phase of a War match leaves the music playing (through its outro and STATS), a
+    /// Deathmatch's stops it. An outro's loop is silent at its start, full at its fade-in's end,
+    /// half way down half way through its fade-out, and over at its stop; a one-shot plays on its
+    /// frame.
+    #[test]
+    fn the_music_plays_through_the_outro_and_script_sounds_fade() {
+        use conker_assets::outro::ScriptSound;
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let at = |phase, colors| MatchView {
+            phase,
+            colors,
+            ..MatchView::default()
+        };
+        let music = |s: &Sounds| s.voices.iter().any(|v| v.id == BACKGROUND && !v.stopped);
+        s.match_sounds(&cx(&pack, 1), &at(0, true), &[], &[]);
+        s.match_sounds(&cx(&pack, 2), &at(2, true), &[], &[]);
+        assert!(music(&s));
+        s.match_sounds(&cx(&pack, 3), &at(2, false), &[], &[]);
+        assert!(!music(&s));
+
+        // The tanks' 0x4A8 (looped in the bank).
+        let id = 0x4A8;
+        let sound = |t, stop, fade_in, fade_out| ScriptSound {
+            id,
+            actor: 0,
+            t,
+            stop,
+            fade_in,
+            fade_out,
+            cents: 0,
+        };
+        let o = Outro {
+            length: 300,
+            sounds: vec![
+                sound(0, Some(100), Some(20), Some(60)),
+                sound(50, None, None, None),
+            ],
+            ..Outro::default()
+        };
+        let mut s = Sounds::default();
+        let mut heard = Vec::new();
+        for k in 0..60 {
+            let cx = cx(&pack, k);
+            s.outro_sounds(&cx, Some((&o, k)));
+            let volume = |i| {
+                (s.voices.iter())
+                    .find(|v| v.owner == Owner::Outro(i) && !v.stopped)
+                    .map(|v| v.volume)
+            };
+            heard.push((volume(0), volume(1)));
+            s.upkeep(&cx, &[], None);
+        }
+        let full = SCRIPT[0];
+        assert!(
+            s.voices
+                .iter()
+                .all(|v| v.owner != Owner::Outro(0) || v.looped)
+        );
+        assert_eq!(
+            (heard[0].0, heard[10].0, heard[40].0),
+            (Some(0.0), Some(full), Some(full / 2.0))
+        );
+        assert_eq!((heard[49].0.is_some(), heard[50].0), (true, None));
+        let once: Vec<u32> = (0..60).filter(|&k| heard[k as usize].1.is_some()).collect();
+        assert_eq!(once, [25]);
+    }
+
     /// A line (no bank sound) plays once unless it is the background; an effect's muffle is a
     /// 520 Hz low-pass (V c1b: `func_10012020` mode 5 sets param 9 to 520).
     #[test]

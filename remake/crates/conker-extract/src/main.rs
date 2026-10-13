@@ -17,7 +17,8 @@ commands:
                         refuses to overwrite an existing pack (its pack.json) without --force;
                         --map <name>: a map, the scene in hex as its folder (repeatable; default 2d);
                         --background [<name>=]<wav>: a map's background recording (lab/audio), the
-                        first map's without a name (repeatable)
+                        first map's without a name (repeatable); --song [<name>=]<wav>: the same for
+                        the song its outro starts (op 8)
 ids are decimal or 0x-prefixed hex (scene 0x2D = scene 45); character names: deathmatch (117), conker (0)
 --rom defaults to env CONKER_ROM; --out defaults to <repo>/lab/extract/slice (outside the source tree)";
 
@@ -66,6 +67,7 @@ fn parse_command(words: &[&str]) -> anyhow::Result<Command> {
 fn main() -> anyhow::Result<()> {
     let mut rom_path = std::env::var_os("CONKER_ROM").map(PathBuf::from);
     let (mut out, mut force, mut maps, mut backgrounds) = (None, false, Vec::new(), Vec::new());
+    let mut songs = Vec::new();
     let mut words = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -75,6 +77,7 @@ fn main() -> anyhow::Result<()> {
             "--force" => force = true,
             "--map" => maps.push(usize::from_str_radix(&args.next().context(USAGE)?, 16)?),
             "--background" => backgrounds.push(args.next().context(USAGE)?),
+            "--song" => songs.push(args.next().context(USAGE)?),
             _ => words.push(arg),
         }
     }
@@ -123,23 +126,31 @@ fn main() -> anyhow::Result<()> {
             if maps.is_empty() {
                 maps.push(conker_extract::SLICE_SCENE);
             }
-            let mut wavs = vec![None; maps.len()];
-            for arg in &backgrounds {
-                let (i, path) = match arg.split_once('=') {
-                    Some((name, path)) => (
-                        (maps.iter().map(|&m| conker_extract::map_name(m)))
-                            .position(|m| m == name)
-                            .with_context(|| format!("--background {arg}: no --map {name}"))?,
-                        path,
-                    ),
-                    None => (0, arg.as_str()),
-                };
-                wavs[i] = Some(std::fs::read(path).with_context(|| format!("reading {path}"))?);
-            }
-            let maps: Vec<_> = (maps.iter().zip(&wavs))
-                .map(|(&scene, wav)| conker_extract::PackMap {
+            let recordings = |args: &[String],
+                              flag: &str|
+             -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+                let mut wavs = vec![None; maps.len()];
+                for arg in args {
+                    let (i, path) = match arg.split_once('=') {
+                        Some((name, path)) => (
+                            (maps.iter().map(|&m| conker_extract::map_name(m)))
+                                .position(|m| m == name)
+                                .with_context(|| format!("{flag} {arg}: no --map {name}"))?,
+                            path,
+                        ),
+                        None => (0, arg.as_str()),
+                    };
+                    wavs[i] = Some(std::fs::read(path).with_context(|| format!("reading {path}"))?);
+                }
+                Ok(wavs)
+            };
+            let wavs = recordings(&backgrounds, "--background")?;
+            let songs = recordings(&songs, "--song")?;
+            let maps: Vec<_> = (maps.iter().zip(wavs.iter().zip(&songs)))
+                .map(|(&scene, (wav, song))| conker_extract::PackMap {
                     scene,
                     background: wav.as_deref(),
+                    song: song.as_deref(),
                 })
                 .collect();
             conker_extract::pack(&rom, &maps)?

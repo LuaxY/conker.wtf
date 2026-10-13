@@ -353,6 +353,15 @@ impl Bots {
                         self.npcs[p].placed = true;
                     }
                 }
+                // The human has the bot's pickup and last attacker now (the script copied its
+                // globals); both bodies moved.
+                Event::TakeOver { player, from } => {
+                    if let (Some(i), Some(j)) = (k(player), k(from)) {
+                        (self.held[i], self.hit_by[i]) = (self.held[j], self.hit_by[j]);
+                        self.npcs[i].placed = true;
+                        self.npcs[j].placed = true;
+                    }
+                }
             }
         }
     }
@@ -549,6 +558,9 @@ impl Bots {
     /// The participants as the AI reads them; a vacant one far away, dead, of no team and place.
     fn bodies(&self, m: &Match) -> Vec<Body> {
         let places = m.places();
+        // Only an untimed Deathmatch or Total War takes lives ([`Body::lives`]).
+        let st = &m.settings;
+        let counted = st.time.is_none() && !st.colors && !st.beach;
         self.slots
             .iter()
             .enumerate()
@@ -580,10 +592,7 @@ impl Bots {
                     // Not `f.drawn`, which lags the draw and the holster: a bot kept counting
                     // through its holster and its last B, on the holster's end, drew again
                     // (0x34's state-5 stall: draw 40 frames, drawn 45, holster 29, over and over).
-                    drawn: match () {
-                        _ if f.carrying => gas::CANISTER,
-                        _ => f.camera_weapon(),
-                    },
+                    drawn: f.camera_weapon(),
                     burning: f.burn.is_some(),
                     grenades: f.grenades,
                     hit_by: self.hit_by[k],
@@ -596,6 +605,12 @@ impl Bots {
                     scope: f.body.scope_yaw.map(|y| (y, f.scope_pitch)),
                     class: f.class,
                     walled: f.body.walled,
+                    out: (f.out > 0).then(|| m.tick.saturating_sub(f.out_at)),
+                    lives: if counted {
+                        u8::try_from(m.lives_left(s)).unwrap_or(u8::MAX)
+                    } else {
+                        conker_rules::colors::LIVES
+                    },
                 }
             })
             .collect()

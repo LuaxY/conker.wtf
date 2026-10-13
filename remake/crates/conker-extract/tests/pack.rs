@@ -115,6 +115,7 @@ fn pack_reads_back_as_the_rom_path() {
     let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B].map(|scene| PackMap {
         scene,
         background: None,
+        song: None,
     });
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let dir = temp_dir("pack-test");
@@ -143,7 +144,7 @@ fn pack_reads_back_as_the_rom_path() {
 
     // The client's slice.
     let slice = Slice::from_rom(bytes).unwrap();
-    let solid = extract_scene::deathmatch_solid(0x2D);
+    let solid = conker_extract::solid_placements(0x2D);
     let collision: Vec<_> = (slice.collision.iter())
         .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
         .collect();
@@ -363,7 +364,7 @@ fn pack_reads_back_as_the_rom_path() {
         let map = conker_assets::Slice::load(name, &PACK_CHARACTERS, PACK_WEAPONS, read).unwrap();
         let placements = extract_scene::scene_placements(&rom, scene).unwrap();
         let collision = extract_scene::scene_collision(&rom, scene, &placements).unwrap();
-        let solid = extract_scene::deathmatch_solid(scene);
+        let solid = conker_extract::solid_placements(scene);
         let shown: Vec<_> = (collision.triangles.iter())
             .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
             .collect();
@@ -449,6 +450,7 @@ fn pack_audio_reads_back() {
     let third = wav(&[5], 22020);
     let fourth = wav(&[6, 7], 22020);
     let fifth = wav(&[8], 22020);
+    let song = wav(&[9], 22020);
     let maps = [
         (0x2D, &background),
         (0x30, &other),
@@ -459,6 +461,7 @@ fn pack_audio_reads_back() {
     .map(|(scene, wav)| PackMap {
         scene,
         background: Some(wav),
+        song: (scene == 0x2B).then_some(song.as_slice()),
     });
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())
@@ -521,15 +524,15 @@ fn pack_audio_reads_back() {
         assert_eq!(files[file.as_str()], &wav[..]);
         listed.push(file);
     }
-    // The War outros' voices (`maps/<map>/outros.json`: Total War's on 2d, Colors' on 30, Beach's
-    // on 2b) and the maps' voice lines (Beach's escape).
+    // The War outros' voices and song (`maps/<map>/outros.json`: Total War's on 2d, Colors' on
+    // 30, Beach's on 2b) and the maps' voice lines (Beach's escape).
     let lines = audio.events.maps.values().flat_map(|m| m.lines.values());
     listed.extend(lines.map(|l| format!("audio/{}", l.file)));
     for map in ["2d", "30", "2b"] {
         let file = format!("maps/{map}/outros.json");
         let outros: Vec<conker_assets::outro::Outro> =
             serde_json::from_slice(files[file.as_str()]).unwrap();
-        let voices = outros.iter().filter_map(|o| o.voice.as_ref());
+        let voices = outros.iter().flat_map(|o| o.voice.iter().chain(&o.song));
         listed.extend(voices.map(|v| format!("audio/{}", v.file)));
     }
     // Scene 0x30's own surface kind 0x11, 0x34's 6 and 0xE and 0x3F's 7 have footsteps; 0x2D's
@@ -546,6 +549,31 @@ fn pack_audio_reads_back() {
     assert_eq!(bubbles.len(), 2);
     assert_eq!(bubbles[0].play, audio.events.maps["2d"].emitters[0].play);
     assert_eq!(audio.sounds.sounds[&1099].file, "maps/2d/1099.wav");
+    // Colors cs5's script sounds (the tanks' 0x4A8, the march 0x6DE, 0x631, 0x633) in 30's folder,
+    // and the outros' attachments and props in each map's `outro.gltf`.
+    for id in [0x4A8, 0x6DE, 0x631, 0x633] {
+        assert_eq!(
+            audio.sounds.sounds[&id].file,
+            format!("maps/30/{id:04}.wav")
+        );
+    }
+    for map in ["2d", "30", "2b"] {
+        let gltf: Value =
+            serde_json::from_slice(files[format!("maps/{map}/outro.gltf").as_str()]).unwrap();
+        assert!(gltf["scenes"][0]["name"] == "09-57", "{map}");
+    }
+    // Beach cs4's song 0x8A with 2b's recording; no other outro has one.
+    assert_eq!(files["audio/maps/2b/song-8a.wav"], song.as_slice());
+    let songs = |map: &str| {
+        let outros: Vec<conker_assets::outro::Outro> =
+            serde_json::from_slice(files[format!("maps/{map}/outros.json").as_str()]).unwrap();
+        outros
+            .into_iter()
+            .map(|o| o.song.map(|s| (s.t, s.entry)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(songs("2b"), [Some((1, 0x8A)), None]);
+    assert_eq!(songs("30"), [None, None]);
     assert!(
         audio.events.maps["2b"].background[0]
             .note
@@ -761,6 +789,7 @@ fn pack_hud_reads_back() {
     let maps = [PackMap {
         scene: SLICE_SCENE,
         background: None,
+        song: None,
     }];
     let export = conker_extract::pack(&rom, &maps).unwrap();
     let files: BTreeMap<&str, &[u8]> = (export.files.iter())

@@ -7,6 +7,7 @@
 //! `../lab/research/mp-original/total-war-gas.md`.
 
 use crate::damage::DamageType;
+use conker_sim::collision::CollisionWorld;
 
 /// The props the script drives, by placement (prop k is placement k), with the id its handles name
 /// them by (`0x30nn`: +0x72, the placement record's byte 0x33, C): the underground room's two
@@ -46,15 +47,15 @@ pub const HAZE_FRAMES: u32 = 150;
 /// A prop as the engine keeps it for the script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Prop {
-    /// +0x6E clear: drawn, and a canister may be touched.
+    /// +0x6E clear: drawn, solid (a door, a cover), and a canister may be touched.
     pub shown: bool,
     /// +0x80: a canister's toucher (its slot + 1) until the script clears it; a door or a cover
-    /// hides some frames after the script sets it to 1 ([`hide_after`]).
+    /// rises while it is set and sinks home while clear ([`Gas::step`]).
     pub flag: i32,
     /// +0x84: who may touch a canister ([`admits`]).
     pub gate: i32,
-    /// The frame `flag` last changed.
-    pub since: u32,
+    /// A door's or cover's height above its home (+0x12 less the home it kept at its first move).
+    pub lift: i16,
 }
 
 /// The gas's props and the script's state the match reads.
@@ -109,24 +110,55 @@ impl Gas {
         usize::try_from(flag - 1).ok()
     }
 
-    /// The doors and covers hide [`hide_after`] frames after their +0x80 went to 1.
-    pub(crate) fn step(&mut self, t: u32) {
+    /// The doors' and covers' heights above home, placements 0-7 ([`Prop::lift`]).
+    pub fn lifts(&self) -> [i16; 8] {
+        std::array::from_fn(|k| self.props[k].lift)
+    }
+
+    /// The doors and covers slide while shown (`func_1511EC50`, C; V d2): up 5 steps a frame while
+    /// +0x80 is set, past [`RISE`] back to it and hidden; down a step while clear, not below home.
+    /// A step is 8, the doors' a quarter: they rise 10 and sink 2 (hidden after 51 moves, home 250
+    /// frames after a show), the covers 40 and 8 (13 moves; home 63 frames after a show).
+    pub(crate) fn step(&mut self) {
         for ((n, _), p) in PROPS.iter().zip(&mut self.props) {
-            if hide_after(*n).is_some_and(|a| p.flag == 1 && t >= p.since + a) {
-                p.shown = false;
+            let v = match n {
+                0 | 1 => 2,
+                2..=7 => 8,
+                _ => continue,
+            };
+            if !p.shown {
+                continue;
+            }
+            if p.flag != 0 {
+                p.lift += 5 * v;
+                if p.lift > RISE {
+                    (p.lift, p.shown) = (RISE, false);
+                }
+            } else {
+                p.lift = (p.lift - v).max(0);
             }
         }
     }
 }
 
-/// Frames from a door's or cover's +0x80 going to 1 until it hides (V d2, d3: the covers 1064 →
-/// 1076, the doors 1452 → 1502; 51 at the match start, d2 23 → 74; I: the props' own animation,
-/// unread).
-fn hide_after(placement: u16) -> Option<u32> {
-    match placement {
-        0 | 1 => Some(50),
-        2..=7 => Some(12),
-        _ => None,
+/// How far above home a door or cover rises before it hides ([`Gas::step`]).
+pub const RISE: i16 = 500;
+
+/// Scene 0x2D's doors and covers (placements 0-7) are solid exactly while shown, where they stand
+/// (`func_150A6568`, C): moves their collision `lifts` above home where `shown` has bit n, out of
+/// reach where not. Outside War: Total War the doors are hidden all match and the covers stand
+/// home (the Deathmatch's solid set). Call before each frame's moves.
+/// ponytail: a hidden prop's triangles go 20000 up rather than out of the world (its grid is XZ
+/// only); drop them if anything ever looks that high.
+pub fn seat(world: &mut CollisionWorld, total_war: bool, shown: u32, lifts: [i16; 8]) {
+    let (shown, lifts) = if total_war {
+        (shown, lifts)
+    } else {
+        (0xFC, [0; 8])
+    };
+    for (n, lift) in (0..8).zip(lifts) {
+        let solid = shown & 1 << n != 0;
+        world.shift(n, if solid { i32::from(lift) } else { 20_000 });
     }
 }
 
@@ -210,30 +242,61 @@ pub enum Effect {
     Plunger(bool),
     /// The engine's triggers 0x26 and 0x27 (type 0, kind 5) put a Tedi off the villagers' beaches.
     Place(usize, [f32; 3]),
+    /// Total War, command F 0xF (`func_1508E89C(i, j)`, block 0x4B16): the out human `i` takes
+    /// team-mate bot `j`'s body where it stands (its momentum, health, weapons, lives) with 90
+    /// immune frames, and `j` gets `i`'s corpse and is out (`Match::apply`; V t1).
+    TakeOver(usize, usize),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Covers hide 12 frames after +0x80 goes to 1 however often the script sends it, doors 50; a
-    /// show brings either back.
+    /// d2's doors and covers (V): a door rises 10 a frame and hides on its 51st move (−1293 at the
+    /// first, −803 at the 50th, home −1303), shown again it sinks 2 a frame, home after 250; a
+    /// cover rises 40 and hides on its 13th, shown again sinks 8, home after 63.
     #[test]
-    fn doors_and_covers_hide_after_their_flag() {
+    fn doors_and_covers_slide_and_hide() {
         let mut g = Gas::default();
         assert_eq!(g.shown(), 0xFF);
-        for (n, t) in [(0, 10), (2, 20)] {
-            let p = g.prop_mut(n).unwrap();
-            (p.flag, p.since) = (1, t);
+        for n in [0, 2] {
+            g.prop_mut(n).unwrap().flag = 1;
         }
-        for t in 10..=60 {
-            g.step(t);
-            assert_eq!(g.prop(2).unwrap().shown, t < 32, "cover at {t}");
-            assert_eq!(g.prop(0).unwrap().shown, t < 60, "door at {t}");
+        let mut seen = Vec::new();
+        for k in 1..=51 {
+            g.step();
+            let (door, cover) = (g.prop(0).unwrap(), g.prop(2).unwrap());
+            seen.push((
+                k,
+                door.lift - 1303,
+                door.shown,
+                cover.lift + 103,
+                cover.shown,
+            ));
         }
+        assert_eq!(seen[0], (1, -1293, true, 143, true));
+        assert_eq!(seen[11], (12, -1183, true, 583, true));
+        assert_eq!(seen[12], (13, -1173, true, 603, false));
+        assert_eq!(seen[49], (50, -803, true, 603, false));
+        assert_eq!(seen[50], (51, -803, false, 603, false));
         assert_eq!(g.shown(), 0xFF & !0b101);
+        for n in [0, 2] {
+            let p = g.prop_mut(n).unwrap();
+            (p.flag, p.shown) = (0, true);
+        }
+        let (mut door, mut cover) = (None, None);
+        for k in 1..=300 {
+            g.step();
+            if door.is_none() && g.prop(0).unwrap().lift == 0 {
+                door = Some(k);
+            }
+            if cover.is_none() && g.prop(2).unwrap().lift == 0 {
+                cover = Some(k);
+            }
+        }
+        assert_eq!((door, cover), (Some(250), Some(63)));
         g.prop_mut(27).unwrap().shown = true;
-        assert_eq!(g.shown(), 0xFA | 1 << 27);
+        assert_eq!(g.shown(), 0xFF | 1 << 27);
         assert!(
             (admits(1, 0), admits(1, 1), admits(2, 1), admits(2, 0)) == (true, false, true, false)
         );

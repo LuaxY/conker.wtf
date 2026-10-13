@@ -4,20 +4,26 @@
 //! `func_1501D348`; the format in `../lab/research/mp-original/total-war-outro.md` §3, the Colors
 //! ones in `colors-outro.md`, Beach's in `beach-presentation.md` §4) for what those six use, with their
 //! actors' characters (each with the clips it plays) and their voice lines (bank 0x16's MP3s,
-//! decoded to WAV). No generic cutscene interpreter: anything else they hold is left out (the head
-//! channels 0-2, talk, attachment sets (op 0x0D), sounds (ops 6, 0x0A), effects (op 5 b=0x0A),
-//! op 9, the clips' blends; Beach's song 0x8A (op 8), near plane (op 5 b=0x25), actors' part masks
-//! (op 5 b=0x3C), kind-3 props and head turn (op 0x11)).
+//! decoded to WAV), and the models their attachments and props show (`outro.gltf`, [`models`]);
+//! the head turns (op 0x11), talk (op 5 b=0x17), part masks (op 5 b=0x3C), attachments (op 0x0D),
+//! clip blends, kind-3 props, script sounds (ops 6, 0x0A), op 8's song (with its map's recording,
+//! [`crate::PackMap::song`]) and the near plane (op 5 b=0x25) as
+//! `../lab/research/mp-original/outros-leftovers.md` reads them. No generic cutscene interpreter:
+//! the rest is left out (the tanks' smoke, op 5 b=0x0A; op 9's texture swap).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
 use conker_assets::hud::{Anchor, Horizontal, Rgba, Vertical};
 use conker_assets::outro::{
-    Actor, Camera, Fade, Key, Outro, Page, Place, Play, Quad, Subtitles, Voice,
+    Actor, Attach, CHATTER, Camera, Fade, Head, Key, OPEN, Outro, Page, Place, Play, Prop, Quad,
+    SHUT, Say, ScriptSound, Subtitles, Talk, Voice,
 };
-use extract_character::Character;
+use extract_character::{Character, parse_attachment};
 use extract_core::{Rom, Table};
+use extract_level::{IDENTITY, Instance, Level, Mesh, scene_level};
+use extract_scene::scene_placements;
+use serde_json::{Value, json};
 
 use crate::{GAME_DATA, map_name, model_lift};
 
@@ -37,6 +43,23 @@ const RECORD: usize = 0x30;
 const SCALE: f32 = 0.5;
 /// The voice lines' bank.
 const MP3: usize = 0x16;
+/// Each actor model's head joint (`func_15036F34`'s a0: 3 for 90, 4 for 135 and 88;
+/// `func_15036CE8`'s 0xC for the villagers) and jaw (the model's special joint 0, header words
+/// 12/13) (C, V lldb; `outros-leftovers-scratch/joints.py`).
+const HEADS: [(usize, u8, u8); 5] = [
+    (90, 3, 6),
+    (88, 4, 7),
+    (135, 4, 7),
+    (156, 12, 15),
+    (157, 12, 15),
+];
+/// The talkers whose jaw does not skew (`func_15034860`: classes 0x69/0x7C/0x87, 135's).
+const NO_SKEW: usize = 135;
+/// The attachment actions' headers (`func_15083568`: a records pointer, a u8 count at +4; 16-byte
+/// records, the bank-09 entry at +0, the joint at +1, the kind at +3).
+const ACTIONS: usize = 0x8008_6CC4;
+/// A placement record's byte the kind-3 objects name it by (the prop's uid, +0x72 at run time).
+const PLACEMENT_UID: usize = 0x33;
 
 /// A script command at its time: `u8 op, u8 delay, u16 b, u8 c, u8 d, u16 e`.
 #[derive(Clone, Copy, Debug)]
@@ -71,14 +94,18 @@ fn script(entry: &[u8]) -> (Option<u16>, Vec<Command>) {
                 if op == 0 {
                     t = i32::from(be16(r, 2));
                 }
-                out.push(Command {
-                    t,
-                    op,
-                    b: be16(r, 2),
-                    c: r[4],
-                    d: r[5],
-                    e: be16(r, 6),
-                });
+                // A command before 0 never runs: the clock starts at 0 (V: Colors cs1's officer's
+                // head turn at −1, cs5's tank sound 0x4A9 at −3 and −1).
+                if t >= 0 {
+                    out.push(Command {
+                        t,
+                        op,
+                        b: be16(r, 2),
+                        c: r[4],
+                        d: r[5],
+                        e: be16(r, 6),
+                    });
+                }
                 t += i32::from(r[1]);
             }
         }
@@ -86,9 +113,9 @@ fn script(entry: &[u8]) -> (Option<u16>, Vec<Command>) {
     (length, out)
 }
 
-/// A command's time on the clock (one before 0 acts at once).
+/// A command's time on the clock.
 fn at(c: &Command) -> u16 {
-    c.t.clamp(0, i32::from(u16::MAX)) as u16
+    c.t.min(i32::from(u16::MAX)) as u16
 }
 
 /// An object's channel `channel`, from its curve entry's 8-byte keys.
@@ -220,6 +247,11 @@ fn voice_file(scene: usize, entry: u16) -> String {
     format!("maps/{}/voice-{entry:x}.wav", map_name(scene))
 }
 
+/// The song's recording under `audio/` ([`Outro::song`]).
+pub fn song_file(scene: usize, entry: u16) -> String {
+    format!("maps/{}/song-{entry:x}.wav", map_name(scene))
+}
+
 /// Whether scene `scene` has outros.
 pub fn has_outros(scene: usize) -> bool {
     OUTROS.iter().any(|o| o.0 == scene)
@@ -232,6 +264,7 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         return Ok(Vec::new());
     };
     let game_data = rom.game_data()?;
+    let placements = scene_placements(rom, scene)?;
     let records = rom.asset(&[0x0E, scene])?;
     let model_of = |uid: u8| {
         (records.as_chunks::<RECORD>().0.iter())
@@ -305,8 +338,8 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
         // The actors: op 2 plays a clip (c 0) at rate 2 × its ticks / VIs to the object's next op 2
         // (a nonzero d: still), once if that next one plays a clip too (else it ends this one: a
         // loop; `func_15029BB8`'s flag to `func_1505E650`, V cs1's soldier's clip 37 holds at 24).
-        let mut actors = Vec::new();
-        for o in of_kind(2) {
+        let (mut actors, mut sounds) = (Vec::new(), Vec::new());
+        for (n, o) in of_kind(2).into_iter().enumerate() {
             let model = model_of(kind(o)?.1)?;
             if let std::collections::btree_map::Entry::Vacant(e) = loaded.entry(model) {
                 e.insert(Character::load(rom, model)?);
@@ -339,6 +372,10 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                     ticks,
                     rate,
                     once: next.c == 0 || (next.c == 1 && next.d == 1),
+                    blend: match c.e {
+                        0 => 5,
+                        e => u8::try_from(e - 1)?,
+                    },
                 });
             }
             ensure!(
@@ -370,8 +407,18 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                 },
                 yaw: if turns { yaw } else { Vec::new() },
                 plays,
+                head: head(&scripts[o].1, model, curve)?,
+                talk: talk(&scripts[o].1, model)?,
+                mask: mask(&scripts[o].1)?,
+                attach: attach(&scripts[o].1, &game_data)?,
             });
+            sounds.extend(script_sounds(&scripts[o].1, n)?);
         }
+        ensure!(
+            (all.iter())
+                .all(|(o, c)| !matches!(c.op, 6 | 0x0A) || kind(*o).is_ok_and(|k| k.0 == 2)),
+            "cutscene {cutscene}: a sound on an object that is no actor"
+        );
         ensure!(!actors.is_empty(), "cutscene {cutscene}: no actor");
         let actor = actors.remove(0);
 
@@ -398,6 +445,13 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
             t: at(line),
             entry: line.b,
             file: voice_file(scene, line.b),
+        });
+        let songs: Vec<_> = all.iter().map(|a| a.1).filter(|c| c.op == 8).collect();
+        ensure!(songs.len() <= 1, "cutscene {cutscene}: songs");
+        let song = songs.first().map(|c| Voice {
+            t: at(c),
+            entry: c.b,
+            file: song_file(scene, c.b),
         });
 
         // The pages: op 7 c 0 opens, 2 turns the page, 1 closes; the text is the last entry, 0xBD
@@ -452,6 +506,25 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
                 })
             }
         };
+        // The kind-3 objects: a hidden placement (its uid) shown and posed, rotated x by channel 8
+        // and y by channel 7 (`func_15020EC4`).
+        let mut props = Vec::new();
+        for o in of_kind(3) {
+            let uid = kind(o)?.1;
+            let placement = (placements.iter())
+                .position(|p| p.raw[PLACEMENT_UID] == uid)
+                .with_context(|| format!("cutscene {cutscene}: no placement {uid:#x}"))?;
+            let curve = entry(first_curve + o)?;
+            let first = |ch| keys(curve, ch).first().map_or(0.0, |k| k.value);
+            props.push(Prop {
+                placement: u16::try_from(placement)?,
+                at: *path(entry(1 + o)?)?.first().context("a prop's place")?,
+                rotation: [first(8), first(7)],
+            });
+        }
+        let near = (all.iter().map(|a| a.1))
+            .find(|c| c.op == 5 && c.b == 0x25)
+            .map(|c| f32::from(c.c));
         out.push(Outro {
             winner,
             cutscene,
@@ -462,10 +535,192 @@ pub fn outros(rom: &Rom, scene: usize) -> Result<Vec<Outro>> {
             cast: actors,
             fade,
             voice,
+            song,
             subtitles,
+            props,
+            sounds,
+            near,
         });
     }
     Ok(out)
+}
+
+/// Op 0x11 b=1 c=1 (on; every use): the head turn, channels 1 and 2 from its time.
+fn head(script: &[Command], model: usize, curve: &[u8]) -> Result<Option<Head>> {
+    let Some(on) = script.iter().find(|c| c.op == 0x11 && c.c == 1) else {
+        return Ok(None);
+    };
+    ensure!(on.b == 1, "op 0x11 b {}", on.b);
+    let (_, joint, _) = (HEADS.iter().find(|h| h.0 == model))
+        .with_context(|| format!("model {model}: no head joint"))?;
+    Ok(Some(Head {
+        t: at(on),
+        joint: *joint,
+        pitch: keys(curve, 1),
+        yaw: keys(curve, 2),
+    }))
+}
+
+/// Op 5 b=0x17 (`func_1502460C`): c 0 talks (d 0 chatter, d 1 open) at e degrees (0: 45), c 1 shuts
+/// (the degrees kept).
+fn talk(script: &[Command], model: usize) -> Result<Option<Talk>> {
+    let mut degrees = 45;
+    let mut says = Vec::new();
+    for c in script.iter().filter(|c| c.op == 5 && c.b == 0x17) {
+        let state = match (c.c, c.d) {
+            (0, 0) => CHATTER,
+            (0, 1) => OPEN,
+            (1, _) => SHUT,
+            other => anyhow::bail!("talk {other:?}"),
+        };
+        if c.c == 0 {
+            degrees = if c.e == 0 { 45 } else { u8::try_from(c.e)? };
+        }
+        says.push(Say {
+            t: at(c),
+            state,
+            degrees,
+        });
+    }
+    if says.is_empty() {
+        return Ok(None);
+    }
+    let (_, _, jaw) =
+        (HEADS.iter().find(|h| h.0 == model)).with_context(|| format!("model {model}: no jaw"))?;
+    Ok(Some(Talk {
+        jaw: *jaw,
+        skew: model != NO_SKEW,
+        says,
+    }))
+}
+
+/// Op 5 b=0x3C: obj+0x94 = (c << 16) | e (d 0, every use, at t 0).
+fn mask(script: &[Command]) -> Result<Option<u8>> {
+    let Some(c) = script.iter().find(|c| c.op == 5 && c.b == 0x3C) else {
+        return Ok(None);
+    };
+    ensure!((c.c, c.d, c.t) == (0, 0, 0), "a part mask {c:?}");
+    Ok(Some(u8::try_from(c.e)?))
+}
+
+/// Op 0x0D: c 0 adds action b + 1's attachments, c 1 removes them (`func_15083568`).
+fn attach(script: &[Command], game_data: &[u8]) -> Result<Vec<Attach>> {
+    let mut out = Vec::new();
+    for c in script.iter().filter(|c| c.op == 0x0D) {
+        let header = ACTIONS - GAME_DATA + 8 * usize::from(c.b);
+        let h = game_data.get(header..header + 8).context("action header")?;
+        let at_ = (u32::from_be_bytes(h[..4].try_into()?) as usize)
+            .checked_sub(GAME_DATA)
+            .context("action records")?;
+        let records =
+            (game_data.get(at_..at_ + 16 * usize::from(h[4]))).context("action records")?;
+        for r in records.as_chunks::<16>().0 {
+            ensure!(
+                matches!(r[3], 1 | 2),
+                "action {:#x}: kind {}",
+                c.b + 1,
+                r[3]
+            );
+            out.push(Attach {
+                t: at(c),
+                entry: u16::from(r[0]),
+                joint: r[1],
+                on: c.c == 0,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Actor `actor`'s script sounds: op 6 plays once; op 0x0A c 0 loops till the next c 1 of its id,
+/// fading in up to a c 2 and out from a c 3 between; d is the pitch in 50 cents (`func_15029BB8`,
+/// `func_150238D8`). A c 1-3 with no c 0 before it (its start before t 0) plays nothing.
+fn script_sounds(script: &[Command], actor: usize) -> Result<Vec<ScriptSound>> {
+    let mut out = Vec::new();
+    for (i, c) in script.iter().enumerate() {
+        let later = |k: u8| {
+            script[i + 1..]
+                .iter()
+                .find(|x| x.op == 0x0A && x.b == c.b && x.c == k)
+                .map(at)
+        };
+        let sound = ScriptSound {
+            id: c.b,
+            actor: u8::try_from(actor)?,
+            t: at(c),
+            stop: None,
+            fade_in: None,
+            fade_out: None,
+            cents: i16::from(c.d) * 50,
+        };
+        match (c.op, c.c) {
+            (6, _) => out.push(sound),
+            (0x0A, 0) => {
+                let stop = later(1).with_context(|| format!("loop {:#x}: no stop", c.b))?;
+                let before = |t: Option<u16>| t.filter(|&t| t <= stop);
+                out.push(ScriptSound {
+                    stop: Some(stop),
+                    fade_in: before(later(2)),
+                    fade_out: before(later(3)),
+                    ..sound
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The outros' attachments and props on `scene` as one pseudo-level (each part or mesh at the
+/// origin: an attachment in its joint's frame, a prop where its outro poses it) and its glTF
+/// scenes, named `09-<entry>` (hex) and `prop-<placement>`; none without any.
+pub fn models(rom: &Rom, scene: usize, outros: &[Outro]) -> Result<Option<(Level, Value)>> {
+    let attached: BTreeSet<u16> = (outros.iter().flat_map(Outro::actors))
+        .flat_map(|a| a.attach.iter().map(|a| a.entry))
+        .collect();
+    let props: BTreeSet<u16> = (outros.iter().flat_map(|o| &o.props))
+        .map(|p| p.placement)
+        .collect();
+    if attached.is_empty() && props.is_empty() {
+        return Ok(None);
+    }
+    let game_data = rom.game_data()?;
+    let (mut level, mut scenes) = (Level::default(), Vec::new());
+    let add = |level: &mut Level, mesh: Mesh| {
+        level.instances.push(Instance {
+            mesh: level.meshes.len(),
+            placement: None,
+            matrix: IDENTITY,
+        });
+        level.meshes.push(mesh);
+    };
+    for e in attached {
+        let first = level.instances.len();
+        let parts = parse_attachment(&rom.asset(&[0x09, usize::from(e)])?, &game_data)?;
+        for (part, ir) in parts.into_iter().enumerate() {
+            let path = vec![0x09, usize::from(e), part];
+            add(&mut level, Mesh { path, ir });
+        }
+        let nodes: Vec<usize> = (first..level.instances.len()).collect();
+        scenes.push(json!({ "name": format!("09-{e:02x}"), "nodes": nodes }));
+    }
+    let placed = match props.is_empty() {
+        true => Level::default(),
+        false => scene_level(rom, scene)?,
+    };
+    for p in props {
+        let first = level.instances.len();
+        for i in (placed.instances.iter()).filter(|i| i.placement == Some(usize::from(p))) {
+            add(&mut level, placed.meshes[i.mesh].clone());
+        }
+        ensure!(
+            level.instances.len() > first,
+            "scene {scene:#x}: no placement {p}"
+        );
+        let nodes: Vec<usize> = (first..level.instances.len()).collect();
+        scenes.push(json!({ "name": format!("prop-{p}"), "nodes": nodes }));
+    }
+    Ok(Some((level, scenes.into())))
 }
 
 /// The outros' characters, each once with only the clips they play.
@@ -493,6 +748,19 @@ pub fn characters(rom: &Rom, outros: &[Outro]) -> Result<Vec<Character>> {
             Ok(character)
         })
         .collect()
+}
+
+/// The songs of a map's outros with its `recording` (path under `audio/`, file); without one, their
+/// [`Outro::song`] goes.
+pub fn songs(outros: &mut [Outro], recording: Option<&[u8]>) -> crate::Files {
+    let mut files = Vec::new();
+    for o in outros {
+        match (&o.song, recording) {
+            (Some(s), Some(wav)) => files.push((format!("audio/{}", s.file), wav.to_vec())),
+            _ => o.song = None,
+        }
+    }
+    files
 }
 
 /// The outros' voice lines as WAVs (path under `audio/`, file).

@@ -60,7 +60,9 @@ use serde::{Deserialize, Serialize};
 /// 19: [`MatchView::winner`] (the outro and the STATS go by the server's), and over, `restart_in`
 /// counts through the outro too (a client that joins mid-outro starts it there).
 /// 20: the high jump (movement state 235, predicted) and `PlayerState::walled`.
-pub const PROTOCOL_ID: u64 = 20;
+/// 21: Total War's takeover (the fighter's `out_at` and `extra` lives) and the doors' and covers'
+/// heights ([`MatchView::lifts`], their collision predicted).
+pub const PROTOCOL_ID: u64 = 21;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -111,7 +113,8 @@ pub struct Combat {
     pub anim: u16,
     /// Frames until the respawn while dying or dead, else 0.
     pub respawn_in: u16,
-    /// Respawns so far: the client's camera cuts to the new spawn when it changes.
+    /// Respawns (and Total War takeovers) so far: the client's camera cuts behind the player when
+    /// it changes.
     pub lives: u16,
     /// Deaths and shots fired (with `kills`, the player's place: conker-rules' `places`), the
     /// place it went out on with its last life (0 in play), and the lives it has left.
@@ -219,11 +222,15 @@ pub struct MatchView {
     /// the HUD's seconds are `countdown / 60 + 1`, the game's `(t + 59) / 60` of t = countdown + 1,
     /// from the frame after the delivery to the kill's), its sound looping (from 29 frames before
     /// the kill to 89 after), and bit n: the prop on placement n shown, for 0 and 1 (the shelter's
-    /// doors: from the delivery to 50 frames after the gas), 2-7 (the covers by the masks: gone
-    /// from 12 frames after the delivery to the gas's end) and 27, 28 (the canisters, at home).
+    /// doors: shown at the delivery, hidden 51 frames after they start rising once the gas is
+    /// over), 2-7 (the covers by the masks: hidden 13 frames after they start rising at the
+    /// delivery, back at the gas's end) and 27, 28 (the canisters, at home);
+    /// `lifts`: the doors' and covers' heights above home (conker-rules' `gas::seat` puts their
+    /// collision there).
     pub countdown: i32,
     pub gas: bool,
     pub props: u32,
+    pub lifts: [i16; 8],
     /// War: Colors (conker-rules' `Settings::colors`): teams are the sides, the score target
     /// (`score_limit`, 0 none), each team's captures ([0] squirrels, [1] Tediz), the flags, and the
     /// screen's fade around the respawn after a capture: out (to black) or back in, over that many

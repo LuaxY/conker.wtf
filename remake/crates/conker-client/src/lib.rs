@@ -830,7 +830,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.add_systems(
         FixedUpdate,
         (
-            seat_plunger,
+            seat_props,
             predict_again.run_if(is_in_rollback),
             (predict, attach, tick_anims, log_players)
                 .chain()
@@ -1157,12 +1157,19 @@ fn own_tick(
     (m, slot, events)
 }
 
-/// War: Beach's plunger collision where the server last had the prop (`conker_rules::beach::seat`).
+/// War: Beach's plunger collision where the server last had the prop (`conker_rules::beach::seat`),
+/// and scene 0x2D's doors and covers where its props stand (`conker_rules::gas::seat`).
 /// ponytail: a predicted presser stands on the server's y, a round trip behind its own; the server
 /// corrects it.
-fn seat_plunger(mut world: ResMut<Collision>, game: Query<&MatchView>) {
-    if let Some(m) = game.iter().next().filter(|m| m.beach) {
+fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Config>) {
+    let Some(m) = game.iter().next() else {
+        return;
+    };
+    if m.beach {
         conker_rules::beach::seat(&mut world.0, m.plunger);
+    }
+    if map_scene(&cfg.map) == Some(0x2D) {
+        conker_rules::gas::seat(&mut world.0, m.total_war, m.props, m.lifts);
     }
 }
 

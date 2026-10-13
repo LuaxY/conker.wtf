@@ -14,6 +14,7 @@ use conker_rules::Rng;
 use conker_rules::beach::Plunger;
 use conker_rules::colors::{self, Pose};
 use conker_rules::damage;
+use conker_rules::game::TAKEOVER_DELAY;
 use conker_rules::gas::{self, Effect};
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
@@ -149,6 +150,11 @@ pub struct Body {
     pub class: u8,
     /// obj+0xF4 bit 0x10000: the wall routine moved it last frame (conker-sim's `walled`).
     pub walled: bool,
+    /// Out of lives (the eliminated mask `0x800D18A0`): frames since the out frame.
+    pub out: Option<u32>,
+    /// Lives left (the stats record's +8): 6, never taken, in a timed match, Colors and Beach (V
+    /// s4, s5, s7; `total-war-teams.md`), 0 once out.
+    pub lives: u8,
 }
 
 /// Natives the AI called that this port does not implement, by (native, handle type, code); the
@@ -409,9 +415,14 @@ impl World<'_> {
             (4, 6) => i32::from(kind(a(2)) == 2 && self.inside(index(a(2)), index(h))),
             (4, 0x10) => i32::from((0..self.bodies.len()).any(|p| self.inside(p, index(h)))),
             // Type 5, the level (`func_1509FE0C`).
+            // The participants less the vacant, the appearing and the out (`func_1509FE0C` 29: the
+            // eliminated mask, C; V t1 426: 15 → 10).
             (5, 0x1D) => {
                 let appear = if self.starting { 0 } else { self.appear };
-                ((1 << self.bodies.len()) - 1) & !self.vacant() & !appear
+                let out = (self.bodies.iter().enumerate())
+                    .filter(|b| b.1.out.is_some())
+                    .fold(0, |m, (k, _)| m | 1 << k);
+                ((1 << self.bodies.len()) - 1) & !self.vacant() & !appear & !out
             }
             (5, 0x1E) => i32::from(self.bodies.get(a(2) as usize).map_or(0, |b| b.team)),
             (5, 0x22) => {
@@ -563,12 +574,45 @@ impl World<'_> {
                 }
                 0
             }
+            // `func_1508E89C(i, j)` (block 0x4B16): out human i takes team-mate bot j's body once the
+            // out view's skull has grown, refused before (C; V t1: out 424, swap 437); with it j's
+            // memory: G+0x18's bit, G+0x9C/+0x39C/+0x3DC/+0xEB0 (its pickup's holder too)/+0x16C0.
+            (0xF, 0xF) => {
+                let (i, j) = (a(2), a(3));
+                if let (Some(si), Some(sj)) = (self.slot(i), self.slot(j))
+                    && self.takes_over(i as usize, j as usize)
+                {
+                    let seen = g.i32(g::SEEN);
+                    if seen & 1 << i != 0 {
+                        g.set_i32(g::SEEN, seen & !(1 << i) | 1 << j);
+                    }
+                    let (i, j) = (i as usize, j as usize);
+                    for off in [g::BAND, g::HEALTH, g::HIT_BY, g::HELD, g::SEES] {
+                        g.set(off, i, g.get(off, j));
+                    }
+                    if let Ok(k) = usize::try_from(g.get(g::HELD, j)) {
+                        g.set(g::HOLDER, k, i as i32);
+                    }
+                    self.effects.push(Effect::TakeOver(si, sj));
+                }
+                0
+            }
             (0xF, 1) => 0,
             (k, c) => {
                 let _ = a(0);
                 self.unknown(6, k, c)
             }
         }
+    }
+
+    /// Participant `i`, out [`TAKEOVER_DELAY`] frames, may take over `j`, its living team-mate bot
+    /// in play (`conker_rules::Match`'s own test, so the script's memory moves with the body).
+    fn takes_over(&self, i: usize, j: usize) -> bool {
+        let (Some(h), Some(b)) = (self.bodies.get(i), self.bodies.get(j)) else {
+            return false;
+        };
+        let out = h.out.is_some_and(|k| k >= TAKEOVER_DELAY);
+        out && i != j && b.out.is_none() && b.is_bot && b.health > 0 && b.team == h.team
     }
 
     /// Participant `p` if it is a human with a +0x70 slot here.
@@ -637,9 +681,9 @@ impl World<'_> {
         match code {
             0x91 => i32::from(n.script),
             0x93 => i32::from(b.health),
-            // `func_150859AC` 3: the stats record's +8 (`0x800D2144 + 0x1C·p`), 6 for every player
-            // in the RAM of s4, s5 and s7; 1: its +0, the class (War: Beach's voices).
-            0xA5 if a(2) == 3 => 6,
+            // `func_150859AC` 3: the stats record's +8 (`0x800D2144 + 0x1C·p`), the lives
+            // ([`Body::lives`]; V t1 425, 438); 1: its +0, the class (War: Beach's voices).
+            0xA5 if a(2) == 3 => i32::from(b.lives),
             0xA5 if a(2) == 1 => i32::from(b.class),
             // s126+0x78, the drawn item (War: Beach's weapon zones).
             0xAA => i32::from(b.drawn),

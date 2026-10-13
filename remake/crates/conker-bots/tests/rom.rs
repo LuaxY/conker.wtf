@@ -220,6 +220,104 @@ fn gas_props_of_0x2d() {
     }
 }
 
+/// War: Total War's takeover, the script on the match (`t1`'s roster: humans 0 and 1, bots 2 and
+/// 3, teams 0, 1, 0, 1; untimed, 2 lives): the human out of lives leaves the participants, the
+/// script picks its team-mate bot and the match takes the swap 13 frames after the out frame (V t1:
+/// out 424, swap 437); the bot is out from then on and the script asks no more.
+#[test]
+fn total_war_takeover() {
+    use conker_bots::{Assets, Bots};
+    use conker_rules::game::{Arena, Event};
+    use conker_rules::gas::Effect;
+    use conker_rules::{Fighter, Match, Placement, Rng, Settings, Spawn, damage};
+    use conker_sim::movement::Input;
+    let Some(rom) = rom() else { return };
+    let data: Vec<Vec<u8>> = (Assets::paths(0x2D).iter())
+        .map(|p| rom.asset(p).unwrap().into_owned())
+        .collect();
+    let assets = Assets {
+        nav: &data[0],
+        triggers: &data[1],
+        ai: &data[2],
+        class: &data[3],
+    };
+    let world = world(&rom, 0x2D);
+    let spawns = (extract_scene::scene_spawns(&rom, 0x2D).unwrap().iter())
+        .map(|s| Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let arena = Arena {
+        spawns,
+        pickups: Vec::new(),
+    };
+    let place = |pos| Placement {
+        index: 0,
+        pos,
+        facing: 0,
+        camera: [0.0; 3],
+    };
+    let roster = [
+        ([-106.0, -1448.0, -71.0], 0),
+        ([3195.0, 1.0, -5861.0], 1),
+        ([-1231.0, 1381.0, 3741.0], 0),
+        ([313.0, -1546.0, 1012.0], 1),
+    ];
+    let players = roster.map(|(pos, team)| Fighter::new(&place(pos), team, 0));
+    let settings = Settings {
+        time: None,
+        lives: 2,
+        total_war: true,
+        ..Settings::default()
+    };
+    let mut m = Match::new(&arena, players.to_vec(), Rng::default(), 0).with(settings);
+    for (k, f) in m.players.iter_mut().enumerate() {
+        (f.bot, f.immune) = (k >= 2, 0);
+    }
+    m.players[0].deaths = 1;
+    let mut bots = Bots::new(assets, &[0, 1], &[2, 3], 2, Rng::default()).unwrap();
+    m.apply(&[Effect::Hit {
+        slot: 0,
+        kind: damage::GAS,
+        attacker: Some(1),
+    }]);
+    let (mut took, mut asked) = (Vec::new(), Vec::new());
+    for t in 0..400u32 {
+        let mut inputs = [Input::default(); 4];
+        let effects = bots.tick(&m, &arena, &world, &mut inputs);
+        asked.extend((effects.iter()).filter_map(|e| match e {
+            Effect::TakeOver(i, j) => Some((t, *i, *j)),
+            _ => None,
+        }));
+        let mut ev = m.apply(&effects);
+        ev.extend(m.step(&arena, &inputs, &world));
+        took.extend((ev.iter()).filter_map(|e| match *e {
+            Event::TakeOver { player, from } => Some((t, player, from)),
+            _ => None,
+        }));
+        bots.observe(&ev, &m);
+    }
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?} {}",
+        bots.unknown,
+        bots.faults
+    );
+    let out = m.players[0].out_at;
+    assert_eq!(took, [(out + 13, 0, 2)]);
+    assert_eq!(asked, took, "the brain's own gate is the match's");
+    // The bot is out on the human's place, the last of 4.
+    assert_eq!(
+        (m.players[0].out, m.lives_left(0), m.players[2].out),
+        (0, 2, 4)
+    );
+}
+
 /// War: Total War's gas, the script on the match with no bot (humans placed where the oracle's
 /// runs d1-d3 had them, `lab/research/mp-original/total-war-gas.md`): canister 0 appears 300 +
 /// random(150) script ticks in (one every other frame), the player of team 0 who touches it carries
@@ -450,6 +548,9 @@ fn colors_flags_and_captures() {
         still: Vec<u32>,
         respawns: Vec<(u32, usize)>,
         home: Option<u32>,
+        fades: Vec<u32>,
+        fading: Option<u32>,
+        over: Option<u32>,
     }
     let Some(rom) = rom() else { return };
     let data: Vec<Vec<u8>> = (Assets::paths(0x30).iter())
@@ -600,6 +701,15 @@ fn colors_flags_and_captures() {
                     c.respawns.push((k, *player));
                 }
             }
+            if m.colors.fade.is_some_and(|f| f.2 == t) {
+                c.fades.push(k);
+            }
+            if c.fading.is_none() && m.phase() == Phase::Fading {
+                c.fading = Some(k);
+            }
+            if m.phase() == Phase::Over {
+                c.over = Some(k);
+            }
         }
         bots.observe(&ev, &m);
         if m.phase() == Phase::Over {
@@ -640,9 +750,18 @@ fn colors_flags_and_captures() {
     assert_eq!(c2.still, (31..90).collect::<Vec<_>>(), "{c2:?}");
     assert_eq!(c2.respawns, [(90, 0), (90, 1)], "{c2:?}");
     assert_eq!(c2.home, Some(390), "{c2:?}");
-    // The target: the third capture ends the match on its frame.
+    // The target: the third capture latches the end on its frame (V c1b 382 → 383): no capture
+    // fade nor respawn, the poses at +30, the end fade at +39 (V 422) and the outro at +55 (V 438).
     assert_eq!(m.colors.scores, [3, 0]);
     assert_eq!(m.ended_at, Some(captures[2].at));
+    let c3 = &captures[2];
+    assert_eq!(
+        (c3.cheer, c3.fading, c3.over),
+        (Some(30), Some(39), Some(55)),
+        "{c3:?}"
+    );
+    assert!(c3.fades.is_empty() && c3.respawns.is_empty(), "{c3:?}");
+    assert_eq!(c2.fades.first(), Some(&61), "{c2:?}");
 }
 
 /// War: Colors through a roster change mid-match: a human leaves while the red flag is carried and

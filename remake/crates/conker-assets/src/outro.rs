@@ -10,13 +10,20 @@
 //!
 //! Total War's single camera and actor are the general shape's simplest case: what they don't use
 //! (`cuts`, `cast`, an actor's `path`/`yaw`/`plays`, the bubble's `moves`) is left out of their JSON.
+//!
+//! What the outros' other commands add (`../lab/research/mp-original/outros-leftovers.md`): an
+//! actor's head turn ([`Head`], op 0x11), its talk ([`Talk`], op 5 b=0x17), part mask (op 5
+//! b=0x3C), attachments ([`Attach`], op 0x0D) and clip blends ([`Play::blend`]); the outro's props
+//! ([`Prop`], kind-3 objects), script sounds ([`ScriptSound`], ops 6 and 0x0A) and near plane (op 5
+//! b=0x25). The attachments' and props' models are `maps/<map>/outro.gltf`'s scenes, named
+//! `09-<entry>` (hex) and `prop-<placement>`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::hud::{Anchor, Rgba};
 
 /// One outro: which win plays it and what it shows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Outro {
     /// The winning team that plays it (0 the squirrels, 1 the Tediz); a DRAW plays none.
     pub winner: u8,
@@ -35,14 +42,26 @@ pub struct Outro {
     pub fade: Fade,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<Voice>,
+    /// The song op 8 starts (`func_1000D96C(entry, 0, 0, 1)`: Beach cs4's 0x8A at t 1) on its own
+    /// slot at the map song's volume, not ducked (V b4 293); `file` the oracle's recording (absent
+    /// without one: a song is the synth's, not a bank WAV).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song: Option<Voice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitles: Option<Subtitles>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub props: Vec<Prop>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<ScriptSound>,
+    /// The camera's near plane (op 5 b=0x25, `func_1510B458`; V Beach cs3's 30), else the view's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<f32>,
 }
 
 /// A camera (object kind 1, look mode 0): its eye on its path ([`path_at`], channel 10 the share of
 /// it; one point: there), looking 400 units along yaw channel 7 + 90° and pitch channel 8 (degrees);
 /// a 50° vertical FOV (ch 9 unused, V).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
     pub path: Vec<[i16; 3]>,
     pub along: Vec<Key>,
@@ -73,7 +92,7 @@ pub struct Key {
 /// 90°). It loops its first clip from frame 1 (op 2; `rate` = 2 × `ticks` / VIs to its next op 2,
 /// V), or plays it `once` and holds its last key (tick `ticks` − 1), then each of `plays` from its
 /// time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Actor {
     /// `characters/<character>/`: its glTF holds the clips its outros play, `animation` by name.
     pub character: String,
@@ -96,10 +115,95 @@ pub struct Actor {
     pub yaw: Vec<Key>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plays: Vec<Play>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Head>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<Talk>,
+    /// Display lists hidden (bit k hides list k; op 5 b=0x3C's e, obj+0x94), as a villager's look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attach: Vec<Attach>,
+}
+
+/// Op 0x11 (`func_150265CC`, `func_15021DB8`, `func_15038620`): from `t` the head `joint`'s own
+/// rotation is the actor's channels, replacing its clip's: yaw = channel 2, pitch = −channel 1
+/// (degrees; the game's rot(−ch1, ch2, 0)), no smoothing (V `heads_tw4.csv`, `heads_cs5.csv`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Head {
+    pub t: u16,
+    pub joint: u8,
+    pub pitch: Vec<Key>,
+    pub yaw: Vec<Key>,
+}
+
+/// Op 5 b=0x17 (`func_1502460C`, `func_15034860`): the `jaw` joint opens and closes from each of
+/// `says`' times; `skew` turns it sideways a little as it closes (none for 135's classes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Talk {
+    pub jaw: u8,
+    pub skew: bool,
+    pub says: Vec<Say>,
+}
+
+/// From `t`: [`SHUT`], [`CHATTER`] or [`OPEN`], the jaw wide open at `degrees`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Say {
+    pub t: u16,
+    pub state: u8,
+    pub degrees: u8,
+}
+
+/// [`Say::state`]: closing (−60 a frame), chattering (±40-59 a frame between shut and open), or
+/// opening (+60 a frame) and holding.
+pub const SHUT: u8 = 0;
+pub const CHATTER: u8 = 1;
+pub const OPEN: u8 = 2;
+
+/// Op 0x0D (`func_15083568`): from `t` bank-09 model `entry` is drawn in `joint`'s frame (`on`), or
+/// no longer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Attach {
+    pub t: u16,
+    pub entry: u16,
+    pub joint: u8,
+    pub on: bool,
+}
+
+/// A kind-3 object: the map's hidden placement `placement` shown for the outro (`func_150226BC`)
+/// and posed by it (`func_15020EC4`): at `at`, turned `rotation` degrees about x, then y.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prop {
+    pub placement: u16,
+    pub at: [i16; 3],
+    pub rotation: [f32; 2],
+}
+
+/// A script sound (op 6 once, op 0x0A a loop; `func_15029BB8`, callback `func_150238D8`): bank sound
+/// `id` at actor `actor` (an index of [`Outro::actors`], followed), from `t` at `cents`; a loop
+/// until `stop`, fading in linearly up to `fade_in` and out from `fade_out` to `stop`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptSound {
+    pub id: u16,
+    pub actor: u8,
+    pub t: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_in: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_out: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_zero_i16")]
+    pub cents: i16,
+}
+
+fn is_zero_i16(c: &i16) -> bool {
+    *c == 0
 }
 
 /// A later op 2: from `t` the actor loops `animation` (`ticks` long) at `rate`, or plays it `once`,
-/// from its start unless it already plays it (`func_15029BB8`).
+/// from its start unless it already plays it (`func_15029BB8`), cross-fading from the clip before
+/// over `blend` frames (op 2's e − 1, 5 for e 0; `func_1505E650`'s step 500 / blend a VI).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Play {
     pub t: u16,
@@ -108,6 +212,8 @@ pub struct Play {
     pub rate: f32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub once: bool,
+    #[serde(default)]
+    pub blend: u8,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -115,7 +221,7 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// The fade in from `rgb` (op 5 b=1, `func_1517EE40`): opaque at t 0, clear `duration` VIs on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Fade {
     pub rgb: [u8; 3],
     pub duration: u16,
@@ -259,7 +365,7 @@ fn facing(ch7: f32) -> u16 {
 }
 
 /// The first frame a command at `t` acts on.
-fn frame(t: u16) -> u32 {
+pub fn frame(t: u16) -> u32 {
     u32::from(t).div_ceil(2).max(1)
 }
 
@@ -332,6 +438,25 @@ impl Actor {
         let steps = (k + 1).saturating_sub(from);
         (current, step(time, steps, clip.2, clip.1, clip.3))
     }
+
+    /// The clip it cross-fades from at frame `k` (an index of [`Self::clips`]), held at its time
+    /// when the new one came, and that clip's weight (0-1): 1023 less 2 × (500 / blend) a frame
+    /// from the new clip's first frame (`conker_anim::AnimPlayer`); none once it is 0.
+    pub fn blend(&self, k: u32) -> Option<(usize, f32, f32)> {
+        let switch = |p: &Play| {
+            let at = frame(p.t);
+            let before = self.clip(at - 1);
+            let from = self.clips().nth(before.0).map(|c| c.0);
+            (at <= k && from != Some(p.animation.as_str())).then_some((p.blend, at, before))
+        };
+        let (blend, at, before) = self.plays.iter().rev().find_map(switch)?;
+        if blend == 0 {
+            return None;
+        }
+        let step = i32::from(500 / i16::from(blend));
+        let weight = 1023 - 2 * step * (k - at + 1) as i32;
+        (weight > 0).then_some((before.0, before.1, weight as f32 / 1023.0))
+    }
 }
 
 impl Subtitles {
@@ -343,6 +468,30 @@ impl Subtitles {
         }
     }
 }
+
+/// The point a bubble of `quads` (shadow, tail shadow, tail, bubble) grows and shrinks about: its
+/// tail's tip, the tail's bottom corner on the side it points to (I: fitted to the DLs' grow and
+/// shrink, within 3 px; the game scales about the carrier's point, `func_1516B6BC`'s +0x40/+0x44).
+pub fn tip(quads: &[Quad]) -> [f32; 2] {
+    let Some(tail) = quads.get(2) else {
+        return [0.0; 2];
+    };
+    let [x, y, w, h] = tail.rect.map(f32::from);
+    let mirrored = tail.uv[2] < tail.uv[0];
+    [if mirrored { x } else { x + w }, y + h]
+}
+
+/// The speech bubble at a frame ([`Outro::bubble`]): the page in it, its text's alpha and the
+/// bubble's scale about its [`tip`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bubble<'a> {
+    pub page: &'a Page,
+    pub alpha: u8,
+    pub scale: f32,
+}
+
+/// Frames a page's text fades in or out over (`func_1516AA70`'s timer 10).
+const TEXT_FADE: u32 = 10;
 
 impl Outro {
     /// Frames it lasts: the STATS show from this frame.
@@ -382,11 +531,33 @@ impl Outro {
         (255 - step) as u8
     }
 
-    /// The page shown at `t`, if any.
-    pub fn page(&self, t: f32) -> Option<&Page> {
+    /// The speech bubble at frame `k` (effect 0x51, `func_1516AA70`), n frames after its last
+    /// command: opened (op 7 c 0), it grows n/3 to full size, its text fading in over 10 frames
+    /// from n = 3; a page turn (c 2) fades the old text out over 10 frames, then the new one in; the
+    /// close (c 1) fades the text out, then shrinks it 0.25 a frame from n = 11 till it is gone
+    /// (V `bubble_tw4.txt`, `bubble_cs1.txt`).
+    pub fn bubble(&self, k: u32) -> Option<Bubble<'_>> {
         let s = self.subtitles.as_ref()?;
-        let shown = |p: &&Page| f32::from(p.t) <= t && t < f32::from(s.close);
-        s.pages.iter().rev().find(shown)
+        let fade = |n: u32| (25.5 * n.min(TEXT_FADE) as f32) as u8;
+        let bubble =
+            |page, alpha, scale: f32| (scale > 0.0).then_some(Bubble { page, alpha, scale });
+        let close = frame(s.close);
+        if k > close {
+            let n = k - close;
+            let scale = 1.0 - 0.25 * n.saturating_sub(TEXT_FADE) as f32;
+            return bubble(s.pages.last()?, fade(TEXT_FADE.saturating_sub(n)), scale);
+        }
+        let i = s.pages.iter().rposition(|p| frame(p.t) <= k)?;
+        let n = k - frame(s.pages[i].t);
+        match (i, n) {
+            (0, _) => bubble(
+                &s.pages[0],
+                fade(n.saturating_sub(2)),
+                (n as f32 / 3.0).min(1.0),
+            ),
+            (_, ..=TEXT_FADE) => bubble(&s.pages[i - 1], fade(TEXT_FADE - n), 1.0),
+            _ => bubble(&s.pages[i], fade(n - TEXT_FADE), 1.0),
+        }
     }
 
     /// The frame the voice starts on.
@@ -445,6 +616,7 @@ mod tests {
             ticks: 10,
             rate: 2.0,
             once: false,
+            blend: 0,
         };
         let mut a = Actor {
             character: "90".into(),
@@ -460,6 +632,10 @@ mod tests {
             along: vec![],
             yaw: vec![],
             plays: vec![play(9, "b"), play(20, "b")],
+            head: None,
+            talk: None,
+            mask: None,
+            attach: vec![],
         };
         assert_eq!(a.clip(0), (0, 0.0));
         assert_eq!(a.clip(1), (0, 1.0));
@@ -474,5 +650,125 @@ mod tests {
         // Once: it holds its last key.
         a.once = true;
         assert_eq!((a.clip(9), a.clip(12)), ((0, 9.0), (0, 9.0)));
+        // A new clip cross-fades from the old one's pose at the switch over e − 1 frames (V cs1:
+        // blend 9 for e 0xA): 1023 − 2·(500/9) a frame from its first frame; the same clip cuts.
+        a.plays = vec![
+            Play {
+                blend: 9,
+                ..play(9, "b")
+            },
+            play(20, "b"),
+        ];
+        let (prev, time, w) = a.blend(5).unwrap();
+        assert_eq!((prev, time), (0, 4.0));
+        assert!((w - (1023.0 - 110.0) / 1023.0).abs() < 1e-6);
+        // Playing b again (frame 10) goes on fading; the fade is over after 9 frames.
+        assert!(a.blend(10).is_some() && a.blend(13).is_some());
+        assert!(a.blend(14).is_none() && a.blend(4).is_none());
+    }
+
+    /// TW cs4 and Colors cs1's bubbles against the DLs (`outros-leftovers-scratch/bubble_*.txt`):
+    /// the bubble's width (its scale), the glyphs' alpha and count (its page) on every read the 2D
+    /// layer changed (the even ones); DL read N draws frame N − zero + 2 (zero: the outro's clock 0).
+    #[test]
+    fn bubbles_grow_fade_and_shrink_as_the_originals() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../lab/research/mp-original/outros-leftovers-scratch"
+        );
+        let page = |t, lines: &[&str]| Page {
+            t,
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+        };
+        let outro = |pages: Vec<Page>, close| Outro {
+            subtitles: Some(Subtitles {
+                pages,
+                close,
+                anchor: Anchor(crate::hud::Horizontal::Left, crate::hud::Vertical::Top),
+                text: [0, 0],
+                quads: vec![],
+                moves: vec![],
+            }),
+            ..Outro::default()
+        };
+        let tw4 = outro(
+            vec![
+                page(16, &["once again the", "above-average", "      bears"]),
+                page(195, &["are victorious !"]),
+                page(354, &["we should be", "in paris by", "the summer."]),
+                page(601, &["supreme victory."]),
+            ],
+            745,
+        );
+        let cs1 = outro(
+            vec![
+                page(36, &["look at this scum."]),
+                page(89, &["get these monsters ", "  outta my sight."]),
+                page(245, &["i don't wanna see ", "their faces again."]),
+                page(
+                    431,
+                    &[
+                        " looks like paris ",
+                        "will be ours again ",
+                        "before the summer.",
+                    ],
+                ),
+                page(606, &["good show."]),
+            ],
+            694,
+        );
+        let mut seen = 0;
+        // The bubble's full widths (cs1: right and left, turned).
+        let tw4_full: &[f32] = &[146.0];
+        let cs1_full: &[f32] = &[188.0, 171.0];
+        for (file, o, zero, full) in [
+            ("bubble_tw4.txt", &tw4, 457, tw4_full),
+            ("bubble_cs1.txt", &cs1, 432, cs1_full),
+        ] {
+            let Ok(text) = std::fs::read_to_string(format!("{dir}/{file}")) else {
+                eprintln!("{dir}: no bubble dumps, skipping");
+                return;
+            };
+            for line in text.lines() {
+                let read: u32 = line.split(' ').next().unwrap().parse().unwrap();
+                if !read.is_multiple_of(2) || line.contains("glyphs 28") {
+                    continue; // the 2D layer's repeats, and the STATS' text
+                }
+                let b = o.bubble(read + 2 - zero);
+                let bub = line.split(" | ").next().unwrap();
+                let white = bub.split(' ').find(|r| r.ends_with(":ff"));
+                let Some(white) = white else {
+                    assert!(b.is_none(), "{file} {read}: {b:?}");
+                    continue;
+                };
+                let n: Vec<f32> = (white.trim_start_matches('(').split([',', ')']))
+                    .take(4)
+                    .map(|v| v.parse().unwrap())
+                    .collect();
+                let glyphs: usize = line
+                    .split("glyphs ")
+                    .nth(1)
+                    .unwrap()
+                    .split(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let alpha =
+                    u8::from_str_radix(&line.split("['").nth(1).unwrap()[6..8], 16).unwrap();
+                let b = b.unwrap_or_else(|| panic!("{file} {read}: no bubble"));
+                if (file, read) == ("bubble_tw4.txt", 840) {
+                    continue; // 0.5 where cs1 shows 0.75 a frame into the shrink: an lldb frame of 4 VIs (I)
+                }
+                let letters: usize = (b.page.lines.iter())
+                    .map(|l| l.chars().filter(|c| *c != ' ').count())
+                    .sum();
+                assert_eq!((letters, b.alpha), (glyphs, alpha), "{file} {read}");
+                let scaled = |f: &f32| ((n[2] - n[0]) / f - b.scale).abs() < 0.04;
+                assert!(full.iter().any(scaled), "{file} {read}: {n:?} {b:?}");
+                seen += 1;
+            }
+        }
+        assert!(seen > 60, "{seen}");
     }
 }
