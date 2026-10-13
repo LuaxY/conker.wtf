@@ -97,6 +97,9 @@ const LINES: [(u16, &str); 3] = [
 const SONG: u16 = ESCAPE - 0x100;
 /// The background's stem ([`Follow`]): War: Beach's song 0x4D's channels 13 and 14.
 const STEM: u16 = SONG - 0x100;
+/// Tank's countdown song (the map's `countdown` line: song 50 over the map's, not an MP3: it ducks
+/// nothing).
+const COUNTDOWN: u16 = STEM - 1;
 /// Whether a voice is an MP3 line: a map's ([`LINES`]) or an outro's voice.
 fn mp3(id: u16) -> bool {
     id > ESCAPE - LINES.len() as u16
@@ -338,6 +341,8 @@ struct Seen {
     /// The floor's surface kind (bits 0-4 of its word) and the horizontal speed: footsteps.
     floor: Option<u8>,
     speed: f32,
+    /// The speed the stick asks for (Tank's engine, [`engine`]).
+    target: f32,
     /// Total War: carrying its team's gas canister, and whether it is a bot ([`On::Carry`]).
     carry: Option<(u8, bool)>,
     /// War: Colors: carrying flag f, and whether it is a bot ([`On::Flag`]).
@@ -517,6 +522,21 @@ struct Sounds {
     /// War: Heist's last voice line ([`MatchView::voice`]; `None` until the first tick with a
     /// match: the line already there is not replayed).
     voice: Option<Option<(u32, u16, u16)>>,
+    /// Tank: each tank's engine ([`engine`]; absent while dead), last tick's shells, the bomb's
+    /// carrier and the bomb's countdown (None before the first tick with a match).
+    engines: HashMap<u16, u8>,
+    tank_shells: Vec<[f32; 3]>,
+    bomb: Option<(Option<u16>, i32)>,
+}
+
+/// A tank's engine (`func_151BB0E0`, C; V s1): 1 speeding up (the stick's speed past the speed,
+/// faster than 1), 2 coasting (faster than 5, not speeding up), else 0 idling.
+pub fn engine(speed: f32, target: f32) -> u8 {
+    match (speed.abs(), target.abs()) {
+        (v, t) if t > v && v > 1.0 => 1,
+        (v, _) if v > 5.0 => 2,
+        _ => 0,
+    }
 }
 
 /// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
@@ -1560,6 +1580,104 @@ impl Sounds {
         self.start(cx, &cue.play, &[id], 1.0, at);
     }
 
+    /// Tank's sounds: each tank's engine (a loop at it, idling or driving, from its creation to its
+    /// death) and its gear changes ([`engine`]); a shell's blast where it went (on a tank when a
+    /// tank near it lost health); a tank's death, its cue's delay on; the bomb taken; the
+    /// countdown's song at the plant, once, for everyone. Power-ups taken are pickups
+    /// ([`Self::match_sounds`]), the shot clip 1's event, the gas Total War's.
+    fn tank(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        if !m.tank {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        for (was, is) in players {
+            let me = Src::player(is);
+            let state = (is.health > 0).then(|| engine(is.speed, is.target));
+            let last = match state {
+                Some(s) => self.engines.insert(is.slot, s),
+                None => self.engines.remove(&is.slot),
+            };
+            let moving = |s: Option<u8>| s.map(|s| s != 0);
+            if moving(last) != moving(state) {
+                let loops: Vec<_> = (0..cues.len())
+                    .filter(|&i| matches!(cues[i].on, On::TankEngine { .. }))
+                    .collect();
+                self.stop(|v| v.owner == me.owner && v.tag.is_some_and(|t| loops.contains(&t)));
+                let on = moving(state).map(|moving| On::TankEngine { moving });
+                for i in loops
+                    .into_iter()
+                    .filter(|&i| Some(&cues[i].on) == on.as_ref())
+                {
+                    let play = &cues[i].play;
+                    self.start(cx, play, &play.sounds, 1.0, Src { tag: Some(i), ..me });
+                }
+            }
+            if let (Some(a), Some(b)) = (last, state)
+                && a != b
+            {
+                self.cues(cx, is, me, |on| *on == On::TankGear { coast: b == 2 });
+            }
+            if was.health > 0 && is.health == 0 {
+                let bomb = is.reaction == u16::from(conker_rules::tank::CLIP_BOMB);
+                let on = On::TankDeath { bomb };
+                for (i, cue) in (cues.iter().enumerate()).filter(|c| c.1.on == on) {
+                    let src = Src::at(is.pos);
+                    self.later.push(Later {
+                        tick: cx.tick + u32::from(cue.delay),
+                        cue: i,
+                        src,
+                        end: false,
+                    });
+                }
+            }
+        }
+        let old = std::mem::take(&mut self.tank_shells);
+        let now: Vec<_> = m.tanks.shells.iter().map(|s| s.0).collect();
+        for pos in gone(&old, &now, 2.0 * conker_rules::tank::SHELL_SPEED) {
+            let hurt =
+                |p: &(Seen, Seen)| p.1.health < p.0.health && dist2(p.1.pos, pos) < 300.0 * 300.0;
+            let ground = !players.iter().any(hurt);
+            self.world(cx, pos, |on| *on == On::TankBlast { ground });
+        }
+        self.tank_shells = now;
+        let (carrier, countdown) = (m.tanks.carrier, m.countdown);
+        if let Some((was, left)) = self.bomb.replace((carrier, countdown)) {
+            if let (None, Some(slot)) = (was, carrier)
+                && let Some(p) = players.iter().find(|p| p.1.slot == slot)
+            {
+                self.cues(cx, &p.1, Src::player(&p.1), |on| *on == On::BombPickup);
+            }
+            if left == 0 && countdown > 0 && cx.pack.lines.contains_key("countdown") {
+                let line = &cx.pack.lines["countdown"];
+                debug!("COUNTDOWN t={} read={}", cx.tick, cx.read);
+                self.push(
+                    cx,
+                    Voice {
+                        id: COUNTDOWN,
+                        owner: Owner::World,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos: cx.ear.pos,
+                        follows: None,
+                        flat: true,
+                        volume: f32::from(line.volume),
+                        own: None,
+                        near: 0.0,
+                        far: 0.0,
+                        base: 1.0,
+                        speed: 1.0,
+                        looped: false,
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                    },
+                );
+            }
+        }
+    }
+
     /// A map's line ([`LINES`]), unpositioned, unless a line already plays (one MP3 stream, C
     /// `func_1509E640`).
     fn line(&mut self, cx: &Cx, (id, name): (u16, &str)) {
@@ -1877,6 +1995,7 @@ fn hear(
     let mut grenades: &[(u32, Grenade)] = &[];
     let mut mount = None;
     let guns = game.single().map_or(&[][..], |m| &m.guns[..]);
+    let tank = game.single().is_ok_and(|m| m.tank);
     for (entity, p, c, anim, fighting, predicted, heard, id) in &mut players {
         // On a mounted gun the weapon is the gun's (its gunner's battle cry, `On::Firing`).
         let seated = match fighting {
@@ -1915,7 +2034,9 @@ fn hear(
             local: predicted,
             floor: p.floor.map(|f| (f.surface & 0x1F) as u8),
             speed: p.xz_speed,
-            carry: (c.carrying).then_some((c.team, bot)),
+            target: p.target_speed,
+            // Tank's bomb carrier is no canister carrier (no radio).
+            carry: (c.carrying && !tank).then_some((c.team, bot)),
             flag: c.flag.map(|f| (f, bot)),
             bot,
             team: c.team,
@@ -1988,6 +2109,7 @@ fn hear(
     s.traps(&cx, m);
     s.colors(&cx, m, &all);
     s.heist(&cx, m, &bag, &all);
+    s.tank(&cx, m, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);
     s.duck_music(&cx);
@@ -2120,7 +2242,7 @@ fn open(
             sounds.insert(SONG - n as u16, load(&s.file));
         }
     }
-    for (id, name) in LINES {
+    for (id, name) in LINES.into_iter().chain([(COUNTDOWN, "countdown")]) {
         if let Some(line) = pack.lines.get(name) {
             sounds.insert(id, load(&line.file));
         }
@@ -2607,6 +2729,7 @@ mod tests {
             local: false,
             floor: None,
             speed: 0.0,
+            target: 0.0,
             carry: None,
             flag: None,
             bot: false,
@@ -2790,14 +2913,88 @@ mod tests {
 
     /// The pack's audio with map 30 (War: Colors), or None without a pack.
     fn colors_pack() -> Option<Pack> {
+        map_pack("30")
+    }
+
+    /// The pack's audio with `map`, or None without a pack.
+    fn map_pack(map: &str) -> Option<Pack> {
         let dir = std::env::var("CONKER_ASSETS")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
         let audio = Audio::load(|f| std::fs::read(format!("{dir}/{f}"))).ok();
-        let Some(audio) = audio.filter(|a| a.events.maps.contains_key("30")) else {
-            eprintln!("no War: Colors audio in the pack at {dir}: skipping");
+        let Some(audio) = audio.filter(|a| a.events.maps.contains_key(map)) else {
+            eprintln!("no map {map} audio in the pack at {dir}: skipping");
             return None;
         };
-        Some(Pack::new(audio, Vec::new(), Vec::new(), "30", &[]))
+        Some(Pack::new(audio, Vec::new(), Vec::new(), map, &[]))
+    }
+
+    /// Tank (V s1): a tank idles from its creation (0x4A7); speeding up it drives (0x4A8) with a
+    /// gear change (0x4A3-0x4A6), at full speed it coasts (0x4A5); a shell gone by a tank that lost
+    /// health is the rocket's blast; a death by a shell 0x2E6 22 ticks on, the engine stopping;
+    /// the bomb taken 0xB or 0xC; the countdown's song at the plant.
+    #[test]
+    fn tank_sounds_follow_the_engine_shells_and_bomb() {
+        let Some(pack) = map_pack("24") else { return };
+        assert_eq!(
+            [0.0, 3.0, 48.0, -10.0].map(|v| engine(v, 48.0)),
+            [0, 1, 2, 1]
+        );
+        assert_eq!(
+            [engine(48.0, 48.0), engine(4.0, 0.0), engine(-30.0, 0.0)],
+            [2, 0, 2]
+        );
+        let body = crate::characters("24")
+            .iter()
+            .position(|c| *c == crate::tank::MODEL);
+        let tank = |speed, target, health| Seen {
+            body: body.unwrap(),
+            speed,
+            target,
+            health,
+            reaction: u16::from(conker_rules::tank::CLIP_HIT),
+            ..at(1, 0.0, 0)
+        };
+        let mut s = Sounds::default();
+        let m = |shells: usize, carrier, countdown| MatchView {
+            tank: true,
+            countdown,
+            tanks: conker_sim::net::TankView {
+                shells: vec![([100.0, 0.0, 0.0], 0, 0.0); shells],
+                carrier,
+                ..default()
+            },
+            ..default()
+        };
+        let steps = [
+            (tank(0.0, 0.0, 6), tank(0.0, 0.0, 6), m(1, None, 0)),
+            (tank(0.0, 0.0, 6), tank(3.0, 48.0, 6), m(1, None, 0)),
+            (tank(3.0, 48.0, 6), tank(48.0, 48.0, 6), m(1, None, 0)),
+            (tank(48.0, 48.0, 6), tank(48.0, 48.0, 1), m(0, None, 0)),
+            (tank(48.0, 48.0, 1), tank(0.0, 0.0, 0), m(0, Some(1), 300)),
+            (tank(0.0, 0.0, 0), tank(0.0, 0.0, 0), m(0, Some(1), 299)),
+        ];
+        let ids = heard(&mut s, &pack, 100..140, |s, cx| {
+            let (was, is, m) = &steps[(cx.tick as usize - 100).min(5)];
+            s.tank(cx, m, &[(*was, *is)]);
+        });
+        let at = |t: u32| -> Vec<u16> { ids.iter().filter(|i| i.0 == t).map(|i| i.1).collect() };
+        assert_eq!(at(100), [1191]);
+        assert!(
+            matches!(at(101)[..], [1187..=1190, 1192] | [1192, 1187..=1190]),
+            "{ids:?}"
+        );
+        assert_eq!(at(102), [1189]);
+        assert!(
+            matches!(at(103)[..], [689 | 693 | 694 | 695 | 701 | 702]),
+            "{ids:?}"
+        );
+        assert!(matches!(at(104)[..], [11 | 12, COUNTDOWN]), "{ids:?}");
+        assert_eq!(at(126), [742]);
+        assert!(
+            !s.voices
+                .iter()
+                .any(|v| [1191, 1192].contains(&v.id) && !v.stopped)
+        );
     }
 
     fn cx(pack: &Pack, tick: u32) -> Cx<'_> {

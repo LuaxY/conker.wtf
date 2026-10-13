@@ -118,6 +118,8 @@ pub struct Bots {
     /// Per participant: the pickup whose weapon it holds (MP+0xEB0), and who hit it last frame.
     held: Vec<i32>,
     hit_by: Vec<u8>,
+    /// Per participant, a bit: hit since the script last read it ([`World::struck`]).
+    struck: u32,
     /// Per participant: its +0x70 when the AI last zeroed it ([`World::forgiven`]).
     forgiven: Vec<u16>,
     /// Per participant: the point it aims at this frame while R is held.
@@ -164,6 +166,7 @@ impl Bots {
             joined: Vec::new(),
             held: vec![-1; n],
             hit_by: vec![0; n],
+            struck: 0,
             forgiven: vec![0; n],
             aims: vec![None; n],
             scopes: vec![None; n],
@@ -249,6 +252,7 @@ impl Bots {
         self.guns.resize(n, Scope::default());
         self.npcs[k] = Npc::default();
         (self.held[k], self.hit_by[k], self.forgiven[k]) = (-1, 0, 0);
+        self.struck &= !(1 << k);
         (self.aims[k], self.scopes[k], self.guns[k]) = (None, None, Scope::default());
     }
 
@@ -364,6 +368,9 @@ impl Bots {
                     if let (Some(v), Some(a)) = (k(victim), k(attacker)) {
                         self.hit_by[v] = 0x80 | a as u8;
                     }
+                    if let Some(v) = k(victim) {
+                        self.struck |= 1 << v;
+                    }
                 }
                 Event::Shot { .. } | Event::Explosion { .. } | Event::Voice { .. } => {}
                 Event::Respawn { player, .. } => {
@@ -397,7 +404,7 @@ impl Bots {
         let bodies = self.bodies(m);
         self.mirror(m, arena);
         let st = &m.settings;
-        let ffa = !st.total_war && !st.colors && !st.beach && !st.heist;
+        let ffa = !st.total_war && !st.colors && !st.beach && !st.heist && !st.raptor;
         // The joiners: their team as the script's start writes it (`team << 1` in Total War's
         // 0xBA at 0x734, the team in Colors' and Beach's, the participant in a Deathmatch), and
         // a fresh start in the frame helper's eyes. War: Beach's appear on this frame (0x1D leaves
@@ -461,6 +468,8 @@ impl Bots {
                     }),
                     false => None,
                 },
+                raptor: m.settings.raptor.then_some(&m.raptor),
+                struck: &mut self.struck,
             };
             if !self.started {
                 self.started = true;
@@ -513,7 +522,8 @@ impl Bots {
         } else if m.settings.tank {
             // Tank's bomb countdown (G+0x2008, 300 from the plant).
             effects.push(Effect::Countdown(self.g.i32(g::TANK_COUNTDOWN)));
-        } else if !m.settings.colors && !m.settings.beach && !m.settings.heist {
+        } else if !m.settings.colors && !m.settings.beach && !m.settings.heist && !m.settings.raptor
+        {
             effects.clear();
         }
         // Heist: the bag walks home on its own, once on its feet (class 0x57's scripts).
@@ -564,7 +574,35 @@ impl Bots {
                 }
                 continue;
             }
+            // War: Raptor: a raptor's behaviours are class 83's, which the steering runs as
+            // Conker's ([`brain::conker_behaviour`]). 0x22, the bite: Z once free and facing its
+            // target within 30°, else it turns to it first (I: class 83's behaviour 34 is not in
+            // the pack; the oracle's bot bites are often cut short by its next move, b1).
+            let raptor = m.settings.raptor && b.class == conker_rules::raptor::CLASS;
+            let bite = raptor && n.script == brain::BITE;
+            if raptor {
+                n.script = brain::conker_behaviour(n.script);
+            }
             n.run(&self.scripts, &self.graph, &view, &mut self.rng);
+            if raptor {
+                n.script = brain::raptor_behaviour(n.script);
+            }
+            let mut face = None;
+            if bite {
+                n.script = brain::BITE;
+                let free = m
+                    .players
+                    .get(slot)
+                    .is_some_and(|f| f.action == Action::Free);
+                let to = players.get(usize::from(n.target)).copied();
+                let off = to.map(|t| {
+                    angle_diff(atan2_u16(b.pos[2] - t[2], t[0] - b.pos[0]), b.facing).abs()
+                });
+                if free && off.is_some_and(|d| d < 0x1555) && b.buttons & BUTTON_Z == 0 {
+                    (n.pressed, n.press) = (BUTTON_Z, 0);
+                }
+                face = to.filter(|_| off.is_some_and(|d| d >= 0x1555));
+            }
             let steer = n.steer(&view);
             let (held, pressed) = n.pad();
             if held & 0x10 == 0 {
@@ -636,7 +674,10 @@ impl Bots {
                 }
                 continue;
             }
-            let mut input = drive(b, toward, steer.speed, aim.is_some(), world);
+            let mut input = match face {
+                Some(t) => drive(b, t, 1.0, false, world),
+                None => drive(b, toward, steer.speed, aim.is_some(), world),
+            };
             input.buttons = held | pressed;
             if matches!(b.drawn, 0x16 | 0x23) {
                 // I: the game's bot aims with R held (its own aim mode, s126+0x197 = 2) and fires
@@ -701,6 +742,7 @@ impl Bots {
                     buttons: f.buttons,
                     scope: f.body.scope_yaw.map(|y| (y, f.scope_pitch)),
                     class: f.class,
+                    prey: f.prey,
                     walled: f.body.walled,
                     out: (f.out > 0).then(|| m.tick.saturating_sub(f.out_at)),
                     lives: if counted {

@@ -256,6 +256,8 @@ pub enum Effect {
     /// Heist: a voice line at slot `.0`'s player (`obj(0x74nn, …)` on the radio path, 0x7FBC): the
     /// sound id (handle & 0xFFF), for the client to play ([`crate::game::Event::Voice`]).
     Voice(usize, u16),
+    /// War: Raptor's eggs, bodies and cooked eggs ([`crate::raptor::Op`]).
+    Raptor(crate::raptor::Op),
 }
 
 #[cfg(test)]

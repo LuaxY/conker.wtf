@@ -326,6 +326,36 @@ pub const CROSSBOW: Weapon = Weapon {
     c_button: Some(anim::CROSSBOW_RUN),
 };
 
+/// War: Raptor's bone crossbow (0x41): the crossbow's, drawn with B in 0x2C8 (64 frames, a Z in
+/// it ignored) and fired with Z in 0x2C9; its bolt hits for 1 (V r10: the raptor 345 away hit 13
+/// frames after Z; I the rest, the crossbow's).
+pub const BONE_CROSSBOW: Weapon = Weapon {
+    id: 0x41,
+    draw: (0x2C8, 64),
+    fire: (0x2C9, 29),
+    ..CROSSBOW
+};
+
+/// War: Raptor's bone knives (0x3F): B draws them (0x2CA, 15 frames), Z throws one (0x2CC, 14
+/// frames) that hits for 1, flying as a bolt (V r9: the raptor 281 away hit 10 frames after Z;
+/// I its speed, the bolt's, and the rest).
+pub const BONE_KNIVES: Weapon = Weapon {
+    id: 0x3F,
+    draw: (0x2CA, 15),
+    idle: 0x2CB,
+    fire: (0x2CC, 14),
+    attack: Attack::Bolt {
+        kind: damage::SHOT_BODY,
+        muzzle: [10.259, -7.948, 45.225],
+        at: 8,
+        aim: anim::CROSSBOW_AIM,
+        aimed: (0x2CC, 14),
+        cooldown: 14,
+    },
+    c_button: None,
+    ..CROSSBOW
+};
+
 /// The shotgun (0x37): see [`Attack::Spread`]. One shot per Z press; a new one may cut the long
 /// 0x235 short (V combat5_sg3). R and A do nothing, C-down throws a grenade (V combat5_ctlw37).
 pub const SHOTGUN: Weapon = Weapon {
@@ -478,6 +508,8 @@ pub fn weapon(id: u8) -> Option<&'static Weapon> {
         0x14 => &W14,
         0x16 => &W16,
         0x18 => &CROSSBOW,
+        0x41 => &BONE_CROSSBOW,
+        0x3F => &BONE_KNIVES,
         0x37 => &SHOTGUN,
         0x40 => &CLUB,
         0x19 => &BAT,
@@ -650,6 +682,22 @@ pub const PICKUPS_3F: [Pickup; 10] = [
     pick(24, 0),
 ];
 
+/// Scene 0x3F's War: Raptor pickups (script 0xBE's k0-k9, C; V r9-r11): the bone crossbow 0x41
+/// and the bone knives 0x3F on placements 15-22, the grenades on 23 and 24, back after 240 VIs.
+/// Only the cavemen take them ([`crate::raptor::CLASS`] never does).
+pub const PICKUPS_3F_RAPTOR: [Pickup; 10] = [
+    pick(15, 0x41),
+    pick(16, 0x41),
+    pick(17, 0x3F),
+    pick(18, 0x3F),
+    pick(19, 0x41),
+    pick(20, 0x41),
+    pick(21, 0x3F),
+    pick(22, 0x3F),
+    pick(23, 0),
+    pick(24, 0),
+];
+
 /// Scene 0x2B's 2 pickups (War: Beach, scenario 8): the vitamin bottles (model 3/91, the props
 /// with ids 1 and 2, placements 6 and 7), each giving item 0x3E, the villagers' start item (V from
 /// the RAM at DL 100-1500, `../lab/oracle/map2b`). The game respawns them after 60 VIs
@@ -792,6 +840,7 @@ mod tests {
             .chain(&PICKUPS_30)
             .chain(&PICKUPS_34)
             .chain(&PICKUPS_1A)
+            .chain(&PICKUPS_3F_RAPTOR)
         {
             if let Gives::Weapon(id) = p.gives {
                 assert_eq!(weapon(id).unwrap().id, id);

@@ -11,6 +11,7 @@
 use conker_anim::combat as anim;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{self, Other, PlayerState, Side};
+use conker_sim::raptor::clip as raptor;
 
 /// A flag: the handle the script names it by (its object index, `0x20nn`), the scene uid its
 /// create native `obj(0x20uu)` takes, its model (bank 01) and its home (C, V e1).
@@ -168,6 +169,15 @@ pub enum Pose {
     Snatch,
     /// Heist: B throws the bag (V h2 381-400, the release on 395).
     Throw,
+    /// War: Raptor ([`crate::raptor`]): the carrier's throw at the fire (clip 0xD6, V r4 402-440);
+    /// the raptor's standing bite (49) and running bite (53), the body's drop (8), the nest drop
+    /// (50) and the respawn's clip (19) (V r1-r8).
+    EggThrow,
+    Bite,
+    RunBite,
+    Drop,
+    Nest,
+    Hatch,
 }
 
 impl Pose {
@@ -180,6 +190,12 @@ impl Pose {
             Pose::Lose => (anim::LOSE, 60, None),
             Pose::Snatch => (crate::heist::GRAB, 26, None),
             Pose::Throw => (crate::heist::THROW, 20, Some(15)),
+            Pose::EggThrow => (0xD6, 39, None),
+            Pose::Bite => (raptor::BITE, 28, None),
+            Pose::RunBite => (raptor::RUN_BITE, 11, None),
+            Pose::Drop => (raptor::DROP, 39, None),
+            Pose::Nest => (raptor::NEST, 45, None),
+            Pose::Hatch => (raptor::RESPAWN, 28, None),
         }
     }
 

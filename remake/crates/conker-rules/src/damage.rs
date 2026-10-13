@@ -150,12 +150,22 @@ pub const CONE_DEATH: u8 = 0x80 | 0xD;
 pub const CONE_DEATH_CLIP: u16 = 0x2D8;
 pub const CONE_DEATH_FRAMES: u16 = 20;
 
+/// War: Raptor's bites (the raptor's attack table, class word 1, `crate::raptor`): the standing
+/// bite's entry 4 (reaction 0x46: whatever it touches dies, held in the jaws; C, V r2) and the
+/// running bite's entry 6 (reaction 0x1C, 3 damage, knocked up; C, V r8). The hazard's type 0x3E
+/// (script command 0x2A on a player in triggers 3 and 0xD): 1 damage and a hop, y velocity 50,
+/// gravity 3, speed 7 (V r12; the blow-up's reaction, I).
+pub const BITE: DamageType = ty(0x46, 0x0F, 0.0, 0.0, 4.0, 0, 0, 0);
+pub const RUN_BITE: DamageType = ty(0x1C, 0x03, 38.0, 60.0, 4.0, 1, 0, 0);
+pub const HAZARD: DamageType = ty(0x2B, 0x41, 7.0, 50.0, 3.0, 1, 0, 0);
+
 /// The damage type the script's player commands 0x2A and 0x2B name.
 pub fn script_type(id: i32) -> Option<DamageType> {
     match id {
         0x1F => Some(GAS),
         0x3B => Some(DOORWAY),
         0x29 => Some(DETONATION),
+        0x3E => Some(HAZARD),
         _ => None,
     }
 }
@@ -282,10 +292,23 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         (GATE, _) => &[(anim::DEAD, GATE_FRAMES)],
         // A death started on a cone (`Match::hurt_frame` switches to it from the fall).
         (CONE_DEATH, _) => &[(CONE_DEATH_CLIP, CONE_DEATH_FRAMES), (anim::DEAD, 81)],
+        // War: Raptor: the standing bite's victim lies in the jaws until its respawn, 87 frames
+        // (V r2: 0x170 at 95, the respawn at 182); the running bite's is knocked up, down and
+        // up again (V r8: 0xF3 30, 0xF4 42, 0xF0 30; I its kill, as the blow-up's).
+        (0x46, _) => &[(BITTEN, 87)],
+        (0x1C, false) => &[
+            (anim::BLOWN_UP, 30),
+            (anim::GET_UP, 42),
+            (anim::RECOVER, 30),
+        ],
+        (0x1C, true) => &[(anim::BLOWN_UP, 88)],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,
     }
 }
+
+/// The standing bite's victim's clip (0x170, V r2).
+pub const BITTEN: u16 = 0x170;
 
 /// How the victim's facing follows a hit with `reaction`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +346,13 @@ pub struct Hitbox {
 }
 
 impl Hitbox {
+    /// War: Raptor's raptor (class 9, model 83 at 0.7): 125, 202 and 125 (V, the oracle's RAM).
+    pub const RAPTOR: Self = Self {
+        radius: 125.0,
+        half: 202.0,
+        centre: 125.0,
+    };
+
     /// The Tedi's 26, 43 and 35; the squirrel soldier's and the caveman's 36, 64 and 44.
     pub fn of(side: Side) -> Self {
         let [radius, half, centre] = match side {

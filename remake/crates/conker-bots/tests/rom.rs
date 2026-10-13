@@ -1506,24 +1506,26 @@ fn deathmatch(
     frames: u32,
     each: impl FnMut(&conker_rules::Match, &[usize]),
 ) -> conker_bots::Bots {
-    play(rom, scene, bots, seed, frames, false, each)
+    play(rom, scene, bots, seed, frames, None, each)
 }
 
-/// [`deathmatch`], or War: Heist on 0x1A (`heist`: slot i on team i & 3, its team's start
-/// records and respawn mask, the script's effects applied, as the server has them).
+/// [`deathmatch`], or a War mode's `settings`, as the server has them: Heist on 0x1A (slot i on
+/// team i & 3, its team's start records and respawn mask), Raptor on 0x3F (slots 4 and 5 of each
+/// 8 the raptors, team 1 on records 0-7, the others the cavemen with the club on 8-15; the mode's
+/// pickups); the script's effects applied.
 fn play(
     rom: &extract_core::Rom,
     scene: usize,
     bots: usize,
     seed: u64,
     frames: u32,
-    heist: bool,
+    settings: Option<conker_rules::Settings>,
     mut each: impl FnMut(&conker_rules::Match, &[usize]),
 ) -> conker_bots::Bots {
     use conker_bots::lift::Lifts;
     use conker_bots::{Assets, Bots, DEFAULT_SKILL};
     use conker_rules::{Arena, Fighter, Match, Rng, Spawn, spawn, weapon};
-    use conker_sim::movement::Input;
+    use conker_sim::movement::{Input, Side};
     let data: Vec<Vec<u8>> = (Assets::paths(scene).iter())
         .map(|p| rom.asset(p).unwrap().into_owned())
         .collect();
@@ -1545,7 +1547,12 @@ fn play(
         })
         .collect();
     let placements = extract_scene::scene_placements(rom, scene).unwrap();
-    let (picks, spots) = weapon::pickups(scene as u16).unwrap();
+    let heist = settings.is_some_and(|s| s.heist);
+    let raptor = settings.is_some_and(|s| s.raptor);
+    let (picks, spots) = match raptor {
+        true => (&weapon::PICKUPS_3F_RAPTOR[..], &[][..]),
+        false => weapon::pickups(scene as u16).unwrap(),
+    };
     let pickups = (picks.iter().enumerate())
         .filter(|(_, p)| p.gives != weapon::Gives::Mask)
         .map(|(k, p)| {
@@ -1570,8 +1577,23 @@ fn play(
     let starts = spawn::starts(scene as u16).unwrap();
     let mut r = rng;
     spawn::place(&arena.spawns, 0, &mut r);
+    let mut members = [0; 2];
     let fighters = (0..=bots)
         .map(|i| {
+            if raptor {
+                use conker_rules::raptor;
+                let team = u8::from(matches!(i & 7, 4 | 5));
+                let k = members[usize::from(team)];
+                members[usize::from(team)] += 1;
+                let at = usize::from(starts.sides[usize::from(team)][k % 8]);
+                return Fighter {
+                    side: [Side::Cavemen, Side::Tediz][usize::from(team)],
+                    start: Some(weapon::CLUB.id),
+                    class: [raptor::CAVEMAN, raptor::CLASS][usize::from(team)],
+                    spawn_mask: starts.side_masks[usize::from(team)],
+                    ..Fighter::new(&spawn::place(&arena.spawns, at, &mut r), team, 23)
+                };
+            }
             let records = conker_rules::heist::RECORDS[i & 3];
             let (at, team, mask) = match heist {
                 true => (
@@ -1590,12 +1612,8 @@ fn play(
         })
         .collect();
     let mut m = Match::new(&arena, fighters, r, 23);
-    if heist {
-        m = m.with(conker_rules::Settings {
-            heist: true,
-            score: conker_rules::heist::SCORE,
-            ..Default::default()
-        });
+    if let Some(s) = settings {
+        m = m.with(s);
     }
     // 0x34's plates and traps, as the server has them.
     m.traps = conker_rules::traps::Traps::new(scene as u16, assets.triggers);
@@ -1827,7 +1845,12 @@ fn heist_bots_fetch_and_deliver() {
     let Some(rom) = rom() else { return };
     let (mut created, mut pickups, mut carrier) = (None, 0, None);
     let (mut top, mut walked, mut scores) = (0f32, 0, [0u16; 4]);
-    let bots = play(&rom, 0x1A, 7, 1, 9000, true, |m, _| {
+    let heist = conker_rules::Settings {
+        heist: true,
+        score: conker_rules::heist::SCORE,
+        ..Default::default()
+    };
+    let bots = play(&rom, 0x1A, 7, 1, 9000, Some(heist), |m, _| {
         let c = m.heist.cash;
         if c.shown && created.is_none() {
             created = Some(m.tick);
@@ -1859,6 +1882,51 @@ fn heist_bots_fetch_and_deliver() {
     assert!(walked > 0);
     assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
     assert_eq!(bots.faults, 0);
+}
+
+/// War: Raptor on 0x3F, script 0xBE's team branch: 1 idle human caveman, 5 caveman bots, 2
+/// raptor bots (oracle b1's roster).
+#[test]
+fn raptor_bots_play() {
+    let Some(rom) = rom() else { return };
+    let raptor = conker_rules::Settings {
+        raptor: true,
+        score: conker_rules::raptor::SCORE,
+        ..Default::default()
+    };
+    let mut scores = [0u16; 2];
+    let (mut bites, mut drops, mut carried, mut speed) = ([0u32; 2], 0u32, 0u32, 0f32);
+    let mut stats = Vec::new();
+    let bots = play(&rom, 0x3F, 7, 1, 9000, Some(raptor), |m, _| {
+        use conker_rules::colors::Pose;
+        use conker_rules::game::Action;
+        scores = m.colors.scores;
+        for f in &m.players {
+            match f.action {
+                Action::Pose(Pose::Bite) if f.since == m.tick - 1 => bites[0] += 1,
+                Action::Pose(Pose::RunBite) if f.since == m.tick - 1 => bites[1] += 1,
+                Action::Pose(Pose::Drop) if f.since == m.tick - 1 => drops += 1,
+                _ => {}
+            }
+            if f.class == conker_rules::raptor::CLASS {
+                speed = speed.max(f.body.xz_speed);
+            }
+        }
+        carried += m.raptor.eggs.iter().filter(|e| e.carrier.is_some()).count() as u32;
+        stats = (m.players.iter())
+            .map(|f| (f.team, f.kills, f.deaths))
+            .collect();
+    });
+    eprintln!(
+        "raptor: scores {scores:?}, bites {bites:?}, drops {drops}, egg frames {carried}, raptor top speed \
+         {speed}; (team, kills, deaths) {stats:?}; unknown {:?}",
+        bots.unknown
+    );
+    assert!(bots.unknown.is_empty(), "{:?}", bots.unknown);
+    assert_eq!(bots.faults, 0);
+    // The oracle's b1 and b2: a team reaches 20 by kills, the other has 14-17.
+    assert!(scores.iter().any(|&s| s >= 20), "{scores:?}");
+    assert!(scores[0].min(scores[1]) >= 5, "{scores:?}");
 }
 
 /// Tank on 0x24 as the server has it (`humans` then `bots`, slot i on record i, from slot 4 on

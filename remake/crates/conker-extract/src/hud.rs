@@ -33,11 +33,15 @@ const GLYPHS: usize = 95;
 /// strike's red flash, 0x80202220, is `iris`); Heist's "$" pip (0xD14, `end.json`'s `lives`, again
 /// under its own name: V hud1 DL 200 draws its texels [14, 16, 7, 7]), and the bubbles its outro
 /// cs3 sends up (0xC01, C `func_150EA11C`'s sprite: CI4 64 × 64 with a 16-entry palette by its size,
-/// read RGBA16 as the atlases; I, no DL of it seen).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 33] = [
+/// read RGBA16 as the atlases; I, no DL of it seen); Race's overview maps of its two routes (C
+/// `func_150918EC`: 0xCF2 when `0x8008FDBC & 0x40`; V k1 DL 250 and b2 DL 150, scenarios 11 and 12:
+/// the RAM's that the map's texrect draws, found by `texfind`).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 35] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
+    ("race_map_low", 0xCF1, Format::Ia8, 64, 64, true),
+    ("race_map_high", 0xCF2, Format::Ia8, 64, 64, true),
     ("grenade", 0xD13, Format::Rgba16, 32, 32, false),
     ("reticle", 0x1013, Format::I8, 32, 32, true),
     ("scope", 0xFEE, Format::I8, 64, 64, true),
@@ -163,6 +167,10 @@ fn image(texture: &str, rect: [u16; 4]) -> Image {
 /// icon on scene 0x1A) cell 4, 4 texels lower and 2 shorter (drawn a pixel lower: not kept); the
 /// tommy gun (0x38) cell 4 of the second atlas, 3 texels lower. War: Raptor's bone knives (0x3F) and
 /// bone crossbow (0x41) share the knives' and the crossbow's cells (C, the function's switch).
+/// Race's power-ups: the missiles (0x33) cell 11 (its last 8 texels past the atlas's edge, clamped
+/// to its column 63, clear there: kept 14 wide), the canister (0x31) cell 6 of the second atlas, 3
+/// texels lower, drawn once per item held, 18 pixels apart leftward (C; V h1 DL 230: three missiles
+/// at x 232, 214, 196, a canister at 232); the board (0x2F) has none.
 fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
     const TOPS: [u16; 5] = [4, 16, 25, 39, 53];
     const HEIGHTS: [u16; 5] = [12, 9, 14, 12, 10];
@@ -188,6 +196,8 @@ fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
         (0x38, cell("atlas2", 4, 3)),
         (0x3F, cell("atlas", 3, 0)),
         (0x41, cell("atlas", 6, 0)),
+        (0x33, image("atlas", [50, 39, 14, 12])),
+        (0x31, cell("atlas2", 6, 3)),
     ]
     .into()
 }

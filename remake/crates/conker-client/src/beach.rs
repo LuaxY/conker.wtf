@@ -235,7 +235,7 @@ pub struct Strike {
 
 /// The puffs' quad and texture, the strike's glow and streak textures.
 #[derive(Resource)]
-struct Sprites {
+pub(crate) struct Sprites {
     quad: Handle<Mesh>,
     texture: Handle<Image>,
     glow: Handle<Image>,
@@ -474,6 +474,63 @@ fn scroll_water(
     }
 }
 
+/// An explosion's puffs (white, grey, black and dark red) and its chunks of debris at `at`: `puffs`
+/// puffs within `radius`, `chunks` chunks (Beach's strikes and detonation, Tank's shells).
+pub(crate) fn burst(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    sprites: &Sprites,
+    seed: &mut u32,
+    at: Vec3,
+    (puffs, radius, chunks): (u32, f32, u32),
+) {
+    for n in 0..puffs + chunks {
+        *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let mut rng = conker_rules::Rng::new(u64::from(*seed) << 8 | 1);
+        let mut r = || rng.next_f32();
+        let dir = Vec3::new(r() - 0.5, r() * 0.8, r() - 0.5).normalize_or_zero();
+        let chunk = n >= puffs;
+        let [red, green, blue] = PUFFS[if chunk { 2 } else { (r() * 4.0) as usize % 4 }];
+        let [lo, hi] = PUFF_ALPHA.map(f32::from);
+        let size = if chunk {
+            12.0 + 10.0 * r()
+        } else {
+            radius * (0.4 + 0.6 * r())
+        };
+        let puff = Puff {
+            vel: if chunk {
+                Vec3::new(dir.x * 30.0, 25.0 + 20.0 * r(), dir.z * 30.0)
+            } else {
+                dir * radius * 0.04 * r()
+            },
+            fall: chunk,
+            size: [size * 0.4, size],
+            age: 0.0,
+            life: if chunk {
+                40.0 + 30.0 * r()
+            } else {
+                16.0 + 24.0 * r()
+            },
+            alpha: (lo + (hi - lo) * r()) / 255.0,
+        };
+        let material = materials.add(StandardMaterial {
+            base_color: Color::srgba_u8(red, green, blue, (puff.alpha * 255.0) as u8),
+            base_color_texture: Some(sprites.texture.clone()),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        });
+        let start = at + dir * radius * 0.5 * r();
+        commands.spawn((
+            puff,
+            Mesh3d(sprites.quad.clone()),
+            MeshMaterial3d(material),
+            Transform::from_translation(start).with_scale(Vec3::splat(size * 0.4)),
+        ));
+    }
+}
+
 /// The detonation, the strikes and the rockets' blasts as this client sees them ([`Blasts`]): rings,
 /// explosions, debris, the strikes' marks and the shakes where they go off.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -503,51 +560,14 @@ fn watch(
     .clone();
     let b = &mut *blasts;
     let mut burst = |at: Vec3, puffs: u32, radius: f32, chunks: u32| {
-        for n in 0..puffs + chunks {
-            *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            let mut rng = conker_rules::Rng::new(u64::from(*seed) << 8 | 1);
-            let mut r = || rng.next_f32();
-            let dir = Vec3::new(r() - 0.5, r() * 0.8, r() - 0.5).normalize_or_zero();
-            let chunk = n >= puffs;
-            let [red, green, blue] = PUFFS[if chunk { 2 } else { (r() * 4.0) as usize % 4 }];
-            let [lo, hi] = PUFF_ALPHA.map(f32::from);
-            let size = if chunk {
-                12.0 + 10.0 * r()
-            } else {
-                radius * (0.4 + 0.6 * r())
-            };
-            let puff = Puff {
-                vel: if chunk {
-                    Vec3::new(dir.x * 30.0, 25.0 + 20.0 * r(), dir.z * 30.0)
-                } else {
-                    dir * radius * 0.04 * r()
-                },
-                fall: chunk,
-                size: [size * 0.4, size],
-                age: 0.0,
-                life: if chunk {
-                    40.0 + 30.0 * r()
-                } else {
-                    16.0 + 24.0 * r()
-                },
-                alpha: (lo + (hi - lo) * r()) / 255.0,
-            };
-            let material = materials.add(StandardMaterial {
-                base_color: Color::srgba_u8(red, green, blue, (puff.alpha * 255.0) as u8),
-                base_color_texture: Some(sprites.texture.clone()),
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                cull_mode: None,
-                ..default()
-            });
-            let start = at + dir * radius * 0.5 * r();
-            commands.spawn((
-                puff,
-                Mesh3d(sprites.quad.clone()),
-                MeshMaterial3d(material),
-                Transform::from_translation(start).with_scale(Vec3::splat(size * 0.4)),
-            ));
-        }
+        burst(
+            &mut commands,
+            &mut materials,
+            &sprites,
+            &mut seed,
+            at,
+            (puffs, radius, chunks),
+        );
     };
     let shake = |wave: &'static Wave, at: [f32; 3], near: f32, range: f32| Shake {
         wave,

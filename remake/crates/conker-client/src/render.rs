@@ -204,6 +204,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     crate::held::build(app, slice.held, carried);
     crate::flags::build(app);
     crate::guns::build(app);
+    crate::tank::build(app, &slice.characters, &cfg.map);
     // The pack has no `.meta` files: don't ask for one before each file.
     let mut assets = AssetPlugin {
         meta_check: AssetMetaCheck::Never,
@@ -565,7 +566,10 @@ fn dress_teams(
     mut commands: Commands,
 ) {
     for (entity, c, model, dressed) in &players {
-        let team = c.team & 3;
+        let team = match c.class {
+            conker_rules::tank::CLASS => crate::tank::flag(c.slot),
+            _ => c.team & 3,
+        };
         let Some((name, texture)) = looks.of(model.body, team) else {
             continue;
         };
@@ -727,8 +731,8 @@ pub fn fov(scope: &conker_camera::Scope) -> f32 {
     conker_camera::VIEW_ANGLES[1] + zoom
 }
 
-/// In War: Total War, its props, once the characters are in (one glTF load at a time, see
-/// [`load_characters`]).
+/// In War: Total War and Tank, their props, once the characters are in (one glTF load at a time,
+/// see [`load_characters`]).
 fn add_props(
     game: Query<&MatchView>,
     assets: Res<AssetServer>,
@@ -736,7 +740,7 @@ fn add_props(
     mut added: Local<bool>,
     mut commands: Commands,
 ) {
-    if !*added && game.single().is_ok_and(|m| m.total_war) {
+    if !*added && game.single().is_ok_and(|m| m.total_war || m.tank) {
         *added = true;
         let props = WorldAssetRoot(assets.load(props_scene(&cfg.map)));
         commands.spawn((crate::lights::Lit, props));
@@ -765,6 +769,10 @@ fn show_pickups(
     };
     let tick = timeline.tick().0;
     for (placement, entity, base, at) in nodes.iter_mut() {
+        // Tank's doors, bomb and wrecks are its own ([`crate::tank`]).
+        if m.tank && crate::tank::owns(*placement) {
+            continue;
+        }
         let Ok((mut v, mut t)) = shown.get_mut(*entity) else {
             continue;
         };

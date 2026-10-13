@@ -2,12 +2,14 @@
 # Bots smoke test: the server with --bots (BOTS, default 2) and HUMANS headless clients (default 1;
 # client 1 stands idle, client 2 runs the test pattern). Passes when every bot moves, fights (hits
 # someone), dies and respawns, and every client sees every bot move. Needs the asset pack (CONKER_ASSETS, default ../assets).
-# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24] [MODE=deathmatch|total-war|colors|beach|heist|tank] [SCORE=1-40|unlimited]
-#   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] crates/conker-server/bots.sh [seconds=150].
+# Usage: [PORT=5888] [MAP=2d|30|34|3f|2b|1a|24] [MODE=deathmatch|total-war|colors|beach|heist|tank|raptor] [SCORE=1-40|unlimited]
+#   [SKILL=inbred|crap|normal|bastard|einstein] [TIME=3-10|unlimited] [SEED=n] [SIDE=squirrels|tediz|cavemen]
+#   crates/conker-server/bots.sh [seconds=150]. SIDE: the side client 1 asks for.
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
 # MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
 # MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
 # MODE=tank (MAP=24) the bombs taken and planted, the deaths by blast and by shell, the power-ups taken.
+# MODE=raptor (MAP=3f) the eggs made, thrown and cooked, the nest drops, the raptor bots and the team scores.
 set -u
 cd "${0:A:h}/../.."
 [[ -f ${CONKER_ASSETS:-../assets}/pack.json ]] || { echo "no asset pack in ${CONKER_ASSETS:-../assets}: cargo run --release -p conker-extract -- pack"; exit 1 }
@@ -31,6 +33,7 @@ clients=()
 for id in $(seq 1 $humans); do
   script=()
   (( id == 2 )) && script=(--script)
+  (( id == 1 )) && [[ -n ${SIDE:-} ]] && script+=(--side $SIDE)
   $bin/conker-client --headless --id $id --transport ws --server 127.0.0.1:$port --digest $digest --seconds $secs \
     $script > $logs/client$id.log 2>&1 &
   clients+=($!)
@@ -96,6 +99,14 @@ if [[ ${MODE:-} == tank ]]; then
   echo "tank: bombs taken $(grep -c 'TANK t=[0-9]* bomb taken' $logs/server.log), planted $(grep -c 'TANK t=[0-9]* bomb planted' $logs/server.log)" \
     "at $(grep -oE 'TANK t=[0-9]+ bomb planted' $logs/server.log | grep -oE '[0-9]+' | tr '\n' ' ')"
   echo "  blast deaths $blasts, shell deaths $((deaths - blasts)), power-ups taken $(grep -c 'TANK t=[0-9]* slot [0-9]* takes power-up' $logs/server.log)"
+  echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
+fi
+if [[ ${MODE:-} == raptor ]]; then
+  echo "raptor: eggs made $(grep -c 'RAPTOR t=[0-9]* Egg([0-9], true)' $logs/server.log)," \
+    "throws $(grep -c 'RAPTOR t=[0-9]* Throw' $logs/server.log), cooked $(grep -c 'RAPTOR t=[0-9]* Cooked' $logs/server.log)," \
+    "nest drops $(grep -c 'RAPTOR t=[0-9]* Nest' $logs/server.log)," \
+    "raptors (slots) $(grep -oE 'bot in slot [0-9]+ on record .*Tediz' $logs/server.log | grep -oE 'slot [0-9]+' | tr '\n' ' ')"
+  echo "  scores: $(grep -oE 'RAPTOR t=[0-9]+ scores \[[0-9]+, [0-9]+\]' $logs/server.log | sed 's/RAPTOR //' | tail -4 | tr '\n' ' ')"
   echo "  $(grep -E 'match ends' $logs/server.log | tail -1)"
 fi
 report "no bot script faults or unknown natives" $(( ! $(grep -c 'bots: .* faults' $logs/server.log) ))

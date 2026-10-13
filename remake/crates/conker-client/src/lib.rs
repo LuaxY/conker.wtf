@@ -27,6 +27,7 @@ pub mod projectiles;
 pub mod render;
 pub mod results;
 pub mod smooth;
+pub mod tank;
 pub mod traps;
 
 /// Browser fetches: the asset pack's data files and the connect token.
@@ -487,7 +488,9 @@ impl Aim {
 
 /// The local player's follow camera, the tick its player arrived (scripts count from it), what
 /// the camera left after each recent tick ([`Aim`], for rollbacks), the respawns it has cut to,
-/// and what the screen draws of the player after a correction ([`smooth::Drawn`]).
+/// and what the screen draws of the player after a correction ([`smooth::Drawn`]). In Tank,
+/// `follow` is the tank's view ([`tank::camera`]) and `tank` the on-foot camera the rules still
+/// take their aim gate from (as the server's), with the tank camera's state.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FollowCamera {
     pub follow: Follow,
@@ -495,6 +498,7 @@ pub struct FollowCamera {
     pub aims: [Aim; AIMS],
     pub lives: u16,
     pub drawn: smooth::Drawn,
+    pub tank: Option<(Follow, tank::Cam)>,
 }
 
 impl FollowCamera {
@@ -505,6 +509,7 @@ impl FollowCamera {
             aims: [Aim::default(); AIMS],
             lives,
             drawn: smooth::Drawn::default(),
+            tank: None,
         }
     }
 }
@@ -580,26 +585,29 @@ pub const DON_WEASO: &str = "134";
 
 /// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
 /// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`], the [`CASH`]
-/// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them).
+/// and [`DON_WEASO`] (their clips and sounds; no player is drawn as them), on 24 the tank
+/// ([`tank::MODEL`]).
 pub fn characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
     let vault = (map == "1a").then_some([WISE_GUY, CASH, DON_WEASO]);
+    let tank = (map == "24").then_some(tank::MODEL);
     PACK_CHARACTERS
         .into_iter()
         .chain(villagers)
         .chain(vault.into_iter().flatten())
+        .chain(tank)
         .collect()
 }
 
 /// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
-/// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], anyone else is
-/// its side's.
+/// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], a tank (24's)
+/// the tank, anyone else is its side's.
 pub fn body(c: &Combat) -> usize {
     match c.class {
         0x11..=0x20 => {
             PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
         }
-        1 => PACK_CHARACTERS.len(),
+        1 | conker_rules::tank::CLASS => PACK_CHARACTERS.len(),
         _ => c.side as usize,
     }
 }
@@ -1136,6 +1144,7 @@ pub fn match_settings(m: &MatchView) -> Settings {
         beach: m.beach,
         heist: m.heist,
         tank: m.tank,
+        raptor: m.raptor,
         ..Settings::default()
     }
 }
@@ -1222,6 +1231,9 @@ fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Co
     if map_scene(&cfg.map) == Some(conker_rules::traps::SCENE) {
         conker_rules::traps::seat(&mut world.0, m.plates);
     }
+    if m.tank {
+        conker_rules::tank::seat(&mut world.0, m.lifts);
+    }
 }
 
 /// Client-side prediction: [`own_tick`], then the follow camera with what the rules know of the
@@ -1277,18 +1289,28 @@ fn predict(
                 camera.follow = Follow::spawn(at.camera, &f.body);
                 camera.lives += 1;
                 camera.drawn = smooth::Drawn::default();
+                camera.tank = None;
                 info!(
                     "t={tick} predicted respawn on record {}: the camera cuts",
                     at.index
                 );
             }
-            camera
-                .follow
-                .step_view(f.camera_view(m.tick), &input.0, &world);
-            f.take_camera(&camera.follow);
-            camera.aims[tick as usize % AIMS] = Aim::of(f);
             let cam = &mut *camera;
+            if settings.tank && cam.tank.is_none() {
+                cam.tank = Some((cam.follow, tank::Cam::default()));
+            }
+            let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
+            foot.step_view(f.camera_view(m.tick), &input.0, &world);
+            f.take_camera(foot);
+            if let Some((_, state)) = &mut cam.tank {
+                tank::camera(&mut cam.follow, state, f, &input.0, &world);
+            }
+            cam.aims[tick as usize % AIMS] = Aim::of(f);
             cam.drawn.step(f, m.tick, &cam.follow, &input.0, &world);
+            // A tank's view follows the predicted hull through a correction.
+            if cam.tank.is_some() {
+                cam.drawn.camera = None;
+            }
         }
         player.0 = f.body;
         *fighting = Fighting::of(&m, i);
@@ -1386,6 +1408,10 @@ fn tick_anims(
             anim.1
         };
         let mut req = request_at(id, p.xz_speed, p.target_speed, percent);
+        // A tank's clips (idle, fire) play at 1 (I: `func_150ED638` sets no rate).
+        if combat.is_some_and(|c| c.class == conker_rules::tank::CLASS) {
+            (req.rate, req.blend) = (1.0, 4.0);
+        }
         if anim.0.id == NONE {
             req.blend = 0.0;
         }
@@ -1925,6 +1951,10 @@ mod tests {
         assert_eq!(drawn("1a", c(Side::Tediz, 0)), "117");
         assert_eq!(drawn("2b", c(Side::Squirrels, 0x14)), "156");
         assert_eq!(drawn("2b", c(Side::Squirrels, 0x1D)), "157");
+        assert_eq!(
+            drawn("24", c(Side::Tediz, conker_rules::tank::CLASS)),
+            "119"
+        );
         assert_eq!(characters("2d"), PACK_CHARACTERS);
     }
 }

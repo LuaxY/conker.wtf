@@ -76,7 +76,9 @@ use serde::{Deserialize, Serialize};
 /// ([`Combat::cook`]), the bullets' flight ([`BulletView`]).
 /// 28: Tank ([`MatchView::tank`], [`TankView`]; [`Combat::power`], `power_left`; the turret's
 /// yaw and the gun's pitch in `PlayerState`).
-pub const PROTOCOL_ID: u64 = 28;
+/// 29: War: Raptor ([`MatchView::raptor`], [`RaptorView`]; the raptor's class 9 in
+/// [`Combat::class`], its bites and drops in `anim`).
+pub const PROTOCOL_ID: u64 = 29;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -340,6 +342,30 @@ pub struct MatchView {
     /// `countdown` and its gas `gas`.
     pub tank: bool,
     pub tanks: TankView,
+    /// War: Raptor (conker-rules' `Settings::raptor`, `raptor`): the cavemen (team 0) against the
+    /// raptors (team 1, [`Combat::class`] 9); the score target `score_limit` and `scores` the
+    /// teams'; `winner` 0 or 1.
+    pub raptor: bool,
+    pub raptors: RaptorView,
+}
+
+/// War: Raptor's eggs, nest and bodies as the clients draw them (conker-rules' `raptor`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RaptorView {
+    /// The three eggs (uids 0x14-0x16): made by the script and not destroyed since; the carrier's
+    /// slot (the egg in its hands, `pos` following it; the carry's clips in its `anim`,
+    /// conker-rules' `raptor::EGG_IDLE`..`EGG_RUN`, the throw `Pose::EggThrow`); where.
+    pub eggs: [(bool, Option<u16>, [f32; 3]); 3],
+    /// The cooked eggs on the fire (props 0xFF − k): where shown, `None` hidden.
+    pub cooked: [Option<[f32; 3]>; 4],
+    /// The tick of the last nest drop: the baby eats from it for conker-rules' `raptor::EATS`
+    /// frames.
+    pub fed: Option<u32>,
+    /// Bit n: slot n's raptor holds a body (character 22) in its jaws.
+    pub prey: u16,
+    /// The bodies dropped: where, facing, and the drop's tick (each gone conker-rules'
+    /// `raptor::DROPPED` frames later).
+    pub drops: Vec<([f32; 3], u16, u32)>,
 }
 
 /// Tank's shells, bomb and wrecks as the clients draw them (conker-rules' `tank`).

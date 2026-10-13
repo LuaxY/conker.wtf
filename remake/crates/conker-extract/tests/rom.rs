@@ -113,8 +113,8 @@ fn slice_in_memory() {
     }
 
     // The weapons and the grenade in the hand: 17 models (the twin guns are two; map 0x1A's bat and
-    // tommy gun; War: Raptor's bone crossbow and knives), and the gas mask in the hand and on the
-    // head, one mesh each but the crossbows, child objects with a list per joint.
+    // tommy gun; War: Raptor's bone crossbow and knives), the gas mask in the hand and on the head,
+    // and Race's kick, one mesh each but the crossbows, child objects with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -122,7 +122,13 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 20);
+    assert_eq!(slice.held.len(), 21);
+    // Race's kick (clip 0x354): bank 09 #0x34 in the right hand from tick 5 to 30 (V k1 DL 250).
+    let kick = slice.held.iter().find(|h| h.entry == 0x34).unwrap();
+    assert_eq!(
+        (kick.joint, &kick.create[..], &kick.remove[..]),
+        (9, &[(0x354, 5.0)][..], &[(0x354, 30.0)][..])
+    );
     // The bat (bank 09 #0x38) in the right hand from its draw 0x10E (15 ticks in), away at 0x110
     // (its holster: the club's 0x2C3 is not it); the tommy gun (#0x5F) from 0x1DD at 11, away at
     // 0x1DE at 12 (ROM clip events, C).
@@ -1461,4 +1467,107 @@ fn raptor_models_and_outros() {
     assert_eq!(heads, [(true, true), (true, true), (false, true)]);
     let masks: Vec<_> = outros[1].actors().map(|a| a.mask).collect();
     assert_eq!(masks, [Some(2), Some(2), Some(2), None]);
+}
+
+/// Race's map 0x33 (`../lab/research/mp-original/race.md`, V runs L1, L2, k1, cls): 120 nav nodes
+/// and a 33-node lap from node 0x13 on each route, as the oracle's race table walks them; the four
+/// barriers by uid, two shown per scenario; the 7 power-ups; script 0xBC; the board on joint 23 and
+/// the bots' helmets on joint 12 by their actions; model 144 on the Tedi's rig.
+#[test]
+fn race_map_and_racers() {
+    let Some(rom) = rom() else { return };
+    let nav = rom.asset(&[0x19, 0x33]).unwrap();
+    assert_eq!(u16::from_be_bytes([nav[0], nav[1]]), 120);
+    let race = conker_extract::race_mode(&rom).unwrap();
+    let low: Vec<u8> = [19, 89, 20, 21, 22, 23, 24, 25, 84, 26, 86, 27, 28, 0, 1, 82]
+        .into_iter()
+        .chain(2..=18)
+        .collect();
+    let high: Vec<u8> = [19, 89, 20, 21, 22]
+        .into_iter()
+        .chain(58..=69)
+        .chain(3..=18)
+        .collect();
+    let routes: Vec<_> = (race.routes.iter())
+        .map(|r| (r.scenario, r.shown.clone(), r.lap.clone(), r.map.as_str()))
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            (11, vec![0, 3], low, "race_map_low"),
+            (12, vec![1, 2], high, "race_map_high")
+        ]
+    );
+    assert!(race.routes.iter().all(|r| r.lap.len() == 33));
+    assert_eq!(race.barriers, [0, 1, 2, 3]);
+    let placements = extract_scene::scene_placements(&rom, 0x33).unwrap();
+    let uids: Vec<u8> = (0..4).map(|i| placements[i].raw[0x33]).collect();
+    assert_eq!(uids, [0xFF, 0xFE, 0xFD, 0xFC]);
+    // Bundle segment `[4, 0x33, 4]` (dispatch 2, segment 4); the power-ups `[3, 100]` and `[3, 101]`.
+    assert!((0..4).all(|i| (placements[i].dispatch, placements[i].model) == (2, 4)));
+    let (pickups, spots) = conker_extract::pickup_table(&rom, 0x33).unwrap();
+    let kinds: Vec<_> = (pickups.iter())
+        .map(|p| {
+            let at = &placements[usize::from(p.placement)];
+            (p.placement, p.gives, (at.dispatch, at.model))
+        })
+        .collect();
+    let (canister, missiles) = ((0, 100), (0, 101));
+    let (c, m) = (
+        conker_rules::weapon::Gives::Weapon(0x31),
+        conker_rules::weapon::Gives::Weapon(0x33),
+    );
+    assert_eq!(
+        kinds,
+        [
+            (4, c, canister),
+            (5, c, canister),
+            (6, m, missiles),
+            (7, m, missiles),
+            (8, m, missiles),
+            (9, c, canister),
+            (10, m, missiles)
+        ]
+    );
+    assert!(spots.is_empty());
+    assert_eq!(conker_extract::ai_script(0x33), 0xBC);
+    assert!(!rom.asset(&[0x14, 0xBC]).unwrap().is_empty());
+    assert_eq!(extract_scene::scene_spawns(&rom, 0x33).unwrap().len(), 17);
+
+    // The board (action 0x79) and the helmets (0x76, 0x78, 0x77), bank-09 attachments.
+    let attached: Vec<_> = (conker_extract::race_attached(&rom).unwrap().iter())
+        .map(|h| (h.entry, h.joint, h.object))
+        .collect();
+    assert_eq!(
+        attached,
+        [
+            (0x5D, 23, false),
+            (0x5A, 12, false),
+            (0x5C, 12, false),
+            (0x5B, 12, false)
+        ]
+    );
+    let game_data = rom.game_data().unwrap();
+    let board = extract_character::parse_attachment(&rom.asset(&[9, 0x5D]).unwrap(), &game_data);
+    assert_eq!(board.unwrap()[0].vertices.len(), 64);
+    let at = |scene, joint| conker_assets::race::Attached { scene, joint };
+    assert_eq!(race.board, at(0, 23));
+    assert_eq!(
+        race.heads,
+        BTreeMap::from([(0xD, at(1, 12)), (0xE, at(2, 12)), (0xF, at(3, 12))])
+    );
+    let racers: Vec<_> = race.racers.iter().map(|(c, n)| (*c, n.as_str())).collect();
+    assert_eq!(
+        racers,
+        [
+            (0xB, "136"),
+            (0xC, "144"),
+            (0xD, "144"),
+            (0xE, "144"),
+            (0xF, "144")
+        ]
+    );
+    let tedi = extract_character::Character::load(&rom, 117).unwrap();
+    let racer = conker_extract::on_tedi_rig(&rom, conker_extract::RACER, &tedi).unwrap();
+    assert_eq!((racer.model.joints.len(), racer.model.lists.len()), (28, 2));
 }

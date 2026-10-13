@@ -64,7 +64,7 @@
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
-//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank] [--score 1-40|unlimited]
+//!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor] [--score 1-40|unlimited]
 //!   [--seed N]
 //!   [--cert PEM --cert-key PEM]
 //!   [--token-key FILE] [--token-addr ADDR:PORT] [--public IP[:PORT]]...
@@ -118,6 +118,12 @@
 //!   `--cavemen`, at most 7 bots: every player a tank (6 hp), free for all, ranked by kills as
 //!   Deathmatch; the level's AI script runs the bomb, the bunkers' doors and the gas (conker-rules'
 //!   `tank`); `TANK` lines log the bomb, the power-ups and the blasts' kills.
+//! - `--mode raptor`: the original's War: Raptor (scenario 2), on map 3f only and without
+//!   `--cavemen`: the cavemen (team 0, the club, the Ugas' camp) against the raptors (team 1, class
+//!   9: a human asking for the Tediz, and bots in slots 2 and 6 of each 8), lives never lost on the
+//!   clock; the level's AI script runs the eggs, the baby and the hazard (conker-rules' `raptor`);
+//!   kills, fed bodies (+1) and delivered eggs (+2) score, and the match ends on the clock or at
+//!   `--score` (1-40, default 20). `RAPTOR` lines log the script's egg and nest effects.
 //! - `RUST_LOG=info,conker_server=debug` logs every player every tick (`STATE`, `COMBAT` lines),
 //!   the events (`EVENT`) and, per bullet in play, the targets where its shooter saw them
 //!   (`LAGCOMP`).
@@ -142,15 +148,15 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors, heist, tank, traps};
+use conker_rules::{beach, colors, heist, raptor, tank, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
     BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
-    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, Restart, Saw, TankView, map_scene,
-    scene_world,
+    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, RaptorView, Restart, Saw, TankView,
+    map_scene, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -287,15 +293,20 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
             "--cavemen" => setup.cavemen = true,
             "--mode" => {
                 let s = &mut setup.settings;
-                (s.total_war, s.colors, s.beach, s.heist, s.tank) = match value()?.as_str() {
-                    "deathmatch" => (false, false, false, false, false),
-                    "total-war" => (true, false, false, false, false),
-                    "colors" => (false, true, false, false, false),
-                    "beach" => (false, false, true, false, false),
-                    "heist" => (false, false, false, true, false),
-                    "tank" => (false, false, false, false, true),
-                    v => return Err(bad(v)),
+                let mode = value()?;
+                let modes = ["total-war", "colors", "beach", "heist", "tank", "raptor"];
+                if mode != "deathmatch" && !modes.contains(&mode.as_str()) {
+                    return Err(bad(&mode));
                 }
+                let on = |m: &str| mode == m;
+                (s.total_war, s.colors, s.beach, s.heist, s.tank, s.raptor) = (
+                    on("total-war"),
+                    on("colors"),
+                    on("beach"),
+                    on("heist"),
+                    on("tank"),
+                    on("raptor"),
+                );
             }
             "--bots" => setup.bots = value()?.parse().map_err(|_| bad("bots"))?,
             "--seed" => setup.seed = value()?.parse().map_err(|_| bad("seed"))?,
@@ -366,6 +377,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Setup, Net), St
     if s.tank && setup.bots > 7 {
         return Err("--mode tank: at most 7 bots (8 players)".into());
     }
+    // Raptor is scenario 2, scene 0x3F's: its score target 1-40 (opt[18], default 20).
+    if s.raptor && (net.map != "3f" || setup.cavemen || s.score == 0) {
+        return Err("--mode raptor: map 3f only, without --cavemen, --score 1-40".into());
+    }
     for addr in net.public.iter_mut().filter(|a| a.port() == 0) {
         addr.set_port(net.port);
     }
@@ -402,7 +417,7 @@ fn main() {
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
-             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank] [--score 1-40|unlimited] [--seed N] \
+             [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach|heist|tank|raptor] [--score 1-40|unlimited] [--seed N] \
              [--cert PEM --cert-key PEM] [--token-key FILE] \
              [--token-addr ADDR:PORT] [--public IP[:PORT]]..."
         ))
@@ -427,7 +442,13 @@ fn main() {
     })
     .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
     let total_war = setup.settings.total_war;
-    let arena = arena(&pack, total_war, setup.settings.tank);
+    // Raptor: the bone weapons and grenades on their own placements (`raptor.json`).
+    let raptor = (setup.settings.raptor).then(|| {
+        conker_assets::raptor::Raptor::load(&net.map, |p| std::fs::read(dir.join(p)))
+            .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())))
+    });
+    let pickups = raptor.as_ref().map_or(&pack.pickups, |r| &r.pickups);
+    let arena = arena(&pack, pickups, total_war, setup.settings.tank);
     let world = scene_world(&pack, scene);
 
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
@@ -551,6 +572,7 @@ fn main() {
         (.., true) => "War: Beach",
         _ if settings.heist => "War: Heist",
         _ if settings.tank => "Tank",
+        _ if settings.raptor => "War: Raptor",
         _ => "Deathmatch",
     };
     info!("map {} (scene {scene:#X}), {mode}", net.map);
@@ -599,7 +621,7 @@ fn main() {
 /// The match's static data from the pack: the spawn records, and the pickups (what each gives, and
 /// where a player touches it; the gas masks only in Total War; Tank's power-ups, the pack's
 /// weapons 0x80, 0x01, 0x10 and 0x02, as their bits).
-fn arena(pack: &Slice, total_war: bool, tank: bool) -> Arena {
+fn arena(pack: &Slice, pickups: &[conker_assets::Pickup], total_war: bool, tank: bool) -> Arena {
     let spawns = (pack.spawns.iter())
         .map(|s| Spawn {
             pos: s.position,
@@ -610,7 +632,10 @@ fn arena(pack: &Slice, total_war: bool, tank: bool) -> Arena {
             b15: s.byte_15,
         })
         .collect();
-    let pickups = (pack.pickups.iter())
+    // The roaming pickups lead the table and share their spots (0x1A's k0-k3).
+    let roams = pickups.iter().take_while(|p| !p.roams.is_empty());
+    let respawn = pickups.first().and_then(|p| p.respawn).map(|vi| vi / 2);
+    let pickups = (pickups.iter())
         .filter(|p| total_war || p.gives != conker_assets::Gives::Mask)
         .map(|p| {
             let gives = match p.gives {
@@ -626,8 +651,6 @@ fn arena(pack: &Slice, total_war: bool, tank: bool) -> Arena {
             (pickup, p.position)
         })
         .collect();
-    // The roaming pickups lead the table and share their spots (0x1A's k0-k3).
-    let roams = pack.pickups.iter().take_while(|p| !p.roams.is_empty());
     Arena {
         spawns,
         pickups,
@@ -635,11 +658,7 @@ fn arena(pack: &Slice, total_war: bool, tank: bool) -> Arena {
             count: roams.clone().count(),
             spots: roams.map(|p| p.roams.clone()).next().unwrap_or_default(),
         },
-        respawn: pack
-            .pickups
-            .first()
-            .and_then(|p| p.respawn)
-            .map(|vi| vi / 2),
+        respawn,
     }
 }
 
@@ -764,6 +783,10 @@ impl Game {
     fn class(&self, side: Side) -> u8 {
         match (self.setup.settings.beach, side) {
             _ if self.setup.settings.tank => tank::CLASS,
+            _ if self.setup.settings.raptor => match side {
+                Side::Tediz => raptor::CLASS,
+                _ => raptor::CAVEMAN,
+            },
             (false, _) => u8::from(self.vault),
             (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
             (true, _) => beach::TEDI_CLASS,
@@ -817,6 +840,9 @@ impl Game {
         if s.total_war || s.colors || s.beach {
             return side as u8;
         }
+        if s.raptor {
+            return u8::from(side == Side::Tediz);
+        }
         self.joins += 1;
         (self.joins - 1) as u8
     }
@@ -827,7 +853,7 @@ impl Game {
         let taken = (0..self.m.players.len()).filter(|i| !self.m.free.contains(i));
         let (bots, humans): (Vec<usize>, Vec<usize>) = taken.partition(|&i| self.m.players[i].bot);
         let s = self.setup.settings;
-        let script = s.total_war || s.colors || s.beach || s.heist || s.tank;
+        let script = s.total_war || s.colors || s.beach || s.heist || s.tank || s.raptor;
         self.ai.restart(&humans, &bots, s.skill, self.m.rng, script);
     }
 
@@ -835,6 +861,8 @@ impl Game {
     /// (all cavemen in [`Game::cavemen`]): its fighter, and the entity clients see.
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
         let side = match self.cavemen {
+            // Raptor: 2 raptors in each 8 (I: the oracle's b1 and b2 had 2).
+            true if self.setup.settings.raptor && slot % 4 == 2 => Side::Tediz,
             true => Side::Cavemen,
             false if self.one_side() => Side::Squirrels,
             false => (self.capped([Side::Squirrels, Side::Tediz][slot % 2]))
@@ -1189,6 +1217,11 @@ fn join_player(
         .filter(|&s| !two_sides || s != Side::Cavemen)
         .filter(|_| !game.one_side())
         .unwrap_or_else(|| game.smaller_side());
+    // Raptor: the Tediz' pick plays a raptor, any other a caveman.
+    let side = match s.raptor && side != Side::Tediz {
+        true => Side::Cavemen,
+        false => side,
+    };
     let Some(side) = game.capped(side) else {
         // ponytail: the client stays connected with no player; a kick needs netcode's per-client
         // disconnect, which lightyear's server doesn't expose.
@@ -1347,6 +1380,9 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         Action::Hurt {
             lethal: true, step, ..
         } if f.class == tank::CLASS => u16::from(tank::RESPAWN.saturating_sub(step)),
+        Action::Hurt {
+            lethal: true, step, ..
+        } if f.class == raptor::CLASS => u16::from(raptor::DOWN_AT.saturating_sub(step)),
         Action::Hurt {
             reaction,
             lethal: true,
@@ -1673,6 +1709,10 @@ fn simulate(
                 Effect::Plunger(held) if *held != game.m.plunger.held => info!("BEACH t={t} {e:?}"),
                 // Heist's bag made and gone, and the voices.
                 Effect::Cash(_) | Effect::Voice(..) => info!("HEIST t={t} {e:?}"),
+                // Raptor's eggs, throws, nest drops and cooked eggs (not the turns).
+                Effect::Raptor(op) if !matches!(op, raptor::Op::Face(..)) => {
+                    info!("RAPTOR t={t} {op:?}")
+                }
                 Effect::Give(i, w)
                     if (game.m.players.get(*i)).is_some_and(|f| f.weapon.unwrap_or(0) != *w) =>
                 {
@@ -1753,6 +1793,9 @@ fn simulate(
             "BEACH t={t} villager down: scores {:?}",
             game.m.colors.scores
         );
+    }
+    if game.m.colors.scores != pre.colors.scores && game.m.settings.raptor {
+        info!("RAPTOR t={t} scores {:?}", game.m.colors.scores);
     }
     if game.m.ended_at.is_some() && pre.ended_at.is_none() {
         info!(
@@ -1934,7 +1977,7 @@ fn lag(
     let now: Vec<Option<[f32; 3]>> = (0..post.players.len())
         .map(|v| alive(v).then_some(post.players[v].body.pos))
         .collect();
-    let hitboxes: Vec<Hitbox> = post.players.iter().map(|f| Hitbox::of(f.side)).collect();
+    let hitboxes: Vec<Hitbox> = post.players.iter().map(Fighter::hitbox).collect();
     for b in tested_bullets(pre, events, world) {
         let saw: Vec<Option<[f32; 3]>> = (0..post.players.len())
             .map(|v| alive(v).then(|| seen(b.owner, v).unwrap_or(post.players[v].body.pos)))
@@ -2005,9 +2048,10 @@ fn publish(
         let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
         let hit = events.1.iter().rev().find(|h| h.0 == slot.index);
         c.hit = hit.map_or(combat_state.hit, |h| h.1);
-        if m.settings.colors || m.settings.beach || m.settings.heist {
-            // Colors and Beach: no life is lost; the team's score ranks the player (Heist's too).
-            if !m.settings.heist {
+        if m.settings.colors || m.settings.beach || m.settings.heist || m.settings.raptor {
+            // Colors and Beach: no life is lost; the team's score ranks the player (Heist's and
+            // Raptor's too).
+            if m.settings.colors || m.settings.beach {
                 c.lives_left = colors::LIVES;
             }
             c.score = standings
@@ -2148,6 +2192,16 @@ fn publish(
             wrecks: (m.wrecks().into_iter())
                 .map(|(k, pos, facing)| (k as u16, pos, facing))
                 .collect(),
+        },
+        raptor: s.raptor,
+        raptors: RaptorView {
+            eggs: (m.raptor.eggs).map(|e| (e.shown, e.carrier.map(|c| c as u16), e.pos)),
+            cooked: m.raptor.cooked,
+            fed: m.raptor.fed,
+            prey: (m.players.iter().enumerate())
+                .filter(|(i, f)| f.prey && !m.free.contains(i))
+                .fold(0, |b, (i, _)| b | 1 << i),
+            drops: m.raptor.drops.clone(),
         },
     });
 }
@@ -2703,6 +2757,62 @@ mod tests {
             );
             assert_eq!(f[s].spawn_mask, !0);
         }
+    }
+
+    /// Raptor: map 3f only, `--score` 1-40 (default 20); bots in slots 2 and 6 of each 8 are
+    /// raptors (team 1, class 9, the raptors' base), the others cavemen (team 0, class 0xB, the
+    /// Ugas'), all with the club (a raptor never draws it, V); the outro by the winning team.
+    #[test]
+    fn raptor_teams_and_outros() {
+        let settings = |list: &[&str]| parse_args(args(list)).map(|(s, _)| s.settings);
+        let r = settings(&["--mode", "raptor", "--map", "3f"]).unwrap();
+        assert!(r.raptor && !r.colors && r.score == raptor::SCORE);
+        let forty = settings(&["--mode", "raptor", "--map", "3f", "--score", "40"]);
+        assert_eq!(forty.unwrap().score, 40);
+        for bad in [
+            &["--mode", "raptor"][..],
+            &["--mode", "raptor", "--map", "2d"],
+            &["--mode", "raptor", "--map", "3f", "--score", "41"],
+            &["--mode", "raptor", "--map", "3f", "--score", "unlimited"],
+            &["--mode", "raptor", "--map", "3f", "--cavemen"],
+        ] {
+            assert!(parse_args(args(bad)).is_err(), "{bad:?}");
+        }
+        let arena = Arena {
+            spawns: (0..32).map(|i| record([i * 100, 0, 0], 64)).collect(),
+            ..Default::default()
+        };
+        let setup = Setup {
+            settings: r,
+            bots: 7,
+            ..Setup::default()
+        };
+        let mut g = Game::new(arena, setup);
+        (g.cavemen, g.starts) = (true, starts(0x3F).unwrap());
+        for slot in 0..7 {
+            let _ = g.join_bot(slot);
+        }
+        let (mut cavemen, mut raptors) = (0, 0);
+        for (s, f) in g.m.players.iter().enumerate() {
+            let raptor = s == 2 || s == 6;
+            let k = if raptor { &mut raptors } else { &mut cavemen };
+            let record = g.starts.sides[usize::from(raptor)][*k];
+            *k += 1;
+            assert!((f.body.pos[0] - 100.0 * f32::from(record)).abs() <= 40.0);
+            let want = match raptor {
+                true => (Side::Tediz, 1, raptor::CLASS),
+                false => (Side::Cavemen, 0, raptor::CAVEMAN),
+            };
+            assert_eq!((f.side, f.team, f.class), want, "slot {s}");
+            assert_eq!(f.start, Some(weapon::CLUB.id));
+        }
+        g.outros = vec![(0, 2, 765), (1, 4, 415)];
+        g.m.ended_at = Some(100);
+        let over = 100 + END_DELAY + FADE + 1;
+        g.m.colors.scores = [20, 7];
+        assert_eq!((g.winner(), g.results_at()), (Some(0), Some(over + 765)));
+        g.m.colors.scores = [9, 20];
+        assert_eq!((g.winner(), g.results_at()), (Some(1), Some(over + 415)));
     }
 
     /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,

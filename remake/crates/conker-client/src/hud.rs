@@ -138,7 +138,19 @@ pub struct Shown {
     pub strike: Option<u32>,
     /// War: Heist: its strip ([`Hud::heist`]) in place of the kills and rank; its STATS.
     pub heist: Option<Bags>,
+    /// Tank: `weapon` is the power-up held, its icon one of [`TANK_ICONS`]; the scope has no dots.
+    pub tank: bool,
 }
+
+/// Tank's power-up icons at the weapon icon's place, in `atlas2`: the boost (0x01), the scope
+/// (0x02), the deadly shells (0x10) and the shield (0x80) (V pw1 DLs 106, 166, 226, 370; pw2 to
+/// 1240, gone with the shield at 1250). No count or timer is drawn with them.
+pub const TANK_ICONS: [(u8, [u16; 4]); 4] = [
+    (conker_rules::tank::BOOST, [0, 25, 22, 14]),
+    (conker_rules::tank::SCOPE, [0, 16, 22, 9]),
+    (conker_rules::tank::SHELLS, [0, 39, 22, 12]),
+    (conker_rules::tank::SHIELD, [0, 4, 22, 12]),
+];
 
 /// War: Heist's strip: each team's bags, the score limit (the pips per team), whether a team has a
 /// participant with lives (else its skull), and the carrying team while the blink shows the "+1"
@@ -947,7 +959,15 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         }
         None => {
             let w = &hud.weapon;
-            if let Some(icon) = w.icons.get(&s.weapon) {
+            let power = (TANK_ICONS.iter().find(|i| s.tank && i.0 == s.weapon)).map(|i| Picture {
+                texture: "atlas2".into(),
+                rect: i.1,
+            });
+            let icon = match s.tank {
+                true => power.as_ref(),
+                false => w.icons.get(&s.weapon),
+            };
+            if let Some(icon) = icon {
                 let [_, _, iw, ih] = icon.rect.map(f32::from);
                 let [x, y] = w.at.map(f32::from);
                 out.push(quad(icon, [x, y, iw, ih], w.anchor, white, 3.0));
@@ -1064,9 +1084,9 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 6.5,
             ));
             // Each dot's rect: its centre ± half its size, truncated to quarter pixels (V scopeB
-            // DL 230, exact).
+            // DL 230, exact). The tank's scope has none (V pw2 DLs 172-195).
             let (d, q) = (c.dot_size / 2.0, |v: f32| (v * 4.0).trunc() / 4.0);
-            for k in 0..c.dots {
+            for k in (0..c.dots).filter(|_| !s.tank) {
                 let a = core::f32::consts::TAU * f32::from(k) / f32::from(c.dots) + s.turn;
                 let (x, y) = (cx + c.radius * a.sin(), cy + c.radius * a.cos());
                 let [x0, y0] = [q(x - d), q(y - d)];
@@ -1514,6 +1534,8 @@ fn shown(
         // Carrying the bag: no weapon icon (V hud1 DL 341; back at 401).
         weapon: if gun.is_some() {
             conker_camera::GUN
+        } else if m.tank {
+            c.power
         } else if carrier == Some(c.slot) {
             0
         } else {
@@ -1526,8 +1548,10 @@ fn shown(
         radar: m.radar && !m.beach,
         blips,
         reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
-        scope: (scope.on && gun.is_none())
-            .then(|| scope.zoom[0] / conker_camera::zoom_limit(c.weapon)),
+        scope: (scope.on && gun.is_none()).then(|| {
+            let weapon = if m.tank { scope.weapon } else { c.weapon };
+            scope.zoom[0] / conker_camera::zoom_limit(weapon)
+        }),
         turn: dot_turn(scope.zoom),
         tint: None,
         gun,
@@ -1556,6 +1580,7 @@ fn shown(
             alive,
             carrying,
         }),
+        tank: m.tank,
     }
 }
 
@@ -2519,6 +2544,58 @@ mod tests {
             [1, 2, 32, 132, 134, 136, 146, 148, 150].map(alpha),
             [4, 8, 128, 128, 0x70, 0x60, 0x10, 0, 0]
         );
+    }
+
+    /// Tank's HUD (`../lab/research/mp-original/tank-client-scratch/draws_*`): Deathmatch's with
+    /// the power-up's icon at the weapon's place from `atlas2` (pw1 DLs 106 boost, 190 scope, 250
+    /// shells, 346 shield), none without one (s0 200); through the scope (pw2 DLs 172-195) the
+    /// back, the ring and the bar ([54, 67.5, 4, 80.75], within the client's unrounded half
+    /// pixel), no dots. The countdown and the gas haze are Total War's (bm1 DLs 62-300, 335-360).
+    #[test]
+    fn tank_matches_the_originals_draws() {
+        let Some(hud) = pack_hud() else { return };
+        let tank = |power| Shown {
+            weapon: power,
+            tank: true,
+            ..state()
+        };
+        let icon = |power| rects(&hud, &tank(power), &texture("atlas2"));
+        assert_eq!(
+            icon(0x01),
+            [([260.0, 5.0, 22.0, 14.0], [0.0, 25.0, 22.0, 39.0])]
+        );
+        assert_eq!(
+            icon(0x02),
+            [([260.0, 5.0, 22.0, 9.0], [0.0, 16.0, 22.0, 25.0])]
+        );
+        assert_eq!(
+            icon(0x10),
+            [([260.0, 5.0, 22.0, 12.0], [0.0, 39.0, 22.0, 51.0])]
+        );
+        assert_eq!(
+            icon(0x80),
+            [([260.0, 5.0, 22.0, 12.0], [0.0, 4.0, 22.0, 16.0])]
+        );
+        assert!(icon(0).is_empty() && icon(0x09).is_empty());
+        let zoom = -38.7 / conker_camera::zoom_limit(0x1F);
+        let scoped = Shown {
+            scope: Some(zoom),
+            ..tank(0x02)
+        };
+        assert!(rects(&hud, &scoped, &texture("scope_dot")).is_empty());
+        assert_eq!(rects(&hud, &scoped, &texture("scope")).len(), 4);
+        let solid: Vec<_> = (sprites(&hud, &scoped).into_iter())
+            .filter(|q| q.tex == Tex::Solid)
+            .map(|q| (q.rect, q.colour[3]))
+            .collect();
+        assert_eq!(solid[0], ([52.0, 46.0, 8.0, 124.0], 65));
+        let (bar, alpha) = solid[1];
+        let want = [54.0, 67.5, 4.0, 80.75];
+        assert!(
+            bar.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.6),
+            "{bar:?}"
+        );
+        assert_eq!(alpha, 0x82);
     }
 
     /// Total War's strip where the original drew it (the gas run's DL 3000: timed, Tediz 4,

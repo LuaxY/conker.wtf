@@ -4,10 +4,10 @@
 
 export type Side = "squirrels" | "tediz";
 
-export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist" | "tank";
+export type Mode = "deathmatch" | "total-war" | "colors" | "beach" | "heist" | "tank" | "raptor";
 /** `conker-server --mode`; whether the mode has a kill limit, lives to lose and a score target,
- * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; Heist and Tank: at most 7
- * bots). */
+ * and its own limits (War: Heist's 1-5 bags, default 3, no unlimited; War: Raptor's 1-40, default
+ * 20, no unlimited; Beach: at most 10 bots, Heist and Tank: 7). */
 export interface ModeInfo {
   name: string;
   kills: boolean;
@@ -21,7 +21,7 @@ export const MODES: Record<Mode, ModeInfo> = {
   deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false },
   "total-war": { name: "War: Total War", kills: false, lives: true, score: false },
   colors: { name: "War: Colors", kills: false, lives: false, score: true },
-  beach: { name: "War: Beach", kills: false, lives: false, score: true },
+  beach: { name: "War: Beach", kills: false, lives: false, score: true, maxBots: 10 },
   heist: {
     name: "War: Heist",
     kills: false,
@@ -32,6 +32,14 @@ export const MODES: Record<Mode, ModeInfo> = {
     maxBots: 7,
   },
   tank: { name: "Tank", kills: true, lives: true, score: false, maxBots: 7 },
+  raptor: {
+    name: "War: Raptor",
+    kills: false,
+    lives: true,
+    score: true,
+    maxScore: 40,
+    defaultScore: 20,
+  },
 };
 
 export type MapId = "1a" | "24" | "2b" | "2d" | "30" | "34" | "3f";
@@ -47,11 +55,19 @@ export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }>
     modes: ["tank"],
     note: "Everyone is a tank, free for all; the bomb gasses everyone outside a bunker. At most 7 bots.",
   },
-  "2b": { name: "Beach 0x2B", modes: ["deathmatch", "beach"] },
+  "2b": {
+    name: "Beach 0x2B",
+    modes: ["deathmatch", "beach"],
+    note: "Beach: the villagers escape, at most 2 Tediz shoot; at most 10 bots (8 villagers, 2 Tediz).",
+  },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
   "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },
   "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
-  "3f": { name: "Temple 0x3F", modes: ["deathmatch"], note: "The bots are cavemen on this map." },
+  "3f": {
+    name: "Temple 0x3F",
+    modes: ["deathmatch", "raptor"],
+    note: "The bots are cavemen on this map. Raptor: cavemen against raptors (a Tediz pick plays a raptor; 2 bots in 8 are raptors).",
+  },
 };
 
 /** The bots' skill (`--skill`), as the original's SET-UP screen names them. */
@@ -68,8 +84,8 @@ export interface Settings {
   lives: number;
   /** 0-10, the kill limit (0: none): only in modes that have one. */
   kills: number;
-  /** The score to win, 1-40, or none: only in modes that have one (War: Colors, War: Beach; War:
-   * Heist's bags 1-5). */
+  /** The score to win, 1-40, or none: only in modes that have one (War: Colors, War: Beach, War:
+   * Raptor without none; War: Heist's bags 1-5). */
   score: number | "unlimited";
   radar: boolean;
 }

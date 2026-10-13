@@ -21,8 +21,8 @@ pub use conker_assets::{ClipInfo, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, RootC
 use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
-    Character, DEATHMATCH_PLAYER, FPS, ROUTE_BANK, SQUIRREL_SOLDIER, bind_pivots, held_models,
-    matrix_slot, parse_attachment, parse_effect, parse_model, parse_routes,
+    Character, DEATHMATCH_PLAYER, FPS, ROUTE_BANK, SQUIRREL_SOLDIER, action_records, bind_pivots,
+    held_models, matrix_slot, parse_attachment, parse_effect, parse_model, parse_routes,
 };
 use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
 use extract_gbi::Material;
@@ -45,11 +45,12 @@ pub const SLICE_CHARACTER: usize = DEATHMATCH_PLAYER;
 /// and taken off (0x151, 0x14E: bank-09 #67 in the hand, #66 on the head), then the draws of
 /// map 0x1A's bat (0x19: 0x10E) and tommy gun (0x38: 0x1DD) (C `func_15065A5C`), then War: Raptor's
 /// bone crossbow (0x41: 0x2C8, action 46, bank-01 #0x2F as a child object) and bone knives (0x3F:
-/// 0x2CA, action 47, bank-09 #0x7B) (V `../lab/research/mp-original/raptor.md` r9, r10). The held
+/// 0x2CA, action 47, bank-09 #0x7B) (V `../lab/research/mp-original/raptor.md` r9, r10), then Race's
+/// kick (0x354: action 0x52, bank-09 #0x34 on the hand from tick 5 to 30; V k1 DL 250). The held
 /// list sorts by the game's action number, not by this order (the club's model is scene 4).
-pub const HELD_CLIPS: [u16; 19] = [
+pub const HELD_CLIPS: [u16; 20] = [
     0x7B, 0x1EE, 0x163, 0x152, 0x168, 0x120, 0x15D, 0x102, 0x76, 0x176, 0xFB, 0x1F7, 0x2C2, 0x151,
-    0x14E, 0x10E, 0x1DD, 0x2C8, 0x2CA,
+    0x14E, 0x10E, 0x1DD, 0x2C8, 0x2CA, 0x354,
 ];
 /// The caveman (class 0xB): scene 0x3F's Deathmatch bots (V oracle, `lab/oracle/caveman_README.md`).
 pub const CAVEMAN: usize = 136;
@@ -94,6 +95,13 @@ pub const BODY: usize = 22;
 const BABY_UID: u8 = 0x11;
 const BODY_UID: u8 = 0x13;
 const EGG_UIDS: [u8; 3] = [0x14, 0x15, 0x16];
+/// Scene 0x33: Race's map (scenarios 11 and 12, `../lab/research/mp-original/race.md`).
+pub const RACE_MAP: usize = 0x33;
+/// Race's bots (classes 0xC-0xF, obj+4 = 0x90; V cls), on the Tedi's rig and clips; a human racer
+/// (class 0xB) is model 136 (V obj+4 = 0x88), the [`CAVEMAN`]'s.
+pub const RACER: usize = 144;
+/// Map 0x33's AI script, `[0x14, 0xBC]` (race.md §4.3): conker-bots' `script` does not map 0x33 yet.
+const RACE_AI: usize = 0xBC;
 
 /// Bank-01 model `entry` with every clip it plays: the baby's are the raptor's (its character byte
 /// +6 is 83, V r3 obj+6; its own bank-02 entry is empty), the others' their animation entry's.
@@ -484,9 +492,15 @@ fn clips(character: &Character) -> (Vec<ClipInfo>, Vec<RootClip>) {
 /// listing its parts' nodes.
 fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
     let held = held_models(rom, SLICE_CHARACTER, &HELD_CLIPS)?;
+    let (models, scenes) = attached_level(rom, &held)?;
+    Ok((held, models, scenes))
+}
+
+/// The models of `held` as [`held_level`] lays them out: a glTF scene each.
+fn attached_level(rom: &Rom, held: &[Held]) -> Result<(Level, Value)> {
     let game_data = rom.game_data()?;
     let (mut models, mut scenes) = (Level::default(), Vec::new());
-    for h in &held {
+    for h in held {
         let (bank, parts) = match h.object {
             true => {
                 let model = parse_model(&rom.asset(&[0x01, h.entry])?)?;
@@ -520,14 +534,15 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
             });
         }
     }
-    Ok((held, models, scenes.into()))
+    Ok((models, scenes.into()))
 }
 
 /// The models the original draws for the projectiles in flight, glTF scene `i` of `projectiles.gltf`
 /// each (`../lab/research/mp-original/visuals-scratch`, oracle runs gren4, rocket, knife, bolt2): the
 /// thrown grenade (bank 01 #0x7E, one joint), the rocket (bank 09 #0xE1), weapon 0x14's knife
 /// (#0x23) and the crossbow's bolt (#0x35, also drawn in the crossbow), and Tank's shell (#0x33,
-/// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`), and War: Raptor's
+/// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`; Race's missile, drawn
+/// at 1.0: V m1 DL 224, `../lab/research/mp-original/race-pack-scratch`), and War: Raptor's
 /// bone knife (0x3F: #0x7C, action 34, V k1 DLs 97 on, `../lab/research/mp-original/raptor-pack-scratch`;
 /// the bone crossbow's bolt is #0x35, V c1), at the origin with +z along the flight. A bullet has no
 /// model in flight (V twin DLs 104-110: only the muzzle flash).
@@ -782,7 +797,8 @@ pub fn map_name(scene: usize) -> String {
 /// the [`WISE_GUY`] after them (its team looks) and Heist's [`CASH`]; with 0x24, the [`TANK`] after
 /// them (its flags, lights and parts, [`tank`]) and the map's props; with 0x3F, the [`RAPTOR`] last,
 /// War: Raptor's [`BABY`], [`EGG`] and [`BODY`] (every clip), its props and `raptor.json`
-/// ([`raptor_mode`]).
+/// ([`raptor_mode`]); with 0x33, Race's bots' [`RACER`] after them (its looks), the board and
+/// helmets as the map's props and `race.json` ([`race_mode`]).
 pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let textures = rom.textures()?;
     let tedi = Character::load(rom, SLICE_CHARACTER)?;
@@ -805,15 +821,18 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let (tank, tank_looks) = tank.unzip();
     let temple = maps.iter().any(|m| m.scene == TEMPLE);
     let raptor = (temple.then(|| Character::load(rom, RAPTOR))).transpose()?;
+    let race = maps.iter().any(|m| m.scene == RACE_MAP);
+    let racer = (race.then(|| on_tedi_rig(rom, RACER, &tedi))).transpose()?;
     characters.extend(
         ([tedi, caveman].into_iter())
             .chain(villagers)
             .chain(wise_guy)
             .chain(tank)
-            .chain(raptor),
+            .chain(raptor)
+            .chain(racer),
     );
-    // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank and the raptor: each folder is
-    // its bank-01 entry.
+    // `PACK_CHARACTERS`, then the villagers, the Wise Guy, the tank, the raptor and the racer: each
+    // folder is its bank-01 entry.
     let entries: Vec<usize> = characters.iter().map(|c| c.entry).collect();
     let names: Vec<String> = entries.iter().map(usize::to_string).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -900,7 +919,10 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
                 raptor_mode(rom)?.to_json(),
             );
         }
-        if matches!(map.scene, SLICE_SCENE | TANK_MAP | TEMPLE) {
+        if map.scene == RACE_MAP {
+            out.add(assets::race::race_json(&name), race_mode(rom)?.to_json());
+        }
+        if matches!(map.scene, SLICE_SCENE | TANK_MAP | TEMPLE | RACE_MAP) {
             let (props, scenes) = props_level(rom, map.scene)?;
             let props = held_gltf(&props, scenes, &textures, "props.bin")?;
             let json = parse(&props.json)?;
@@ -1079,8 +1101,11 @@ pub fn solid_placements(scene: usize) -> Vec<usize> {
 /// canister's model (3/85) at the origin, for a carrier's hands (a worn mask is a held model,
 /// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place; on 0x3F War: Raptor's, scene 0
 /// its [`hidden_placements`] in place (the cooked eggs 0-3, the never-shown 4-6, the bone weapons
-/// 15-22).
+/// 15-22); on 0x33 Race's board and helmets ([`race_attached`]), a scene each at the origin.
 pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
+    if scene_id == RACE_MAP {
+        return attached_level(rom, &race_attached(rom)?);
+    }
     let props: &[usize] = match scene_id {
         SLICE_SCENE => &TOTAL_WAR_PROPS,
         _ => hidden_placements(scene_id),
@@ -1351,8 +1376,11 @@ fn node_spot(nav: &[u8], id: u8) -> Result<[i16; 3]> {
 }
 
 /// A map's pickups and, when the game moves them off their placements, their spots (conker-rules'
-/// `weapon::pickups`, and [`roaming`]'s from the navigation graph).
+/// `weapon::pickups`, [`roaming`]'s from the navigation graph, and 0x33's [`RACE_PICKUPS`]).
 pub fn pickup_table(rom: &Rom, scene: usize) -> Result<(Vec<weapon::Pickup>, Vec<[i16; 3]>)> {
+    if scene == RACE_MAP {
+        return Ok((RACE_PICKUPS.to_vec(), vec![]));
+    }
     if let Some(r) = roaming(scene) {
         let nav = rom.asset(&[0x19, scene])?;
         let spots = (r.start.iter())
@@ -1512,12 +1540,160 @@ fn raptor_mode(rom: &Rom) -> Result<assets::raptor::Raptor> {
     })
 }
 
-/// A map's AI script (`[0x14, id]`): conker-bots' `script`, 0x1A's [`VAULT_AI`] and 0x24's
-/// [`TANK_AI`].
+/// Race's power-ups on 0x33 in the script's order (script 0xBC's handles 0x3001-0x3007 at G+0x1D4,
+/// the placements' uids 1-7; their types at G+0x20C; C, V L1): canisters `[3, 100]` (4, 5, 9) and
+/// missiles `[3, 101]` (6, 7, 8, 10), as the item a racer holds (s126+0x75 less 0x80: 0x31, 0x33; V w4).
+const RACE_PICKUPS: [weapon::Pickup; 7] = [
+    pick(4, Gives::Weapon(0x31)),
+    pick(5, Gives::Weapon(0x31)),
+    pick(6, Gives::Weapon(0x33)),
+    pick(7, Gives::Weapon(0x33)),
+    pick(8, Gives::Weapon(0x33)),
+    pick(9, Gives::Weapon(0x31)),
+    pick(10, Gives::Weapon(0x33)),
+];
+/// VIs until a taken power-up is back: 9 frames (script 0xBC 0x16A8; V L1 541 → 551).
+const RACE_RESPAWN: u16 = 18;
+/// The bots' looks on [`RACER`], class → the display lists it hides (obj+0x94; C `func_15083384`,
+/// V cls: 2 on the class-0xF bots only).
+const RACER_LOOKS: [(u8, u8); 4] = [(0xC, 0), (0xD, 0), (0xE, 0), (0xF, 2)];
+/// The routes: the scenario, the barriers it shows by uid (script 0xBC shows 0x30FE/0x30FD when the
+/// route flag `0x8008FDBC & 0x40` is set, scenario 12, else 0x30FF/0x30FC; C, V L1, L2) and its
+/// overview map (`hud.json`'s; C `func_150918EC`, V k1, b2: blobs 0xCF1, 0xCF2).
+const RACE_ROUTES: [(u8, [u8; 2], &str); 2] = [
+    (11, [0xFF, 0xFC], "race_map_low"),
+    (12, [0xFE, 0xFD], "race_map_high"),
+];
+/// The start line's node id (script 0xBC's `command(0xF000, 0x11, 0x13, ..)`, C) and the one
+/// behind it (the lap's last, V L1, L2).
+const RACE_START: [u8; 2] = [0x13, 0x12];
+/// The board's action (script 0xBC's player command 0x78 → `func_15097A8C` → `func_15083568(obj,
+/// 0x79, ..)`; V k1, cls) and the helmets' by bot class (C `func_15083384`, V cls).
+const RACE_BOARD: u32 = 0x79;
+const RACE_HEADS: [(u8, u32); 3] = [(0xD, 0x76), (0xE, 0x78), (0xF, 0x77)];
+/// The racers' classes: the humans' (model 136) and the bots' ([`RACER`]) (V cls).
+const RACE_HUMAN: u8 = 0xB;
+const RACE_BOTS: std::ops::RangeInclusive<u8> = 0xC..=0xF;
+
+/// Race's board, then the helmets of [`RACE_HEADS`], as their actions attach them (one bank-09
+/// model on a matrix slot each): `props.gltf`'s scenes on 0x33.
+pub fn race_attached(rom: &Rom) -> Result<Vec<Held>> {
+    let game_data = rom.game_data()?;
+    let actions = std::iter::once(RACE_BOARD).chain(RACE_HEADS.map(|h| h.1));
+    actions
+        .map(|a| {
+            let records = action_records(&game_data, a)?;
+            let &[r] = records.as_slice() else {
+                anyhow::bail!("action {a:#x}: {} records", records.len())
+            };
+            Ok(Held {
+                entry: usize::from(r[0]),
+                object: r[3] == 0,
+                joint: r[1],
+                create: vec![],
+                remove: vec![],
+            })
+        })
+        .collect()
+}
+
+/// One lap of a route (`high`: scenario 12's) on navigation graph `nav`, node indices from the
+/// start's: each next node is `func_150888A8`'s pick among the links (+9..+0xD) but the node it
+/// came from, of those with +0xE 0: the first whose +0xF is not the other route's (1 on 12, 2 on
+/// 11), or a later one marked for a route (+0xF not 0); else one of the other route's (C; V L1, L2:
+/// the oracle's race-table nodes).
+fn race_lap(nav: &[u8], high: bool) -> Result<Vec<u8>> {
+    let count = usize::from(u16::from_be_bytes([nav[0], nav[1]]));
+    let nodes = (nav.get(4..4 + 16 * count))
+        .context("short navigation graph")?
+        .as_chunks::<16>()
+        .0;
+    let node = |i: u8| {
+        nodes
+            .get(usize::from(i))
+            .with_context(|| format!("no node {i}"))
+    };
+    let index = |id: u8| {
+        (nodes.iter().position(|r| r[7] == id))
+            .map(|i| i as u8)
+            .with_context(|| format!("no node id {id:#x}"))
+    };
+    let other = if high { 1 } else { 2 };
+    let (start, mut prev) = (index(RACE_START[0])?, index(RACE_START[1])?);
+    let mut lap = vec![start];
+    loop {
+        let at = lap[lap.len() - 1];
+        let (mut pick, mut fallback) = (None, None);
+        for (k, &l) in node(at)?[9..14].iter().enumerate() {
+            if l == 0xFF || l == prev || node(l)?[0xE] != 0 {
+                continue;
+            }
+            if node(l)?[0xF] == other {
+                fallback = Some(l);
+            } else if k == 0 || pick.is_none() || node(l)?[0xF] != 0 {
+                pick = Some(l);
+            }
+        }
+        let next = (pick.or(fallback)).with_context(|| format!("node {at}: no way on"))?;
+        if next == start {
+            return Ok(lap);
+        }
+        anyhow::ensure!(lap.len() < count, "the lap does not come back to its start");
+        prev = at;
+        lap.push(next);
+    }
+}
+
+/// `maps/33/race.json` from the ROM: the scene's placements (the barriers by uid), its navigation
+/// graph (the laps) and the board's and helmets' actions (their joints).
+pub fn race_mode(rom: &Rom) -> Result<assets::race::Race> {
+    use assets::race::{Attached, Race, Route};
+    let placements = scene_placements(rom, RACE_MAP)?;
+    let barrier = |uid: u8| {
+        (placements.iter())
+            .position(|p| p.raw[outro::PLACEMENT_UID] == uid)
+            .map(|i| i as u16)
+            .with_context(|| format!("0x33: no barrier {uid:#x}"))
+    };
+    let nav = rom.asset(&[0x19, RACE_MAP])?;
+    let routes = (RACE_ROUTES.iter())
+        .map(|&(scenario, uids, map)| {
+            Ok(Route {
+                scenario,
+                shown: uids.into_iter().map(barrier).collect::<Result<_>>()?,
+                lap: race_lap(&nav, scenario == 12)?,
+                map: map.into(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut barriers: Vec<u16> = routes.iter().flat_map(|r| r.shown.clone()).collect();
+    barriers.sort_unstable();
+    let attached = race_attached(rom)?;
+    let at = |k: usize| Attached {
+        scene: k,
+        joint: attached[k].joint,
+    };
+    let bots = RACE_BOTS.map(|c| (c, RACER.to_string()));
+    Ok(Race {
+        barriers,
+        routes,
+        racers: std::iter::once((RACE_HUMAN, CAVEMAN.to_string()))
+            .chain(bots)
+            .collect(),
+        board: at(0),
+        heads: (RACE_HEADS.iter().enumerate())
+            .map(|(k, h)| (h.0, at(k + 1)))
+            .collect(),
+    })
+}
+
+/// A map's AI script (`[0x14, id]`): conker-bots' `script`, 0x1A's [`VAULT_AI`], 0x24's
+/// [`TANK_AI`] and 0x33's [`RACE_AI`].
 pub fn ai_script(scene: usize) -> usize {
     match scene {
         VAULT => VAULT_AI,
         TANK_MAP => TANK_AI,
+        RACE_MAP => RACE_AI,
         _ => conker_bots::script(scene),
     }
 }
@@ -1585,7 +1761,8 @@ fn pack_data(
                 position: (spots.get(k).copied())
                     .unwrap_or(placements[usize::from(p.placement)].position)
                     .map(f32::from),
-                respawn: roaming.as_ref().map(|r| r.respawn),
+                respawn: (roaming.as_ref().map(|r| r.respawn))
+                    .or((scene == RACE_MAP).then_some(RACE_RESPAWN)),
                 roams: match roaming.as_ref().is_some_and(|r| k < r.roamers) {
                     true => roams.clone(),
                     false => vec![],
@@ -1630,6 +1807,7 @@ fn character_file(rom: &Rom, c: &Character) -> Result<assets::Character> {
                     .filter(|l| l.0 == c.entry)
                     .map(|l| (k, l.1))
             })
+            .chain(RACER_LOOKS.into_iter().filter(|_| c.entry == RACER))
             .collect(),
         teams: (matches!(c.entry, WISE_GUY | TANK))
             .then(|| team_material(c, &team_ids(rom, c.entry)?))

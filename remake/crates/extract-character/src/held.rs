@@ -88,17 +88,11 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
     actions.dedup();
     let mut held = Vec::new();
     for action in actions {
-        let header = data_at(&game_data, ACTIONS + 8 * (action as usize - 1), 8)?;
-        let records = data_at(
-            &game_data,
-            be32(header, 0)? as usize,
-            16 * header[4] as usize,
-        )?;
         let of = |creates: bool| {
             let e = events.iter().filter(|e| e.3 == action && e.2 == creates);
             e.map(|e| (e.0, e.1)).collect()
         };
-        for r in records.as_chunks::<16>().0 {
+        for r in action_records(&game_data, action)? {
             held.push(Held {
                 entry: r[0] as usize,
                 object: r[3] == 0,
@@ -109,6 +103,18 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
         }
     }
     Ok(held)
+}
+
+/// The 16-byte records of action `action` (`func_15083568`: byte 0 the entry, 1 the matrix slot,
+/// 3 the kind), whatever creates it (a clip's event, or a script: Race's board and helmets).
+pub fn action_records(game_data: &[u8], action: u32) -> Result<Vec<[u8; 16]>> {
+    let header = data_at(game_data, ACTIONS + 8 * (action as usize - 1), 8)?;
+    let records = data_at(
+        game_data,
+        be32(header, 0)? as usize,
+        16 * header[4] as usize,
+    )?;
+    Ok(records.as_chunks::<16>().0.to_vec())
 }
 
 /// When a route's next event fires: at its time, or at the latest time of the records before it

@@ -359,10 +359,12 @@ pub struct SceneCollision {
 /// 1's `+0x4F` is 0x51, the first 0x40 prop seen: I, the same set). 0x1A: its placement 0 (V dm3, dm15,
 /// hs7 and lldb; the match sets 0x20 on every other placement, 13 too, which is drawn). 0x24: Tank's
 /// (scenario 1) eight bunker doors 0-7 (V b1: `+0x4F` 0x01, `+0x6E` 0; the power-ups' 0x21/0x23, the
-/// wrecks hidden until the match shows one). Other scenes: none.
+/// wrecks hidden until the match shows one). 0x33: Race's four barriers 0-3 (V L1, L2: `+0x4F` 0x01, the
+/// power-ups' 0x21; each scenario hides two by `+0x6E`, conker-assets' `race.json`). Other scenes: none.
 pub fn deathmatch_solid(scene: usize) -> &'static [usize] {
     match scene {
         0x24 => &[0, 1, 2, 3, 4, 5, 6, 7],
+        0x33 => &[0, 1, 2, 3],
         0x2D => &[2, 3, 4, 5, 6, 7, 10, 11, 40, 41, 42, 43, 44, 45],
         0x34 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 29, 30, 31, 32],
         0x2B => &[0, 1, 5],

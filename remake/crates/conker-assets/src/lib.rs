@@ -6,8 +6,8 @@
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
 //!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
-//!   `outros.json` ([`outro::Outro`]); on `2d`, `24` and `3f`, `props.gltf` (+ `props.bin`); on `3f`,
-//!   `raptor.json` ([`raptor::Raptor`]); on `2b`,
+//!   `outros.json` ([`outro::Outro`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
+//!   on `3f`, `raptor.json` ([`raptor::Raptor`]); on `33`, `race.json` ([`race::Race`]); on `2b`,
 //!   `effects.gltf` (+ `effects.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
@@ -23,6 +23,7 @@
 pub mod audio;
 pub mod hud;
 pub mod outro;
+pub mod race;
 pub mod raptor;
 
 use std::fmt::Display;
@@ -107,7 +108,8 @@ pub fn level_gltf(map: &str) -> String {
 }
 
 /// War: Total War's props on its map (`2d` only): glTF scene 0 the props its Deathmatch hides, named
-/// as the level's nodes; scenes 1 and 2 the canister's and the gas mask's models at the origin.
+/// as the level's nodes; scenes 1 and 2 the canister's and the gas mask's models at the origin. On
+/// `33`, Race's board and helmets, a scene each in its joint's frame ([`race::Attached`]).
 pub fn props_gltf(map: &str) -> String {
     format!("maps/{map}/props.gltf")
 }

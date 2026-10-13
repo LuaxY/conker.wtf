@@ -362,6 +362,10 @@ pub const MATCH_CLIPS: [u16; 140] = [
     0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C,
     0x235, 0x238, 0x253, 0x254, 0x26E, 0x28E, 0x2C2, 0x2C3, 0x2C8, 0x2C9, 0x2CA, 0x2CC, 0x2E4,
 ];
+/// The racers' clips with sound events besides [`MATCH_CLIPS`]', for Race's models (136 the humans',
+/// [`crate::RACER`] the bots'): the kick (0x354: sound 90 at tick 11). Riding (5), knocked up
+/// (0x54) and dead (0x170) have none (V k1, b, the oracle's obj+0x84; C their route events).
+const RACE_CLIPS: [u16; 1] = [0x354];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
 const VOICE_BANK: usize = 0x12;
@@ -490,7 +494,8 @@ fn clip_sounds(rom: &Rom, game_data: &[u8], class: usize) -> Result<Vec<ClipSoun
             class,
             crate::CASH | crate::TANK | crate::RAPTOR | crate::BABY | crate::BODY
         );
-        if route.aux_offset == 0 || (!every && !MATCH_CLIPS.contains(&clip)) {
+        let racing = matches!(class, crate::CAVEMAN | crate::RACER) && RACE_CLIPS.contains(&clip);
+        if route.aux_offset == 0 || (!every && !racing && !MATCH_CLIPS.contains(&clip)) {
             continue;
         }
         let (mut at, mut deferred, mut last) = (route.aux_offset as usize + 0x10, None, 0.0);
@@ -1470,6 +1475,132 @@ fn tank_cues() -> Vec<Cue> {
     ]
 }
 
+/// Race's sounds besides the racers' clips (the kick's swing, 90, is clip 0x354's event) on 0x33
+/// (`../lab/research/mp-original/race.md`; C as named, V `../lab/audio/captures/race_{a,b,c}_calls.txt`:
+/// a 1 human and 3 bots with walls, deaths and kicks, b missiles fired and hitting, c the finish).
+/// The finish, the results and a jump play nothing (V c, a).
+fn race_cues() -> Vec<Cue> {
+    let hum = |hum, id, note: &str| cue(On::RaceHum { hum }, record([id], 1000, 200, 1000), note);
+    let beep = |stage, id| {
+        cue(
+            On::RaceCountdown { stage },
+            play([id], 0x5DC0, Some(0x5DC0), 0, 0, Channel::Free),
+            "the countdown's beep, unpositioned for everyone (C script 0xBC 0x1566: obj(0x7687 or 0x7688, 1, \
+             0x5DC0) → func_10010F30; V a, b, c reads 141, 171: 1671, 196: 1672)",
+        )
+    };
+    let pickup = |item| {
+        cue(
+            On::Pickup {
+                gives: Gives::Weapon(item),
+            },
+            play([1577], 32767, Some(32767), 100, 1000, Channel::Free),
+            "a power-up taken: 0x629 (C func_1511DD98; V a, b, c)",
+        )
+    };
+    let death = |kind_e, sounds: &[u16], volume, near, far, note: &str| {
+        let p = play(
+            sounds.iter().copied(),
+            volume,
+            Some(volume),
+            near,
+            far,
+            Channel::Free,
+        );
+        cue(On::RaceDeath { kind_e }, p, note)
+    };
+    let mut flight = play(range(750, 3), 30000, None, 500, 1000, Channel::A);
+    flight.if_idle = true;
+    let mut wall = play(range(778, 8), 28000, Some(24000), 300, 1800, Channel::A);
+    wall.if_idle = true;
+    vec![
+        hum(
+            0,
+            1459,
+            "hum 0x5B3 (C func_150D3360 → func_1000FA64: at the rider, volume 1000, near 200, far 1000, callback \
+             func_150D5124; V a: three records a racer from read 22, made again at each respawn)",
+        ),
+        hum(1, 1460, "hum 0x5B4 (C, V as hum 0's)"),
+        hum(2, 1468, "hum 0x5BC (C, V as hum 0's)"),
+        beep(1, 1671),
+        beep(2, 1671),
+        beep(3, 1672),
+        pickup(0x31),
+        pickup(0x33),
+        cue(
+            On::Shot { weapon: 0x31 },
+            play([1576], 32767, Some(32767), 500, 1000, Channel::A),
+            "a canister used (Z, the boost): 0x628 on the racer's channel A (C func_150D7790; V a, w3)",
+        ),
+        cue(
+            On::Shot { weapon: 0x33 },
+            play([567], 30000, None, 500, 2000, Channel::A),
+            "a missile fired (Z): 0x237 on the missile's channel A, at the racer (C func_150D7790 → \
+             func_1506C460; V a, b)",
+        ),
+        cue(
+            On::RaceMissile,
+            flight,
+            "a missile in flight: from 30 VIs (obj+0xA8), 0x2EE + random(3) when its channel A is idle (C \
+             func_150538CC kind 0xD; V a, b)",
+        ),
+        cue(
+            On::Hit {
+                weapon: 0x33,
+                lethal: None,
+            },
+            play([263], 28000, None, 300, 1800, Channel::Free),
+            "a missile hitting a racer: 0x107 (attacks 0x0F and 0x10's sound) on the missile, which vanishes \
+             (here on no player's channel) (C func_1505C7D8; V b 233, 269)",
+        ),
+        cue(
+            On::RaceKick,
+            play([1015], 28000, Some(24000), 300, 1800, Channel::A),
+            "a kick hitting a racer: attack 0x15's sound word 0xFF0103F7 (1015) on the kicker's channel A \
+             (C func_1505C7D8, the class data's attack table; V a)",
+        ),
+        cue(
+            On::RaceWall,
+            wall,
+            "a scrape: word 0xFF08030A, one of 778-785 on the racer's channel A when idle (C func_1504CB98; V a \
+             525, 971)",
+        ),
+        death(
+            Some(false),
+            &[1224],
+            32767,
+            700,
+            2000,
+            "the blow-up: 0x4C8, its volume passed as −0x7D00 (0x8300 to the player: I full) (C func_150D5A6C; \
+             V a, b)",
+        ),
+        death(
+            Some(true),
+            &[1076],
+            32000,
+            700,
+            2000,
+            "the blow-up over surface kind 0xE (178 of 0x33's faces): 0x434 (C func_150D5A6C; V a)",
+        ),
+        death(
+            None,
+            &[694, 695],
+            32000,
+            1000,
+            3000,
+            "the blow-up's blast: 0x2B6 + random(2) (C func_150D5A6C; V a, b)",
+        ),
+        death(
+            None,
+            &[689, 690, 691, 692],
+            32000,
+            700,
+            2000,
+            "the blow-up's debris: 0x2B1 + random(4) (C func_150D5A6C; V a, b)",
+        ),
+    ]
+}
+
 /// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.
 /// 0x2D: its two flickering lamps' buzz (C func_151607A4 → func_15160954 → func_151618BC; V: these
 /// two positions in every capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
@@ -1484,7 +1615,10 @@ fn tank_cues() -> Vec<Cue> {
 /// func_151604A0, message 0x1C; V 191-219 each); sequence 30, no channel muted (mask 0), volume 8000
 /// (C func_150000B0: the scene record's song, V). 0x24 (Tank, scenario 1, 2 humans): no emitter
 /// (V `../lab/audio/captures/tank_s1_calls.txt`: only the tanks' and the match's sounds), sequence
-/// 32, no channel muted, volume 18000 (C func_150000B0, V).
+/// 32, no channel muted, volume 18000 (C func_150000B0, V). 0x33 (Race): no emitter, no zone and no
+/// song (V `../lab/audio/captures/race_*_calls.txt`: only the racers', the power-ups' and the
+/// countdown's sounds, no song start; `../lab/audio/map33/quiet.wav`, the boards' hums muted: digital
+/// silence between them), so no background.
 fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     let spots = match map {
         "2d" => &[[-1101, -1201, -229], [650, -1191, 486]][..],
@@ -1639,6 +1773,9 @@ pub fn pack_audio(
     }
     if maps.iter().any(|m| m.0 == "24") {
         cues.extend(tank_cues());
+    }
+    if maps.iter().any(|m| m.0 == "33") {
+        cues.extend(race_cues());
     }
     // War: Raptor's baby and body on 0x3F: their clips' sounds (the raptor's are a character's).
     if maps.iter().any(|m| m.0 == "3f") {

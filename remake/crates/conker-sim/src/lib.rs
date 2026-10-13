@@ -9,6 +9,7 @@ pub mod follow;
 pub mod movement;
 #[cfg(feature = "net")]
 pub mod net;
+pub mod raptor;
 pub mod root;
 pub mod tank;
 pub mod trig;

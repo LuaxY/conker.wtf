@@ -17,6 +17,7 @@ use conker_rules::damage;
 use conker_rules::game::TAKEOVER_DELAY;
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
+use conker_rules::raptor::{self, Op, Raptor};
 use conker_rules::tank;
 use conker_sim::collision::CollisionWorld;
 use std::collections::BTreeMap;
@@ -155,6 +156,8 @@ pub struct Body {
     pub scope: Option<(f32, f32)>,
     /// The record's class (+0, `func_150859AC` 1; War: Beach's voices by it).
     pub class: u8,
+    /// War: Raptor: a body in its jaws (query 0xB2 0: +0x2E4[0]).
+    pub prey: bool,
     /// obj+0xF4 bit 0x10000: the wall routine moved it last frame (conker-sim's `walled`).
     pub walled: bool,
     /// Out of lives (the eliminated mask `0x800D18A0`): frames since the out frame.
@@ -210,6 +213,11 @@ pub struct World<'a> {
     pub appear: i32,
     /// War: Heist's bag and scores; `None` in the other modes.
     pub cash: Option<Heist<'a>>,
+    /// War: Raptor's eggs; `None` in the other modes.
+    pub raptor: Option<&'a Raptor>,
+    /// Per participant, a bit: hit since the script last read it (obj+0x22C bit 0x100, query
+    /// 0xD1 reads and clears it; the egg referee reads a carrier's only every third frame).
+    pub struck: &'a mut u32,
 }
 
 /// War: Heist as the script sees it: the bag and the team scores at the frame's start, and the
@@ -268,6 +276,42 @@ fn kind(h: i32) -> i32 {
 
 fn index(h: i32) -> usize {
     (h & !0xF000) as usize
+}
+
+/// War: Raptor's bots: the AI's behaviours of class 83 (`G[0x1F24 + 8k][1]`, 0xBE's start) and
+/// Conker's in their place (`[0]`), which the steering runs (I: the pack holds no class 83 data);
+/// [`BITE`], 0x22, runs the fight's.
+const RAPTOR_BEHAVIOURS: [(u8, u8); 10] = [
+    (0x1F, 7),
+    (0x1A, 1),
+    (0x1B, 2),
+    (0x1D, 4),
+    (0x1E, 5),
+    (0x1C, 3),
+    (0x27, 0xC),
+    (0x25, 0xA),
+    (0x26, 0xB),
+    (BITE, 3),
+];
+pub const BITE: u8 = 0x22;
+
+/// The Conker behaviour a raptor's stands for (others as they are).
+pub fn conker_behaviour(b: u8) -> u8 {
+    (RAPTOR_BEHAVIOURS.iter())
+        .find(|r| r.0 == b)
+        .map_or(b, |r| r.1)
+}
+
+/// The raptor behaviour a Conker one stands for (others as they are).
+pub fn raptor_behaviour(b: u8) -> u8 {
+    (RAPTOR_BEHAVIOURS.iter())
+        .find(|r| r.1 == b)
+        .map_or(b, |r| r.0)
+}
+
+/// Query 0x97: x and z packed, `x << 16 | z & 0xFFFF` (the script shifts them back out).
+fn packed(p: [f32; 3]) -> i32 {
+    (p[0] as i32) << 16 | (p[2] as i32 & 0xFFFF)
 }
 
 /// War: Colors' flag a handle names (`0x2000 |` its object index, [`colors::FLAGS`]).
@@ -375,6 +419,21 @@ impl World<'_> {
                 self.effects.push(Effect::Cash(false));
                 0
             }
+            // War: Raptor (0xBE): `obj(0x2011)` the baby (always there; its eating is the
+            // match's, from the nest drop), `obj(0x2014 + k)` egg k, which `obj2` destroys.
+            (3, 2) if self.raptor.is_some() && index(h) == raptor::BABY_UID => h,
+            (3, 2) if self.egg(h).is_some() => {
+                if let Some(k) = self.egg(h).filter(|_| !self.starting) {
+                    self.effects.push(Effect::Raptor(Op::Egg(k, true)));
+                }
+                h
+            }
+            (4, 2) if self.egg(h).is_some() => {
+                if let Some(k) = self.egg(h) {
+                    self.effects.push(Effect::Raptor(Op::Egg(k, false)));
+                }
+                0
+            }
             (3, 2) => match (colors::FLAGS.iter()).position(|f| usize::from(f.uid) == index(h)) {
                 Some(k) => {
                     if !self.starting {
@@ -420,6 +479,12 @@ impl World<'_> {
             .and_then(|p| self.slots.get(p).copied().flatten())
     }
 
+    /// War: Raptor: the egg `h` names (`0x2000 | 0x14 + k`).
+    fn egg(&self, h: i32) -> Option<usize> {
+        let k = index(h).checked_sub(raptor::EGG_UID)?;
+        (self.raptor.is_some() && kind(h) == 2 && k < raptor::EGGS.len()).then_some(k)
+    }
+
     /// Heist: `h` names the bag (0x2010; Beach's gun has that handle on its own map).
     fn is_cash(&self, h: i32) -> bool {
         self.cash.is_some() && kind(h) == 2 && index(h) == usize::from(heist::HANDLE)
@@ -439,6 +504,15 @@ impl World<'_> {
         }
         if let Some(k) = flag(h) {
             return self.flag_query(k, code, args);
+        }
+        // An egg: 0xBF its height above the floor (0: the referee splats a thrown one; I, V r4's
+        // splat the frame after the throw), 0x97 its x and z packed.
+        if let Some(e) = self.egg(h).and_then(|k| Some(self.raptor?.eggs[k])) {
+            return match code {
+                0xBF => 0,
+                0x97 => packed(e.pos),
+                c => self.unknown(5, 2, c),
+            };
         }
         match (kind(h), code) {
             // `func_150AE140`: a handle of type 0 answers 0 (0xBE asks 0xCA of a participant index).
@@ -568,6 +642,15 @@ impl World<'_> {
             // Props (type 3) 0 shows a prop; 4 sets +0x7C.., +0x80 and +0x84 (0x7FFFFFFF keeps
             // one): camera/zone setup at level start, and the gas's props ([`Effect`]). The level
             // (5) 0xA, 0xF: HUD and music; (0xA, 0) a timer display.
+            // War: Raptor's cooked eggs (props 0xFF − n): 0 shows one, 2 moves it to (x, _, z),
+            // where the match shows it ([`Op::Cooked`]).
+            (3, 0) if self.raptor.is_some() && h & 0xFFF >= 0xFC => 1,
+            (3, 2) if self.raptor.is_some() && h & 0xFFF >= 0xFC => {
+                let n = (0xFF - (h & 0xFFF)) as usize;
+                let at = [a(2) as f32, a(4) as f32];
+                self.effects.push(Effect::Raptor(Op::Cooked(n, at)));
+                1
+            }
             (3, 0) => {
                 if let Some(n) = Self::prop(h) {
                     self.effects.push(Effect::Show(n));
@@ -789,6 +872,20 @@ impl World<'_> {
             0xBC => 0,
             // Colors: it holds the flag `a(2)` (obj+0x13C = the flag + 100); it was hit (+0x104);
             // a human's buttons, the pad byte `0x800BE710 + 2p` (A, B, Z, start; I its byte).
+            // War: Raptor: it carries the egg `a(2)`; a body in its jaws; hit since the last
+            // read (read and cleared); its x and z packed (`x << 16 | z & 0xFFFF`).
+            0x95 if self.egg(a(2)).is_some() => {
+                let carrier =
+                    (self.egg(a(2)).zip(self.raptor)).and_then(|(k, r)| r.eggs[k].carrier);
+                i32::from(carrier.is_some() && carrier == self.slot(p as i32))
+            }
+            0xB2 => i32::from(b.prey),
+            0xD1 => {
+                let hit = *self.struck & 1 << p != 0;
+                *self.struck &= !(1 << p);
+                i32::from(hit)
+            }
+            0x97 => packed(b.pos),
             0x95 if self.is_cash(a(2)) => i32::from(
                 self.slot(p as i32)
                     .is_some_and(|s| self.cash.as_ref().and_then(|h| h.cash.carrier) == Some(s)),
@@ -999,6 +1096,17 @@ impl World<'_> {
         let effect = match (code, slot) {
             (0x62, _) => Some(Effect::Score(p as u8, a(2) as u16)),
             (7, Some(_)) if self.is_cash(a(2)) => Some(Effect::LetGo(usize::from(heist::CASH))),
+            // War: Raptor: 7 lets go of an egg (the reset); 1 sets (a(2) = 1) or clears +0x25C
+            // bits a(3), of which only the carrier's 0x10, the throw at the fire, is the match's
+            // (0x20, the carry, it keeps itself); 0x10 the facing (degrees << 16); 0x14 0x28 the
+            // nest drop (behaviour 40).
+            (7, Some(s)) if self.egg(a(2)).is_some() => Some(Effect::Raptor(Op::LetGo(s))),
+            (1, Some(s)) if a(2) == 1 && a(3) & 0x10 != 0 => Some(Effect::Raptor(Op::Throw(s))),
+            (1, _) => return 0,
+            (0x10, Some(s)) => Some(Effect::Raptor(Op::Face(s, (a(2) >> 16) as u16))),
+            (0x14, Some(s)) if self.raptor.is_some() && a(2) == 0x28 => {
+                Some(Effect::Raptor(Op::Nest(s)))
+            }
             (7, Some(_)) => flag(a(2)).map(Effect::LetGo),
             (0x13, Some(s)) => Some(Effect::Immune(s, a(2) as u8)),
             (0x53, Some(s)) => Some(Effect::Hold(s, a(2) as u8)),
@@ -1016,7 +1124,7 @@ impl World<'_> {
             (0x70, _) | (0x4B | 0x4C, None) => return 0,
             (0x3F | 0x54 | 0x8B, _) => return 0,
             // On a vacant participant: no player to act on (the match let its flag go as it left).
-            (7 | 0x13 | 0x53 | 0x45 | 0x82 | 0x1F | 0x27, None) => return 0,
+            (7 | 0x10 | 0x13 | 0x53 | 0x45 | 0x82 | 0x1F | 0x27, None) => return 0,
             _ => None,
         };
         if let Some(e) = effect {
@@ -1933,6 +2041,8 @@ mod tests {
             plunger: Plunger::default(),
             appear: 0,
             cash: None,
+            raptor: None,
+            struck: &mut 0,
         };
         let mut g = Globals::new(g::SIZE);
         g.set_i32(g::ALIVE, 3);
@@ -1997,6 +2107,8 @@ mod tests {
             plunger: Plunger::default(),
             appear: 0,
             cash: None,
+            raptor: None,
+            struck: &mut 0,
         };
         let mut g = Globals::new(g::SIZE);
         let mut q = |w: &mut World, args: &[i32]| w.query(&mut g, args[0], args[1], args);
@@ -2092,6 +2204,8 @@ mod tests {
                 plunger: Plunger::default(),
                 appear: 0,
                 cash: None,
+                raptor: None,
+                struck: &mut 0,
             };
             let mut g = Globals::new(g::SIZE);
             g.set_f32(g::AIM_RATE, 1.0);

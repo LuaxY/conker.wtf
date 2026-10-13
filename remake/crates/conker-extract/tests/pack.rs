@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24, 0x33].map(|scene| PackMap {
         scene,
         background: None,
         song: None,
@@ -326,17 +326,20 @@ fn pack_reads_back_as_the_rom_path() {
     check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b", "1a", "24"]);
     assert_eq!(
-        manifest.characters[..7],
-        ["128", "117", "136", "156", "157", "59", "119"]
+        manifest.maps,
+        ["2d", "30", "34", "3f", "2b", "1a", "24", "33"]
+    );
+    assert_eq!(
+        manifest.characters[..9],
+        ["128", "117", "136", "156", "157", "59", "119", "83", "144"]
     );
 
     // Each map's solid placements (the oracle's RAM) are those with collision flags less its
     // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data. On 0x1A
     // the match sets 0x20 on every placement but 0, so its drawn 13 is not solid (V,
     // `lab/oracle/map1a/props_pickups_lights.md` §1).
-    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24] {
+    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A, 0x24, 0x33] {
         let (pickups, _) = conker_extract::pickup_table(&rom, scene).unwrap();
         let mut hidden = conker_extract::hidden_placements(scene).to_vec();
         if scene == 0x1A {
@@ -365,6 +368,7 @@ fn pack_reads_back_as_the_rom_path() {
         ("2b", 0x2B, 12),
         ("1a", 0x1A, 32),
         ("24", 0x24, 20),
+        ("33", 0x33, 17),
     ];
     for (name, scene, records) in maps {
         let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
@@ -643,6 +647,45 @@ fn pack_reads_back_as_the_rom_path() {
             "03-55@4"
         ]
     );
+    // Map 0x33's Race (`lab/research/mp-original/race.md`): `race.json` as `race_mode` builds it;
+    // script 0xBC, no lights, lift nor kill gate; the power-ups back after 18 VIs; the bots' model
+    // (144) on the Tedi's clips with its looks (class 0xF hides list 1); the props glTF of the board
+    // and the helmets, a scene each.
+    let race = conker_assets::race::Race::load("33", read).unwrap();
+    assert_eq!(race, conker_extract::race_mode(&rom).unwrap());
+    assert_eq!(race.to_json(), files["maps/33/race.json"]);
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.push("144");
+    let race_map = conker_assets::Slice::load("33", &names, PACK_WEAPONS, read).unwrap();
+    assert!(race_map.lights.lights.is_empty());
+    assert!(conker_rules::lift::parse(&race_map.triggers, 0x33).is_empty());
+    assert!(conker_rules::lift::kill_gates(&race_map.triggers).is_empty());
+    assert!(race_map.pickups.iter().all(|p| p.respawn == Some(18)));
+    let barriers = (race_map.collision.iter())
+        .filter(|t| matches!(t.layer, PackLayer::Placement(_)))
+        .count();
+    assert!(barriers > 0);
+    let racer = &race_map.characters[3];
+    assert_eq!(
+        (&racer.clips, &racer.root_clips),
+        (&pack.characters[1].clips, &pack.characters[1].root_clips)
+    );
+    assert_eq!(
+        racer.looks,
+        BTreeMap::from([(0xC, 0), (0xD, 0), (0xE, 0), (0xF, 2)])
+    );
+    eprintln!("model 144's lift: {}", racer.model_lift);
+    let (props, scenes) = conker_extract::props_level(&rom, 0x33).unwrap();
+    let mut gltf = extract_level::to_gltf(&props, &textures, "").unwrap();
+    let mut json: Value = serde_json::from_str(&gltf.json).unwrap();
+    let names: Vec<_> = (json["nodes"].as_array().unwrap().iter())
+        .map(|n| n["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["09-5d-00", "09-5a-00", "09-5c-00", "09-5b-00"]);
+    json["scenes"] = scenes;
+    gltf.json = json.to_string();
+    check_gltf(&dir, &conker_assets::props_gltf("33"), &gltf.glb());
+
     // The bone crossbow in the hand is bank 01 #0x2F (a child object), the bone knives #0x7B.
     let held = |entry| pack.held.iter().find(|h| h.entry == entry).unwrap();
     assert_eq!((held(0x2F).joint, held(0x2F).create[0]), (9, (0x2C8, 21.0)));
@@ -888,7 +931,13 @@ fn pack_audio_reads_back() {
     let characters = pack.characters.iter().chain(&wise_guy.characters[3..]);
     for (name, character) in names.iter().zip(characters) {
         for e in &audio.events.characters[*name] {
-            assert!(MATCH_CLIPS.contains(&e.clip), "{name} {:#x}", e.clip);
+            // Race's kick (0x354) on the human racers' model 136 too.
+            let race = *name == "136" && e.clip == 0x354;
+            assert!(
+                MATCH_CLIPS.contains(&e.clip) || race,
+                "{name} {:#x}",
+                e.clip
+            );
             assert!(
                 character.clips.iter().any(|c| c.logical.contains(&e.clip)),
                 "{name} {:#x}",
@@ -1297,6 +1346,22 @@ fn pack_hud_reads_back() {
     // War: Raptor's bone knives and bone crossbow show the knives' and the crossbow's (C).
     assert_eq!(hud.weapon.icons[&0x3F], hud.weapon.icons[&0x14]);
     assert_eq!(hud.weapon.icons[&0x41], hud.weapon.icons[&0x18]);
+    // Race's missiles and canister (V h1 DL 230's texrects), and its overview maps (V k1, b2).
+    let icon = |id| {
+        (
+            hud.weapon.icons[&id].texture.as_str(),
+            hud.weapon.icons[&id].rect,
+        )
+    };
+    assert_eq!(
+        (icon(0x33), icon(0x31)),
+        (("atlas", [50, 39, 14, 12]), ("atlas2", [0, 28, 22, 14]))
+    );
+    assert_eq!(hud.textures["race_map_low"].size, [64, 64]);
+    assert_ne!(
+        files["hud/race_map_low.png"],
+        files["hud/race_map_high.png"]
+    );
     // The results' place, accuracy and labels are drawn with these.
     assert!(['%', 'P'].iter().all(|&c| hud.glyph(c).is_some()));
     // A mounted gun's gunner view (`mounted-gun.md` §3; its PNGs' sizes checked above).
@@ -1567,4 +1632,110 @@ fn tank_audio_reads_back() {
             format!("characters/119/{id:04}.wav")
         );
     }
+}
+
+/// Race's sound on 0x33 (`lab/research/mp-original/race.md`; V `lab/audio/captures/race_*_calls.txt`):
+/// no background, emitter nor zone; the kick's swing on clip 0x354 of both racers' models; the
+/// boards' hums, the countdown, the power-ups, the missiles, the walls, the kicks' hits and the
+/// blow-ups as cues for anyone.
+#[test]
+fn race_audio_reads_back() {
+    use conker_assets::audio::{Audio, Channel, ClipAction, On};
+    use conker_extract::audio::pack_audio;
+    let Some(path) = std::env::var_os("CONKER_ROM") else {
+        eprintln!("CONKER_ROM unset: skipping");
+        return;
+    };
+    let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
+    let maps = [("33".to_string(), None, None, None)];
+    let surfaces = std::collections::BTreeSet::new();
+    let characters = [conker_extract::CAVEMAN, conker_extract::RACER];
+    let (files, _) = pack_audio(&rom, &surfaces, &maps, &characters, &[]).unwrap();
+    let files: BTreeMap<&str, &[u8]> = (files.iter())
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
+    let audio = Audio::load(|p: &str| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
+    let map = &audio.events.maps["33"];
+    assert!(map.background.is_empty() && map.emitters.is_empty() && map.zones.is_empty());
+    for racer in ["136", "144"] {
+        let kick: Vec<_> = (audio.events.characters[racer].iter())
+            .filter(|c| c.clip == 0x354)
+            .map(|c| match &c.action {
+                ClipAction::Play(p) => (c.time, p.sounds.clone(), p.channel),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kick, [(11.0, vec![90], Channel::A)], "{racer}");
+    }
+    let cue = |on: On| {
+        (audio.events.cues.iter())
+            .filter(|c| c.on == on)
+            .map(|c| {
+                assert!(c.character.is_none());
+                let p = &c.play;
+                (
+                    p.sounds.clone(),
+                    p.volume,
+                    p.own,
+                    p.near,
+                    p.far,
+                    p.channel,
+                    p.if_idle,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let free = Channel::Free;
+    for (hum, id) in [(0, 1459), (1, 1460), (2, 1468)] {
+        let expected = (vec![id], 1000, None, 200, 1000, free, false);
+        assert_eq!(cue(On::RaceHum { hum }), [expected]);
+    }
+    let beep = |id| [(vec![id], 24000, Some(24000), 0, 0, free, false)];
+    assert_eq!(cue(On::RaceCountdown { stage: 1 }), beep(1671));
+    assert_eq!(cue(On::RaceCountdown { stage: 2 }), beep(1671));
+    assert_eq!(cue(On::RaceCountdown { stage: 3 }), beep(1672));
+    for item in [0x31, 0x33] {
+        let gives = Gives::Weapon(item);
+        let expected = (vec![1577], 32767, Some(32767), 100, 1000, free, false);
+        assert_eq!(cue(On::Pickup { gives }), [expected]);
+    }
+    assert_eq!(
+        cue(On::Shot { weapon: 0x31 }),
+        [(vec![1576], 32767, Some(32767), 500, 1000, Channel::A, false)]
+    );
+    assert_eq!(
+        cue(On::Shot { weapon: 0x33 }),
+        [(vec![567], 30000, None, 500, 2000, Channel::A, false)]
+    );
+    assert_eq!(
+        cue(On::RaceMissile),
+        [(
+            vec![750, 751, 752],
+            30000,
+            None,
+            500,
+            1000,
+            Channel::A,
+            true
+        )]
+    );
+    let hit = On::Hit {
+        weapon: 0x33,
+        lethal: None,
+    };
+    assert_eq!(cue(hit), [(vec![263], 28000, None, 300, 1800, free, false)]);
+    assert_eq!(
+        cue(On::RaceKick),
+        [(vec![1015], 28000, Some(24000), 300, 1800, Channel::A, false)]
+    );
+    let scrape: Vec<u16> = (778..786).collect();
+    assert_eq!(
+        cue(On::RaceWall),
+        [(scrape, 28000, Some(24000), 300, 1800, Channel::A, true)]
+    );
+    let death = |kind_e| cue(On::RaceDeath { kind_e });
+    assert_eq!(death(Some(false))[0].0, [1224]);
+    assert_eq!(death(Some(true))[0].0, [1076]);
+    let both: Vec<_> = death(None).into_iter().map(|c| c.0).collect();
+    assert_eq!(both, [vec![694, 695], vec![689, 690, 691, 692]]);
 }

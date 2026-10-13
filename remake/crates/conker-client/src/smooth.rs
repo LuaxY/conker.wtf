@@ -153,7 +153,12 @@ pub fn note_corrections(
 ) {
     for (p, mut cam) in &mut own {
         let cam = &mut *cam;
-        if let Some((by, turn)) = cam.drawn.correct(p.pos, p.facing, &cam.follow) {
+        let corrected = cam.drawn.correct(p.pos, p.facing, &cam.follow);
+        // A tank's view follows the predicted hull ([`crate::tank::camera`]).
+        if cam.tank.is_some() {
+            cam.drawn.camera = None;
+        }
+        if let Some((by, turn)) = corrected {
             let t = timeline.tick().0;
             let (x, y, z, d) = (by.x, by.y, by.z, by.length());
             debug!("CORRECTION t={t} by={x},{y},{z} jump={d} turn={turn}");

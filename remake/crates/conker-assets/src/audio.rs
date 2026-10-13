@@ -298,6 +298,31 @@ pub enum On {
     TankDeath { bomb: bool },
     /// Tank: a tank taking the gas bomb, at it.
     BombPickup,
+    /// Race: a racer's board, its hum `hum` (0-2: [`Play::sounds`] 0x5B3, 0x5B4, 0x5BC), a loop at it
+    /// from the board's creation (each spawn) to its removal (the death); hum 0 only with fewer than
+    /// 5 racers, hum 2 with fewer than 7 or on a racer with a camera (C `func_150D3360`). Each tick
+    /// its volume and pitch (cents) move toward targets set by the rider's state s (C `func_150D3A68`:
+    /// a human by stick y, ≥ 21 → 0, < −20 → 2, else 1; a bot by its speed, > 6 → 0, > 3 → 1, else 2)
+    /// and its height h above the floor (C `func_150D5124`): hum 0's volume v = 25·h (0 below 500,
+    /// at most 5000), s 2 → v + 7000 at pitch 5·h (at most 1000), s 1 → v + 7000 at pitch 400, s 0 →
+    /// v at once (when not 0) at pitch 400; hum 1's s 0 → 16000 at once at pitch 400, s 1 (or 5
+    /// racers or more) → 12000 at pitch 0, s 2 → 0 at pitch 400; hum 2's s 0 → 24000 at once, else
+    /// 400, at pitch 0. The volume moves 512 a tick, the pitch up 512 or down 16; below 500 it is
+    /// silent.
+    RaceHum { hum: u8 },
+    /// Race: the start's countdown, at the listener: `stage` 1 and 2 (60 and 30 ticks before the
+    /// go), 3 (5 before) (C script 0xBC 0x1566).
+    RaceCountdown { stage: u8 },
+    /// Race: a missile (weapon 0x33) in flight, from its 15th tick: each tick its channel A is idle,
+    /// one of [`Play::sounds`] at random, at it.
+    RaceMissile,
+    /// Race: a racer scraping a wall (losing 1 hp), at it.
+    RaceWall,
+    /// Race: a racer's kick (B) hitting another, at the kicker.
+    RaceKick,
+    /// Race: a racer blowing up (a head-on wall, its last hp, or no floor below), at it: `kind_e`
+    /// whether the floor's surface kind (bits 0-4) is 0xE; None: either.
+    RaceDeath { kind_e: Option<bool> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -576,6 +601,15 @@ mod tests {
                         delay: 0,
                         note: "C".into(),
                     },
+                    Cue {
+                        on: On::RaceDeath { kind_e: Some(true) },
+                        character: None,
+                        play: play(vec![577]),
+                        then: vec![],
+                        at: None,
+                        delay: 0,
+                        note: "C".into(),
+                    },
                 ],
             },
         }
@@ -607,6 +641,10 @@ mod tests {
         assert!(events.contains(r#""stops_on_leave":true"#), "{events}");
         assert!(
             events.contains(r#""on": {"tank_gear":{"coast":true}}"#),
+            "{events}"
+        );
+        assert!(
+            events.contains(r#""on": {"race_death":{"kind_e":true}}"#),
             "{events}"
         );
         assert_eq!(

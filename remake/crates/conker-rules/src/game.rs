@@ -41,6 +41,7 @@ use crate::heist::{self, Heist};
 use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
+use crate::raptor::{self, Raptor};
 use crate::spawn::{self, Placement, Spawn};
 use crate::tank::{self, Tank};
 use crate::traps::{self, Traps};
@@ -169,6 +170,12 @@ pub struct Settings {
     /// Tank (scenario 1, scene 0x24; [`crate::tank`]): every player a tank, free for all; ends and
     /// ranks as Deathmatch (the clock, [`Self::kills`], lives untimed).
     pub tank: bool,
+    /// War: Raptor (scenario 2, scene 0x3F; [`crate::raptor`]): the cavemen (team 0, Side::Cavemen)
+    /// against the raptors (team 1, class [`raptor::CLASS`]). The team scores ([`Colors::scores`])
+    /// go up for a kill, a fed body and a delivered egg; the match ends on the clock, at
+    /// [`Self::score`] (1-40, default [`raptor::SCORE`]) or as Heist's untimed; lives as
+    /// Deathmatch's; teams rank as Heist's.
+    pub raptor: bool,
 }
 
 impl Default for Settings {
@@ -185,6 +192,7 @@ impl Default for Settings {
             beach: false,
             heist: false,
             tank: false,
+            raptor: false,
         }
     }
 }
@@ -378,6 +386,9 @@ pub struct Fighter {
     /// Tank: the power-up held (s126+0x128's bit, [`crate::tank::SHIELD`]..; 0 none), its timer
     /// or shells in [`Self::boost`].
     pub power: u8,
+    /// War: Raptor: a body (character 22) in the raptor's jaws (+0x2E4[0]), from its standing
+    /// bite's kill to the drop or the nest; kept through hits and its death, gone at its respawn.
+    pub prey: bool,
 }
 
 impl Fighter {
@@ -435,6 +446,23 @@ impl Fighter {
             boost: 0,
             climb: weapon::Climb::default(),
             power: 0,
+            prey: false,
+        }
+    }
+
+    /// The body the area tests and the bullets' sweep take ([`Hitbox`]): the raptor's own.
+    pub fn hitbox(&self) -> Hitbox {
+        match self.class {
+            raptor::CLASS => Hitbox::RAPTOR,
+            _ => Hitbox::of(self.side),
+        }
+    }
+
+    /// The body it pushes the others with (conker-sim's `Other`): the raptor's own.
+    pub fn other(&self) -> Other {
+        match self.class {
+            raptor::CLASS => conker_sim::raptor::body(self.body.pos),
+            _ => Other::player(self.side, self.body.pos),
         }
     }
 
@@ -597,6 +625,7 @@ impl Fighter {
         match self.weapon() {
             _ if self.seated() => anim::GUN_SEATED,
             _ if self.flag == Some(heist::CASH) => heist::IDLE,
+            _ if self.flag == Some(raptor::EGG) => raptor::EGG_IDLE,
             _ if self.flag.is_some() => anim::FLAG_IDLE,
             _ if self.carrying => anim::CARRY_IDLE,
             Some(w) if self.drawn => w.idle,
@@ -846,6 +875,8 @@ pub struct Match {
     pub traps: Traps,
     /// Tank's shells, bomb and wrecks ([`crate::tank`]).
     pub tank: Tank,
+    /// War: Raptor's eggs, cooked eggs, baby and dropped bodies ([`crate::raptor`]).
+    pub raptor: Raptor,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -928,6 +959,7 @@ impl Match {
             plunger: Plunger::default(),
             traps: Traps::default(),
             tank: Tank::default(),
+            raptor: Raptor::default(),
         }
     }
 
@@ -1065,6 +1097,9 @@ impl Match {
         }
         self.heist.cash.step(world, self.tick);
         self.pickups(arena, &mut ev);
+        if self.settings.raptor {
+            self.touch_eggs();
+        }
         if self.settings.tank {
             self.touch_bomb();
             tank::doors(&mut self.gas);
@@ -1125,7 +1160,11 @@ impl Match {
         // `animate`; V: 0x14's shot kills in its own update after the victim's, and the victim's
         // death 0x17E drifts from the third row on, combat4_w14 835).
         for (i, f) in self.players.iter_mut().enumerate() {
-            if !self.free.contains(&i) && f.out == 0 && !self.settings.tank {
+            if !self.free.contains(&i)
+                && f.out == 0
+                && !self.settings.tank
+                && f.class != raptor::CLASS
+            {
                 animate(f, world);
             }
         }
@@ -1142,6 +1181,9 @@ impl Match {
         }
         if let Some(c) = (self.heist.cash.carrier).and_then(|c| self.players.get(c)) {
             self.heist.cash.held(c.body.pos, c.body.facing);
+        }
+        if self.settings.raptor {
+            self.hold_eggs();
         }
         // Total War, out on one frame: the game places the teams at the frame's end, team 0 first
         // (`func_151E565C`'s loop at 0x151E5DD0, C), so of two teams out together the Tediz win
@@ -1225,9 +1267,11 @@ impl Match {
         }
         // Heist's: Total War's with its bags (untimed: fewer than 2 teams with a participant left,
         // V unt1).
-        if s.total_war || s.heist {
+        // Raptor's: Heist's with the team scores (I untimed, as Heist's shared branch).
+        if s.total_war || s.heist || s.raptor {
             let teams = (0..heist::TEAMS as u8).filter(|&t| in_play().any(|f| f.team == t));
-            let bags = s.heist && self.score_end(&self.heist.scores);
+            let bags = (s.heist && self.score_end(&self.heist.scores))
+                || (s.raptor && self.score_end(&self.colors.scores));
             return time_up || bags || (out().next().is_some() && teams.count() < 2);
         }
         let kills = s.kills > 0 && taken().any(|i| self.players[i].kills >= u16::from(s.kills));
@@ -1236,10 +1280,12 @@ impl Match {
         time_up || kills || alone || no_human
     }
 
-    /// Colors, Beach and Heist: a team's score `scores` reaches the target (none at 0).
+    /// Colors, Beach, Heist and Raptor: a team's score `scores` reaches the target (none at 0).
     fn score_end(&self, scores: &[u16]) -> bool {
         let (s, target) = (&self.settings, u16::from(self.settings.score));
-        (s.colors || s.beach || s.heist) && target > 0 && scores.iter().any(|&n| n >= target)
+        (s.colors || s.beach || s.heist || s.raptor)
+            && target > 0
+            && scores.iter().any(|&n| n >= target)
     }
 
     /// The teams the match ranks by: Heist's 4, the other War modes' 2, none in Deathmatch.
@@ -1247,7 +1293,7 @@ impl Match {
         let s = &self.settings;
         match () {
             _ if s.heist => heist::TEAMS as u8,
-            _ if s.total_war || s.colors || s.beach => 2,
+            _ if s.total_war || s.colors || s.beach || s.raptor => 2,
             _ => 0,
         }
     }
@@ -1268,7 +1314,7 @@ impl Match {
     pub fn standings(&self) -> Vec<Option<Standing>> {
         let score = |f: &Fighter| match () {
             _ if self.settings.heist => self.heist.scores.get(usize::from(f.team)).copied(),
-            _ if self.settings.colors || self.settings.beach => {
+            _ if self.settings.colors || self.settings.beach || self.settings.raptor => {
                 self.colors.scores.get(usize::from(f.team)).copied()
             }
             _ => None,
@@ -1292,6 +1338,9 @@ impl Match {
         let Some(k) = f.flag.take() else {
             return;
         };
+        if k == raptor::EGG {
+            return self.let_go_egg(i);
+        }
         // Heist: the throw's release (B), else a drop.
         if k == heist::CASH {
             let thrown = f.action == Action::Pose(Pose::Throw);
@@ -1428,7 +1477,11 @@ impl Match {
             // A mask is touched only while the gas counts down (`func_1511DF6C` skips model 0x54 on
             // scene 0x2D while G+0x1FE4 ≤ 0, C), and not by a player wearing one (I).
             let countdown = self.gas.countdown;
-            let may = |f: &Fighter| def.gives != Gives::Mask || (countdown > 0 && !f.masked);
+            // War: Raptor's raptors take nothing (V r11; I the rule: class 9 holds no item).
+            let may = |f: &Fighter| {
+                f.class != raptor::CLASS
+                    && (def.gives != Gives::Mask || (countdown > 0 && !f.masked))
+            };
             let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
             let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
                 f.health > 0 && may(f) && weapon::touches(pos, f.body.pos, reach(i))
@@ -1691,6 +1744,7 @@ impl Match {
                     (c.pos, c.yaw, c.state) = (pos, yaw, state);
                 }
                 Effect::Voice(player, id) => ev.push(Event::Voice { player, id }),
+                Effect::Raptor(op) => self.raptor_op(op),
                 // The capture's poses take over whatever the player was doing, a hit's included
                 // (I; nobody is hurt through them: the script keeps everyone immune).
                 Effect::Pose(i, pose) => {
@@ -1827,6 +1881,10 @@ impl Match {
         if let (None, Some(id)) = (self.players[i].weapon, self.players[i].start) {
             self.give(i, id);
         }
+        // War: Raptor's raptors keep the club in the slot but never draw it (V: 0xC0).
+        if self.settings.raptor && self.players[i].class == raptor::CLASS {
+            return self.raptor_player(i, input, arena, world, seen, ev);
+        }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
         // earlier in the slot order where they moved to this frame, and so do the mounted guns (a
         // gunner and one jumping on move by their own rules) and Colors' uncarried flags.
@@ -1834,7 +1892,7 @@ impl Match {
         let cash = Some(self.heist.cash).filter(|c| c.shown && c.carrier.is_none());
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i)
-            .map(|(_, p)| Other::player(p.side, p.body.pos))
+            .map(|(_, p)| p.other())
             .chain(self.guns.iter().map(|g| gun::body(g.place.pos)))
             .chain(flags.map(|f| colors::body(f.pos)))
             .chain(cash.map(|c| heist::body(c.pos)))
@@ -2027,7 +2085,8 @@ impl Match {
         }
         // Colors: holding a flag, B puts it down and nothing else starts (V b1, h2, e1).
         // Heist: B throws the bag (V h2: clip 0x118 from 381, B on 380).
-        if f.flag.is_some() && f.action == Action::Free && pressed(BUTTON_B) {
+        if f.flag.is_some_and(|k| k != raptor::EGG) && f.action == Action::Free && pressed(BUTTON_B)
+        {
             let pose = match f.flag == Some(heist::CASH) {
                 true => Pose::Throw,
                 false => Pose::PutDown,
@@ -2392,7 +2451,7 @@ impl Match {
             _ => 0,
         };
         f.body.holding = f.flag.is_some();
-        f.body.heavy = f.flag == Some(heist::CASH);
+        f.body.heavy = matches!(f.flag, Some(heist::CASH | raptor::EGG));
         // Beach's item 0x3E drives a villager, but for the crouch's 40 % (V spd: 14; I: its handler
         // skipped in the crouch states, the boost kept).
         use movement::state::{CROUCH, CROUCH_WALK};
@@ -2446,6 +2505,7 @@ impl Match {
                     u16::from(state)
                 }
                 _ if f.flag == Some(heist::CASH) => heist::carry_clip(f.body.xz_speed),
+                _ if f.flag == Some(raptor::EGG) => raptor::carry_clip(f.body.xz_speed),
                 _ if f.flag.is_some() => colors::carry_clip(f.body.xz_speed),
                 // The canister's run and stand (V d1: 215 from the frame after the carry, 216
                 // standing; I: the jumps' plain states).
@@ -2511,10 +2571,11 @@ impl Match {
                 // A bot's twin-gun bullet leaves the muzzle toward the first body part or wall its
                 // aim ray meets (`func_151C62D0` → `func_151D5174` for a bot, s126+0x84, then
                 // `func_151C4B0C`; C), not along its facing: V obul, the bullets' pitch lies
-                // between the muzzle's and the eye's to the aim. The pistol's and 0x23's
-                // (`func_150FE860`, `func_150FE320`) keep the facing and take the pitch byte
+                // between the muzzle's and the eye's to the aim. 0x23's and (I) the tommy gun's
+                // (`func_150FE320`, `func_150FE860`) keep the facing and take the pitch byte
                 // obj+0x1D1 (`func_15145740`, C), which follows a bot's aim pitch +0x170 (V o34p:
-                // 0x23 within 3.4°, in 1.1° steps; the steps and the lag are not ported).
+                // 0x23 within 3.4°, in 1.1° steps; the steps and the lag are not ported). The
+                // pistol's (`func_150FED30`) takes `func_150FF2D4`'s, untraced: as 0x23's here (I).
                 let ray = self.aims.get(i).copied().flatten();
                 if let Some((eye, dir)) = ray {
                     let to: [f32; 3] = if b.kind == damage::TWIN_BULLET {
@@ -2616,7 +2677,7 @@ impl Match {
                     let centre = [muzzle[0] + d * c, muzzle[1], muzzle[2] - d * s];
                     for v in (0..self.players.len()).filter(|&v| v != i) {
                         let p = self.seen_pos(seen, i, v);
-                        if !in_reach(centre, r, p, Hitbox::of(self.players[v].side))
+                        if !in_reach(centre, r, p, self.players[v].hitbox())
                             || (kind.flags & 0x2000 != 0 && !clear(world, muzzle, p))
                         {
                             continue;
@@ -2641,7 +2702,7 @@ impl Match {
                     let centre: [f32; 3] = core::array::from_fn(|j| nozzle[j] + dir[j] * d);
                     for v in (0..self.players.len()).filter(|&v| v != i) {
                         let p = self.seen_pos(seen, i, v);
-                        let h = Hitbox::of(self.players[v].side);
+                        let h = self.players[v].hitbox();
                         if !in_reach(centre, flame::FLAME_R, p, h) {
                             continue;
                         }
@@ -2657,7 +2718,7 @@ impl Match {
                 let [fwd, up, r] = kind.reach.map(|v| 2.0 * f32::from(v));
                 let centre = local_to_world(me.pos, me.facing, [fwd, 0.0, up]);
                 for v in (0..self.players.len()).filter(|&v| v != i) {
-                    let (p, h) = (self.seen_pos(seen, i, v), Hitbox::of(self.players[v].side));
+                    let (p, h) = (self.seen_pos(seen, i, v), self.players[v].hitbox());
                     if self.players[v].immune == 0
                         && in_reach(centre, r, p, h)
                         && self.hurt(v, &kind, true, false, me.move_angle, Some(i), ev)
@@ -2721,7 +2782,7 @@ impl Match {
     }
 
     /// Player `v` as shooter `s` saw it ([`Seen`]), else where it is.
-    fn seen_pos(&self, seen: Seen, s: usize, v: usize) -> [f32; 3] {
+    pub(crate) fn seen_pos(&self, seen: Seen, s: usize, v: usize) -> [f32; 3] {
         seen(s, v).unwrap_or(self.players[v].body.pos)
     }
 
@@ -2786,10 +2847,7 @@ impl Match {
         (0..self.players.len())
             .filter(|&v| v != owner && self.players[v].anim != anim::DEAD)
             .filter_map(|v| {
-                let (at, h) = (
-                    self.seen_pos(seen, owner, v),
-                    Hitbox::of(self.players[v].side),
-                );
+                let (at, h) = (self.seen_pos(seen, owner, v), self.players[v].hitbox());
                 projectile::hits_ellipsoid(from, dir, len, at, h).map(|d| (v, d))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -2820,7 +2878,7 @@ impl Match {
                 } else {
                     0.0
                 };
-                hits_body(from, dir, len, at, Hitbox::of(f.side), crouched)
+                hits_body(from, dir, len, at, f.hitbox(), crouched)
                     .map(|d| (v, d, from[1] + dir[1] * d - at[1] >= BULLET_HEAD - drop))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -3015,7 +3073,7 @@ impl Match {
     /// health and immunity tests for area hits); `angle` is the source's move angle, or the
     /// direction away from it for types with flag 0x10. Returns whether it took the hit.
     #[allow(clippy::too_many_arguments)]
-    fn hurt(
+    pub(crate) fn hurt(
         &mut self,
         v: usize,
         kind: &DamageType,
@@ -3087,6 +3145,14 @@ impl Match {
             }
             if lethal && enemy {
                 a.kills = (a.kills + 1).min(9999);
+                // War: Raptor: every kill is +1 for the killer's team (the rules' bit 0x200, C;
+                // V b1, b2), latched with the frame's other step scores.
+                let team = usize::from(a.team);
+                if self.settings.raptor
+                    && let Some(s) = self.colors.scores.get_mut(team)
+                {
+                    *s = s.saturating_add(1);
+                }
             } else if lethal && reaction != 0x2D {
                 a.suicides += 1;
             }
@@ -3457,10 +3523,14 @@ impl Match {
             if let Some((v, head)) = self.first_body(b.owner, b.pos, b.dir, b.reach(), seen) {
                 // `func_151D4DAC`: a hit on the head (part 0xA) takes 1 health at once, stunned
                 // or not, and below 3 kills with type 0x20, which no stun or immunity refuses (C;
-                // V ohit: stunned hits at +55 take 4 → 3 → 2 → dead, at +40 nothing). Only the
-                // twin guns' bullets test body parts and so have a head; not the pistol's, 0x23's
-                // or, in multiplayer, the mounted gun's (`func_151C229C`'s flag 8, C; V e_w39: the
-                // pistol at +48.6 takes 2, e1: the gun's hit takes 2).
+                // V ohit: stunned hits at +55 take 4 → 3 → 2 → dead, at +40 nothing). Bullets that
+                // test body parts have a head (`func_151C229C`'s flag 8): the twin guns' and the
+                // pistol's (its spawner `func_150FED30` sets it, C; V e_w39: a bullet pops the
+                // corpse's head at read 970); not 0x23's, the tommy gun's (I: `func_150FE860`) or,
+                // in multiplayer, the mounted gun's (C; V e1: its hit takes 2).
+                // ponytail: the pistol's head stays off: [`BULLET_HEAD`]'s height (fitted to the
+                // twin guns') would make e_w39's level body hits at +48.6 (2 each, V) head hits;
+                // on with the model's head part (part 0xA) instead of a height.
                 let f = &mut self.players[v];
                 let head = head && b.kind == damage::TWIN_BULLET;
                 if head && f.health > 0 && !self.waiting.contains(&v) {
@@ -3523,7 +3593,7 @@ impl Match {
         for (kind, r) in blasts {
             for v in 0..self.players.len() {
                 let p = self.players[v].body.pos;
-                if !in_reach(pos, r, p, Hitbox::of(self.players[v].side)) || !clear(world, pos, p) {
+                if !in_reach(pos, r, p, self.players[v].hitbox()) || !clear(world, pos, p) {
                     continue;
                 }
                 let away = away_from(world, pos, p);
@@ -4502,7 +4572,8 @@ mod tests {
 
     /// `func_151D4DAC`'s head hits, V oracle ohit (0x30): a stunned player at 4 hit on the head
     /// (+55, +60, +61) goes 3, 2, then dead (1328-1333); body hits on it at +40 do nothing; an
-    /// unstunned head hit takes 2 (2379: 3 → 1). The pistol's bullets have no head (V e_w39).
+    /// unstunned head hit takes 2 (2379: 3 → 1). The pistol's bullets have none here (see
+    /// `fly_bullets`: V e_w39's body hits at +48.6).
     #[test]
     fn a_bullet_on_the_head_hurts_through_the_stun() {
         let shot = |m: &mut Match, arena: &Arena, w: &CollisionWorld, h: f32| {

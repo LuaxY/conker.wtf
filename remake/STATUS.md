@@ -1,5 +1,246 @@
 # Status after wave 6 (2026-10-10)
 
+## Tank: the client (2026-10-13)
+**Batch M10, the client half. The client draws and plays Tank (`--mode tank` on map 24):
+- every player is model 119 at 0.5. Its turret (joint 2) turns by `turret` and its gun (joint 3) pitches by `pitch`,
+  over the clip, so the gun points where the rules fire. The treads' texture scrolls with the speed and the brake
+  lights light while braking. The flag is the slot's (red, blue, green, yellow from slot 3). The model hides from the
+  death to the respawn while its wreck stands in;
+- the local tank's camera follows the hull, and the scope (power-up 0x02, R) looks from the turret;
+- the shells (`projectiles.gltf#Scene4` at 1.5) and their blasts (War: Beach's puffs);
+- the props: the bunkers' doors slide apart along their own z, the bomb shows on its post or over its carrier, and the
+  wrecks stand where tanks died (330 frames);
+- the HUD: the power-up's icon at the weapon icon's place and the tank's scope. The countdown digit and the gas haze
+  are Total War's, unchanged;
+- the sounds: the engine (idle, driving) and its gear changes, the shot (clip 1's event), the shells' blasts, the
+  deaths, the bomb and power-up pickups, the countdown's song at the plant, and the gas.
+
+No wire, server or pack change.** Research: this batch's `../lab/research/mp-original/tank-client-scratch/` (oracle
+`ConkerRecomp.m10`): `run.sh`, `hw.sh` (HUD walks), the runs pw1 (each power-up), pw2 (the scope, R 170-200) and bm1
+(the bomb, the countdown, the gas), their `draws_*.txt`, and `probe.sh` (a remake match with free cameras).
+
+| Part | What |
+|---|---|
+| conker-client `tank.rs` (new) | **`Parts`** per tank: joints `joint_02`/`joint_03`, its own copies of the brake lights' material (off, and lit with the pack's `Tank::brake_lit`) and the treads'. **`pose`** (PostUpdate, after the clips): the turret × `Quat::from_rotation_y(turret)`, the gun × `from_rotation_x(−pitch)` (`turns`); the model hidden while `health == 0 && respawn_in > 0` (V c1: obj+0x6A/6B from the death + 1 to the respawn). **`lights`:** the brake swap (`braking`: past 5 with the target behind, C) and the treads' `uv_transform` (`scroll`: −7 S a frame per unit of speed, wrap 0x800, 32 S a texel, C `func_150ED638`). **`camera`** (below). **`shells`:** a model per `TankView::shells` entry, nose along (yaw, vy/speed); a shell gone is a blast of 16 puffs over 120 (`beach::burst`). **`props`:** doors 0-7 at home + their z × `lifts`; the bomb (12) on `POST` while `bomb`, over its carrier (190 up, 0.3 of the post's scale) while carried; wreck 18 + slot at (pos, facing); 9, 13-15, 17, 26-33 hidden (`owns`) |
+| `tank.rs` `camera` | **Behind the hull:** at rest 310 back, 159 up, looking at 88.5 over the tank; at full speed 400, 135, 52; straight in the speed's share (−1..1, eased a tenth a frame; reversing nearer). The heading closes on the hull's at 0.067 of the gap a frame, + 0.03 at full speed, at least 0.2°; a wall between pulls the eye in. **Scope** (power 0x02 and R): the eye 27.5 ahead along the turret's yaw and 111.6 up, looking level, `Scope { on, weapon 0x1F, zoom (−38.7, −23.5) }` (field of view 26.5°); R let go cuts back behind the hull. The on-foot camera still runs for the rules' aim gate, as the server's (`FollowCamera::tank`) |
+| `lib.rs`, `smooth.rs` | `characters("24")` adds 119 (`tank::MODEL`); `body()`: class 8 → it. Tank clips play at rate 1 (I). `seat_props`: `tank::seat` (the doors' collision). `FollowCamera::tank`: `follow` is the tank's view, `tank.0` the on-foot camera; a correction blends the body only (`drawn.camera` cleared) |
+| `render.rs`, `beach.rs` | `dress_teams`: a tank's team look is `tank::flag(slot)`; `add_props` also on `m.tank`; `show_pickups` leaves `tank::owns` to `tank.rs`. `beach::burst` and `Sprites` are `pub(crate)` (the strike's puffs as a function) |
+| `hud.rs` | **`Shown::tank`:** `weapon` is `Combat::power`, its icon from `TANK_ICONS` (`atlas2`); the scope's zoom by `zoom_limit(0x1F)`; no dots |
+| `audio.rs` | **`Sounds::tank`:** per tank the engine loop (`On::TankEngine`: 1191 idling, 1192 driving) from the spawn to the death; `engine()` states 0 idle, 1 speeding up (the target past the speed, faster than 1), 2 coasting (faster than 5); a change plays `On::TankGear` (1187-1190, into coasting 1189). A shell gone: `On::TankBlast` (the rocket's set; on the ground also 750), on a tank if one within 300 lost health. A death: `On::TankDeath` (742 after 22 frames, 735 by the bomb). The bomb taken: `On::BombPickup` (11, 12). The plant: the map's `countdown` song once, unducked (id `COUNTDOWN`). `Seen::target`; Tank's bomb carrier sends no canister radio |
+| `lab/screens/tank/` | `shots.sh` (groups a-d, ports 5980-5987), `drive.txt` (slot 0), `scope.txt` (R held) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| tank `the_turret_and_gun_turn_where_the_rules_fire` | the muzzle (joint 4 over joint 3) rises with the pitch; turret +90° on a hull facing 0 points along game angle 0x4000, as the rules' shell (facing + turret) |
+| tank `treads_brakes_flags_and_props`, `the_shell_points_along_its_flight` | the scroll's wrap; braking both ways; flags by slot; the placements; the nose along yaw and vy/speed |
+| tank `the_camera_follows_the_hull_and_the_scope_sits_on_the_turret` | V t1: 310/159/88.5 at rest, 400/135/52 at full speed; V pw2: the eye 27.5 along the turret, 111.6 up, level; the cut back at R's release |
+| hud `tank_matches_the_originals_draws` | **pw1** DL 106 boost `atlas2` [0, 25, 22, 14], 190 scope [0, 16, 22, 9], 250 shells [0, 39, 22, 12], 346 shield [0, 4, 22, 12], all at [260, 5]; none without (s0 200). **pw2** DLs 172-195: the back [52, 46, 8, 124] alpha 0x41, the ring's quarters, the bar [54, 67.5, 4, 80.75] (ours 67.34 and 81.3: unrounded), no dots |
+| audio `tank_sounds_follow_the_engine_shells_and_bomb` | 1191 at the spawn, 1192 + a gear speeding up, 1189 coasting, the rocket's blast on a hurt tank, 742 22 frames after a death, the engine stopped, 11/12 and the countdown song together |
+| lib `bodies_by_map_and_class` | class 8 on 24 draws 119 |
+| Live, `shots.sh` (audio debug) | 1191 per tank at the start, 1192 + 1188 driving (read 30), 699 at the shot (101), 693/702 + 750 at its ground blast (121), 12 at the bomb's take (494), the countdown song at the plant (524), 1231 at 30 left (795), 735 twice at the blast (824); power-ups 1296, 1187, 385 (c) |
+| `bun run test` | pass (34 test binaries, 0 failures) |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+
+**HUD findings** (the oracle's DL walks: 1 human and 1 bot, one screen). Tank's HUD is Deathmatch's (health in two
+rows of 3 pieces, the score and rank, the clock, the radar), plus:
+- the power-up's icon at the weapon icon's place ([260, 5], right/top) from `atlas2`'s first column, as above. No
+  count or timer: the shells' 3 and the shield's time are not drawn;
+- the scope: the back, the ring and a fixed bar (no zoom on the tank's scope), no dots;
+- the countdown digit (centred at 150, 86) and the gas haze are Total War's draws (same command, same two IA8 layers).
+
+Screens (`../lab/screens/tank/`, 1280 × 720):
+- **The tank:** `driving.png` (slot 0's view and HUD, braking: the brake lights lit), `turret.png` (turned 90°),
+  `firing.png` (the shell leaving), `blast.png` (its puffs on slot 1).
+- **The bomb:** `bomb-carried.png` (over the carrier), `countdown.png` (the carrier in bunker E, the digit 4).
+- **The doors and gas:** `doors.png` (bunker E's doors shutting, from outside), `gas.png` (outside at 7 frames
+  before the blast: the haze, the digit 1), `wreck.png` (an outsider's wreck after the blast).
+- **The HUD:** `hud-power.png` (the shield's icon), `scope.png` (the scope's view: back, ring and bar).
+
+**Gaps.**
+- **Item 6, cs5's op 9:** a no-op. The pack's outro leaves op 9's texture swap out (`conker-extract/src/outro.rs`);
+  the headlights' texture it swaps in is already the glTF's own.
+- **Pack lane:** the tank's icons and scope bar could move into `hud.json` (e.g. a `tank` block: the four icons and
+  the bar); they are constants in `hud.rs` now.
+- **I, the camera:** the heading's follow is fitted to t1 (86° → 21.6° in 20 frames standing, about 35° behind
+  turning at speed 39); turning in place the original's spring lags more. The wall pull-in is the remake's. The scope's look is level: the gun's pitch aims high at far targets and is
+  not followed (V pw2: level, no target).
+- **I:** the carried bomb's place and size (item 0x18's look is not found); the shells' blast (the strike's puffs:
+  `func_15137610`, the impact, is unread; V bm1 363's puffs share their colours); the tank's clip rate 1.
+- **Not done:** the treads scroll as one (the original's sides differ by the turn: ±Δfacing/70); the hull does not tilt
+  with the floor; the engine's pitch by speed (`|speed| · obj+0xB8 / 2`, a running voice's rate is fixed here); the
+  fire's smoke (`func_15102B38`, 5-9 puffs: C); the rumble (`func_151C1FB8`: C); a shield effect (none seen in pw2's
+  draws); the tank's lights (not in `lights.json`).
+- **Live notes:** the power-ups are dealt to the six spots at random per run (`shots.sh c` finds the scope's taker in
+  the server log). A pickup's sound plays at the player nearest the pickup's current spot, which for a roaming pickup
+  may already be its next one.
+
+## Raptor: rules, server and bots (2026-10-13)
+**Batch M6, the rules half. `--mode raptor` on `--map 3f` plays the original's War: Raptor (scenario 2): the cavemen
+(team 0, class 0xB, the club, the Ugas' camp) against the raptors (team 1, class 9, model 83 at 0.7, 6 hp, west by
+the nest). A human asking for the Tediz plays a raptor; bots in slots 2 and 6 of each 8 are raptors. Every kill is +1
+for the killer's team, a body dropped in the nest +1, an egg thrown into the cavemen's fire +2; the match ends at
+`--score` (1-40, default 20) or on the clock (99 lives); untimed, lives count and it ends as Heist's. The raptor runs
+its own frame: it speeds up 1 a frame to 35, brakes, turns 1024-768 a frame, jumps (y velocity 70). Its standing bite
+(Z or B, clip 49) kills every caveman in its area on frame 14 and leaves the body in its jaws. At full speed the bite
+is the running one (clip 53, 3 damage, knocked up). B or Z drops the body (clip 8). It takes nothing. Cavemen take the
+3 eggs from the nest, carry them at the bag's pace and throw them into their fire (clip 0xD6); a hit or a death
+resets the egg. The cooked eggs show in turn. The bone crossbow (0x41) and knives (0x3F) hit for 1; the 10 pickups
+are back 120 frames after a take. Script 0xBE, run by conker-bots, does the eggs, the nest, the hazard and the bots.
+Protocol 29.** Research: `../lab/research/mp-original/raptor.md` (runs r0-r12, b1, b2), `raptor-scratch/`.
+
+| Part | What |
+|---|---|
+| conker-sim `raptor.rs` (new) | **`step(p, input, world, others, drive)`:** the raptor's gait. Target = stick · 35/75, +1 a frame (`TOP` 35), braking 1.8 while that leaves 15, then 1.1, 0 under 1. It turns toward the stick at 1024 a frame up to speed 21, then down to 768 at 35. States 0/1/10 (idle, slow, run). A jumps (state 51, y velocity 70, `fall` as r1's steps, 56 frames, 3 landing frames, then 0). `Drive::Hold` (a bite, a hurt) and `Drive::Lunge(n)`, the running bite's root motion (`LUNGE`, −2.5 a frame). **`body`:** radius 124, centre 126 up, scale 124/203 (V b1's obj+0xE4/E8/EC; the cavemen gather 145-150 from it, as b1's) |
+| conker-rules `raptor.rs` (new) | **`Match::raptor_player`** in place of the on-foot frame. Z/B when free on the ground: the drop with a body, the running bite at 35, else the bite. The bite turns toward an enemy within 60° and 500 at 1100 a frame until frame 14. **`bite()`:** the area (`in_reach`, (224, 84) ahead standing, (140, 154) after the lunge) hits every enemy in it, 4 frames, once. A hit plays 54 (club, 13 frames), 12 (17) or 23 (the hazard's hop, to the landing), with no knock-back. A death plays 47 then 48 from 59, and `down()` at 119 with clip 19. **Eggs:** `touch_eggs` (a living caveman's body over one, as the bag's), `hold_eggs` (40 ahead, 38 up), `let_go_egg`. **`raptor_op`** applies script 0xBE's `Op`: Egg made/gone, LetGo, Face, Throw, Nest (clip 50, the baby eats 156 frames), Cooked. Consts `CLASS` 9, `CAVEMAN` 0xB, `SCORE` 20 |
+| conker-rules `game.rs`, `damage.rs`, `colors.rs`, `weapon.rs`, `gas.rs` | `Settings::raptor`; `Fighter::prey`, `hitbox()` (`Hitbox::RAPTOR` 125/202/125 for class 9: every area test, bullet and bolt), `other()`; `Match::raptor`. A lethal enemy hit is +1 to the attacker's team (`colors.scores`); the end and the standings are Heist's with those scores; 2 teams. Pickups refuse class 9. The egg is `flag` 3 (B does not drop it; the carrier is heavy and plays 0xD8/0xD7/0x2E4). Damage types `BITE` (0x46, kill → clip 0x170 87 frames), `RUN_BITE` (0x1C, 3), `HAZARD` (script type 0x3E). Poses `Bite`, `RunBite`, `Drop`, `Nest`, `Hatch`, `EggThrow`. `BONE_CROSSBOW` (draw 0x2C8, fire 0x2C9), `BONE_KNIVES` (0x2CA/0x2CB/0x2CC, a bolt of `SHOT_BODY` at frame 8, 14-frame cycle), `PICKUPS_3F_RAPTOR` (placements 15-24). `Effect::Raptor(Op)` |
+| conker-bots | 0xBE's natives: the baby's and eggs' handles (`obj`/`obj2`), an egg's 0xBF and 0x97, player queries 0x95 (carries egg k), 0xB2 (a body in the jaws), 0xD1 (hit since the last read, read and cleared), 0x97 (x, z packed); commands 7 (an egg let go), 1 (+0x25C 0x10: the throw), 0x10 (face), 0x14 0x28 (the nest), the cooked eggs' 0 and 2. **Raptor bots:** class 83's behaviours run as Conker's (`RAPTOR_BEHAVIOURS`: 0x1F→7, 0x1A→1, …); 0x22, the bite, presses Z once free and facing the target within 30°, else turns to it. The count-2 role pick keeps raptor bots Attackers: they never feed (kept, as the original) |
+| conker-server | `--mode raptor` (map 3f, no `--cavemen`, `--score` 1-40, no `unlimited`). Teams by side; class 9 for the Tediz' side, 0xB for the cavemen; all hold the club (a raptor never draws it, V: the slot reads 0xC0); the raptors' base is `starts.sides[1]`. `arena()` takes `raptor.json`'s 10 pickups. The script flag; `respawn_in` = 119 − step for a raptor; the team score in `Combat::score`; `Fighter::hitbox` for the lag-compensated bullets. **RAPTOR lines:** the script's ops (not Face) and each score change. `bots.sh` MODE=raptor (+ `SIDE=` for client 1) |
+| conker-sim `net.rs` | Protocol 29: `MatchView::raptor`, `raptors: RaptorView` (below) |
+| conker-client | `match_settings` copies `raptor`, so a local raptor is predicted on its own frame. Nothing drawn (M7) |
+| web | `data.ts`: mode `raptor` ("War: Raptor", lives, score 1-40, default 20, no unlimited); map `3f` plays Deathmatch and Raptor |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| sim `raptor` (4) | r1: the run to 35 and the braking, the turns (1024, 768 at 35), the jump; r8: the lunge |
+| rules `raptor` (5) | r2/r5/r6: the standing bite kills on frame 14 within its area, misses ~30° off; r8: the running bite's 3; r7: death, `down()` at 119; r4: an egg taken, carried, thrown (+2); a kill to the target ends the match |
+| bots ROM `raptor_bots_play` | 7 bots, 9000 frames, seed 1: [21, 11], bites [25, 16], 5 body drops, no unknown natives, no faults |
+| server `raptor_teams_and_outros` | the flags, sides, teams, classes, the club, the records, the outros (team 0: cs2 765, team 1: cs4 415) |
+| `bun run test`, `bun run check`, wasm clippy | all pass |
+
+| Run (cavemen-raptors) | Result |
+|---|---|
+| oracle b1, b2 (V) | 14-20 at 8510 (raptors); 20-17 at 12037 (cavemen) |
+| ROM test, seeds 1-4 | 21-11, 20-18, 21-16, 20-13 (cavemen) |
+| server `bots.sh 450` (MODE=raptor MAP=3f, 7 bots + 1 idle human), seeds 1-3 | 20-7 at 8478, 20-6 at 8179, 20-9 at 8159 (seed 3, `SIDE=tediz`); every bots.sh check ok, no panics. Per run: 9 eggs made, none thrown or cooked, no nest drops (as b1: no Collector took an egg; raptor bots never feed) |
+
+**M7 handoff (the wire, protocol 29).**
+- `MatchView::raptor`; `score_limit`, `scores` ([0] cavemen, [1] raptors), `winner` 0 or 1; the outros by winner
+  (the pack's cs2 and cs4).
+- `MatchView::raptors` (`RaptorView`): `eggs[k]` = (shown, carrier slot, pos; a carried egg's pos is already 40
+  ahead and 38 up of its carrier); `cooked[k]` (shown at, else `None`; props 0xFF − k); `fed` (the nest drop's
+  tick: the baby eats `raptor::EATS` = 156 frames from it); `prey` (bit n: slot n has a body in its jaws, model 22
+  on the rig's `carry` joint); `drops` (pos, facing, tick: a dropped body, gone `raptor::DROPPED` = 39 frames on).
+- Per player: `Combat::class` 9 is a raptor (model 83; `Combat::weapon` still names the club: do not draw it);
+  `Combat::anim` carries its clips (0 idle, 1 slow, 10 run, 51 jump, 49 bite, 53 running bite, 8 drop, 50 nest, 54/12/23
+  hurt, 47/48 death, 19 respawn) and the egg carrier's (0xD5 grab, 0xD8/0xD7/0x2E4 carry, 0xD6 throw); the victim of a
+  bite plays 0x170. `Combat::flag` stays `None` for an egg (the egg's carrier is in `RaptorView`). `respawn_in` counts
+  a raptor's 119 frames. The raptor's camera (raptor.md §2.2: ~342 behind, ~150 up at rest) is the client's.
+
+**Gaps.**
+- **I, the bots' bite:** class 83's behaviour 34 (the bite) is not in the pack. The bot turns to its target and presses
+  Z once within 30°. The oracle's bot bites are often cut short by its next move (b1: clip 49 restarted at 12-frame
+  steps), while ours run to the end. Our cavemen win every run; the oracle's raptors won b1.
+- **I, the server's raptors score half the ROM test's** (6-9 vs 11-18, fewer bites a match: ~30 vs ~41 per 9000
+  frames). Ruled out: slot layout, the human's order, debug vs release, the camera volumes (the ROM test with them
+  still gives 10-17). Not ruled out: the server world's `roots`/`sink`. Also, the cavemen's friendly fire leaves
+  victims immune (10 frames), and a bite on them is refused.
+- **I:** the standing bite's near edge (the sphere puts it at 104; no V under 144). The lock-on's cone and range (60°,
+  500). No knock-back on a raptor, and a hit cuts its bite short. The egg's touch is the bag's radius 29. A thrown egg
+  splats the frame after the throw. Untimed, the end is Heist's.
+- **Pack lane:** `outros.json`'s cs2 and cs4 last 765 and 415 frames (`length / 2`), the oracle's 750 and 375.
+- **Item 8, the pistol's head:** the code confirms it. `func_150FED30` builds its bullets with `func_151C229C`'s arg15
+  = 1 (flag 8: parts tested); `func_150FE860` with 0 (C). V e_w39: its bullet pops the corpse's head (1278, read 970).
+  `func_150FE860` is most likely the tommy gun's (I). The comments are fixed, but the head test stays off for the
+  pistol: the remake's head is a height (`BULLET_HEAD` 47.25, fitted to the twin guns), which would turn e_w39's level
+  body hits at +48.6 (2 each, V) into head hits. It goes on with the model's head part (part 0xA).
+- **Not done:** the jump zones (triggers 4-7) are the script's A presses, not checked against the oracle; a feed by a
+  human raptor and an egg delivery are not run live (the bots never feed, and no Collector took an egg in the runs).
+
+## Map 0x33 and the racers: the pack (2026-10-13)
+**Batch M12, the pack half. The pack has map 0x33 (Race's map, scenarios 11 and 12) like the other maps, with its four
+route barriers solid, the 7 power-ups, 17 spawns (the grid), nav and `ai.bin` (script 0xBC). A new `maps/33/race.json`
+holds the two routes (the barriers each shows, one lap of nav nodes, the overview map), the racers' characters by
+class, the board and the helmets. Character 144 (the bots) is packed. The board is a held model on the rider's foot
+joint, in `maps/33/props.gltf` with the helmets. Race's sounds are cues; Race has no music. No rules, server or client
+change: M12's rules half and M13 play it.** Research: `../lab/research/mp-original/race.md` (§M12), `race-scratch/`;
+this batch's `race-pack-scratch/` (oracle `ConkerRecomp.m11`): `lap.py` (the lap walk), `audio.sh` →
+`../lab/audio/captures/race_{a,b,c}_calls.txt`, `music.sh` → `../lab/audio/map33/`, and `runs/`. The runs: k1 (the
+kick and the board, DLs 250/252/390), cls (the helmets by class, DL 60), m1 (the missile, DLs 222-232), h1 (2 players,
+DL 230), and the HUD walks `hud-k250`, `hud-h230`.
+
+| Part | What |
+|---|---|
+| extract-scene | `deathmatch_solid(0x33)` = the barriers 0-3 (V L1, L2: `+0x4F` 0x01; the power-ups have 0x21). 56 of the 1849 collision faces, 14 each, as the layers `{placement: 0..3}`; each scenario hides two by `+0x6E` (`race.json`'s `shown`) |
+| extract-character `held.rs` | `action_records(game_data, action)`: an action's 16-byte records, used by `held_models` and by Race's models, which a script makes |
+| conker-extract `lib.rs` | `RACE_MAP` (0x33), `RACER` (144), `RACE_AI` (0xBC). With 0x33 in `--map`: 144 on the Tedi's rig (the Tedi's clips, lift 49) after the raptor; its `looks` hide list 1 on class 0xF (obj+0x94 = 2, V cls). `race_attached`: action 0x79 (the board, bank-09 #0x5D on slot 23) and the helmets 0x76, 0x78, 0x77 (#0x5A, #0x5C, #0x5B on slot 12) → `maps/33/props.gltf`, 4 scenes at the origin. `race_mode()` → `race.json`: the barriers; the routes (scenario 11 shows 0 and 3, uids 0xFF/0xFC, `race_map_low`; 12 shows 1 and 2, `race_map_high`); each lap is `func_150888A8`'s walk from node 0x13 (previous 0x12), 33 nodes; the racers (0xB → 136, 0xC-0xF → 144); the board; the heads (0xD, 0xE, 0xF). `pickup_table(0x33)`: canisters `[3, 100]` at placements 4, 5, 9 give 0x31, missiles `[3, 101]` at 6, 7, 8, 10 give 0x33, respawn 18 VIs. `ai_script(0x33)` = 0xBC. `HELD_CLIPS` + the kick 0x354: `held.json` gains #0x34 (the fist on slot 9, t5-t30) at index 11. The missile is `projectiles.gltf#Scene4` (#0x33) drawn at 1.0 (V m1 DL 224) |
+| conker-extract `audio.rs` | `race_cues()` (below); `clip_sounds` keeps 0x354's swing (90 at t11) on 136 and 144. `map_sounds("33")`: no emitter, zone or song |
+| conker-extract `hud.rs` | `race_map_low`/`race_map_high` (blobs 0xCF1, 0xCF2, IA8 64 × 64). Weapon icons: 0x33 is `atlas` [50, 39, 14, 12] (the DL clamps at the atlas's edge); 0x31 is `atlas2` cell 6, [0, 28, 22, 14] |
+| conker-assets | `race.rs`: `Race` (`barriers`, `routes` of `Route { scenario, shown, lap, map }`, `racers`, `board` and `heads` as `Attached { scene, joint }`) and `race_json`; `load` refuses a shown non-barrier and a lap that passes a node twice. New `On` variants: `RaceHum { hum }`, `RaceCountdown { stage }`, `RaceMissile`, `RaceWall`, `RaceKick`, `RaceDeath { kind_e }`; the sample covers them |
+| Tests | `tests/rom.rs` `race_map_and_racers`: 120 nav nodes; both laps verbatim; shown, uids; the pickups; 17 spawns; AI 0xBC; the attached models; the board's 64 vertices; 144's 28 joints and 2 lists. `tests/pack.rs`: 0x33 in the read-back (ROM path, solid rule, 17 spawns). A Race block: `race.json` = `race_mode` byte for byte; no lights, lifts or kill gates; respawn 18; barrier faces; 144's clips = the Tedi's; looks; props.gltf's nodes. HUD icons and maps; `race_audio_reads_back`. conker-assets: the round trip and the refusals |
+| `package.json` | `pack` + `--map 33` (no `--background`: no music) |
+| Pack | Re-exported (`--force`, the new `pack` arguments). New: `maps/33/` (63 textures, 1849 collision faces, 17 spawns, 7 pickups, 16 triggers, nav, `ai.bin`, `lights.json` empty, `props.gltf`, `race.json`), `characters/144/` (6 textures), Race's WAVs in `audio/common`, `hud/race_map_low.png`, `race_map_high.png`. Changed: `weapons/deathmatch/held.*` (21; indices from 11 up shift by 1), `audio/events.json`, `sounds.json`, `hud/hud.json`, `pack.json`, `README.md`. Removed by hand, stale since they moved to `common` (now played by more than one owner): `audio/characters/119/0750.wav`, `0752.wav`, `audio/characters/136/` (1051-1054, 1061, 1063, 1067-1070) |
+
+**The board.** It is bank-09 #0x5D (64 vertices), the one record of action 0x79: an attachment on matrix slot 0x17,
+joint 23, a foot. Script 0xBC's player command 0x78 → `func_15097A8C` creates it at each spawn (C). It goes at the
+death and comes back at the respawn (V k1). It is drawn in joint 23's frame with no offset of its own, as a held weapon
+(V k1, b2, cls). It is part of neither 136's nor 144's model, and it is not an object of its own. The helmets work the
+same way, on joint 12 by class: 0xD #0x5A, 0xE #0x5C, 0xF #0x5B, 0xC none (V cls).
+
+**Race's sounds** (C as noted in `race_cues`, V race_a-c):
+
+| Cue | Sounds | Volume | Near/far |
+|---|---|---|---|
+| hums 0, 1, 2 (records; the law in `On::RaceHum`) | 1459, 1460, 1468 | 1000 | 200/1000 |
+| countdown beeps 1 and 2; go | 1671; 1672 (unpositioned) | 24000 | 0/0 |
+| power-up taken | 1577 | 32767 | 100/1000 |
+| canister used | 1576 | 32767 | 500/1000 |
+| missile fired | 567 | 30000 | 500/2000 |
+| missile in flight | 750-752 | 30000 | 500/1000 |
+| missile hit | 263 | 28000 | 300/1800 |
+| kick hit (the swing is clip event 90) | 1015 | 28000 | 300/1800 |
+| wall scrape | 778-785 | 28000 | 300/1800 |
+| blow-up; over kind 0xE | 1224; 1076 | 32767; 32000 | 700/2000 |
+| blow-up's blast; debris | 694-695; 689-692 | 32000 | 1000/3000; 700/2000 |
+
+There is no music: song11b saw no song or MP3 start, and `../lab/audio/map33/quiet.wav`, with the hums muted, has
+silent stretches. A jump, the finish and the results play nothing (V race_a, race_c).
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle k1, b2, cls | the board on joint 23 from each spawn to the death; the helmets on joint 12 by class; list 1 hidden on 0xF |
+| Oracle m1 | the missile is #0x33 at scale 1.0 (DL 224) |
+| Oracle race_a-c | every cue's id, volume and distances above |
+| `lap.py` | the walk's laps = `race_lap`'s (33 nodes each) |
+| conker-assets, conker-extract tests | pass (conker-assets 14, `tests/pack.rs` 6, `tests/rom.rs` 15, `tests/traps.rs` 1) |
+| `bun run test` | 476 pass, 1 ignored (with the Raptor and Tank-client lanes' work in the tree) |
+| `bun run check` | fails at `cargo fmt --check`, only on the other lanes' in-progress files (conker-bots, conker-client, conker-rules, conker-sim, conker-server). This lane's crates (conker-extract, conker-assets, extract-scene, extract-character) pass `fmt --check` and clippy `-D warnings`; `web/app` check passes |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1799 files |
+
+**Gaps.**
+- **I:** the hum law's height is obj+0x28, read as the height above the floor (C: the airborne test). The hums' halving
+  when byte 0x800C35EA is 1 is not packed. 1224's volume, passed as −0x7D00, is read as full.
+- **I:** the power-ups' swing of ±8 on +0 and +0x18 is read as a bob.
+- **Not found:** a start/finish prop (0x33's 11 placements are the barriers and the power-ups). The map has no kill
+  gates (death is no floor) and no lights.
+- **Not decoded:** the results screen's layout (phase 6). The race HUD is not in `hud.json` (numbers below, for M13).
+- **Bots lane:** `conker_bots::script(0x33)` still gives 0xBA; the pack's `ai.bin` is 0xBC.
+
+**Handoff to M12's rules half (rules, sim, server, bots).**
+- Read `race.json`: the route by scenario; the barriers not in `shown` are not solid (skip their
+  `{placement: k}` collision layers); the lap is the order of nav nodes to pass.
+- Pickups: `Gives::Weapon(0x31)` (canister, the boost) and `(0x33)` (missile), respawn 18 VIs; up to 3 of one type,
+  and a new type replaces the count (race.md).
+- `conker_bots::script(0x33)` → 0xBC. 144's clips are the Tedi's: ride 5 (30 frames, also jumping and steering),
+  knocked up 0x54 (29), kick 0x354 (29: attack 0x15 at t11), dead 0x170 (88); bots play 0xF for one frame between
+  kicks.
+- Emit the cues: `race_hum` from the spawn to the death; `race_countdown` 1/2/3 at 60/30/5 ticks before the go;
+  `pickup`, `shot` 0x31/0x33, `race_missile`, `hit` 0x33, `race_kick`, `race_wall`, `race_death`.
+
+**Handoff to M13 (client).**
+- Racers: class 0xB is 136 and 0xC-0xF are 144 (with `looks`). Draw `props.gltf` scene `board.scene` on
+  `joint_<board.joint>` from the spawn to the death, and the helmets by class on joint 12. `held.json` index 11 is now
+  the kick's fist.
+- Barriers: draw only the route's `shown` placements in `level.gltf`.
+- Power-ups: they spin +3.03° a frame. On a take they shrink 7 → 0 over 4 frames; on the return they grow 1.82, 3.64,
+  5.46, 7.0, 7.16, 7.01, 7.0 (V L1 541-557). The missile is `projectiles.gltf#Scene4` at 1.0.
+- HUD (V k1 DL 250, 1 view; h1 DL 230, 2 views):
+  - health at the top left (`atlas` [49, 5, 15, 4] pieces), the lives pips at (7, 6);
+  - the place ("1st", font + `rank_*`) centred at the top; "LAP 1/5" in the font at (10, 20);
+  - the overview map at [226, 13]-[290, 77], TEXEL0 × ENV with env alpha 0x80, with 2 × 2 dots, one's own green and
+    the others red (2 players: at [198, 14] and [198, 122]);
+  - the race clock "0:01:63" centred near x 146, top 204;
+  - the items at x 232, top 6, one icon per item, 18 px apart leftward.
+
 ## HUD and audio leftovers (2026-10-13)
 **Batch E9. Through a scope the local player's body and weapon hide in its own view. The rank's ties follow the
 original's rule. The death iris is centred on the dying player's head. Weapon 0x16's R view tints the framebuffer, and
