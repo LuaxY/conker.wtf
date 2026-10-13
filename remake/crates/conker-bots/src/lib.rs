@@ -80,6 +80,8 @@ pub fn script(scene: usize) -> usize {
         0x34 => 0xBD,
         0x3F => 0xBE,
         0x2B => 0xB9,
+        // 0x1A's Deathmatch runs Heist's script, its FFA branch (V dm6).
+        0x1A => 0xB7,
         _ => 0xBA,
     }
 }
@@ -622,18 +624,30 @@ impl Bots {
         let g = &mut self.g;
         g.set_i32(g::PICKUPS, arena.pickups.len() as i32);
         g.set_i32(g::PICKUPS + 4, arena.pickups.len() as i32);
-        g.set_i32(g::RESPAWN, 240);
-        for (k, (p, pos)) in arena.pickups.iter().enumerate() {
+        g.set_i32(g::RESPAWN, arena.respawn.map_or(240, |f| 2 * i32::from(f)));
+        let roams = arena.roaming.count;
+        for (k, (p, _)) in arena.pickups.iter().enumerate() {
             let gives = match p.gives {
                 Gives::Weapon(w) => i32::from(w),
                 Gives::Grenades => 2222,
                 Gives::Mask => i32::from(gas::MASK),
             };
             g.set(g::GIVES, k, gives);
-            g.set(g::PICKUP_FLAGS, k, 6);
+            // 0x1A's: 3 the roaming ones, 2 the fixed (V dm6); 6 elsewhere.
+            let flags = match roams {
+                0 => 6,
+                _ if k < roams => 3,
+                _ => 2,
+            };
+            g.set(g::PICKUP_FLAGS, k, flags);
+            // NODE_OF[k] holds pickup k's node wherever it stands, so its spot is k. Only a flag-1
+            // pickup records its holder; the others' stays -1 (`func_1508DA1C`, `func_1508DC24`,
+            // C): 0xB7 goes for the pickups whose holder is -1 and timer 0.
             g.set(g::PLACE, k, k as i32);
+            g.set(g::SPOT, k, k as i32);
+            g.set(g::HOLDER, k, -1);
             g.set(g::PROP, k, 0x3001 + k as i32);
-            let node = self.graph.nearest(*pos, Some(0), None).0;
+            let node = (self.graph).nearest(m.pickup_at(arena, k), Some(0), None).0;
             g.set(
                 g::NODE_OF,
                 k,
@@ -813,6 +827,7 @@ mod tests {
         let arena = Arena {
             spawns: Vec::new(),
             pickups: Vec::new(),
+            ..Default::default()
         };
         let start = || {
             let at = |x| Placement {

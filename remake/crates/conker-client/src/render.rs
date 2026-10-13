@@ -85,6 +85,16 @@ pub fn shade_to_linear(color: &mut [f32; 4]) {
 #[derive(Resource)]
 struct ModelLift(Vec<f32>);
 
+/// Each body's team looks (the pack's `Character::teams`, the Wise Guy's; None for the others): the
+/// glTF material's name (extract-character names material i `material_ii`, C) and each team's
+/// texture, by body ([`crate::characters`]).
+#[derive(Resource)]
+struct TeamLooks(Vec<Option<(String, Vec<String>)>>);
+
+/// The team a player's model is dressed as, and the model.
+#[derive(Component)]
+struct TeamDressed(u8, Entity);
+
 /// A body's character: its scene and its clips' graph.
 struct Look {
     scene: Handle<WorldAsset>,
@@ -115,14 +125,6 @@ pub(crate) struct Model {
     pub(crate) body: usize,
     pub(crate) scene: Entity,
 }
-
-/// A bullet or grenade drawn this frame (respawned every frame from the [`MatchView`]).
-#[derive(Component)]
-struct Projectile;
-
-/// Placeholder meshes for projectiles: bullet (and aimed shot), grenade, rocket.
-#[derive(Resource)]
-struct ProjectileLooks([(Handle<Mesh>, Handle<StandardMaterial>); 3]);
 
 /// The HUD's text (native).
 #[cfg(not(target_family = "wasm"))]
@@ -155,7 +157,16 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     let level = level_scene(&cfg.map);
     let lift = |c: &conker_assets::Character| f32::from(c.model_lift);
     app.insert_resource(ModelLift(slice.characters.iter().map(lift).collect()));
+    let bodies = crate::characters(&cfg.map);
+    let teams = (slice.characters.iter().zip(bodies)).map(|(c, name)| {
+        let t = c.teams.as_ref()?;
+        let textures = t.textures.iter().map(|f| format!("characters/{name}/{f}"));
+        Some((format!("material_{:02}", t.material), textures.collect()))
+    });
+    app.insert_resource(TeamLooks(teams.collect()));
+    app.add_systems(Update, dress_teams);
     crate::beach::build(app, &slice.characters);
+    crate::projectiles::build(app);
     let carried = (slice.lights.lights.iter())
         .find(|l| l.when == conker_assets::When::Carried)
         .cloned();
@@ -234,6 +245,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
                 let target = offscreen.then(|| offscreen_target(&mut commands, images));
                 setup_scene(&mut commands, &assets, &level, eye, look, free, target)
             },
+            #[cfg(not(target_family = "wasm"))]
             setup_combat,
         ),
     );
@@ -251,7 +263,8 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             follow_camera,
             crate::outro::show,
             crate::beach::camera,
-            draw_projectiles,
+            crate::projectiles::fly,
+            crate::projectiles::flames,
             add_props.run_if(ready),
             crate::outro::add_actors.run_if(ready),
             crate::flags::add.run_if(ready),
@@ -408,26 +421,9 @@ fn setup_scene(
     });
 }
 
-/// The projectile placeholders and the HUD.
-fn setup_combat(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mut look = |radius: f32, color: Color| {
-        let mesh = meshes.add(Sphere::new(radius));
-        let material = materials.add(StandardMaterial {
-            base_color: color,
-            unlit: true,
-            ..default()
-        });
-        (mesh, material)
-    };
-    let bullet = look(4.0, Color::srgb(1.0, 0.85, 0.2));
-    let grenade = look(9.0, Color::srgb(0.15, 0.35, 0.1));
-    let rocket = look(12.0, Color::srgb(1.0, 0.35, 0.1));
-    commands.insert_resource(ProjectileLooks([bullet, grenade, rocket]));
-    #[cfg(not(target_family = "wasm"))]
+/// The HUD (native).
+#[cfg(not(target_family = "wasm"))]
+fn setup_combat(mut commands: Commands) {
     commands.spawn((
         Hud,
         Text::new(""),
@@ -518,6 +514,49 @@ fn rebuild_models(players: Query<(Entity, &Combat, &Model)>, mut commands: Comma
                 .entity(entity)
                 .remove::<(Model, Rig, crate::held::Hands)>();
         }
+    }
+}
+
+/// Heist's team looks ([`TeamLooks`]): a Wise Guy's model draws team `team & 3`'s texture (REDS,
+/// BLUES, GREENS, YELLOWS: the shirt) in the team material, on its own copy of it (V runs tm4, tm8:
+/// the game binds segment 0x0A per team and changes nothing else, `../lab/oracle/map1a/teams/`; V
+/// slots 0-3 in Deathmatch too, where the server's teams are the join order).
+#[allow(clippy::type_complexity)]
+fn dress_teams(
+    looks: Res<TeamLooks>,
+    players: Query<(Entity, &Combat, &Model, Option<&TeamDressed>), With<Rig>>,
+    children: Query<&Children>,
+    mut parts: Query<(
+        &bevy::gltf::GltfMaterialName,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    assets: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    for (entity, c, model, dressed) in &players {
+        let team = c.team & 3;
+        let Some((name, texture)) = (looks.0.get(model.body).and_then(Option::as_ref))
+            .and_then(|(name, t)| Some((name, t.get(usize::from(team))?)))
+        else {
+            continue;
+        };
+        if dressed.is_some_and(|d| d.0 == team && d.1 == model.scene) {
+            continue;
+        }
+        let texture: Handle<Image> = assets.load(texture);
+        for e in children.iter_descendants(model.scene) {
+            if let Ok((n, mut m)) = parts.get_mut(e)
+                && n.0 == *name
+            {
+                let mut own = materials.get(&m.0).cloned().unwrap_or_default();
+                own.base_color_texture = Some(texture.clone());
+                m.0 = materials.add(own);
+            }
+        }
+        commands
+            .entity(entity)
+            .insert(TeamDressed(team, model.scene));
     }
 }
 
@@ -642,7 +681,7 @@ fn follow_camera(
     player: Query<&FollowCamera>,
     camera: Single<
         (&mut Transform, &mut Projection, &FreeCameraState),
-        (Without<Model>, Without<Projectile>),
+        (Without<Model>, Without<crate::projectiles::Projectile>),
     >,
 ) {
     let (mut camera, mut projection, free) = camera.into_inner();
@@ -668,34 +707,6 @@ pub fn fov(scope: &conker_camera::Scope) -> f32 {
     conker_camera::VIEW_ANGLES[1] + zoom
 }
 
-/// The match's bullets, aimed shots, grenades and rockets where the server last put them.
-/// ponytail: respawned every frame (a handful at most); pool them if that ever shows.
-fn draw_projectiles(
-    game: Query<&MatchView>,
-    old: Query<Entity, With<Projectile>>,
-    looks: Res<ProjectileLooks>,
-    mut commands: Commands,
-) {
-    for entity in &old {
-        commands.entity(entity).despawn();
-    }
-    let Ok(m) = game.single() else {
-        return;
-    };
-    let shots = (m.bullets.iter().chain(&m.shots).map(|p| (p, 0)))
-        .chain(m.grenades.iter().map(|p| (p, 1)))
-        .chain(m.rockets.iter().map(|p| (p, 2)));
-    for (pos, kind) in shots {
-        let (mesh, material) = looks.0[kind].clone();
-        commands.spawn((
-            Projectile,
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_translation(Vec3::from_array(*pos)),
-        ));
-    }
-}
-
 /// In War: Total War, its props, once the characters are in (one glTF load at a time, see
 /// [`load_characters`]).
 fn add_props(
@@ -714,9 +725,9 @@ fn add_props(
 
 /// The level glTF draws every placement, pickups included, as a node named `model@placement`, and
 /// so do War: Total War's props: a taken pickup's node shrinks away ([`shrink`]) and hides until it
-/// is back; in Total War, a prop the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`]
-/// says so (a canister taken shrinks too, the doors and covers slide by [`MatchView::lifts`] and
-/// just go).
+/// is back, a roaming one (0x1A's, [`MatchView::roaming`]) standing where it is now; in Total War,
+/// a prop the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`] says so (a canister
+/// taken shrinks too, the doors and covers slide by [`MatchView::lifts`] and just go).
 #[allow(clippy::type_complexity)]
 fn show_pickups(
     game: Query<&MatchView>,
@@ -748,8 +759,14 @@ fn show_pickups(
             n @ 0..8 if driven => f32::from(m.lifts[n as usize]),
             _ => 0.0,
         };
-        if t.translation.y != y + lift {
-            t.translation.y = y + lift;
+        // A roaming one stands where the match has it (a pickup position, as the node's own).
+        let roams = m.roaming.iter().find(|r| u32::from(r.0) == *placement);
+        let to = roams.map_or(t.translation.with_y(y + lift), |r| Vec3::from(r.1));
+        if t.translation != to {
+            if roams.is_some() {
+                debug!("t={tick} pickup on placement {placement} at {to}");
+            }
+            t.translation = to;
         }
         *at = match (taken || gone, *at) {
             (false, _) => None,

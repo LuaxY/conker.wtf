@@ -1,5 +1,110 @@
 # Status after wave 6 (2026-10-10)
 
+## Visuals: projectiles, flames, the twist, the twin guns' textures (2026-10-13)
+**Batch E8 (Wave 7 item 1). Rockets, grenades, weapon 0x14's knives and the crossbow's bolts fly as the original's
+models, turned as its display lists turn them. Bullets draw nothing, as in the original: the placeholder spheres are
+gone. The flamethrower's stream is a ribbon through its flame points, drawn with the jets' flame texture. The twin
+guns' twist turns the upper body toward the aim. The twin guns' three untextured materials are textured. 0x2D's white
+quads (and 0x34's two) are out of the levels, because the original never draws them. Every map's rockets shake the
+views. No protocol change.** Research: oracle runs on 0x2D (`ConkerRecomp.e8`, slot 0 given the weapon by a poke;
+scratch `../lab/research/mp-original/visuals-scratch`: `rsp.py` now keeps the RDP state, `gren2.py` the grenade's
+angles, plus the input scripts; DL dumps in `/tmp/e8`: twin, rocket, gren4, knife, bolt2, flame, quad3). The game
+rebuilds its display list every other frame while its objects move every frame, so a change between two lists covers
+two frames (the rocket moves 400 a list, 200 a frame). Every rate below is per frame.
+
+| Part | What |
+|---|---|
+| conker-extract, conker-assets | `PROJECTILES` (the grenade bank-01 #0x7E, the rocket bank-09 #0xE1, the knife #0x23, the bolt #0x35) → `weapons/deathmatch/projectiles.gltf` (`projectiles_gltf`): scene i each, +z along the flight (V the oracle's batches: the grenade 12 + 8 + 8 vertices, the rocket 16 with its nose at +484, the bolt 23). `weapons/deathmatch/flame.png` (`flame_png`): the jets' flame (`traps::TEXTURES[0]`). `UNDRAWN` = bank-03 #0x33 (class 51): `map_level` drops its instances (0x2D's placements 40-45, 0x34's 29-30). They are solid in the match but never drawn (V quad3 DL 130: slot 0's camera faces placement 40 from 700 units and draws no batch within 300 of it; I on 0x34). `pack-readme.md` rows |
+| extract-gbi `dl.rs` | `State::texture`: when a draw's G_TEXTURE tile was described for an earlier image at the same TMEM address, it takes the tile described since, for the newer load. Bank-09 #0x1A is the case: G_TEXTURE picks tile 1, its 64 × 32 image describes tiles 1 and 0, and the next three images (3790, 3796, 3112) re-describe tile 0 only. The rule does not apply when G_TEXTURE chose its tile after that description (bank-01 #0x00 and #0x45 describe tile 5, then choose tile 0). C: F3DEX2's triangles carry G_TEXTURE's tile, so the console samples a 64 × 32 window over each new 16 × 16 image and the old image's leftovers (I, not compared on screen). The export takes each image's own tile instead, a deliberate departure |
+| conker-client `projectiles.rs` (new) | `fly` matches the `MatchView`'s shots, grenades and rockets in order per list (reach a frame: 2 bolt steps, 60, 400). Each shows its model from its second view (I), +z along its step. The rocket is at 0.047, nose ahead (V rocket DLs 120-124). The grenade is at 0.5, pointing along the ground and rolling forward 32.7° a frame from 32.7° up (V gren4 DLs 119-129, its frames 16-26, within 0.6°); it then settles from its last frame in the air (V −98° at DL 129, then −59°, −17°, … to 3°; here × 0.775 a frame, I). The knife is at 0.5, 40° up, then rolls 30° a frame (V knife DLs 121-132). The bolt is at 0.5, turned 60° about its length, then 30° back a frame (V bolt2 DLs 151-158). Bullets have no model (V twin DLs 104-110). `flames` gives each flamethrower (0x15) holder a stream. From `DELAY` frames into the fire clip, a point a frame leaves the nozzle (74.1 ahead, 9.9 left, 52 up, 4.8° left of the facing) at 41.7 a frame along the stream. It rises 9.1, easing toward 16.5 by 0.16 a frame. Its width is 16, +6.6 a frame; its alpha is 200 for 9 frames, then fades out over 7. The first wall ahead of the nozzle stops it. The ribbon faces the eye, with `flame.png` repeating every 218 units and scrolling (V flame DLs 106-170, the stream's 15 records at 0x8021DFF0) |
+| conker-client `held.rs` | `twist` runs after the clips. `joint_01` (the upper body, with the arms and guns) turns by −twist about up, to `facing − twist` as the camera aims; `joint_12` (the head) turns back to the legs' facing (V twin DLs 165/186/230: `joint_01` is at 5.3° on the root at twist 0, 54.9° at 9000, −9.3° at −2660; the arms and guns within 1.6°) |
+| conker-client `beach.rs`, `render.rs` | `rocket_shakes` runs on every map, before the Beach gate (800/2000 at the rocket's last spot: the rocket pool's `func_151C05A4`, C). `render.rs`: the spheres are gone, and `fly` and `flames` run in their place. The HUD's setup is native-only (on wasm it spawned nothing) |
+| Fades (item 7) | Already covered, nothing to change: every fade (capture, escape, end, RESTART, outro) is a HUD quad, and every quad's alpha goes through E3's `display_alpha` (`hud.rs`, `hud_alphas_blend_as_the_console`) |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| extract-gbi `a_stale_texture_tile_gives_way_to_the_newer_one` | #0x1A's sequence: the first image at 64 × 32 on tile 1, the next two at 16 × 16 (line 2) with their own palettes |
+| conker-extract `slice_in_memory`, `textures_counts` | every held material is textured; 09-1a-00 draws 3790, 3796 and 3112 at 16 × 16. `textures()` over banks 01, 03 and 04: 2,894 PNGs, and every mesh's textures equal HEAD's (the first form of the rule changed bank-01 #0x00's draw 27 and #0x45's draws 3-4; the G_TEXTURE condition restores them) |
+| conker-extract `projectiles_and_undrawn_quads` | the four models' vertices 28, 16, 34, 23, the rocket's z −316…484, 4 scenes; 0x2D's scene level has 6 class-51 instances and 0x34's has 2, and their map levels have none |
+| conker-client `projectiles_turn_as_the_original` | the knife's z at frames 0 and 2 against knife DLs 121/123, its side axis up × flight; the bolt's x at 60° then level (bolt2 151/155); the grenade's z at frames 16 and 18 against gren4 DLs 119/121 (within 0.01), its frame-26 pitch −98.1° ± 1, lying along the throw at rest; knife or bolt by the weapon |
+| conker-client `the_flame_stream_follows_the_records` | flame DL 130's records: 41.7 a frame along the stream, rising 9.1, then 12.2 ± 0.3 on its fourth frame (V 12.25); 35.8 wide then; 15 points; alphas 29, 57, … 171, 200, 200; 30 ribbon vertices; a wall 200 ahead keeps 4 points short of it |
+| conker-client `the_twist_turns_the_upper_body_to_the_aim`, `a_rocket_shakes_every_map` | the upper body faces `facing − twist` (49.44° at 9000) with the head kept on the legs; a rocket gone on a Deathmatch map leaves one shake at its last spot, dropped once over |
+| `bun run test`, `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass (417 tests, with M2's work in the tree): the `textures_counts` and rustfmt/clippy failures listed under M2 below are fixed |
+| Pack | `bun run pack --force`, then `../lab/tools/verify-pack.sh`: "pack equal" (1,396 files). Against the pack before E8: new `weapons/deathmatch/projectiles.{gltf,bin}` and `flame.png`; `held.{gltf,bin}` (materials 15-17 textured; meshes and nodes equal); levels 2d and 34 without the class-51 quads |
+
+Screenshots (`../lab/screens/visuals/shots.sh`, ports 5980-5988, offscreen 1280 × 720, release build in `target-net`;
+Deathmatch on 0x2D, slot 0 at (−2247, −521, 6015) facing 16896, given the weapon at read 40, the same scripts as the
+oracle's runs). The clients' reads trail the server's by 2-3 (the view's delay), so the side shots come a few reads
+after the oracle's lists. `rocket-side2.png`: the rocket over the trapdoor, nose ahead (read 128). `grenade-side.png`
+(in flight) and `grenade-rest.png` (lying along its throw). `knife-side.png` (tumbling, blade first),
+`knife.png` (the scope's view as it leaves). `bolt-side.png` (tip ahead). `flame.png` and `flame-side.png` (the stream
+rising from the nozzle). `twist.png` (slot 0's aim view, R held, the stick right) and `twist-free.png` (the same from
+the side: the upper body turned on the legs). `quad2.png`: wave 4's duel spot without the white quad (it was at the top left). `rocket.png`, `grenade.png`
+and `bolt.png` are slot 0's views at the throw or shot; their projectiles are small, hidden or still in hand.
+
+**Gaps.**
+- **I, not drawn:** the muzzle flashes (the twin guns' bank-09 #0xDF model and texrects of blobs 0x923, 0x924 and
+  0x926; the rocket's launch flash uses the same blobs). The rocket's trail (texrects of blob 0x78A, 7-13 units, 4-5
+  every other frame). The stream's puffs (texrects of 0xBA6) and tongues (ribbons of 0xBA7 at the nozzle).
+- **I, approximations:** a projectile shows from its second view, one frame later than the original's first list, plus
+  the frame its scene takes to spawn. Knife or bolt comes from the weapon of the player nearest where it appears. A
+  bounce is a fall that stops (the views' steps are uneven). The grenade's settling is a decay, not V's wobble (up to
+  20° off at its frames 30-36). The stream's nozzle doesn't follow the twist, and the head's own drift under the
+  twist (V 7.5°, 17.2°, 28.2° on the root) is not modelled.
+- **C/I:** the twin guns' three materials show their own 16 × 16 images, where the console's G_TEXTURE tile would
+  sample a 64 × 32 window (above).
+- **Not traced:** the burning player off 0x34 (traps.rs draws it there only). `fade_escapees` fades a textured 3D model
+  in plain alpha, without `display_alpha` (it has no single luminance). On 0x34, bank-03 #0x71 at placements 31 and 32 (among
+  others) is still untextured.
+
+## Deathmatch on 0x1A, the Vault (2026-10-13)
+**Batch M2, the rules and client half (the pack half: c19ad4a). `--map 1a` plays the original's Deathmatch scenario
+6: everyone is the Wise Guy (class 1, model 59, the squirrels' body) in their team's shirt, holding the bat. The first
+four pickups (tommy gun, bazooka, knives, crossbow) roam over spots 0-7, and every pickup is back 150 frames after a
+take. The tommy gun fires a bullet on the press, then one every 4 frames, with no clip, and its aim climbs. Bots run
+Heist's script 0xB7 (its FFA branch). The level is lit by its 34 lights, five of which flicker with a buzz. Song 30
+plays (the pack's `background.wav`, sequence 30 recorded on the oracle). Protocol 24.** Research: `../lab/research/mp-original/heist.md` §1, §3, §3.1 (oracle runs in `/tmp/m1`: dm6, h3, h4, bots1).
+
+| Part | What |
+|---|---|
+| conker-rules `weapon.rs` | `BAT` (0x19: the club's handler, draw 0x10E / put-away 0x110, 15 frames each, C; V h3), `TOMMY` (0x38: draw 0x1DD, idle 0x1DF, put-away 0x1DE, `Attack::Bullets` of type 0x35 = the pistol bullet's numbers, cycle 4 at +3, `rounds` 0), `tommy_clip` (0x1E0 / 0x253 / 0x254 by speed, C), `Climb` (s126+0x1A2/0x1A4: the rate +10 a VI, min(climb, 175) + rate a VI, capped 0x1E00, 0 when Z is let go, V h4), `Weapon::club()`. `PICKUPS_1A`, `VAULT_SPOTS` (12), `SPOTS_1A`, `VAULT_RESPAWN` 150, `Roaming` (`pick`: `(int)(r · 0.99999 · n)`, drawn again while any pickup holds the spot, `func_1508DC24`, C), `pickups(0x1A)` |
+| conker-rules `game.rs`, `spawn.rs` | `Arena.roaming`, `Arena.respawn` (derives `Default`), `PickupState.spot`, `Match::pickup_at`. A roaming pickup picks a spot at each appearance: the first frame, then each return. The touch test uses its spot. The bat runs the club's rules: R blocks Z, the combo, and the club's walk and run. The tommy gun fires on the press (n = 0), with no clip check for `rounds` 0. `Fighter.climb` steps while it fires with Z held, and `strike` pitches its bullets up by `climb >> 8` steps of 200 angle units. Its fire clip follows the speed every frame. `in_hand`: the bat attaches 14 frames into its draw (its held model's event). `starts(0x1A)`: Deathmatch records [0-3, 20-31] (C, V dm6), masks all ones |
+| conker-sim `net.rs`, conker-server | `PROTOCOL_ID` 24: `MatchView.roaming` (placement, position) and the fighter's `climb`. `--map 1a` (Deathmatch only): `Game::vault`, so every player is a squirrel (its asked side ignored) with class 1 and start item 0x19, on slot s's Deathmatch record. `arena()` reads the pack's `roams` (the leading pickups) and `respawn` (VIs / 2) |
+| conker-bots | `script(0x1A)` = 0xB7. `mirror`: RESPAWN from the arena, PICKUP_FLAGS 3 for the roaming pickups and 2 for the fixed ones (V dm6), NODE_OF from `pickup_at`, G[0x10F0][k] = k (`g::SPOT`), G[0xF70][k] = −1 (holder). Query 0xD3 gives the bat 0 (C `func_15099C14`). ROM test `vault_deathmatch_bots_fight` |
+| conker-client | `WISE_GUY` = "59" in `characters("1a")`; `body()` maps class 1 to it. `render.rs`: `dress_teams` (each Wise Guy gets its own copy of `material_02` with `team-<team & 3>.png`, the shirt; V tm4, tm8). `show_pickups` moves the roaming nodes to `MatchView.roaming`. `audio.rs`: the bat's hits are melee hits and the tommy gun's are bullet hits; a roaming pickup sounds from its spot; the switching lights buzz. `lights.rs`: lights 10, 11, 12, 20 and 29 switch (on → off 35/1000 a frame, off → on 70/1000), and the level is relit from its 10 nearest lights |
+| web `data.ts` | `MapId` "1a", `MAPS["1a"]`: "Vault 0x1A", Deathmatch only |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| `tommy_gun_fires_and_climbs` (V h4: Z read 160-400) | 62 bullets (s126+0x1AA: 1 at read 161, then +1 at 164, 168, … 404; heist.md's "61" counted from 164); climb 40, 120, 240, 335, 375, … 0x1E00, 0 the frame after release; back to `Free` 7 frames later |
+| `tommy_climb_is_h4s`, `roaming_picks_a_free_spot`, `table_is_consistent` | h4's sequence; 20 picks with 7 spots held all land on the free one, none when all are held; `SPOTS_1A` = spots [0, 2, 3, 1, 8-11] as the pack |
+| `vault_pickups_roam` | first frame: k0-k3 on four distinct spots in 0-7; k2 taken at t is still away at t + 149 and back at t + 150 on a spot none held; the others don't move |
+| `bat_swings_as_the_club` (V h3) | draw clip 0x10E; Z at 20 hits at 30 (10 frames into 0x113) for 1 |
+| `vault_players_hold_the_bat` (server) | 6 bots: all squirrels, start 0x19, class 1, mask all ones, on records 0, 1, 2, 3, 20, 21 (jitter ≤ 40) |
+| `draw_events_fire_on_the_attach_frame` (client, + 0x19, 0x38) | the pack's held-model events fire on `in_hand`'s frame: the bat 15, the tommy gun 11 (the default 10 holds) |
+| `vault_deathmatch_bots_fight` (ROM, 3 bots, 3,572 frames) and `bots.sh` `MAP=1a` (ports 5970-5974) | 3 bots: 7 pickups, 16 hits, 4 kills, 4 deaths, against the oracle's dm6 (1 idle human + 3 bots, 119 s): 7, 17, 4, 4. 5 and 7 bots are within one run's variance of the oracle's. No unknown native |
+| Client tests (96), `bodies_by_map_and_class`, `lights_switch_off_and_on`, `a_vertex_takes_its_nearest_lights` | pass |
+| Screens (`../lab/screens/vault/shots.sh`, ports 5976/5978, 1280 × 720) | `bat.png` (slot 0 draws the bat), `tommy.png` (slot 1, blue shirt, firing the tommy gun; slot 0, red, with the bat), `roam.png` (a roaming pickup on its spot), `relit.png` (the relit level) |
+| `bun run test` (all lanes' edits in the tree) | every suite passes except conker-extract's `textures_counts` (2,895 against 2,894), from E8's uncommitted extract-gbi edits |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | fail on E8's work in progress only: rustfmt in `beach.rs`, `projectiles.rs`, conker-extract's `tests/rom.rs`, `zz_e8_dump.rs`; clippy on `render.rs` `setup_combat` (`commands` unused on wasm) and `projectiles.rs` (9 arguments). This batch's files are clean, and web `bun run check` passes |
+
+**Gaps.**
+- **I:** the roaming spot is picked at the return, not at the take (both fit dm6's 5 returns). The climb's pitch is added
+  to the bullet's own pitch in `strike`; the original subtracts `0x1A2 >> 8` from the stick-y the aim reads, and the
+  pitch byte's 3-step chase is left out. The tommy gun stops 7 frames after Z, the twin guns' rule, and walks and runs
+  with the plain gait. The bat's attach frame (14) comes from its held model's draw event: s126+0x11A was not traced.
+  The respawn masks (all ones) include the lift-end records 4-7; dm6 only showed 13, 14 and 17. The bat's reach is the
+  club's (the same handler, C), not measured on 0x1A. The tommy bullet's damage-type id 0x35 is inferred from its numbers.
+- **V, other:** flag 1 (roam, gone while held: team mode with ≤ 4 participants) and its death drop are not ported:
+  Deathmatch is always flag 3. Bots never took k4-k7 in the oracle (bots1) and rarely do here. `weapon_class(0x40)`
+  stays 3 (0x3F's script reads it). The Total War takeover's holder-table write is overwritten the next frame (no
+  script reads it today).
+- **Client:** the bases' hum zones don't stop, the radar's blips don't take the team colours, and the text HUD names
+  "weapon 0x19/0x38".
+- **For M3 (Heist):** the four teams and their sizes, the money bag (character 87 on the nav graph, class 0x57's
+  scripts), carrying it (states 20-24), the deliveries and scores, flag-1 roaming, the base zones, and script 0xB7's
+  team branch with its outros.
+
 ## Deathmatch maps: traps, zones, the restart fade (2026-10-13)
 **Batch E10, the rules half. 0x34's pressure plates (placements 6-9) sink and rise as the original's and switch on its
 traps: 27 fire jets for 120 frames, the electric floor for 151; one touch kills, credited to the presser. Its 7 burning

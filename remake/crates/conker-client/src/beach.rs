@@ -10,8 +10,8 @@
 //! - the strike (a villager's `Combat::deadline` reaching 0): its red light at the villager over the
 //!   40 frames to the blast ([`strike_size`]), its red floor glow ([`glow`]) and spinning streak
 //!   ([`streak`]), then the blast's explosion, debris and shake ([`BLAST`]);
-//! - a rocket's blast shakes the views near it too ([`BLAST`], I: the original's rocket code is
-//!   shared by every map; here War: Beach's only).
+//! - a rocket's blast shakes the views near it too ([`BLAST`]), on every map (`rocket_shakes`: the
+//!   original's rocket code is shared by every map, C).
 //!
 //! The strike's explosion (I: the original's 11 sparks, model 0x132, are not drawn): a burst of
 //! camera-facing puffs of the pack's `explosion.png` in the colours the original's draws use (det1 DL
@@ -490,6 +490,10 @@ fn watch(
     mut ring_model: Local<Option<Handle<WorldAsset>>>,
     mut commands: Commands,
 ) {
+    let tick = timeline.tick().0;
+    if let Ok(m) = game.single() {
+        rocket_shakes(&mut blasts, &m.rockets, tick);
+    }
     let (Some(m), Some(sprites)) = (game.single().ok().filter(|m| m.beach), sprites) else {
         return;
     };
@@ -497,7 +501,6 @@ fn watch(
         assets.load(format!("{}#Scene0", conker_assets::effects_gltf("2b")))
     }))
     .clone();
-    let tick = timeline.tick().0;
     let b = &mut *blasts;
     let mut burst = |at: Vec3, puffs: u32, radius: f32, chunks: u32| {
         for n in 0..puffs + chunks {
@@ -587,12 +590,6 @@ fn watch(
         }
     }
     b.strikes.retain(|s| s.blast.is_none_or(|t| tick < t + 60));
-    let old = b.rockets.replace(m.rockets.clone());
-    for at in (old.iter()).flat_map(|old| crate::audio::gone(old, &m.rockets, 2.0 * ROCKET_SPEED)) {
-        b.shakes.push(shake(&BLAST, at, 800.0, 2000.0));
-    }
-    b.shakes
-        .retain(|s| s.wave.at(tick.saturating_sub(s.from)).is_some());
     // The rings: random yaw, a = 200 + rand % 56, L = 12 + 4r.
     let mut rng = conker_rules::Rng::new(u64::from(tick) << 8 | 1);
     for at in RECORDS.into_iter().filter(|_| detonation) {
@@ -646,6 +643,24 @@ fn watch(
             Transform::from_translation(at).with_scale(Vec3::ZERO),
         ));
     }
+}
+
+/// On every map, a rocket gone since last tick shakes the views near where it went ([`BLAST`] at
+/// 800/2000: the rocket pool's `func_151C05A4`, C, which every map's rockets run); shakes that are
+/// over are dropped.
+fn rocket_shakes(b: &mut Blasts, rockets: &[[f32; 3]], tick: u32) {
+    let old = b.rockets.replace(rockets.to_vec());
+    for at in (old.iter()).flat_map(|old| crate::audio::gone(old, rockets, 2.0 * ROCKET_SPEED)) {
+        b.shakes.push(Shake {
+            wave: &BLAST,
+            from: tick,
+            at: Vec3::from_array(at),
+            near: 800.0,
+            range: 2000.0,
+        });
+    }
+    b.shakes
+        .retain(|s| s.wave.at(tick.saturating_sub(s.from)).is_some());
 }
 
 /// The rings grow and fade ([`ring`]) on their own copies of the model's material; gone once over.
@@ -988,6 +1003,25 @@ mod tests {
             [1.0, 1.0, 0.0]
         );
         assert!((shake_share(506.0, 1013.0, 1012.5) - 0.5).abs() < 1e-6);
+    }
+
+    /// A rocket that goes off shakes the views on any map (the watch's rocket half runs before its
+    /// War: Beach gate): a [`BLAST`] at its last spot, 800/2000, dropped once over.
+    #[test]
+    fn a_rocket_shakes_every_map() {
+        let mut b = Blasts::default();
+        rocket_shakes(&mut b, &[[0.0, 0.0, 0.0]], 10);
+        rocket_shakes(&mut b, &[[0.0, 0.0, 200.0]], 11);
+        assert!(b.shakes.is_empty(), "a rocket in flight");
+        rocket_shakes(&mut b, &[], 12);
+        let s = b.shakes[0];
+        assert_eq!(
+            (s.from, s.at, s.near, s.range),
+            (12, Vec3::new(0.0, 0.0, 200.0), 800.0, 2000.0)
+        );
+        assert_eq!(s.wave.amp, BLAST.amp);
+        rocket_shakes(&mut b, &[], 12 + 182);
+        assert!(b.shakes.is_empty());
     }
 
     /// The strike's glow and streak against fx2's `strike.csv` (the call at read 304, the blast at

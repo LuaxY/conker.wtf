@@ -22,6 +22,7 @@ pub mod held;
 pub mod hud;
 pub mod lights;
 pub mod outro;
+pub mod projectiles;
 pub mod render;
 pub mod results;
 pub mod smooth;
@@ -569,20 +570,30 @@ impl Clips {
 /// War: Beach's villagers, models 156 (the men) and 157 (the women), packed with map 2b.
 pub const VILLAGERS: [&str; 2] = ["156", "157"];
 
+/// The Wise Guy, model 59: every player's on 1a (class 1, heist.md §1, V t0/dm6), packed with map 1a.
+pub const WISE_GUY: &str = "59";
+
 /// The characters the client draws on `map`, its bodies: the sides' ([`PACK_CHARACTERS`], in
-/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`].
+/// [`Side`] order), then on 2b War: Beach's [`VILLAGERS`], on 1a the [`WISE_GUY`].
 pub fn characters(map: &str) -> Vec<&'static str> {
     let villagers = (map == "2b").then_some(VILLAGERS).into_iter().flatten();
-    PACK_CHARACTERS.into_iter().chain(villagers).collect()
+    let wise_guy = (map == "1a").then_some(WISE_GUY);
+    PACK_CHARACTERS
+        .into_iter()
+        .chain(villagers)
+        .chain(wise_guy)
+        .collect()
 }
 
 /// The body (of [`characters`]) a player is drawn as: a villager's class picks its model
-/// (`beach::model`: 156 below 0x1D, else 157), anyone else is its side's.
+/// (`beach::model`: 156 below 0x1D, else 157), class 1 (1a's) is the [`WISE_GUY`], anyone else is
+/// its side's.
 pub fn body(c: &Combat) -> usize {
     match c.class {
         0x11..=0x20 => {
             PACK_CHARACTERS.len() + usize::from(conker_rules::beach::model(c.class) == 157)
         }
+        1 => PACK_CHARACTERS.len(),
         _ => c.side as usize,
     }
 }
@@ -684,6 +695,7 @@ impl MatchArena {
         let arena = Arena {
             spawns,
             pickups: Vec::new(),
+            ..Default::default()
         };
         let lifts = conker_rules::lift::parse(triggers, scene as u8);
         Self(arena, gun::spawn(scene.into()), lifts)
@@ -1874,5 +1886,22 @@ mod tests {
             ]
         );
         assert_eq!((clips.duration(15), clips.duration(54)), (52, 1));
+    }
+
+    /// Each map's bodies: 1a's class 1 is the Wise Guy, 2b's villagers keep theirs, the sides are
+    /// their own everywhere.
+    #[test]
+    fn bodies_by_map_and_class() {
+        let c = |side, class| Combat {
+            side,
+            class,
+            ..Combat::default()
+        };
+        let drawn = |map, c: Combat| characters(map)[body(&c)];
+        assert_eq!(drawn("1a", c(Side::Squirrels, 1)), "59");
+        assert_eq!(drawn("1a", c(Side::Tediz, 0)), "117");
+        assert_eq!(drawn("2b", c(Side::Squirrels, 0x14)), "156");
+        assert_eq!(drawn("2b", c(Side::Squirrels, 0x1D)), "157");
+        assert_eq!(characters("2d"), PACK_CHARACTERS);
     }
 }

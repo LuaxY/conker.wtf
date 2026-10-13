@@ -61,7 +61,7 @@
 //! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
 //! log has each client's traffic (`NET` lines).
 //!
-//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b] [--port 5888] [--digest-file PATH] [--seconds N]
+//! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
 //!   [--radar on|off] [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS]
 //!   [--first-read R] [--no-lagcomp] [--cavemen] [--mode deathmatch|total-war|colors|beach] [--score 1-40|unlimited]
@@ -72,7 +72,9 @@
 //! - `--map 2d|30|34|3f|2b`: the map (a folder under the pack's `maps/`, the scene in hex; default 2d). The
 //!   clients learn it from `GET /info` on the token endpoint ([`token`]) before loading the level. 2b (the
 //!   Beach, War: Beach's map) plays Deathmatch too: its start records, the villagers' two vitamin
-//!   pickups (item 0x3E, no weapon there), its mounted gun.
+//!   pickups (item 0x3E, no weapon there), its mounted gun. 1a (the Vault, Heist's map) plays
+//!   Deathmatch only, as the original's scenario 6: every player the Wise Guy holding the bat, the
+//!   four roaming pickups ([`Game::vault`]).
 //! - `--token-key FILE` (or `CONKER_TOKEN_KEY`): 64 hex digits that sign the connect tokens; a
 //!   random key per start without it. `--token-addr`: the token endpoint (default `[::]`, port + 1;
 //!   production: loopback behind the static server).
@@ -353,7 +355,7 @@ fn main() {
     };
     let (setup, net) = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         fail(format!(
-            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b] [--port N] [--digest-file PATH] [--seconds N] \
+            "{e}; usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a] [--port N] [--digest-file PATH] [--seconds N] \
              [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] \
              [--skill inbred|crap|normal|bastard|einstein] [--radar on|off] \
              [--spawn X,Y,Z[,FACING]]... [--give SLOT:READ:ID]... [--warp SLOT:READ:X,Y,Z]... [--wait N] [--margin TICKS] \
@@ -371,7 +373,7 @@ fn main() {
     });
     let (scene, starts) = (map_scene(&net.map))
         .and_then(|s| Some((s, starts(s)?)))
-        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30, 34, 3f or 2b", net.map)));
+        .unwrap_or_else(|| fail(format!("--map {}: not 2d, 30, 34, 3f, 2b or 1a", net.map)));
     let pack = Slice::load(&net.map, &PACK_CHARACTERS, PACK_WEAPONS, |p| {
         std::fs::read(dir.join(p))
     })
@@ -400,6 +402,7 @@ fn main() {
         game.outros[usize::from(o.winner)] = o.frames();
     }
     game.cavemen = game.setup.cavemen || scene == 0x3F;
+    game.vault = scene == 0x1A && !game.setup.cavemen;
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
     game.m.guns = gun::spawn(usize::from(scene));
@@ -570,7 +573,21 @@ fn arena(pack: &Slice, total_war: bool) -> Arena {
             (pickup, p.position)
         })
         .collect();
-    Arena { spawns, pickups }
+    // The roaming pickups lead the table and share their spots (0x1A's k0-k3).
+    let roams = pack.pickups.iter().take_while(|p| !p.roams.is_empty());
+    Arena {
+        spawns,
+        pickups,
+        roaming: weapon::Roaming {
+            count: roams.clone().count(),
+            spots: roams.map(|p| p.roams.clone()).next().unwrap_or_default(),
+        },
+        respawn: pack
+            .pickups
+            .first()
+            .and_then(|p| p.respawn)
+            .map(|vi| vi / 2),
+    }
 }
 
 /// The bots' data (the pack's navigation graph, trigger table, AI and class scripts), their AI over
@@ -648,6 +665,9 @@ struct Game {
     /// Scene 0x3F's Deathmatch (scenario 7, V oracle): the bots are cavemen, the humans Tediz, and
     /// every player starts holding item 0x40 ([`Fighter::start`]).
     cavemen: bool,
+    /// Scene 0x1A's Deathmatch (scenario 6, V dm6): every player the Wise Guy (class 1, model 59,
+    /// the squirrels' body) holding the bat, starting on its slot's Deathmatch record.
+    vault: bool,
 }
 
 impl Game {
@@ -672,6 +692,7 @@ impl Game {
             outros: [0; 2],
             won: None,
             cavemen: false,
+            vault: false,
         }
     }
 
@@ -680,13 +701,14 @@ impl Game {
     fn start_item(&self, side: Side) -> Option<u8> {
         match self.setup.settings.beach {
             true => (side == Side::Squirrels).then_some(beach::ITEM),
+            false if self.vault => Some(weapon::BAT.id),
             false => self.cavemen.then_some(weapon::CLUB.id),
         }
     }
 
     fn class(&self, side: Side) -> u8 {
         match (self.setup.settings.beach, side) {
-            (false, _) => 0,
+            (false, _) => u8::from(self.vault),
             (true, Side::Squirrels) => beach::CLASSES[self.members(side) % beach::CLASSES.len()],
             (true, _) => beach::TEDI_CLASS,
         }
@@ -741,6 +763,7 @@ impl Game {
     fn join_bot(&mut self, slot: usize) -> impl Bundle + use<> {
         let side = match self.cavemen {
             true => Side::Cavemen,
+            false if self.vault => Side::Squirrels,
             false => (self.capped([Side::Squirrels, Side::Tediz][slot % 2]))
                 .expect("parse_args caps Beach's bots"),
         };
@@ -785,7 +808,10 @@ impl Game {
             // (jittered, pushed apart); keep each player's record if that ever matters.
             // The cavemen take the squirrels' base (the Ugas' on 0x3F, `spawn::starts`).
             let base = usize::from(side == Side::Tediz);
-            let record = self.starts.sides[base][self.members(side) % 8];
+            let record = match self.vault {
+                true => self.starts.deathmatch[slot % 16],
+                false => self.starts.sides[base][self.members(side) % 8],
+            };
             let place = place(&self.arena.spawns, usize::from(record), &mut self.m.rng);
             // Beach: everyone respawns on its own record (the script's command 0x1F moves it).
             let mask = match self.setup.settings.beach {
@@ -849,9 +875,11 @@ impl Game {
     }
 
     /// The side with fewer players in the match, the squirrels on a tie; the Tediz against the
-    /// cavemen.
+    /// cavemen; on 0x1A always the squirrels ([`Game::vault`]).
     fn smaller_side(&self) -> Side {
-        match self.cavemen || self.members(Side::Tediz) < self.members(Side::Squirrels) {
+        match !self.vault
+            && (self.cavemen || self.members(Side::Tediz) < self.members(Side::Squirrels))
+        {
             true => Side::Tediz,
             false => Side::Squirrels,
         }
@@ -1050,6 +1078,7 @@ fn join_player(
     let two_sides = s.total_war || s.colors || s.beach;
     let side = (asked.side)
         .filter(|&s| !two_sides || s != Side::Cavemen)
+        .filter(|_| !game.vault)
         .unwrap_or_else(|| game.smaller_side());
     let Some(side) = game.capped(side) else {
         // ponytail: the client stays connected with no player; a kick needs netcode's per-client
@@ -1812,6 +1841,14 @@ fn publish(
         rockets: m.rockets.iter().map(|r| r.1.pos).collect(),
         shots: m.shots.iter().map(|s| s.1.pos).collect(),
         taken,
+        roaming: (0..game.arena.roaming.count)
+            .map(|k| {
+                (
+                    game.arena.pickups[k].0.placement,
+                    m.pickup_at(&game.arena, k),
+                )
+            })
+            .collect(),
         countdown: m.gas.countdown,
         gas: m.gas.gas,
         props: m.gas.shown(),
@@ -2259,6 +2296,29 @@ mod tests {
         assert_eq!(g.smaller_side(), Side::Tediz);
     }
 
+    /// Scene 0x1A's Deathmatch: everyone the Wise Guy (class 1, the squirrels' body) holding the
+    /// bat, slot s on the s-th Deathmatch record (0-3, then 20-31), respawning anywhere.
+    #[test]
+    fn vault_players_hold_the_bat() {
+        let spawns = (0..32).map(|i| record([i * 100, 0, 0], 64)).collect();
+        let arena = Arena {
+            spawns,
+            ..Default::default()
+        };
+        let mut g = Game::new(arena, Setup::default());
+        (g.vault, g.starts) = (true, starts(0x1A).unwrap());
+        let _: Vec<_> = (0..6).map(|s| g.join_bot(s)).collect();
+        for (s, f) in g.m.players.iter().enumerate() {
+            let x = 100.0 * f32::from([0u8, 1, 2, 3, 20, 21][s]);
+            assert_eq!(
+                (f.side, f.start, f.class, f.spawn_mask),
+                (Side::Squirrels, Some(0x19), 1, !0)
+            );
+            assert!((f.body.pos[0] - x).abs() <= 40.0, "{s}: {:?}", f.body.pos);
+        }
+        assert_eq!(g.smaller_side(), Side::Squirrels);
+    }
+
     /// Bots take slots 0..N, on alternate sides, each in its side's base; humans join after them,
     /// on the side with fewer players unless they ask, on their side's next record; a leaving human
     /// never moves a bot.
@@ -2333,10 +2393,12 @@ mod tests {
         g.m.pickups[0] = PickupState {
             timer: 9,
             taken: Some((2, 5)),
+            ..Default::default()
         };
         g.m.pickups[1] = PickupState {
             timer: 9,
             taken: Some((1, 5)),
+            ..Default::default()
         };
         g.history.push(7, vec![[0.0; 3], [1.0; 3], [2.0; 3]]);
         g.remove(1);

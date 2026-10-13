@@ -67,7 +67,9 @@ use serde::{Deserialize, Serialize};
 /// 23: scene 0x34's plates and traps ([`MatchView`]'s `plates` and `traps`; the fighter's fire may
 /// have no owner, a cone's), the floor zones (the fast path off in them), and RESTART's fade
 /// ([`MatchView::phase`] 3).
-pub const PROTOCOL_ID: u64 = 23;
+/// 24: scene 0x1A's roaming pickups ([`MatchView::roaming`]) and the fighter's tommy-gun climb
+/// (conker-rules' `Fighter::climb`).
+pub const PROTOCOL_ID: u64 = 24;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -227,6 +229,9 @@ pub struct MatchView {
     /// Bit n: the pickup on placement n is taken (back after 120 frames). Total War's gas masks
     /// are pickups on placements 21-26, touched only while `countdown` runs.
     pub taken: u64,
+    /// Scene 0x1A's roaming pickups where they stand now (placement, position; conker-rules'
+    /// `weapon::Roaming`); empty elsewhere.
+    pub roaming: Vec<(u16, [f32; 3])>,
     /// Total War's gas (conker-rules' `gas`): frames until it kills (300 from the delivery; 0 none;
     /// the HUD's seconds are `countdown / 60 + 1`, the game's `(t + 59) / 60` of t = countdown + 1,
     /// from the frame after the delivery to the kill's), its sound looping (from 29 frames before

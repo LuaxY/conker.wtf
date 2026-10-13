@@ -84,6 +84,7 @@ fn main() {
                 (*p, at.map(f32::from))
             })
             .collect(),
+        ..Default::default()
     };
     for (p, _) in &mut arena.pickups {
         if let (conker_rules::weapon::Gives::Weapon(w), Some((new, old))) = (&mut p.gives, give)

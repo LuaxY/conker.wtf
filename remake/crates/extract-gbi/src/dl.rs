@@ -222,9 +222,14 @@ struct State<'a> {
     level: u8,
     scale: [u16; 2],
     tiles: [Tile; 8],
+    /// When each tile was last described (G_SETTILE), counted with the loads: see [`State::texture`].
+    described: [u32; 8],
+    /// When G_TEXTURE last chose its tile.
+    chosen: u32,
+    order: u32,
     image: Option<Image>,
-    /// (TMEM address, image, interleaved)
-    loads: Vec<(u16, Image, bool)>,
+    /// (TMEM address, image, interleaved, when)
+    loads: Vec<(u16, Image, bool, u32)>,
     /// (TMEM address, entries, image)
     tluts: Vec<(u16, u16, Image)>,
 }
@@ -234,8 +239,25 @@ impl State<'_> {
         if !self.texture_on {
             return None;
         }
-        let tile = self.tiles[self.texture_tile];
-        let load = self.loads.iter().find(|l| l.0 == tile.tmem);
+        // A G_TEXTURE tile left from an earlier image: bank-09 #0x1A's (the twin gun) first image
+        // describes tiles 1 and 0, G_TEXTURE picks 1, and the later images, loaded at the same TMEM
+        // address, only describe tile 0 again. The RDP samples tile 1 (C: F3DEX2's triangles carry
+        // G_TEXTURE's tile, RT64 `textureTile`), a window over the new load and the old one's
+        // leftovers; the list's tile for the new image is the one described since, so take it.
+        // Not when G_TEXTURE chose its tile after that one was described (bank-01 #0x45 and #0x00
+        // describe tile 5, then choose tile 0: theirs is meant).
+        let own = self.texture_tile;
+        let at = self.tiles[own].tmem;
+        let load = self.loads.iter().find(|l| l.0 == at);
+        let newer = (0..8)
+            .filter(|&k| {
+                let t = &self.tiles[k];
+                let since = self.described[own].max(self.chosen);
+                k != own && t.tmem == at && t.line != 0 && self.described[k] > since
+            })
+            .max_by_key(|&k| self.described[k])
+            .filter(|_| load.is_some_and(|l| l.3 > self.described[own]));
+        let tile = self.tiles[newer.unwrap_or(own)];
         let indexed = tile.size <= 1 && matches!(tile.format, 0 | 2);
         let palette = if indexed {
             let addr = 0x100
@@ -267,8 +289,9 @@ impl State<'_> {
     fn load(&mut self, w1: u32, interleaved: bool) {
         if let Some(image) = self.image {
             let tmem = self.tiles[(w1 >> 24 & 7) as usize].tmem;
+            self.order += 1;
             self.loads.retain(|l| l.0 != tmem);
-            self.loads.push((tmem, image, interleaved));
+            self.loads.push((tmem, image, interleaved, self.order));
         }
     }
 
@@ -385,6 +408,7 @@ pub fn walk<'a>(start: u32, resolve: impl Fn(u32) -> Option<&'a [u8]>) -> Result
             0xD7 => {
                 st.texture_on = w0 >> 1 & 0x7F != 0;
                 st.texture_tile = (w0 >> 8 & 7) as usize;
+                st.chosen = st.order;
                 st.level = (w0 >> 11 & 7) as u8;
                 st.scale = [(w1 >> 16) as u16, w1 as u16];
             }
@@ -459,6 +483,8 @@ pub fn walk<'a>(start: u32, resolve: impl Fn(u32) -> Option<&'a [u8]>) -> Result
             0xF3 => st.load(w1, w1 & 0xFFF == 0),
             0xF4 => st.load(w1, false),
             0xF5 => {
+                st.order += 1;
+                st.described[(w1 >> 24 & 7) as usize] = st.order;
                 let t = &mut st.tiles[(w1 >> 24 & 7) as usize];
                 *t = Tile {
                     format: (w0 >> 21 & 7) as u8,
@@ -792,6 +818,57 @@ mod tests {
         assert_eq!((m.prim_color, m.env_color), (0x1122_3344, 0x5566_7788));
         assert_eq!(ir.draws[1].material.geometry_mode, 0x005);
         assert_eq!(ir.draws[2].material.texture, None);
+    }
+
+    /// Bank-09 #0x1A's sequence (the twin gun): G_TEXTURE tile 1, tiles 1 and 0 described for a 64 x
+    /// 32 CI8 image, then 16 x 16 images loaded at the same TMEM address with only tile 0 described
+    /// again (once, for the first of them): those draws take tile 0.
+    #[test]
+    fn a_stale_texture_tile_gives_way_to_the_newer_one() {
+        let v = verts(3);
+        let draw = (0x0500_0000 | tri(0, 1, 2), 0);
+        let tile_64x32 = |t: u32| (0xF508_1000, t << 24 | 0x0001_4060); // CI8, line 8, masks 6/5
+        let load = |image: u32, texels: u32| {
+            [
+                (0xFD10_0000, image),                            // SETTIMG flat, mode 0
+                (0xF300_0000, 0x0700_0000 | (texels - 1) << 12), // LOADBLOCK tile 7, dxt 0
+                (0xFD10_0000, 0x0040_0000 | image),              // SETTIMG flat, mode 1 (TLUT)
+                (0xF000_0000, 0x063F_C000),                      // LOADTLUT tile 6, 256 entries
+            ]
+        };
+        let mut cmds = vec![
+            vtx(3, 0, 0x0100_0000),
+            (0xD700_0902, 0xFFFF_FFFF), // G_TEXTURE level 1, tile 1, on
+            tile_64x32(1),
+            (0xF510_0000, 0x0700_0000), // SETTILE 7: the load tile, line 0, tmem 0
+            (0xF500_0100, 0x0600_0000), // SETTILE 6: the TLUT's, tmem 0x100
+        ];
+        cmds.extend(load(0xAAA, 1024));
+        cmds.extend([tile_64x32(0), draw]);
+        cmds.extend(load(0xBBB, 128));
+        cmds.extend([(0xF508_0400, 0x0001_0040), draw]); // SETTILE 0: CI8, line 2, masks 4/4
+        cmds.extend(load(0xCCC, 128));
+        cmds.extend([draw, END]);
+        let ir = run(&[&list(&cmds), &v]).unwrap();
+        let t: Vec<_> = (ir.draws.iter())
+            .map(|d| d.material.texture.unwrap())
+            .collect();
+        let image = |index| Some(Image::Flat { index, mode: 0 });
+        assert_eq!(t.len(), 3);
+        assert_eq!(
+            (t[0].image, t[0].tile.line, t[0].size()),
+            (image(0xAAA), 8, [64, 32])
+        );
+        for (t, index) in t[1..].iter().zip([0xBBB, 0xCCC]) {
+            assert_eq!(
+                (t.image, t.tile.line, t.size()),
+                (image(index), 2, [16, 16])
+            );
+            assert_eq!(
+                t.palette.map(|p| p.image),
+                Some(Image::Flat { index, mode: 1 })
+            );
+        }
     }
 
     #[test]

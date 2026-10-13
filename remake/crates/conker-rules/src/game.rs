@@ -101,10 +101,15 @@ const BOUNCE_MIN: f32 = 5.0;
 const NONE: u32 = u32::MAX;
 
 /// The static data a match needs: spawn records, pickups and their places.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Arena {
     pub spawns: Vec<Spawn>,
     pub pickups: Vec<(Pickup, [f32; 3])>,
+    /// The pickups that move (0x1A's first four; none elsewhere).
+    pub roaming: weapon::Roaming,
+    /// Frames a taken pickup is away, if not [`weapon::PICKUP_RESPAWN`] (0x1A's
+    /// [`weapon::VAULT_RESPAWN`]).
+    pub respawn: Option<u16>,
 }
 
 impl Arena {
@@ -115,7 +120,11 @@ impl Arena {
             .filter(|p| p.gives != Gives::Mask)
             .map(|p| (*p, placement(p.placement)))
             .collect();
-        Self { spawns, pickups }
+        Self {
+            spawns,
+            pickups,
+            ..Default::default()
+        }
     }
 }
 
@@ -349,6 +358,8 @@ pub struct Fighter {
     /// respawn; 0 in the other modes), and s126+0x12C, a bottle's boost in VIs ([`beach::drive`]).
     pub class: u8,
     pub boost: u16,
+    /// The tommy gun's climb while firing (s126+0x1A2/0x1A4, [`weapon::Climb`]).
+    pub climb: weapon::Climb,
 }
 
 impl Fighter {
@@ -403,6 +414,7 @@ impl Fighter {
             gun: None,
             class: 0,
             boost: 0,
+            climb: weapon::Climb::default(),
         }
     }
 
@@ -511,9 +523,10 @@ impl Fighter {
             0x14 => 11,
             0x21 => 12,
             0x22 => 15,
+            0x19 => 14, // the bat: its held model's draw event (I: no s126+0x11A trace)
             0x24 => 17,
             0x26 => 18,
-            _ => 10, // 0x09, 0x16
+            _ => 10, // 0x09, 0x16, 0x38
         };
         match self.camera_weapon() {
             0 => false,
@@ -596,6 +609,8 @@ impl Fighter {
 pub struct PickupState {
     pub timer: u16,
     pub taken: Option<(usize, u32)>,
+    /// A roaming pickup's spot ([`weapon::Roaming`]; `None`: not yet placed, or not roaming).
+    pub spot: Option<u8>,
 }
 
 /// What happened in a frame (for HUD, sounds, the client's camera on respawn, and the tests).
@@ -1205,9 +1220,17 @@ impl Match {
         }
     }
 
+    /// Where pickup k stands: its roaming spot, else its place.
+    pub fn pickup_at(&self, arena: &Arena, k: usize) -> [f32; 3] {
+        match self.pickups.get(k).and_then(|p| p.spot) {
+            Some(s) => arena.roaming.spots[usize::from(s)],
+            None => arena.pickups[k].1,
+        }
+    }
+
     fn pickups(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
         let t = self.tick;
-        for (k, (def, pos)) in arena.pickups.iter().enumerate() {
+        for (k, (def, _)) in arena.pickups.iter().enumerate() {
             let p = &mut self.pickups[k];
             if let Some((who, at)) = p.taken {
                 match def.gives {
@@ -1240,25 +1263,34 @@ impl Match {
                 }
             }
             let p = &mut self.pickups[k];
+            let back = p.timer == 1;
             p.timer = p.timer.saturating_sub(1);
             if p.timer > 0 {
                 continue;
             }
+            // A roaming pickup moves at each appearance: the first frame, then each return.
+            if k < arena.roaming.count && (back || p.spot.is_none()) {
+                let held: Vec<_> = self.pickups.iter().map(|p| p.spot).collect();
+                self.pickups[k].spot = arena.roaming.pick(&held, &mut self.rng);
+            }
+            let pos = self.pickup_at(arena, k);
+            let p = &mut self.pickups[k];
             // A mask is touched only while the gas counts down (`func_1511DF6C` skips model 0x54 on
             // scene 0x2D while G+0x1FE4 ≤ 0, C), and not by a player wearing one (I).
             let countdown = self.gas.countdown;
             let may = |f: &Fighter| def.gives != Gives::Mask || (countdown > 0 && !f.masked);
             let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
             let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
-                f.health > 0 && may(f) && weapon::touches(*pos, f.body.pos, reach(i))
+                f.health > 0 && may(f) && weapon::touches(pos, f.body.pos, reach(i))
             });
             if let Some(i) = toucher {
                 *p = PickupState {
                     timer: match self.settings.beach {
                         true => beach::BOTTLE_RESPAWN,
-                        false => weapon::PICKUP_RESPAWN,
+                        false => arena.respawn.unwrap_or(weapon::PICKUP_RESPAWN),
                     },
                     taken: Some((i, t)),
+                    spot: p.spot,
                 };
                 ev.push(Event::Pickup {
                     player: i,
@@ -1710,12 +1742,12 @@ impl Match {
         // 190).
         let armed = w.filter(|_| f.drawn);
         let aiming = armed.is_some_and(|w| w.id == 0x23) && late_held(BUTTON_R);
-        let no_fire = armed.is_some_and(|w| matches!(w.id, 0x16 | 0x40)) && late_held(BUTTON_R);
+        let no_fire = armed.is_some_and(|w| w.id == 0x16 || w.club()) && late_held(BUTTON_R);
         // The club: a Z press in a swing draws the RNG (`func_150641D8`, C) and, within
         // `COMBO_WINDOW` frames of the first swing's hit, chains the second (V combat6_e40 870,
         // 990; 1110: no hit, nothing).
         if let Action::Fire { .. } = f.action
-            && armed.is_some_and(|w| w.id == 0x40)
+            && armed.is_some_and(|w| w.club())
             && pressed(BUTTON_Z)
             && !no_fire
         {
@@ -1809,6 +1841,11 @@ impl Match {
             }
         }
         let n = t - f.since;
+        let tommy = matches!(f.action, Action::Fire { .. }) && w.is_some_and(|w| w.id == 0x38);
+        f.climb.step(tommy && held(BUTTON_Z));
+        if tommy {
+            f.anim = weapon::tommy_clip(f.body.xz_speed, f.body.target_speed);
+        }
         match (f.action, w) {
             (Action::Fire { .. }, Some(w)) if w.rounds > 0 && f.rounds == 0 => {
                 // The frame after the last round: reload (V ammo_cook 242, e_w23 1031).
@@ -1851,8 +1888,13 @@ impl Match {
                     Attack::Bullets {
                         kind, muzzles, at, ..
                     } => {
+                        // The tommy gun also fires on the press, and has no clip (V h4: Z held
+                        // 160-400, s126+0x1AA 1 at read 161, then +1 at 164, 168, … 404: 62).
+                        let press = w.id == 0x38 && n == 0;
                         for (m, o) in muzzles.iter().zip(at) {
-                            if cycles.iter().any(|&c| c != NONE && t == c + o) && f.rounds > 0 {
+                            if (press || cycles.iter().any(|&c| c != NONE && t == c + o))
+                                && (f.rounds > 0 || w.rounds == 0)
+                            {
                                 f.rounds -= u8::from(w.rounds > 0);
                                 f.shots = f.shots.saturating_add(1);
                                 let muzzle = local_to_world(pos, facing, *m);
@@ -2153,7 +2195,9 @@ impl Match {
                 (Some(w), LAND) if w.id == 0x21 => w.idle,
                 (Some(_), state @ (JUMP | RUN_JUMP | FALL | LAND)) => u16::from(state),
                 (Some(w), state) => {
-                    match conker_anim::armed_move(w.id, f.body.xz_speed, f.body.target_speed) {
+                    // The bat walks and runs as the club (V h3).
+                    let id = if w.club() { 0x40 } else { w.id };
+                    match conker_anim::armed_move(id, f.body.xz_speed, f.body.target_speed) {
                         Some(a) => a,
                         None if state != movement::state::IDLE => u16::from(state),
                         None => f.idle_anim(),
@@ -2226,6 +2270,15 @@ impl Match {
                         let dir = to.map(|c| c / len);
                         b = Bullet::aimed(world, i, b.pos, dir, b.speed, b.kind);
                     }
+                }
+                // The tommy gun's climb lifts its bullets (`func_1504CB98`, C; I: added to the
+                // bullet's own pitch).
+                let climb = self.players[i].climb.pitch();
+                if climb > 0.0 && self.players[i].weapon == Some(0x38) {
+                    let h = b.dir[0].hypot(b.dir[2]).max(f32::EPSILON);
+                    let (sin, cos) = (b.dir[1].atan2(h) + climb).sin_cos();
+                    let dir = [b.dir[0] / h * cos, sin, b.dir[2] / h * cos];
+                    b = Bullet::aimed(world, i, b.pos, dir, b.speed, b.kind);
                 }
                 ev.push(Event::Shot {
                     player: i,
@@ -3493,6 +3546,7 @@ mod tests {
                 (weapon::PICKUPS_2D[0], [0.0, 0.0, 3000.0]),
                 (weapon::PICKUPS_2D[2], [0.0, 0.0, -3000.0]),
             ],
+            ..Default::default()
         };
         let at = |x: f32, facing| Placement {
             index: 0,
@@ -4259,6 +4313,7 @@ mod tests {
         let arena = Arena {
             spawns: (-4..=4).map(|k| rec([k * 1500, 0, 0], 0)).collect(),
             pickups: Vec::new(),
+            ..Default::default()
         };
         let at = |x: f32, team| {
             let place = Placement {
@@ -4838,10 +4893,12 @@ mod tests {
         let arena = Arena {
             spawns: vec![rec([2000, 0, 0], 0)],
             pickups: vec![(weapon::PICKUPS_2D[19], [0.0, 0.0, 3000.0])],
+            ..Default::default()
         };
         m.pickups = vec![PickupState {
             timer: 600,
             taken: Some((0, 1)),
+            ..Default::default()
         }];
         m.players[1].body.pos = [0.0, 0.0, -3000.0];
         let b = &mut m.players[0].body;
@@ -4883,6 +4940,7 @@ mod tests {
         let arena = Arena {
             spawns: vec![rec([2000, 0, 0], 0)],
             pickups: vec![(weapon::PICKUPS_2D[19], [0.0, 0.0, 0.0])],
+            ..Default::default()
         };
         m.pickups = vec![PickupState::default()];
         let (canister, at) = gas::CANISTERS[0];
@@ -5480,5 +5538,100 @@ mod tests {
         m.apply(&[Effect::Plunger(false)]);
         run(&mut m, &arena, &w, 1, |_| 0);
         assert_eq!(m.plunger.y, 338.0);
+    }
+
+    /// The bat (V h3): B draws 0x10E for 15 frames; Z swings the club's 0x113, the hit landing 10
+    /// frames in for 1.
+    #[test]
+    fn bat_swings_as_the_club() {
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos[0] = 60.0;
+        m.give(0, 0x19);
+        let ev = run(&mut m, &arena, &w, 2, |t| if t == 0 { BUTTON_B } else { 0 });
+        assert!(ev.is_empty() && m.players[0].anim == 0x10E);
+        let ev = run(
+            &mut m,
+            &arena,
+            &w,
+            40,
+            |t| if t == 20 { BUTTON_Z } else { 0 },
+        );
+        let hits: Vec<_> = (ev.iter())
+            .filter(|(_, e)| matches!(e, Event::Hit { victim: 1, .. }))
+            .map(|(t, _)| *t)
+            .collect();
+        assert_eq!((hits, m.players[1].health), (vec![30], HEALTH - 1));
+    }
+
+    /// The tommy gun (V h4): Z held 160-400 fires 62 bullets (the press and every 4 frames from 3
+    /// in), with no clip; the climb goes 40, 120, 240, 335, 375 and to 0 once Z is let go.
+    #[test]
+    fn tommy_gun_fires_and_climbs() {
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos[2] = 3000.0;
+        m.give(0, 0x38);
+        run(
+            &mut m,
+            &arena,
+            &w,
+            20,
+            |t| if t == 0 { BUTTON_B } else { 0 },
+        );
+        let mut climbs = Vec::new();
+        for _ in 0..250 {
+            run(
+                &mut m,
+                &arena,
+                &w,
+                1,
+                |t| if t <= 260 { BUTTON_Z } else { 0 },
+            );
+            climbs.push(m.players[0].climb.climb);
+        }
+        assert_eq!(m.players[0].shots, 62);
+        assert_eq!(climbs[..5], [40, 120, 240, 335, 375]);
+        assert_eq!((climbs[240], climbs[241]), (0x1E00, 0));
+        assert_eq!(m.players[0].action, Action::Free);
+    }
+
+    /// 0x1A's roaming pickups (V dm6): the first frame puts k0-k3 on four spots of 0-7; one taken
+    /// at t is back at t + 150 on a spot no pickup stood on.
+    #[test]
+    fn vault_pickups_roam() {
+        let (_, m, w) = duel();
+        let arena = Arena {
+            pickups: (weapon::PICKUPS_1A.iter().zip(weapon::SPOTS_1A))
+                .map(|(p, s)| (*p, s.map(f32::from)))
+                .collect(),
+            roaming: weapon::Roaming::vault(),
+            respawn: Some(weapon::VAULT_RESPAWN),
+            ..Default::default()
+        };
+        let mut m = Match::new(&arena, m.players, Rng::new(1), 0);
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let spots = |m: &Match| {
+            m.pickups[..4]
+                .iter()
+                .map(|p| p.spot.unwrap())
+                .collect::<Vec<_>>()
+        };
+        let first = spots(&m);
+        assert!(first.iter().all(|&s| s < 8));
+        assert!((1..4).all(|k| !first[..k].contains(&first[k])), "{first:?}");
+        m.players[0].body.pos = m.pickup_at(&arena, 2);
+        let ev = run(&mut m, &arena, &w, 1, |_| 0);
+        assert!(ev.iter().any(|e| e.1
+            == Event::Pickup {
+                player: 0,
+                pickup: 2
+            }));
+        m.players[0].body.pos = [9000.0, 0.0, 9000.0];
+        run(&mut m, &arena, &w, 149, |_| 0);
+        assert_eq!((m.pickups[2].timer, spots(&m)), (1, first.clone()));
+        run(&mut m, &arena, &w, 1, |_| 0);
+        let back = spots(&m);
+        assert_eq!(m.pickups[2].timer, 0);
+        assert!(!first.contains(&back[2]), "{first:?} {back:?}");
+        assert_eq!((back[0], back[1], back[3]), (first[0], first[1], first[3]));
     }
 }

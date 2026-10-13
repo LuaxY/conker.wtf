@@ -197,6 +197,7 @@ mod tests {
         let arena = Arena {
             spawns: vec![spawn],
             pickups: Vec::new(),
+            ..Default::default()
         };
         let at = Placement {
             index: 0,
@@ -247,6 +248,7 @@ mod tests {
         let arena = Arena {
             spawns: vec![spawn],
             pickups: Vec::new(),
+            ..Default::default()
         };
         let at = |pos| Placement {
             index: 0,

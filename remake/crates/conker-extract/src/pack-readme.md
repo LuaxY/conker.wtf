@@ -17,7 +17,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | Path | What it is |
 |---|---|
 | `pack.json` | `format` (the pack format; a server reads only its own), `source_rom_sha1` (for reference), the folders under `maps/`, `characters/` and `weapons/`, `audio`: the folders under `audio/` that hold sound (absent in a pack without sound), and `hud`: whether the pack has `hud/` |
-| `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map), `2b` (scene 0x2B, the Beach, War: Beach's map, scenario 8), `1a` (scene 0x1A, the Vault, Heist's map, scenario 0, and Deathmatch scenario 6) |
+| `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides and the quads it never draws, bank-03 #0x33). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map), `2b` (scene 0x2B, the Beach, War: Beach's map, scenario 8), `1a` (scene 0x1A, the Vault, Heist's map, scenario 0, and Deathmatch scenario 6) |
 | `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister at the origin (in a carrier's hands). Textures in `textures/` with the level's |
 | `maps/<map>/collision.json` | What players stand on and run into, in the game's build order |
 | `maps/<map>/spawns.json` | The multiplayer spawn records (20 on 0x2D, 25 on 0x30, 12 on 0x34, 16 on 0x3F, 12 on 0x2B, 32 on 0x1A) |
@@ -42,6 +42,8 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, the villagers' looks and the Wise Guy's team looks |
 | `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (16 models: the twin guns are two; the Vault's bat and tommy gun among them), and War: Total War's gas mask in the hand and on the head: glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
+| `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt (a bullet has none) |
+| `weapons/deathmatch/flame.png` | The flamethrower's stream (blob 0x916, as `maps/34/traps/flame.png`): a ribbon through its flame points, its S along the stream |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
 | `game/class.bin` | The characters' behaviour scripts (game bytecode, raw) |

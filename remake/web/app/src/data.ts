@@ -14,9 +14,14 @@ export const MODES: Record<Mode, { name: string; kills: boolean; lives: boolean;
     beach: { name: "War: Beach", kills: false, lives: false, score: true },
   };
 
-export type MapId = "2b" | "2d" | "30" | "34" | "3f";
+export type MapId = "1a" | "2b" | "2d" | "30" | "34" | "3f";
 /** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
 export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
+  "1a": {
+    name: "Vault 0x1A",
+    modes: ["deathmatch"],
+    note: "Everyone is the Wise Guy, holding the bat.",
+  },
   "2b": { name: "Beach 0x2B", modes: ["deathmatch", "beach"] },
   "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
   "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },

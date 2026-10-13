@@ -141,6 +141,29 @@ fn slice_in_memory() {
         let bank = if h.object { 1 } else { 9 };
         assert_eq!(names[mesh], format!("{bank:02x}-{:02x}-00", h.entry));
     }
+    // Every held material is textured: the twin guns' last three images (3790, 3796, 3112) are
+    // sampled through the tile described for them, not G_TEXTURE's stale tile 1 (extract-gbi).
+    let materials = held["materials"].as_array().unwrap();
+    let untextured: Vec<_> = (materials.iter())
+        .filter(|m| m["pbrMetallicRoughness"]["baseColorTexture"].is_null())
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert!(untextured.is_empty(), "{untextured:?}");
+    let twin = names.iter().position(|&n| n == "09-1a-00").unwrap();
+    let images: Vec<_> = (held["meshes"][twin]["primitives"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .map(|p| &materials[p["material"].as_u64().unwrap() as usize]["extras"]["texture"])
+    .map(|t| (t["image"].as_str().unwrap(), t["size"].clone()))
+    .collect();
+    for (image, size) in [("3790", [16, 16]), ("3796", [16, 16]), ("3112", [16, 16])] {
+        let flat = format!("Some(Flat {{ index: {image}, mode: 0 }})");
+        assert!(
+            images.contains(&(flat.as_str(), serde_json::json!(size))),
+            "{image}"
+        );
+    }
 
     assert_eq!(slice.collision.len(), 4_299);
     let terrain: Vec<_> = slice
@@ -775,6 +798,33 @@ fn mounted_gun_model() {
         .map(|c| (c.pair, c.logical.clone(), c.duration))
         .collect();
     assert_eq!(clips, [(0, vec![1], 12)]);
+}
+
+/// The projectiles' models in flight (E8, V the oracle's batches: the grenade 12 + 8 + 8 vertices,
+/// the rocket 16 with its nose at +484 and tail at −316, the bolt 23) and the quads 0x2D and 0x34
+/// never draw (bank-03 #0x33), out of their levels.
+#[test]
+fn projectiles_and_undrawn_quads() {
+    let Some(rom) = rom() else { return };
+    let (level, scenes) = conker_extract::projectiles_level(&rom).unwrap();
+    let counts: Vec<_> = (level.meshes.iter()).map(|m| m.ir.vertices.len()).collect();
+    assert_eq!(counts, [28, 16, 34, 23]);
+    let z: Vec<_> = (level.meshes[1].ir.vertices.iter())
+        .map(|v| v.position[2])
+        .collect();
+    assert_eq!((z.iter().min(), z.iter().max()), (Some(&-316), Some(&484)));
+    assert!(level.meshes.iter().all(|m| m.ir.unresolved.len() <= 1));
+    assert_eq!(scenes.as_array().unwrap().len(), 4);
+    for (scene, quads) in [(0x2D, 6), (0x34, 2)] {
+        let all = extract_level::scene_level(&rom, scene).unwrap();
+        let undrawn = |l: &extract_level::Level| {
+            (l.instances.iter())
+                .filter(|i| l.meshes[i.mesh].path.starts_with(&conker_extract::UNDRAWN))
+                .count()
+        };
+        assert_eq!(undrawn(&all), quads);
+        assert_eq!(undrawn(&conker_extract::map_level(&rom, scene).unwrap()), 0);
+    }
 }
 
 /// What the six outros' other commands give (`../lab/research/mp-original/outros-leftovers.md`):

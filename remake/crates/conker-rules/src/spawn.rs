@@ -124,6 +124,13 @@ pub const RAPTOR_MASKS_3F: [u32; 2] = [0xFFFF_FF00, 0xFFFF_00FF];
 pub const DEATHMATCH_START_2B: [u8; 16] = [1, 10, 2, 3, 11, 10, 0, 3, 1, 10, 2, 3, 11, 10, 0, 3];
 pub const BEACH_START_2B: [[u8; 8]; 2] = [[1, 2, 11, 0, 1, 2, 11, 0], [10, 3, 10, 3, 10, 3, 10, 3]];
 
+/// Scene 0x1A Deathmatch (scenario 6): slots 0-3 start on the four bases' records 0-3, the rest on
+/// the FFA records 0x14-0x1F (script 0xB7's init, C; V dm6: p0-3 at the bases). Masks all ones
+/// (I; V dm6: respawns on 13, 14 and 17). The map's War, Heist, is not ported: its sides here are
+/// the same records halved, for `--cavemen` (I).
+pub const DEATHMATCH_START_1A: [u8; 16] =
+    [0, 1, 2, 3, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+
 /// A map's start tables: Deathmatch's record per slot, and the two sides' bases (the k-th member's
 /// record, and the side's respawn mask), from the War mode played on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +142,7 @@ pub struct Starts {
 
 /// The start tables of scene `scene` (0x2D: Total War's sides; 0x30: Colors'; 0x34: Deathmatch's
 /// split by slot parity; 0x3F: Raptor's, the Ugas as the squirrels; 0x2B: Beach's, the villagers
-/// as the squirrels), if known.
+/// as the squirrels; 0x1A: Deathmatch's halved), if known.
 pub const fn starts(scene: u16) -> Option<Starts> {
     match scene {
         0x2D => Some(Starts {
@@ -161,6 +168,14 @@ pub const fn starts(scene: u16) -> Option<Starts> {
         0x2B => Some(Starts {
             deathmatch: DEATHMATCH_START_2B,
             sides: BEACH_START_2B,
+            side_masks: DEATHMATCH_MASKS,
+        }),
+        0x1A => Some(Starts {
+            deathmatch: DEATHMATCH_START_1A,
+            sides: [
+                [0, 1, 2, 3, 20, 21, 22, 23],
+                [24, 25, 26, 27, 28, 29, 30, 31],
+            ],
             side_masks: DEATHMATCH_MASKS,
         }),
         _ => None,

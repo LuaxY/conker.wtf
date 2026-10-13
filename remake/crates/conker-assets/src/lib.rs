@@ -129,6 +129,17 @@ pub fn held_gltf(weapons: &str) -> String {
     format!("weapons/{weapons}/held.gltf")
 }
 
+/// The projectiles in flight: glTF scenes 0-3 the thrown grenade, the rocket, the knife and the
+/// bolt, at the origin with +z along the flight.
+pub fn projectiles_gltf(weapons: &str) -> String {
+    format!("weapons/{weapons}/projectiles.gltf")
+}
+
+/// The flamethrower's flame (blob 0x916, RGBA32 32 × 32): its stream's texture.
+pub fn flame_png(weapons: &str) -> String {
+    format!("weapons/{weapons}/flame.png")
+}
+
 /// Where a collision triangle comes from (extract-scene's `Layer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

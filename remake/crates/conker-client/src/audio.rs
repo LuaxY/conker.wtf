@@ -583,16 +583,16 @@ fn burning(p: &Seen) -> bool {
 }
 
 /// The weapon that hit `victim`, which the server does not send, from its first reaction (its
-/// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21 or the
-/// club 0x40 (the nearest holding it drawn), 0x11C the club's second swing, 0xD3
+/// [`Combat::anim`] as the hit lands, conker-rules' `damage::sequence`): 0x11B melee 0x21, the
+/// club 0x40 or the bat 0x19 (the nearest holding one drawn), 0x11C the club's second swing, 0xD3
 /// weapon 0x14's shot or the crossbow's bolt, 0x69 the flame, 0x19C weapon 0x23 or the mounted gun
 /// (its seated gunner's weapon, the nearest of the two); a blast (0xF3) is a
 /// rocket's when one went off this tick or the last (`rocket`), else the shotgun's or a grenade's;
 /// the kill 0x17E is the sniper's, melee 0x22's, the crossbow's or the shotgun's, and the stagger
-/// 0x11D a bullet's or the shotgun's (or a lethal shot or burn): the nearest other player holding
-/// one of those drawn decides (a burning victim: the flame), else weapon 0x14, a grenade, the sniper
-/// rifle and the twin guns. I: wrong when another player holds such a weapon nearer than the
-/// shooter.
+/// 0x11D a bullet's (the tommy gun's too: its type's reaction is the twin guns', C) or the
+/// shotgun's (or a lethal shot or burn): the nearest other player holding one of those drawn
+/// decides (a burning victim: the flame), else weapon 0x14, a grenade, the sniper rifle and the
+/// twin guns. I: wrong when another player holds such a weapon nearer than the shooter.
 fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool) -> u8 {
     let nearest = |ids: &[u8]| {
         let d = |p: &Seen| dist2(p.pos, victim.pos);
@@ -602,7 +602,7 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
             .map(|o| o.weapon)
     };
     match victim.reaction {
-        HIT_MELEE => nearest(&[0x40]).unwrap_or(0x21),
+        HIT_MELEE => nearest(&[0x40, 0x19]).unwrap_or(0x21),
         HIT_CLUB => 0x40,
         HIT_SHOT => nearest(&[SHOTS, 0x18]).unwrap_or(SHOTS),
         FLAME_HIT => 0x15,
@@ -611,7 +611,7 @@ fn hit_weapon(victim: &Seen, burnt: bool, others: &[(Seen, Seen)], rocket: bool)
         BLOWN_UP => nearest(&[0x37]).unwrap_or(GRENADE),
         DEATH_SHOT => nearest(&[0x24, 0x22, 0x18, 0x37]).unwrap_or(0x24),
         _ if burnt => 0x15,
-        _ => nearest(&[0x09, 0x39, 0x24, SHOTS, 0x37]).unwrap_or(0x09),
+        _ => nearest(&[0x09, 0x39, 0x24, SHOTS, 0x37, 0x38]).unwrap_or(0x09),
     }
 }
 
@@ -1452,7 +1452,8 @@ impl Sounds {
     /// The match's sounds: weapon 0x14's shots (one sound a tick in flight, the wall's when one is
     /// gone without hurting anyone near it), pickups taken (by the nearest player), Total War's gas
     /// (at the listener while it is out), the background (from the first tick of play to the match's
-    /// end) and the lamps' buzz (an emitter at each lamp in `flashed`, a flash starting this tick).
+    /// end) and the lamps' buzz (an emitter at each lamp in `flashed`, a flash starting this tick, or
+    /// on 0x1A a switching light coming back on).
     fn match_sounds(
         &mut self,
         cx: &Cx,
@@ -1507,7 +1508,10 @@ impl Sounds {
         for pickup in
             (cx.pack.pickups.iter()).filter(|p| p.placement < 64 && taken >> p.placement & 1 != 0)
         {
-            let d = |p: &Seen| dist2(p.pos, pickup.position);
+            // A roaming one (0x1A's) was taken where it stood.
+            let roams = m.roaming.iter().find(|r| r.0 == pickup.placement);
+            let at = roams.map_or(pickup.position, |r| r.1);
+            let d = |p: &Seen| dist2(p.pos, at);
             let Some(p) = players
                 .iter()
                 .map(|p| p.1)
@@ -1818,8 +1822,7 @@ fn hear(
         s.player(&cx, was, is, &all);
     }
     s.grenades(&cx, grenades);
-    let lamps = flickers.iter().flat_map(|f| &f.lamps);
-    let flashed: Vec<[f32; 3]> = lamps.filter(|l| l.flashed).map(|l| l.at).collect();
+    let flashed: Vec<[f32; 3]> = flickers.iter().flat_map(|f| f.flashed()).collect();
     s.match_sounds(&cx, m, &all, &flashed);
     s.beach(&cx, m, &all);
     s.zones(&cx, &all);

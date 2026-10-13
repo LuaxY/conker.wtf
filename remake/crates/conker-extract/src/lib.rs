@@ -491,6 +491,46 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
     Ok((held, models, scenes.into()))
 }
 
+/// The models the original draws for the projectiles in flight, glTF scene `i` of `projectiles.gltf`
+/// each (`../lab/research/mp-original/visuals-scratch`, oracle runs gren4, rocket, knife, bolt2): the
+/// thrown grenade (bank 01 #0x7E, one joint), the rocket (bank 09 #0xE1), weapon 0x14's knife
+/// (#0x23) and the crossbow's bolt (#0x35, also drawn in the crossbow), at the origin with +z
+/// along the flight. A bullet has no model in flight (V twin DLs 104-110: only the muzzle flash).
+pub const PROJECTILES: [[usize; 2]; 4] = [[0x01, 0x7E], [0x09, 0xE1], [0x09, 0x23], [0x09, 0x35]];
+
+/// [`PROJECTILES`] as one pseudo-level (a mesh each, a bank-01 model in its bind pose) and their
+/// glTF scenes.
+pub fn projectiles_level(rom: &Rom) -> Result<(Level, Value)> {
+    let game_data = rom.game_data()?;
+    let mut level = Level::default();
+    for path in PROJECTILES {
+        let ir = match path[0] {
+            0x01 => {
+                let model = parse_model(&rom.asset(&path)?)?;
+                let pivots = bind_pivots(&model.joints)?;
+                let mut ir = (model.lists.into_iter().next()).context("projectile: no list")?;
+                for v in &mut ir.vertices {
+                    let p = (pivots.get(matrix_slot(v.matrix)).copied()).unwrap_or_default();
+                    v.position = std::array::from_fn(|a| v.position[a] + p[a] as i16);
+                }
+                ir
+            }
+            _ => parse_effect(&rom.asset(&path)?, &game_data)?,
+        };
+        level.instances.push(Instance {
+            mesh: level.meshes.len(),
+            placement: None,
+            matrix: IDENTITY,
+        });
+        level.meshes.push(Mesh {
+            path: path.to_vec(),
+            ir,
+        });
+    }
+    let scenes = (0..PROJECTILES.len()).map(|i| json!({ "nodes": [i] }));
+    Ok((level, scenes.collect()))
+}
+
 /// The held models' glTF, one glTF scene per held model: Bevy's `#Scene<i>` is `held[i]`.
 fn held_gltf(models: &Level, scenes: Value, textures: &Textures, bin_uri: &str) -> Result<Gltf> {
     let mut gltf = to_gltf(models, textures, bin_uri)?;
@@ -765,6 +805,15 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
         held_models.bin,
         held_models.images,
     ));
+    let (projectiles, scenes) = projectiles_level(rom)?;
+    let g = held_gltf(&projectiles, scenes, &textures, "projectiles.bin")?;
+    let path = assets::projectiles_gltf(PACK_WEAPONS);
+    gltfs.push((path, parse(&g.json)?, g.bin, g.images));
+    // The flamethrower's stream draws the fire jets' flame (V flame DL 130: blob 0x916).
+    let (_, id, format, w, h) = traps::TEXTURES[0];
+    let flame = extract_gbi::decode(format, w, h, &textures.get(id)?, &[], true)?;
+    let flame = extract_gbi::png(w as u32, h as u32, &flame)?;
+    out.add(assets::flame_png(PACK_WEAPONS), flame);
     let mut pngs = 0;
     // One accessor, node, material or animation per line.
     for (path, json, bin, images) in gltfs {
@@ -1007,13 +1056,23 @@ fn map_lights(rom: &Rom, scene: usize) -> Result<assets::Lights> {
     })
 }
 
-/// A map's level: the scene's ([`scene_level`]) without its [`hidden_placements`], its pickups'
-/// models moved to their spots where the game moves them off their placements
-/// ([`weapon::pickups`]).
+/// Bank-03 model 0x33 (class 51): 0x2D's quads at the centre (placements 40-45) and 0x34's 29 and
+/// 30, solid in the match (`lab/oracle/walls_README.md`) but not drawn (V quad3 DL 130: slot 0's
+/// camera facing placement 40 from 700 units, no batch within 300 of it; I on 0x34). Untextured,
+/// they drew as white quads.
+pub const UNDRAWN: [usize; 2] = [0x03, 0x33];
+
+/// A map's level: the scene's ([`scene_level`]) without its [`hidden_placements`] and the
+/// [`UNDRAWN`] model, its pickups' models moved to their spots where the game moves them off their
+/// placements ([`weapon::pickups`]).
 pub fn map_level(rom: &Rom, scene: usize) -> Result<Level> {
     let mut level = scene_level(rom, scene)?;
     let hidden = hidden_placements(scene);
-    (level.instances).retain(|inst| inst.placement.is_none_or(|i| !hidden.contains(&i)));
+    let meshes = &level.meshes;
+    (level.instances).retain(|inst| {
+        inst.placement.is_none_or(|i| !hidden.contains(&i))
+            && !meshes[inst.mesh].path.starts_with(&UNDRAWN)
+    });
     let (pickups, spots) = pickup_table(rom, scene)?;
     for (p, spot) in pickups.iter().zip(spots) {
         for inst in &mut level.instances {

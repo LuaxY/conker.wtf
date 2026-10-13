@@ -138,6 +138,7 @@ fn total_war_runs_the_team_branch() {
     let arena = Arena {
         spawns: Vec::new(),
         pickups: Vec::new(),
+        ..Default::default()
     };
     let players = vec![at(0, 0), at(40, 1), at(80, 0), at(120, 1)];
     let settings = Settings {
@@ -255,6 +256,7 @@ fn total_war_takeover() {
     let arena = Arena {
         spawns,
         pickups: Vec::new(),
+        ..Default::default()
     };
     let place = |pos| Placement {
         index: 0,
@@ -365,6 +367,7 @@ fn total_war_gas() {
                 )
             })
             .collect(),
+        ..Default::default()
     };
     // 0: team 0, the deliverer, waiting in the shelter (trigger 5, d1's p0); 1 and 2 outside, of
     // team 1 and 0; 3 in the doorway (trigger 0x50, d2's p0); 4 on mask k23 (placement 25, d2's p1).
@@ -576,6 +579,7 @@ fn colors_flags_and_captures() {
     let arena = Arena {
         spawns,
         pickups: Vec::new(),
+        ..Default::default()
     };
     // Beside the flags as e1's P1 and P2 were teleported (42 units off), and the squirrels' zone
     // on its floor.
@@ -798,6 +802,7 @@ fn colors_keeps_its_flags_through_a_join_and_a_leave() {
     let arena = Arena {
         spawns,
         pickups: Vec::new(),
+        ..Default::default()
     };
     let place = |pos| Placement {
         index: 0,
@@ -899,7 +904,11 @@ fn colors_bots_take_a_flag() {
     let pickups = (picks.iter().zip(spots))
         .map(|(p, at)| (*p, at.map(f32::from)))
         .collect();
-    let arena = Arena { spawns, pickups };
+    let arena = Arena {
+        spawns,
+        pickups,
+        ..Default::default()
+    };
     // The server's places: each side's k-th player on its k-th start record.
     let starts = spawn::starts(0x30).unwrap();
     let mut rng = Rng::default();
@@ -965,6 +974,7 @@ fn mounted_gun_bodies() {
     let arena = Arena {
         spawns: Vec::new(),
         pickups: Vec::new(),
+        ..Default::default()
     };
     let fighter = |pos, facing, team| {
         let place = Placement {
@@ -1053,6 +1063,7 @@ fn mounted_guns_m2_and_e1() {
     let arena = Arena {
         spawns: Vec::new(),
         pickups: Vec::new(),
+        ..Default::default()
     };
     let place = |pos, facing| Placement {
         index: 0,
@@ -1325,6 +1336,7 @@ fn beach_script_runs_the_match() {
     let arena = Arena {
         spawns,
         pickups: Vec::new(),
+        ..Default::default()
     };
     let mut m = Match::new(&arena, players, Rng::default(), 0).with(Settings {
         beach: true,
@@ -1443,6 +1455,7 @@ fn beach_keeps_its_deadlines_through_a_join_and_a_leave() {
     let arena = Arena {
         spawns: spawns.clone(),
         pickups: Vec::new(),
+        ..Default::default()
     };
     let mut m = Match::new(&arena, players, Rng::default(), 0).with(Settings {
         beach: true,
@@ -1527,7 +1540,18 @@ fn deathmatch(
             (*p, at.map(f32::from))
         })
         .collect();
-    let arena = Arena { spawns, pickups };
+    // 0x1A's roaming pickups, and everyone the Wise Guy with the bat (as the server has them).
+    let vault = scene == 0x1A;
+    let arena = Arena {
+        spawns,
+        pickups,
+        roaming: if vault {
+            weapon::Roaming::vault()
+        } else {
+            Default::default()
+        },
+        respawn: vault.then_some(weapon::VAULT_RESPAWN),
+    };
     let rng = Rng { state: seed };
     let starts = spawn::starts(scene as u16).unwrap();
     let mut r = rng;
@@ -1535,7 +1559,11 @@ fn deathmatch(
     let fighters = (0..=bots)
         .map(|i| {
             let at = usize::from(starts.deathmatch[i % 16]);
-            Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, 23)
+            Fighter {
+                start: vault.then_some(weapon::BAT.id),
+                class: u8::from(vault),
+                ..Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, 23)
+            }
         })
         .collect();
     let mut m = Match::new(&arena, fighters, r, 23);
@@ -1685,4 +1713,75 @@ fn no_endless_stand_below_a_ledge_on_0x2d() {
         "{:?}",
         bots.unknown
     );
+}
+
+/// 0x1A's Deathmatch (scenario 6) on Heist's script 0xB7, its FFA branch, with 3 bots for dm6's
+/// 119 s (3,572 frames). Every bot starts and respawns with the bat, moves, fights and goes for the
+/// pickups; the tommy gun (k0) is taken and fired. The script finds pickup k's node as
+/// G[0x14F4][G[0x10F0][k]] (C, 0x2240): the node under its spot. The oracle's 3-bot runs (dm6,
+/// dm3w, dm3v; 1 idle human): 6-10 pickups, 7-17 hits (the victims' health drops), 4-5 kills,
+/// 4-5 deaths, the bat never swung (V: 15 swings only in a 7-bot run, dm7); here, seed 1: 15
+/// pickups (10 of the roaming k0-k3), 14 tommy-gun shots, 4 kills.
+#[test]
+fn vault_deathmatch_bots_fight() {
+    use conker_bots::brain::g;
+    let Some(rom) = rom() else { return };
+    let mut from = [None::<[f32; 3]>; 4];
+    let (mut moved, mut pickups, mut tommy) = ([0f32; 4], 0, 0);
+    let (mut shots, mut taken, mut back) = ([0u16; 4], [None; 8], [None::<u32>; 4]);
+    let (mut spots, mut last, mut stats) = (Vec::new(), Vec::new(), Vec::new());
+    let bots = deathmatch(&rom, 0x1A, 3, 1, 3572, |m, _| {
+        for (k, p) in m.pickups.iter().enumerate() {
+            pickups += u32::from(k < 4 && p.taken.is_some() && p.taken != taken[k]);
+            taken[k] = p.taken;
+        }
+        for (i, f) in m.players.iter().enumerate() {
+            let p = f.body.pos;
+            match from[i] {
+                Some(q) => moved[i] += (p[0] - q[0]).hypot(p[2] - q[2]).min(100.0),
+                None => assert_eq!(f.weapon, Some(0x19), "{i} at the start"),
+            }
+            from[i] = Some(p);
+            tommy += f.shots.saturating_sub(shots[i]) * u16::from(f.weapon == Some(0x38));
+            shots[i] = f.shots;
+            // The bat again on the frames after each respawn.
+            match (back[i], f.health) {
+                (None, 0) => back[i] = Some(0),
+                (Some(n), h) if h > 0 => {
+                    assert!(n < 2 || f.weapon == Some(0x19), "{i} at {}", m.tick);
+                    back[i] = (n < 2).then_some(n + 1);
+                }
+                _ => {}
+            }
+        }
+        // The spots the bots' last frame saw (`Bots::tick` mirrors before the step).
+        last = std::mem::replace(&mut spots, m.pickups.iter().map(|p| p.spot).collect());
+        stats = (m.players.iter())
+            .map(|f| (f.shots, f.hits, f.kills, f.deaths))
+            .collect();
+    });
+    eprintln!(
+        "0x1A: {pickups} roaming pickups, {tommy} tommy-gun shots; moved {moved:?}; (shots, \
+         hits, kills, deaths) {stats:?}"
+    );
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+    assert!(moved[1..].iter().all(|&d| d > 10_000.0), "{moved:?}");
+    assert!(shots[1..].iter().all(|&s| s > 0), "{shots:?}");
+    assert!(pickups > 0 && tommy > 0, "{pickups} {tommy}");
+    // The script's spot nodes (`G[0x14F4]`, 0x381A): 0-7 where k0-k3 roam, then k4-k7's 8-11.
+    const NODES: [i32; 12] = [
+        0x2E, 0x33, 0x23, 0x38, 5, 0xF, 0x16, 0x1B, 0x79, 0x7A, 0x7B, 0x7C,
+    ];
+    let gl = bots.globals();
+    assert_eq!(last.len(), 8);
+    for (k, spot) in last.iter().enumerate() {
+        let spot = spot.map_or(k + 4, usize::from);
+        let node = gl.get(g::NODE_OF, gl.get(g::SPOT, k) as usize);
+        assert_eq!(node, NODES[spot], "k{k}");
+        assert_eq!(gl.get(g::HOLDER, k), -1, "k{k}");
+    }
 }

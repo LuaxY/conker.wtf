@@ -56,6 +56,9 @@ pub mod g {
     pub const HOLDER: i32 = 0xF70;
     pub const OVERRIDE: i32 = 0xFF0;
     pub const PICKUP_TIMER: i32 = 0x1070;
+    /// Pickup k's spot (`func_1508DC24`: the roaming pick, else PLACE[k], C), an index into
+    /// NODE_OF: 0xB7 reads the node G[0x14F4][G[0x10F0][k]] (C, script 0x2240).
+    pub const SPOT: i32 = 0x10F0;
     pub const GIVES: i32 = 0x1174;
     pub const PICKUP_FLAGS: i32 = 0x11F4;
     pub const PLACE: i32 = 0x1274;
@@ -1658,7 +1661,9 @@ fn wrap360(d: f32) -> f32 {
     if r < 0.0 { r + 360.0 } else { r }
 }
 
-/// Query 0xD3: the held item's class: 2 automatic guns, 3 melee, 1 other weapons, 0 none.
+/// Query 0xD3: the held item's class: 2 automatic guns, 3 melee, 1 other weapons, 0 none. The bat
+/// 0x19 is in no case, so 0: its holder goes for a weapon (`func_15099C14`, C; V dm6: the bots
+/// with the bat in state 6 a quarter of the time).
 pub fn weapon_class(item: u8) -> i32 {
     match item {
         0x03 | 0x09 | 0x15 => 2,
@@ -1723,9 +1728,10 @@ mod tests {
                 weapon_class(0x09),
                 weapon_class(0x22),
                 weapon_class(0x39),
-                weapon_class(0)
+                weapon_class(0),
+                weapon_class(0x19)
             ),
-            (2, 3, 1, 0)
+            (2, 3, 1, 0, 0)
         );
         assert_eq!(
             (give_range(0x09), give_range(0x24), give_range(0x22)),

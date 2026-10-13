@@ -13,10 +13,16 @@
 //! characters; with the sweeping ground lights ([`Sweepers`]) and a strike's red light they light the
 //! level as the original does ([`relight`]).
 //!
-//! The white lamps (0x2D's two in the shelter, 0x2B's two) flicker ([`Flicker`], light behaviour 4,
-//! `war-leftovers.md` §6), each flash's start buzzing at the lamp ([`crate::audio`]'s emitters). On
-//! 0x2D the room dims while a lamp flickers: each vertex by its light with the lamps' sizes now over
-//! its light with them full (I: the room is otherwise drawn as if the lamps saturate it).
+//! 0x1A's 34 lights (`maps/1a/lights.json`, `../lab/oracle/map1a/props_pickups_lights.md` §3) light
+//! its level as [`relight`] does 2b's, each vertex by its 10 nearest; they are not Bevy point lights
+//! (I: the original lights its characters with other sets). Five of them switch off and on at
+//! random ([`Switch`]), each buzzing as it comes back on.
+//!
+//! The white lamps (0x2D's two in the shelter, 0x2B's two, 0x1A's two) flicker ([`Flicker`], light
+//! behaviour 4, `war-leftovers.md` §6), each flash's start buzzing at the lamp ([`crate::audio`]'s
+//! emitters). On 0x2D the room dims while a lamp flickers: each vertex by its light with the lamps'
+//! sizes now over its light with them full (I: the room is otherwise drawn as if the lamps saturate
+//! it).
 
 use std::collections::{HashMap, HashSet};
 
@@ -158,12 +164,39 @@ pub struct Lamp {
     pub flashed: bool,
 }
 
-/// The map's flickering lamps, a tick at a time ([`flicker`]), with the client's own random numbers
-/// (the original's are each machine's own too, I).
+/// Per mille a frame that an on switching light goes off, and an off one comes on ([`Switch`]).
+pub const SWITCH_CHANCES: [u32; 2] = [35, 70];
+
+/// A switching light ([`Lights::switching`], 0x1A's five; light behaviour 255): its index in
+/// [`Lights::lights`], place and full size, whether it is on (it starts on, I), and whether it came
+/// back on this tick.
+pub struct Switch {
+    pub light: usize,
+    pub at: [f32; 3],
+    full: f32,
+    pub on: bool,
+    pub flashed: bool,
+}
+
+impl Switch {
+    /// One frame: an on light goes off with [`SWITCH_CHANCES`]' 35/1000, an off one comes on with
+    /// 70/1000 (C `func_15100340` → `func_151616D0` → `func_151604A0`; I: a frame each, `rand %
+    /// 1000`; V lt3's spans agree: on 1-219 frames, median 18-27; off 1-92, median 10-13). True as
+    /// it comes back on (its buzz, `func_151604A0`'s message 0x1C, C).
+    pub fn tick(&mut self, rng: &mut Rng) -> bool {
+        let flips = rng.next_u32() % 1000 < SWITCH_CHANCES[usize::from(!self.on)];
+        self.on ^= flips;
+        flips && self.on
+    }
+}
+
+/// The map's flickering lamps and switching lights, a tick at a time ([`flicker`]), with the
+/// client's own random numbers (the original's are each machine's own too, I).
 #[derive(Resource)]
 pub struct Flickers {
     rng: Rng,
     pub lamps: Vec<Lamp>,
+    pub switches: Vec<Switch>,
 }
 
 impl Flickers {
@@ -178,16 +211,38 @@ impl Flickers {
                 flashed: false,
             })
             .collect();
+        let switches = (lights.switching.iter())
+            .filter_map(|&light| {
+                let l = lights.lights.get(light)?;
+                Some(Switch {
+                    light,
+                    at: l.at,
+                    full: l.size,
+                    on: true,
+                    flashed: false,
+                })
+            })
+            .collect();
         Self {
             rng: Rng::new(seed.rotate_left(17) | 1),
             lamps,
+            switches,
         }
     }
 
-    /// Light `i`'s size if it flickers: the light's size byte, trunc(size).
+    /// Light `i`'s size if it flickers or switches: the light's size byte, trunc(size); 0 while
+    /// switched off.
     pub fn size(&self, i: usize) -> Option<f32> {
         let lamp = self.lamps.iter().find(|l| l.light == i);
-        lamp.map(|l| l.flicker.size.trunc())
+        let switch = self.switches.iter().find(|s| s.light == i);
+        (lamp.map(|l| l.flicker.size.trunc()))
+            .or_else(|| switch.map(|s| if s.on { s.full } else { 0.0 }))
+    }
+
+    /// Where a lamp's flash started or a light came back on this tick (their buzz, [`crate::audio`]).
+    pub fn flashed(&self) -> impl Iterator<Item = [f32; 3]> {
+        let lamps = self.lamps.iter().filter(|l| l.flashed).map(|l| l.at);
+        lamps.chain(self.switches.iter().filter(|s| s.flashed).map(|s| s.at))
     }
 
     /// Whether a lamp is not at its full size.
@@ -196,8 +251,8 @@ impl Flickers {
     }
 }
 
-/// Steps the lamps a tick while the match plays (before [`crate::audio`] hears their flashes), and
-/// War: Beach's sweepers, headless too.
+/// Steps the lamps and switching lights a tick while the match plays (before [`crate::audio`] hears
+/// their flashes), and War: Beach's sweepers, headless too.
 pub fn flickers(app: &mut App, lights: &Lights, seed: u64) {
     app.insert_resource(Flickers::new(lights, seed));
     app.insert_resource(Sweepers::new(seed));
@@ -299,12 +354,19 @@ fn sweep(
     }
 }
 
-/// Each lamp's frame (none once the match is over).
+/// Each lamp's and switching light's frame (none once the match is over).
 pub fn flicker(game: Query<&MatchView>, mut flickers: ResMut<Flickers>) {
     let playing = game.single().is_ok_and(|m| m.phase < 2);
-    let Flickers { rng, lamps } = &mut *flickers;
+    let Flickers {
+        rng,
+        lamps,
+        switches,
+    } = &mut *flickers;
     for l in lamps {
         l.flashed = playing && l.flicker.tick(l.full, rng);
+    }
+    for s in switches {
+        s.flashed = playing && s.tick(rng);
     }
 }
 
@@ -476,7 +538,10 @@ fn tint_room(
 }
 
 /// The lights a view of War: Beach takes: the 10 nearest to the point 1000 in front of its camera
-/// (`func_1515D914`, C; V: 6-9 alive, all taken).
+/// (`func_1515D914`, C; V: 6-9 alive, all taken). On 0x1A each vertex takes the 10 nearest to it of
+/// those shining (V `../lab/oracle/map1a/props_pickups_lights.md` §3: NUMLIGHT 11, the 10 nearest
+/// point lights and a black directional; I: nearest to the vertex, the pack README's, and an off
+/// switching light not counted).
 const VIEW_LIGHTS: usize = 10;
 
 /// A relit shape: its mesh, its vertices' positions in its own frame and their display colours.
@@ -486,7 +551,9 @@ type Shape = (AssetId<Mesh>, Vec<Vec3>, Vec<[f32; 3]>);
 /// draw has G_LIGHTING, the pack's colours are the drawn ones, a far vertex is ambient × colour): each
 /// vertex of the unlit draws under [`Lit`], colour × min(1, ambient + Σ rgb × [`share`]) over the
 /// [`VIEW_LIGHTS`] lights shining this frame (the lamps at their flicker's size, the red ones
-/// pulsing, the sweepers, a strike's red light). Each mesh's colours are read once
+/// pulsing, the sweepers, a strike's red light). 0x1A's level the same, in every mode (V: all its
+/// vertices lit, ambient (94, 94, 96)), with its own 34 lights: the bases' pulsing, the two lamps
+/// flickering, the five switching ones while on. Each mesh's colours are read once
 /// `render::shade_vertex_colors` has decoded them (its `Added` event, read here after `Update`).
 // ponytail: a mesh two nodes share (0x2B's 03-5b, 28 vertices) is lit at the first node only; copy
 // it per node if that shows.
@@ -498,12 +565,13 @@ fn relight(
     children: Query<&Children>,
     parts: Query<(&Mesh3d, &GlobalTransform, &MeshMaterial3d<StandardMaterial>)>,
     camera: Query<&GlobalTransform, With<FreeCameraState>>,
-    (time, timeline, flickers, sweepers, blasts): (
+    (time, timeline, flickers, sweepers, blasts, cfg): (
         Res<Time>,
         Res<LocalTimeline>,
         Res<Flickers>,
         Res<Sweepers>,
         Res<crate::beach::Blasts>,
+        Res<crate::Config>,
     ),
     room: Res<Room>,
     materials: Res<Assets<StandardMaterial>>,
@@ -519,7 +587,8 @@ fn relight(
     let (Ok(m), Ok(eye)) = (game.single(), camera.single()) else {
         return;
     };
-    if !m.beach {
+    let vault = cfg.map == "1a";
+    if !m.beach && !vault {
         return;
     }
     for e in roots.iter().flat_map(|r| children.iter_descendants(r)) {
@@ -567,13 +636,16 @@ fn relight(
         .chain(strikes)
         .filter(|l| l.2 > 0.0)
         .collect();
-    let point = eye.translation() + eye.forward() * 1000.0;
-    lights.sort_by(|a, b| {
-        a.0.distance_squared(point)
-            .total_cmp(&b.0.distance_squared(point))
-    });
-    lights.truncate(VIEW_LIGHTS);
+    if !vault {
+        let point = eye.translation() + eye.forward() * 1000.0;
+        lights.sort_by(|a, b| {
+            a.0.distance_squared(point)
+                .total_cmp(&b.0.distance_squared(point))
+        });
+        lights.truncate(VIEW_LIGHTS);
+    }
     let ambient = rgb(room.lights.ambient);
+    let mut near = Vec::with_capacity(lights.len());
     for (e, (id, ps, base)) in shapes.iter() {
         let (Ok((_, at, _)), Some(mut mesh)) = (parts.get(*e), meshes.get_mut(*id)) else {
             continue;
@@ -583,10 +655,32 @@ fn relight(
             continue;
         };
         for ((c, p), base) in cs.iter_mut().zip(ps).zip(base) {
-            let lit = lit(*base, at.transform_point(*p), ambient, &lights);
+            let p = at.transform_point(*p);
+            let lights = match vault {
+                true => nearest(&lights, p, &mut near),
+                false => &lights[..],
+            };
+            let lit = lit(*base, p, ambient, lights);
             c[..3].copy_from_slice(&lit.map(Srgba::gamma_function));
         }
     }
+}
+
+/// The [`VIEW_LIGHTS`] of `lights` (place, rgb, size) nearest to `p`, in `buf`.
+pub fn nearest<'a>(
+    lights: &[(Vec3, [f32; 3], f32)],
+    p: Vec3,
+    buf: &'a mut Vec<(Vec3, [f32; 3], f32)>,
+) -> &'a [(Vec3, [f32; 3], f32)] {
+    buf.clear();
+    buf.extend_from_slice(lights);
+    if buf.len() > VIEW_LIGHTS {
+        buf.select_nth_unstable_by(VIEW_LIGHTS, |a, b| {
+            a.0.distance_squared(p).total_cmp(&b.0.distance_squared(p))
+        });
+        buf.truncate(VIEW_LIGHTS);
+    }
+    buf
 }
 
 /// A vertex of display colour `base` at `p`, lit (display values): base × min(1, ambient + Σ rgb ×
@@ -782,5 +876,68 @@ mod tests {
         let ((dark_lo, dark_hi), (up_lo, up_hi)) = (range(0), range(1));
         assert!((3..=4).contains(&dark_lo) && (29..=30).contains(&dark_hi));
         assert!((7..=8).contains(&up_lo) && (19..=20).contains(&up_hi));
+    }
+
+    /// 0x1A's switching lights against lt3 (`props_pickups_lights.md` §3: on spans median 18-27,
+    /// off 10-13): at 35/1000 off and 70/1000 on a frame the medians are 20 and 10, on two thirds of
+    /// the time; one buzz each time one comes back on, its size 0 while off.
+    #[test]
+    fn lights_switch_off_and_on() {
+        let l = |size| Light {
+            at: [0.0; 3],
+            rgb: [255; 3],
+            size,
+            swing: 0.0,
+            step: 0.0,
+            when: When::Calm,
+            flicker: false,
+        };
+        let lights = Lights {
+            ambient: [94, 94, 96],
+            lights: vec![l(255.0), l(82.0)],
+            switching: vec![1],
+        };
+        let mut f = Flickers::new(&lights, 5);
+        let (mut spans, mut run, mut on, mut buzzes, mut ons) = ([vec![], vec![]], 0, true, 0, 0);
+        for _ in 0..200_000 {
+            let Flickers { rng, switches, .. } = &mut f;
+            let s = &mut switches[0];
+            let back = s.tick(rng);
+            buzzes += u32::from(back);
+            if s.on != on {
+                spans[usize::from(on)].push(run);
+                ons += u32::from(s.on);
+                (on, run) = (s.on, 0);
+            }
+            run += 1;
+            assert_eq!(f.size(1), Some(if on { 82.0 } else { 0.0 }));
+        }
+        assert_eq!((buzzes, f.size(0)), (ons, None));
+        let median = |v: &mut Vec<u32>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let (off, on) = (median(&mut spans[0]), median(&mut spans[1]));
+        assert!(
+            (9..=10).contains(&off) && (19..=20).contains(&on),
+            "{off} {on}"
+        );
+        let share = spans[1].iter().sum::<u32>() as f32 / 200_000.0;
+        assert!((0.65..0.68).contains(&share), "{share}");
+    }
+
+    /// A vertex of 0x1A takes the 10 lights nearest to it.
+    #[test]
+    fn a_vertex_takes_its_nearest_lights() {
+        let lights: Vec<_> = (0..14)
+            .map(|k| (Vec3::X * (100 * k) as f32, [1.0; 3], 10.0))
+            .collect();
+        let mut buf = Vec::new();
+        let mut xs: Vec<f32> = (nearest(&lights, Vec3::X * 1300.0, &mut buf).iter())
+            .map(|l| l.0.x)
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, (4..14).map(|k| (100 * k) as f32).collect::<Vec<_>>());
+        assert_eq!(nearest(&lights[..3], Vec3::ZERO, &mut buf).len(), 3);
     }
 }

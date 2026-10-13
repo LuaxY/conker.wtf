@@ -335,6 +335,7 @@ fn match_34(
     let arena = Arena {
         spawns,
         pickups: Vec::new(),
+        ..Default::default()
     };
     let players = (at.iter().enumerate())
         .map(|(i, &pos)| {

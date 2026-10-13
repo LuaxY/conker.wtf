@@ -8,6 +8,9 @@
 //! In War: Total War a carrier holds the gas canister ([`GAS_JOINT`]) and shines its green light
 //! (the pack's carried light, [`crate::lights`]), and the gas mask (bank-09 #67 in the hand, #66 on
 //! the head) follows its own clips ([`mask_shows`]).
+//! The aimed gun's twist ([`conker_sim::movement::PlayerState::twist`]) turns the upper body
+//! (`joint_01`, the arms and the guns with it) toward the aim; the head keeps the legs' facing
+//! ([`twist`]).
 
 use crate::render::MODEL_SCALE;
 use crate::{Anim, Config};
@@ -19,7 +22,7 @@ use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW, MASK_OFF, M
 use conker_assets::{Held, Light, PACK_WEAPONS, held_gltf, props_gltf};
 use conker_rules::net::Fighting;
 use conker_rules::weapon::weapon;
-use conker_sim::net::{Combat, MatchView};
+use conker_sim::net::{Combat, MatchView, Player};
 use lightyear::prelude::Predicted;
 
 #[derive(Resource)]
@@ -49,6 +52,41 @@ pub fn build(app: &mut App, held: Vec<Held>, carried: Option<Light>) {
     app.insert_resource(HeldModels(held));
     app.insert_resource(CarryLight(carried));
     app.add_systems(Update, (hang, show, hang_gas, show_gas).chain());
+    app.add_systems(
+        PostUpdate,
+        twist
+            .after(bevy::app::AnimationSystems)
+            .before(bevy::transform::TransformSystems::Propagate),
+    );
+}
+
+/// A player's upper body (`joint_01`) and head (`joint_12`), which the twist turns.
+#[derive(Component)]
+struct Twisted(Entity, Option<Entity>);
+
+/// The twist as a turn about the body's up axis: the upper body aims along `facing − twist`, as
+/// the camera does (V twin: `joint_01`'s yaw on the root's 5.3° at twist 0, 54.9° at 9000 (49.4°),
+/// −9.3° at −2660; the arms and guns, its children, within 1.6°; the head, `joint_12`, not
+/// following: 7.5°, 17.2° and 28.2° on the root, its own drift a look, I).
+pub fn twist_turn(twist: i16) -> Quat {
+    Quat::from_rotation_y(-f32::from(twist) * std::f32::consts::TAU / 65536.0)
+}
+
+/// Turns each player's upper body by its twist, after the clips posed it, and the head back.
+fn twist(players: Query<(&Player, &Twisted)>, mut joints: Query<&mut Transform>) {
+    for (p, t) in &players {
+        if p.0.twist == 0 {
+            continue;
+        }
+        let Ok(mut spine) = joints.get_mut(t.0) else {
+            continue;
+        };
+        let (pose, turn) = (spine.rotation, twist_turn(p.0.twist));
+        spine.rotation = turn * pose;
+        if let Some(Ok(mut head)) = t.1.map(|h| joints.get_mut(h)) {
+            head.rotation = pose.inverse() * turn.inverse() * pose * head.rotation;
+        }
+    }
 }
 
 /// Whether held model `h` is in the hand of a player holding `weapon` (0: none), `drawn` or not,
@@ -142,7 +180,11 @@ fn hang(
                 Some((i, hand.id()))
             })
             .collect();
-        commands.entity(player).insert(Hands(hands));
+        let mut player = commands.entity(player);
+        player.insert(Hands(hands));
+        if let Some(spine) = joint(1) {
+            player.insert(Twisted(spine, joint(12)));
+        }
     }
 }
 
@@ -369,7 +411,7 @@ mod tests {
             camera: [0.0; 3],
         };
         let draws = [
-            0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x14, 0x16, 0x18, 0x37, 0x40,
+            0x09, 0x39, 0x23, 0x24, 0x15, 0x21, 0x22, 0x14, 0x16, 0x18, 0x37, 0x40, 0x19, 0x38,
         ]
         .map(|id| {
             let w = weapon(id).unwrap();
@@ -393,7 +435,28 @@ mod tests {
                 action,
                 ..Fighter::new(&place, 0, 0)
             };
-            assert!(!f.in_hand(frames - 1) && f.in_hand(frames), "{clip:#x}");
+            assert!(
+                !f.in_hand(frames - 1) && f.in_hand(frames),
+                "{clip:#x}: {frames}"
+            );
         }
+    }
+
+    /// The twisted upper body faces `facing − twist` (the camera's aim), 49.4° at the limit; the
+    /// head's counter-turn keeps it on the legs' facing whatever the spine's pose.
+    #[test]
+    fn the_twist_turns_the_upper_body_to_the_aim() {
+        use crate::render::model_yaw;
+        let (facing, twist) = (16896u16, 9000i16);
+        let body = Quat::from_rotation_y(model_yaw(facing));
+        let aim = Quat::from_rotation_y(model_yaw(facing.wrapping_sub(twist as u16)));
+        let upper = body * twist_turn(twist);
+        assert!((upper * Vec3::Z).distance(aim * Vec3::Z) < 1e-5);
+        assert!((twist_turn(twist).to_scaled_axis().y.to_degrees() + 49.44).abs() < 0.01);
+        let pose = Quat::from_euler(EulerRot::XYZ, 0.2, 0.3, -0.1);
+        let head = Quat::from_rotation_x(0.4);
+        let turn = twist_turn(twist);
+        let twisted = turn * pose * (pose.inverse() * turn.inverse() * pose * head);
+        assert!((twisted * Vec3::Z).distance(pose * head * Vec3::Z) < 1e-5);
     }
 }
