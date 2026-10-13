@@ -233,7 +233,7 @@ pub struct Lights {
 }
 
 /// A point light at `at`, of `rgb`, `size + swing × sin φ` big, φ stepping `step` a frame (from
-/// any phase), shining `when`.
+/// any phase), shining `when`; `flicker`: it flickers in bursts (light behaviour 4, `func_151607A4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Light {
     #[serde(serialize_with = "ints3")]
@@ -243,6 +243,12 @@ pub struct Light {
     pub swing: f32,
     pub step: f32,
     pub when: When,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flicker: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +901,7 @@ mod tests {
                         swing: 55.0,
                         step: 0.1021,
                         when,
+                        flicker: when == When::Shown(27),
                     })
                     .into(),
             },

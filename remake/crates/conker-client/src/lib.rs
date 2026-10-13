@@ -757,6 +757,7 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
+    lights::flickers(&mut app, &slice.lights, cfg.id);
     let (held, pickups) = (slice.held.clone(), slice.pickups.clone());
     let triggers = slice.triggers.clone();
     if cfg.headless {

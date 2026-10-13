@@ -700,6 +700,49 @@ fn pack_audio_reads_back() {
     );
     assert_eq!(cue(&On::StrikeBlast, None), Some(vec![0x69D]));
     assert_eq!(cue(&On::Debris, None), Some((0x1B9..=0x1C1).collect()));
+    // War: Colors (`war-leftovers.md` §7): the capture jingles (MP3 0x1A4, 0x1A7), the flag's radio
+    // lines (2 squirrel, 7 Tedi variants; a bot's the next id; 10 frames after the click), the
+    // canister's the same way, the losers' voices.
+    for (team, id) in [("squirrels", "1a4"), ("tediz", "1a7")] {
+        let line = &audio.events.maps["30"].lines[&format!("jingle-{team}")];
+        assert_eq!(
+            (line.file.as_str(), line.volume),
+            (format!("maps/30/jingle-{id}.wav").as_str(), 32767)
+        );
+        let (rate, pcm) = read_wav(files[format!("audio/{}", line.file).as_str()]).unwrap();
+        assert!(
+            rate == 22050 && pcm.len() > rate as usize,
+            "{team}: {rate} Hz"
+        );
+    }
+    let radio = |on: On| {
+        let c = (audio.events.cues.iter()).find(|c| c.on == on).unwrap();
+        (c.play.sounds.clone(), c.play.volume, c.delay)
+    };
+    let flag = |flag, bot| radio(On::Flag { flag, bot });
+    assert_eq!(flag(0, false), (vec![0x5A3, 0x5A5], 30000, 10));
+    assert_eq!(flag(0, true), (vec![0x5A4, 0x5A6], 32700, 10));
+    assert_eq!(
+        flag(1, false).0,
+        (0x642..=0x64E).step_by(2).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        flag(1, true).0,
+        (0x643..=0x64F).step_by(2).collect::<Vec<_>>()
+    );
+    let carry = radio(On::Carry {
+        canister: 1,
+        bot: true,
+    });
+    assert_eq!(carry, (vec![0x641], 32700, 10));
+    assert_eq!(
+        cue(&On::Lose { team: 0 }, None),
+        Some(vec![0x657, 0x658, 0x659])
+    );
+    assert_eq!(
+        cue(&On::Lose { team: 1 }, None),
+        Some(vec![0x662, 0x663, 0x664])
+    );
 }
 
 /// The pack's HUD (`hud/`): `Hud::load` reads `hud.json` back and writes it out the same, as

@@ -10,15 +10,21 @@
 //!   [`hit_weapon`] reads the weapon from the victim's first reaction); the match ([`MatchView`]: a
 //!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
 //!   (its player's [`Combat::carrying`] going on), War: Colors' flag taken ([`Combat::flag`]); the grenades in flight (the local fighter
-//!   carries them all: launch, bounces, fuse and blast); the background and the map's bubbling spots;
-//!   a War outro's voice line at its frame (unpositioned, at [`MIX`]; its volume is I); a mounted
+//!   carries them all: launch, bounces, fuse and blast); the background and the lamps' buzz (each
+//!   flash of [`crate::lights::Flickers`]); a War outro's voice line at its frame (unpositioned, at
+//!   [`MIX`]; its volume is I; it stops a jingle playing, one MP3 stream, I); a mounted
 //!   gun's state changing and its trigger let go ([`MatchView::guns`]), the local gunner's zoom and
 //!   aim moving; War: Beach's detonation ([`MatchView::cooldown`] going on: its three blasts and
 //!   debris, the presser's radio voice), strikes (a villager's [`Combat::deadline`] reaching 0: the
 //!   call and the villager's cry, the blast 40 frames on, debris), the plunger's radio voice in trigger
-//!   0x25 while it is ready, and the local escapee's radio line with the music ducked
-//!   ([`duck`]). Radio voices ([`Sounds::radio`]) are a human's: the click on, the voice its
-//!   cue's `delay` later, the click off once it has played, at most one every 300 ticks.
+//!   0x25 while it is ready, and the local escapee's radio line; War: Colors' captures (a team's
+//!   score rising: 30 ticks on, its jingle for everyone and each loser's voice); the music ducks
+//!   while a line plays ([`duck`]). Radio lines ([`Sounds::radio`]: Beach's voices, a canister or a
+//!   flag taken) are the click on, the line its cue's `delay` later, the click off once it has
+//!   played (a bot's: the line only), at most one a slot every 300 ticks.
+//! - **The mask's muffle** ([`Sounds::mask`]): while a gas mask's put-on is in force, any player's
+//!   (C `func_15074664`: no camera test), the effects (not the background or the lines) go through
+//!   a [`MUFFLE_HZ`] low-pass ([`Biquad`]), the ones already playing too.
 //! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
 //!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
 //!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
@@ -28,7 +34,7 @@
 //!   (without a device a sound that does not loop is over at once, so `if_idle` always passes).
 //! - **Playback** (windowed): rodio's mixer, each sound a [`Playing`] source with its loop points,
 //!   envelope and pitch, at the two ear volumes the tick sets ([`MIX`] for effects, the background
-//!   recording at 1.0, equal-power pan). The device opens at once natively and on the first key
+//!   recording at 1.0, equal-power pan), the effects through the muffle while [`MUFFLED`]. The device opens at once natively and on the first key
 //!   press or click in the browser (a page may start audio only after a gesture), then every WAV
 //!   loads ([`WavLoader`]). M mutes ([`MUTE_KEY`]).
 
@@ -52,12 +58,12 @@ use conker_rules::projectile::{Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::{Attack, Weapon, weapon};
 use conker_rules::{Rng, beach, gun};
 use conker_sim::net::{Combat, GunView, MatchView, Player, PlayerId};
-use core::f32::consts::FRAC_PI_2;
+use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 use core::time::Duration;
 use lightyear::core::timeline::is_in_rollback;
 use lightyear::prelude::*;
 use rodio::{ChannelCount, SampleRate, Source};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
@@ -74,10 +80,23 @@ const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
 /// The background's voice id (the game's sound ids start at 1).
 const BACKGROUND: u16 = 0;
 /// A War outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
-/// sound ids end at 1762), War: Beach's escape line as `ESCAPE`.
+/// sound ids end at 1762), the maps' lines ([`Pack::lines`]) as in [`LINES`].
 const VOICE: u16 = u16::MAX;
 const ESCAPE: u16 = VOICE - 0x100;
-/// War: Beach's radio: ticks between a player's voices (`0x800D9AB0`'s 600 VIs), the plunger's
+/// The maps' voice lines by id: War: Beach's escape, War: Colors' capture jingles (by the scoring
+/// team: the squirrels', the Tediz').
+const LINES: [(u16, &str); 3] = [
+    (ESCAPE, "escape"),
+    (ESCAPE - 1, "jingle-squirrels"),
+    (ESCAPE - 2, "jingle-tediz"),
+];
+/// Ticks from a capture to its jingle and the losers' voices (script 0xBB's timer; V c1a, c1b:
+/// capture 382, the calls 412).
+const CHEER: u32 = 30;
+/// The muffle's cutoff (Hz): the effects player's FX param 9 during a mask put-on (`func_10012020`
+/// mode 5, C: 11025 → 520, its param 8 0 → 127, I: the wet mix, full).
+pub const MUFFLE_HZ: f32 = 520.0;
+/// The radio: ticks between a slot's lines (`0x800D9AB0`'s 600 VIs), the plunger's
 /// voice trigger, and the ticks after a blast its debris lands in (V ev2 655-694 after 617, ev3
 /// 1082-1109 after 1044).
 const RADIO_GAP: u32 = 300;
@@ -101,7 +120,7 @@ pub fn has_sound(manifest: &[u8]) -> bool {
 
 /// The pack's sound data, the held models (Holding cues) and the pickups (Pickup cues), with each
 /// body's character ([`crate::characters`]) and clip events sorted by clip; the map's background,
-/// emitters, voice lines and (War: Beach) the plunger's voice trigger.
+/// emitters (its lamps' buzz), voice lines and (War: Beach) the plunger's voice trigger.
 #[derive(Resource)]
 struct Pack {
     audio: Audio,
@@ -115,13 +134,50 @@ struct Pack {
     ready_zone: Option<CameraVolume>,
 }
 
+impl Pack {
+    fn new(
+        mut audio: Audio,
+        held: Vec<Held>,
+        pickups: Vec<Pickup>,
+        map: &str,
+        triggers: &[u8],
+    ) -> Self {
+        let characters = crate::characters(map);
+        let mut clips: Vec<_> = (characters.iter())
+            .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
+            .collect();
+        for c in &mut clips {
+            c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
+        }
+        let ready_zone = (map == "2b")
+            .then(|| triggers.as_chunks::<0x34>().0.get(READY_ZONE))
+            .flatten()
+            .map(CameraVolume::parse_record);
+        let map = audio.events.maps.get(map);
+        let background = map.and_then(|m| m.background.first().cloned());
+        let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
+        let lines = map.map_or_else(Default::default, |m| m.lines.clone());
+        Self {
+            audio,
+            held,
+            pickups,
+            characters,
+            clips,
+            background,
+            emitters,
+            lines,
+            ready_zone,
+        }
+    }
+}
+
 /// Registers sound: the tick's events and voices ([`hear`], headless too) and, windowed, the device,
 /// the WAV loader and the mute key. `map`: whose ambience plays (`triggers`: its trigger table).
 /// `seed`: the client's own random sounds.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     app: &mut App,
-    mut audio: Audio,
+    audio: Audio,
     held: Vec<Held>,
     pickups: Vec<Pickup>,
     windowed: bool,
@@ -129,42 +185,17 @@ pub fn build(
     triggers: &[u8],
     seed: u64,
 ) {
-    let characters = crate::characters(map);
-    let mut clips: Vec<_> = (characters.iter())
-        .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
-        .collect();
-    for c in &mut clips {
-        c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
-    }
-    let ready_zone = (map == "2b")
-        .then(|| triggers.as_chunks::<0x34>().0.get(READY_ZONE))
-        .flatten()
-        .map(CameraVolume::parse_record);
-    let map = audio.events.maps.get(map);
-    let background = map.and_then(|m| m.background.first().cloned());
-    let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
-    let lines = map.map_or_else(Default::default, |m| m.lines.clone());
-    let bursts = vec![Burst::default(); emitters.len()];
-    app.insert_resource(Pack {
-        audio,
-        held,
-        pickups,
-        characters,
-        clips,
-        background,
-        emitters,
-        lines,
-        ready_zone,
-    });
+    app.insert_resource(Pack::new(audio, held, pickups, map, triggers));
     app.insert_resource(Sounds {
         rng: Rng::new(seed | 1),
-        bursts,
         duck: DUCK[0],
         ..default()
     });
     app.add_systems(
         FixedUpdate,
-        hear.after(crate::tick_anims).run_if(not(is_in_rollback)),
+        hear.after(crate::tick_anims)
+            .after(crate::lights::flicker)
+            .run_if(not(is_in_rollback)),
     );
     if windowed {
         app.init_asset::<Pcm>().init_asset_loader::<WavLoader>();
@@ -247,6 +278,8 @@ struct Seen {
     team: u8,
     freeze: u8,
     deadline: u16,
+    /// Wearing a gas mask ([`Combat::masked`]; the local player's prediction).
+    masked: bool,
 }
 
 /// A player as the last tick saw it.
@@ -352,13 +385,6 @@ impl Voice {
     }
 }
 
-/// An emitter's burst (`func_151607A4`): bubbles left, and the tick the next may play.
-#[derive(Clone, Copy, Default)]
-struct Burst {
-    left: u32,
-    next: u32,
-}
-
 /// A cue's sound due later (a gun's case, a body part landing), or (`end`) the end of a cue held by
 /// a condition: its sounds stop and its `then` plays.
 struct Later {
@@ -368,14 +394,13 @@ struct Later {
     end: bool,
 }
 
-/// The sound state: the voices, sounds due later, the emitters' bursts, and last tick's projectiles
-/// and pickups (what changed is an event).
+/// The sound state: the voices, sounds due later, and last tick's projectiles and pickups (what
+/// changed is an event).
 #[derive(Resource, Default)]
 struct Sounds {
     rng: Rng,
     voices: Vec<Voice>,
     later: Vec<Later>,
-    bursts: Vec<Burst>,
     /// Last tick's grenades (the local fighter's: all in flight), their bounces so far, rockets,
     /// shots and taken pickups; false until the first tick with a match.
     grenades: Vec<(u32, Grenade)>,
@@ -396,13 +421,22 @@ struct Sounds {
     guns: Vec<GunView>,
     turning: Option<Turning>,
     /// War: Beach: the plunger's cooldown last tick (None before the first), the strikes called
-    /// (slot, where, the call's tick; till their blast), each speaker's last radio voice and the
-    /// radio voices playing (speaker, the tick the voice is due), the music's volume ([`duck`]).
+    /// (slot, where, the call's tick; till their blast). The radio: each slot's last line (War:
+    /// Beach's by speaker, Total War's and Colors' by team) and the lines playing (speaker, the tick
+    /// the line is due, its cue). The music's volume ([`duck`]).
     cooldown: Option<u16>,
     strikes: Vec<(u16, [f32; 3], u32)>,
     radio_at: HashMap<u16, u32>,
     radios: Vec<(u16, u32, usize)>,
     duck: f32,
+    /// War: Colors: the scores last tick (None before the first), the captures' cheers due (tick,
+    /// the scoring team).
+    scores: Option<[u16; 2]>,
+    cheers: Vec<(u32, u8)>,
+    /// The mask's muffle ([`Self::mask`]) and the players whose put-on was their last mask event
+    /// (s126+0x94).
+    muffled: bool,
+    wearers: HashSet<u16>,
 }
 
 /// War: Beach's music volume while the escape's radio line plays: from 0x4650 down to 0x1E0A at
@@ -670,11 +704,18 @@ impl Sounds {
                 ClipAction::Stop(c) => self.stop(|v| v.owner == me.owner && v.channel == *c),
             }
         }
+        // A canister or a flag taken: its team's radio line (`func_15103C14`'s slot).
         if let (Some((canister, bot)), None) = (is.carry, was.carry) {
-            self.cues(cx, is, me, |on| *on == On::Carry { canister, bot });
+            self.radio(cx, is, On::Carry { canister, bot }, u16::from(canister));
         }
         if let (Some((flag, bot)), None) = (is.flag, was.flag) {
-            self.cues(cx, is, me, |on| *on == On::Flag { flag, bot });
+            self.radio(cx, is, On::Flag { flag, bot }, u16::from(flag));
+        }
+        if self.mask(was, is) {
+            debug!(
+                "MUFFLE t={} read={} p={} masked={} muffled={}",
+                cx.tick, cx.read, is.slot, is.masked, self.muffled
+            );
         }
         // War: Beach's rockets fire with clip 0x207 (conker-rules' `beach::ROCKET_FIRE`).
         let fire = |w: u8, p: &Seen| {
@@ -762,6 +803,25 @@ impl Sounds {
                 self.world(cx, is.pos, |on| *on == On::Explosion { weapon: GRENADE });
             }
         }
+    }
+
+    /// The mask's muffle (`func_150642AC` cases 3 and 4 → `func_15074664`, C): any player's put-on
+    /// (its mask going on; bots too, no camera test) muffles the effects; a take-off unmuffles them
+    /// if that player's last mask event was a put-on (s126+0x94). A death drops the mask without a
+    /// take-off. Whether the muffle changed.
+    fn mask(&mut self, was: &Seen, is: &Seen) -> bool {
+        let muffled = self.muffled;
+        match (was.masked, is.masked) {
+            (false, true) => {
+                self.wearers.insert(is.slot);
+                self.muffled = true;
+            }
+            (true, false) if is.health > 0 && self.wearers.remove(&is.slot) => {
+                self.muffled = false;
+            }
+            _ => {}
+        }
+        self.muffled != muffled
     }
 
     /// A footstep of `kind` on the player's floor (`func_10011EB8`), louder with speed.
@@ -1024,8 +1084,8 @@ impl Sounds {
                 .iter()
                 .map(|p| p.1)
                 .find(|p| beach::Plunger::under(p.pos, m.plunger));
-            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS) {
-                self.radio(cx, &p, On::Plunger);
+            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS && !p.bot) {
+                self.radio(cx, &p, On::Plunger, p.slot);
             }
         }
         self.cooldown = m.beach.then_some(m.cooldown);
@@ -1038,11 +1098,12 @@ impl Sounds {
                 self.strikes.push((is.slot, is.pos, cx.tick));
             }
             let ready = cx.pack.ready_zone.is_some_and(|z| z.contains(is.pos));
-            if ready && m.cooldown == 0 && is.team == beach::VILLAGERS && is.health > 0 {
-                self.radio(cx, is, On::PlungerReady);
+            let villager = is.team == beach::VILLAGERS && !is.bot;
+            if ready && m.cooldown == 0 && villager && is.health > 0 {
+                self.radio(cx, is, On::PlungerReady, is.slot);
             }
             if is.local && was.freeze == 0 && is.freeze > 0 && is.team == beach::VILLAGERS {
-                self.line(cx);
+                self.line(cx, LINES[0]);
             }
         }
         let strikes = std::mem::take(&mut self.strikes);
@@ -1058,7 +1119,11 @@ impl Sounds {
                 self.strikes.push((slot, at, call));
             }
         }
-        // A radio voice that has played: the click off.
+    }
+
+    /// A radio line that has played: the click off at its speaker.
+    fn clicks_off(&mut self, cx: &Cx, players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
         let radios = std::mem::take(&mut self.radios);
         for (slot, due, i) in radios {
             let owner = Owner::Player(slot);
@@ -1071,7 +1136,11 @@ impl Sounds {
                 });
             }
         }
-        let line = self.voices.iter().any(|v| v.id == ESCAPE && !v.stopped);
+    }
+
+    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) plays.
+    fn duck_music(&mut self, cx: &Cx) {
+        let line = (self.voices.iter()).any(|v| !v.stopped && LINES.iter().any(|l| l.0 == v.id));
         self.duck = duck(self.duck, line);
         let [full, ..] = DUCK;
         for v in self.voices.iter_mut().filter(|v| v.id == BACKGROUND) {
@@ -1084,17 +1153,14 @@ impl Sounds {
         }
     }
 
-    /// A human's radio voice `on` (its character's), unless it spoke one in the last
-    /// [`RADIO_GAP`] ticks (`func_15103C14`): the click on at once on its voice slot, the voice its
-    /// cue's `delay` later, the click off once that has played (`func_15103910`). Bots' records are
-    /// not exported.
-    fn radio(&mut self, cx: &Cx, p: &Seen, on: On) {
-        if p.bot
-            || self
-                .radio_at
-                .get(&p.slot)
-                .is_some_and(|&t| cx.tick < t + RADIO_GAP)
-        {
+    /// A radio line `on` (its character's) at `p` (`func_15103C14`), unless slot `busy` spoke one in
+    /// the last [`RADIO_GAP`] ticks: a human's click on at once on its voice slot, the line its
+    /// cue's `delay` later, the click off once that has played (`func_15103910`); a bot's line only
+    /// (`func_15103AA0`: its clicks at volume −25000, I unheard). War: Beach's slots are its
+    /// speakers (its bots' lines are not exported), Total War's and Colors' the canister's and the
+    /// flag's teams.
+    fn radio(&mut self, cx: &Cx, p: &Seen, on: On, busy: u16) {
+        if (self.radio_at.get(&busy)).is_some_and(|&t| cx.tick < t + RADIO_GAP) {
             return;
         }
         let cues = &cx.pack.audio.events.cues;
@@ -1104,10 +1170,7 @@ impl Sounds {
         let Some((i, cue)) = voice else {
             return;
         };
-        self.radio_at.insert(p.slot, cx.tick);
-        self.cues(cx, p, Src::player(p), |o| {
-            *o == On::RadioClick { end: false }
-        });
+        self.radio_at.insert(busy, cx.tick);
         let (tick, src, end) = (cx.tick + u32::from(cue.delay), Src::player(p), false);
         self.later.push(Later {
             tick,
@@ -1115,19 +1178,57 @@ impl Sounds {
             src,
             end,
         });
-        self.radios.push((p.slot, tick, i));
+        if !p.bot {
+            self.cues(cx, p, Src::player(p), |o| {
+                *o == On::RadioClick { end: false }
+            });
+            self.radios.push((p.slot, tick, i));
+        }
     }
 
-    /// The local escapee's radio line, unpositioned, unless it already plays.
-    fn line(&mut self, cx: &Cx) {
-        let Some(line) = cx.pack.lines.get("escape") else {
+    /// War: Colors: a team's score rising is a capture. [`CHEER`] ticks after the tick this client
+    /// sees it (I: the server's tick plus the latency), the scorers' jingle for everyone and each
+    /// loser's voice at it, unless it is voicing (`func_1509F354`; I: one of its radio lines or
+    /// loser's voices still playing).
+    fn colors(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        let was = self.scores.replace(m.scores).filter(|_| m.colors);
+        for (team, (is, was)) in m.scores.iter().zip(was.unwrap_or(m.scores)).enumerate() {
+            if *is > was {
+                self.cheers.push((cx.tick + CHEER, team as u8));
+            }
+        }
+        let cheers = std::mem::take(&mut self.cheers);
+        let (due, later): (Vec<_>, Vec<_>) = cheers.into_iter().partition(|c| c.0 <= cx.tick);
+        self.cheers = later;
+        let cues = &cx.pack.audio.events.cues;
+        let voice = |on: &On| matches!(on, On::Lose { .. } | On::Flag { .. } | On::Carry { .. });
+        let voices: Vec<u16> = (cues.iter().filter(|c| voice(&c.on)))
+            .flat_map(|c| c.play.sounds.iter().copied())
+            .collect();
+        for (_, team) in due {
+            self.line(cx, LINES[1 + usize::from(team)]);
+            for p in players.iter().map(|p| p.1).filter(|p| p.team != team) {
+                let owner = Owner::Player(p.slot);
+                let voicing = |v: &Voice| !v.stopped && v.owner == owner && voices.contains(&v.id);
+                if !self.voices.iter().any(voicing) {
+                    let team = p.team;
+                    self.cues(cx, &p, Src::player(&p), |on| *on == On::Lose { team });
+                }
+            }
+        }
+    }
+
+    /// A map's line ([`LINES`]), unpositioned, unless a line already plays (one MP3 stream, C
+    /// `func_1509E640`).
+    fn line(&mut self, cx: &Cx, (id, name): (u16, &str)) {
+        let Some(line) = cx.pack.lines.get(name) else {
             return;
         };
-        if self.voices.iter().any(|v| v.id == ESCAPE && !v.stopped) {
+        if (self.voices.iter()).any(|v| !v.stopped && LINES.iter().any(|l| l.0 == v.id)) {
             return;
         }
         let v = Voice {
-            id: ESCAPE,
+            id,
             owner: Owner::World,
             channel: Channel::Free,
             tag: None,
@@ -1160,8 +1261,14 @@ impl Sounds {
     /// The match's sounds: weapon 0x14's shots (one sound a tick in flight, the wall's when one is
     /// gone without hurting anyone near it), pickups taken (by the nearest player), Total War's gas
     /// (at the listener while it is out), the background (from the first tick of play to the match's
-    /// end) and the map's bubbling spots.
-    fn match_sounds(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+    /// end) and the lamps' buzz (an emitter at each lamp in `flashed`, a flash starting this tick).
+    fn match_sounds(
+        &mut self,
+        cx: &Cx,
+        m: &MatchView,
+        players: &[(Seen, Seen)],
+        flashed: &[[f32; 3]],
+    ) {
         let cues = &cx.pack.audio.events.cues;
         for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Gas) {
             let tagged = |v: &Voice| v.tag == Some(i);
@@ -1249,24 +1356,14 @@ impl Sounds {
             (2, _) => self.stop(|v| v.id == BACKGROUND),
             _ => {}
         }
-        if m.phase < 2 {
-            for (i, e) in cx.pack.emitters.iter().enumerate() {
-                let Some(mut b) = self.bursts.get(i).copied() else {
-                    break;
-                };
-                if b.left == 0 && (self.rng.next_f32()) < e.start_chance {
-                    b = Burst {
-                        left: self.between(1, 5) as u32,
-                        next: cx.tick,
-                    };
-                }
-                if b.left > 0 && cx.tick >= b.next {
-                    let at = e.at.map(f32::from);
-                    self.start(cx, &e.play, &e.play.sounds, 1.0, Src::at(at));
-                    b.left -= 1;
-                    b.next = cx.tick + (self.between(1, 29) + self.between(8, 20)) as u32;
-                }
-                self.bursts[i] = b;
+        for &at in flashed {
+            for e in cx
+                .pack
+                .emitters
+                .iter()
+                .filter(|e| e.at.map(f32::from) == at)
+            {
+                self.start(cx, &e.play, &e.play.sounds, 1.0, Src::at(at));
             }
         }
     }
@@ -1298,7 +1395,7 @@ impl Sounds {
                 && let Some(pcm) = out.sounds.get(&v.id).and_then(|h| pcms.get(h))
             {
                 let sound = cx.pack.audio.sounds.sounds.get(&v.id);
-                v.control = Some(out.play(pcm, sound, v.speed, ears));
+                v.control = Some(out.play(pcm, sound, v, ears));
             }
             if let Some(c) = &v.control {
                 for (a, e) in c.ears.iter().zip(ears) {
@@ -1335,6 +1432,7 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
+    flickers: Option<Res<crate::lights::Flickers>>,
     mut commands: Commands,
 ) {
     let tick = timeline.tick().0;
@@ -1353,6 +1451,10 @@ fn hear(
             _ if seated => (conker_camera::GUN, true),
             Some(f) if predicted => (f.state.weapon.unwrap_or(0), f.state.drawn),
             _ => (c.weapon, c.drawn),
+        };
+        let masked = match fighting {
+            Some(f) if predicted => f.state.masked,
+            _ => c.masked,
         };
         if let Some(f) = fighting.filter(|_| predicted) {
             grenades = &f.grenades;
@@ -1377,6 +1479,7 @@ fn hear(
             team: c.team,
             freeze: c.freeze,
             deadline: c.deadline,
+            masked,
         };
         match heard {
             Some(mut h) => {
@@ -1420,8 +1523,19 @@ fn hear(
         s.player(&cx, was, is, &all);
     }
     s.grenades(&cx, grenades);
-    s.match_sounds(&cx, m, &all);
+    let lamps = flickers.iter().flat_map(|f| &f.lamps);
+    let flashed: Vec<[f32; 3]> = lamps.filter(|l| l.flashed).map(|l| l.at).collect();
+    s.match_sounds(&cx, m, &all, &flashed);
     s.beach(&cx, m, &all);
+    s.colors(&cx, m, &all);
+    s.clicks_off(&cx, &all);
+    s.duck_music(&cx);
+    // The muffle ends with the match (I: the original's sound mode with its scene).
+    if m.phase == 2 && s.muffled {
+        (s.muffled, s.wearers) = (false, HashSet::new());
+        debug!("MUFFLE t={tick} read={read}: off, over");
+    }
+    MUFFLED.store(s.muffled, Relaxed);
     s.guns(&cx, &m.guns, &all);
     let scope = camera.follow.cam.scope;
     let gunner = scope.on && scope.weapon == conker_camera::GUN;
@@ -1453,6 +1567,7 @@ fn hear(
             stopped: false,
             control: None,
         };
+        s.stop(|v| LINES[1..].iter().any(|l| l.0 == v.id));
         s.push(&cx, v);
     }
     let out = output.as_deref().zip(pcms.as_deref());
@@ -1470,12 +1585,12 @@ struct Output {
 
 impl Output {
     /// Puts a sound on the mixer at `speed` × its rate, starting at these ear volumes.
-    fn play(&self, pcm: &Pcm, sound: Option<&Sound>, speed: f32, ears: [f32; 2]) -> Arc<Control> {
+    fn play(&self, pcm: &Pcm, sound: Option<&Sound>, v: &Voice, ears: [f32; 2]) -> Arc<Control> {
         let control = Arc::new(Control::default());
         for (a, e) in control.ears.iter().zip(ears) {
             a.store(e.to_bits(), Relaxed);
         }
-        let playing = Playing::new(pcm, sound, speed, control.clone());
+        let playing = Playing::new(pcm, sound, v.looped, v.speed, control.clone());
         self.device.mixer().add(playing);
         control
     }
@@ -1529,14 +1644,18 @@ fn open(
             sounds.insert(VOICE - n as u16, load(&v.file));
         }
     }
-    if let Some(line) = pack.lines.get("escape") {
-        sounds.insert(ESCAPE, load(&line.file));
+    for (id, name) in LINES {
+        if let Some(line) = pack.lines.get(name) {
+            sounds.insert(id, load(&line.file));
+        }
     }
     commands.insert_resource(Output { device, sounds });
 }
 
 /// Set as the mixer first pulls a sound's samples: the output runs.
 static PULLED: AtomicBool = AtomicBool::new(false);
+/// The mask's muffle ([`Sounds::mask`]), set each tick: the effects play through their [`Biquad`].
+static MUFFLED: AtomicBool = AtomicBool::new(false);
 
 /// Logs once that the output runs (in the browser, that the AudioContext started).
 fn running(mut said: Local<bool>) {
@@ -1698,9 +1817,43 @@ impl Env {
     }
 }
 
+/// A second-order low-pass (the RBJ cookbook's, Q 1/√2), direct form I.
+#[derive(Clone, Copy, Debug)]
+struct Biquad {
+    b: [f32; 3],
+    a: [f32; 2],
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl Biquad {
+    /// Cutting from `cutoff` Hz at `rate` samples a second (below its Nyquist).
+    fn low_pass(cutoff: f32, rate: f32) -> Self {
+        let (sin, cos) = (TAU * cutoff.min(0.45 * rate) / rate).sin_cos();
+        let alpha = sin * FRAC_1_SQRT_2; // sin / (2Q)
+        let a0 = 1.0 + alpha;
+        let b1 = (1.0 - cos) / a0;
+        Self {
+            b: [b1 / 2.0, b1, b1 / 2.0],
+            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    fn run(&mut self, x: f32) -> f32 {
+        let Self { b, a, x: xs, y: ys } = self;
+        let y = b[0] * x + b[1] * xs[0] + b[2] * xs[1] - a[0] * ys[0] - a[1] * ys[1];
+        (*xs, *ys) = ([x, xs[0]], [y, ys[0]]);
+        y
+    }
+}
+
 /// A sound on the mixer: its samples (a loop's stretch repeating until it is stopped), through its
 /// envelope, as two channels at its [`Control`]'s ear volumes (smoothed over about 20 ms), at its
-/// rate × the pitch's speed. ponytail: a loop's `count` is not kept (no sound of the pack has one).
+/// rate × the pitch's speed; an effect (a bank sound) through the muffle's low-pass while
+/// [`MUFFLED`] (the filter runs all along, so a switch finds it settled). ponytail: a loop's
+/// `count` is not kept (no sound of the pack has one).
 struct Playing {
     samples: Arc<[i16]>,
     channels: usize,
@@ -1716,11 +1869,18 @@ struct Playing {
     smooth: f32,
     right: Option<f32>,
     control: Arc<Control>,
+    muffle: Option<[Biquad; 2]>,
 }
 
 impl Playing {
-    /// `sound` None: the background (loops whole, no envelope).
-    fn new(pcm: &Pcm, sound: Option<&Sound>, speed: f32, control: Arc<Control>) -> Self {
+    /// `sound` None: the background or a line (no envelope; `looped`: whole, the background).
+    fn new(
+        pcm: &Pcm,
+        sound: Option<&Sound>,
+        looped: bool,
+        speed: f32,
+        control: Arc<Control>,
+    ) -> Self {
         let channels = usize::from(pcm.channels);
         let frames = pcm.samples.len() / channels;
         let rate = (pcm.rate as f32 * speed).max(1.0);
@@ -1729,7 +1889,7 @@ impl Playing {
                 (s.looped.as_ref()).map(|l| (l.start as usize, (l.end as usize).min(frames))),
                 Env::new(&s.envelope, rate / 1e6),
             ),
-            None => (Some((0, frames)), Env::FLAT),
+            None => (looped.then_some((0, frames)), Env::FLAT),
         };
         let looped = looped.filter(|l| l.0 < l.1);
         Self {
@@ -1749,6 +1909,7 @@ impl Playing {
             smooth: 1.0 - (-1.0 / (rate * 0.02)).exp(),
             right: None,
             control,
+            muffle: sound.map(|_| [Biquad::low_pass(MUFFLE_HZ, rate); 2]),
         }
     }
 
@@ -1792,11 +1953,17 @@ impl Iterator for Playing {
             }
         }
         let i = self.frame * self.channels;
-        let left = f32::from(self.samples[i]) / 32768.0;
-        let right = match self.channels {
+        let mut left = f32::from(self.samples[i]) / 32768.0;
+        let mut right = match self.channels {
             1 => left,
             _ => f32::from(self.samples[i + 1]) / 32768.0,
         };
+        if let Some([l, r]) = &mut self.muffle {
+            let muffled = (l.run(left), r.run(right));
+            if MUFFLED.load(Relaxed) {
+                (left, right) = muffled;
+            }
+        }
         for (ear, target) in self.ears.iter_mut().zip(&self.control.ears) {
             *ear += (f32::from_bits(target.load(Relaxed)) - *ear) * self.smooth;
         }
@@ -1904,7 +2071,7 @@ mod tests {
             .ears
             .iter()
             .for_each(|e| e.store(1f32.to_bits(), Relaxed));
-        let mut p = Playing::new(&pcm, Some(&sound), 1.0, control.clone());
+        let mut p = Playing::new(&pcm, Some(&sound), false, 1.0, control.clone());
         let left: Vec<f32> = (0..9)
             .map(|_| (p.next().unwrap() * 32768.0).round())
             .collect();
@@ -1931,9 +2098,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hits_name_their_weapon() {
-        let at = |slot, x: f32, weapon| Seen {
+    fn at(slot: u16, x: f32, weapon: u8) -> Seen {
+        Seen {
             slot,
             body: conker_sim::movement::Side::Tediz as usize,
             pos: [x, 0.0, 0.0],
@@ -1952,7 +2118,12 @@ mod tests {
             team: 0,
             freeze: 0,
             deadline: 0,
-        };
+            masked: false,
+        }
+    }
+
+    #[test]
+    fn hits_name_their_weapon() {
         let victim = Seen {
             reaction: conker_anim::combat::HIT,
             ..at(0, 0.0, 0)
@@ -2013,5 +2184,176 @@ mod tests {
             [[1000.0, 0.0, 0.0]]
         );
         assert_eq!(gone(&old, &[], 400.0).count(), 3);
+    }
+    /// A line (no bank sound) plays once unless it is the background; an effect's muffle is a
+    /// 520 Hz low-pass (V c1b: `func_10012020` mode 5 sets param 9 to 520).
+    #[test]
+    fn lines_end_and_the_muffle_cuts_at_520_hz() {
+        let pcm = Pcm {
+            samples: vec![1000; 4].into(),
+            channels: 1,
+            rate: 22050,
+        };
+        let play = |looped| Playing::new(&pcm, None, looped, 1.0, Arc::new(Control::default()));
+        assert_eq!(
+            play(false).count(),
+            8,
+            "4 frames, left and right, then done"
+        );
+        assert_eq!(play(true).take(100).count(), 100, "the background loops");
+        let gain = |hz: f32| {
+            let mut f = Biquad::low_pass(MUFFLE_HZ, 22050.0);
+            let out: Vec<f32> = (0..22050)
+                .map(|i| f.run((TAU * hz * i as f32 / 22050.0).sin()))
+                .collect();
+            out[11025..].iter().fold(0f32, |m, y| m.max(y.abs()))
+        };
+        assert!(gain(100.0) > 0.95, "{}", gain(100.0));
+        assert!(
+            (gain(MUFFLE_HZ) - FRAC_1_SQRT_2).abs() < 0.02,
+            "{}",
+            gain(MUFFLE_HZ)
+        );
+        assert!(gain(5000.0) < 0.02, "{}", gain(5000.0));
+    }
+
+    /// `func_15074664` (C): any player's put-on muffles; a take-off unmuffles only after that
+    /// player's own put-on; a death (the mask dropped at 0 health) leaves it.
+    #[test]
+    fn the_mask_muffles_from_any_put_on() {
+        let mut s = Sounds::default();
+        let (bare, masked) = (
+            at(1, 0.0, 0),
+            Seen {
+                masked: true,
+                ..at(1, 0.0, 0)
+            },
+        );
+        let other = |p: Seen| Seen { slot: 2, ..p };
+        assert!(s.mask(&bare, &masked) && s.muffled, "a put-on (anyone's)");
+        assert!(!s.mask(&other(masked), &other(bare)), "2 never put one on");
+        assert!(s.mask(&masked, &bare) && !s.muffled, "1's take-off");
+        assert!(s.mask(&other(bare), &other(masked)));
+        let dead = Seen {
+            health: 0,
+            ..other(bare)
+        };
+        assert!(
+            !s.mask(&other(masked), &dead) && s.muffled,
+            "a death keeps it"
+        );
+    }
+
+    /// The pack's audio with map 30 (War: Colors), or None without a pack.
+    fn colors_pack() -> Option<Pack> {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let audio = Audio::load(|f| std::fs::read(format!("{dir}/{f}"))).ok();
+        let Some(audio) = audio.filter(|a| a.events.maps.contains_key("30")) else {
+            eprintln!("no War: Colors audio in the pack at {dir}: skipping");
+            return None;
+        };
+        Some(Pack::new(audio, Vec::new(), Vec::new(), "30", &[]))
+    }
+
+    fn cx(pack: &Pack, tick: u32) -> Cx<'_> {
+        let ear = Ear {
+            slot: 0,
+            pos: [0.0; 3],
+            right: [1.0, 0.0],
+        };
+        Cx {
+            pack,
+            tick,
+            read: -1,
+            ear,
+        }
+    }
+
+    /// The ids `run` started over ticks `ticks` (each tick: the sounds due, `run`, then as headless).
+    fn heard(
+        s: &mut Sounds,
+        pack: &Pack,
+        ticks: std::ops::Range<u32>,
+        mut run: impl FnMut(&mut Sounds, &Cx),
+    ) -> Vec<(u32, u16)> {
+        let mut ids = Vec::new();
+        for t in ticks {
+            let cx = cx(pack, t);
+            let before = s.voices.len();
+            s.due(&cx);
+            run(s, &cx);
+            ids.extend(s.voices[before..].iter().map(|v| (t, v.id)));
+            s.upkeep(&cx, &[], None);
+        }
+        ids
+    }
+
+    /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);
+    /// none again from that flag's slot within 300 frames; a bot's line is the odd id, unclicked.
+    #[test]
+    fn a_flag_taken_calls_on_the_radio() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let squirrel = |bot| Seen {
+            flag: Some((0, bot)),
+            bot,
+            ..at(1, 0.0, 0)
+        };
+        let (was, is) = (at(1, 0.0, 0), squirrel(false));
+        let calls = heard(&mut s, &pack, 100..120, |s, cx| {
+            if cx.tick == 100 {
+                s.player(cx, &was, &is, &[]);
+            }
+            s.clicks_off(cx, &[(is, is)]);
+        });
+        let line = calls.iter().find(|c| c.1 != 0x5B0 && c.1 != 0x5B1);
+        assert_eq!(calls.first(), Some(&(100, 0x5B0)));
+        assert!(matches!(line, Some(&(110, 0x5A3 | 0x5A5))), "{calls:x?}");
+        assert!(calls.contains(&(111, 0x5B1)), "{calls:x?}");
+        let again = heard(&mut s, &pack, 399..400, |s, cx| {
+            s.player(cx, &was, &is, &[])
+        });
+        assert_eq!(again, [], "busy till 300 frames on");
+        let bot = squirrel(true);
+        let calls = heard(&mut s, &pack, 400..420, |s, cx| {
+            if cx.tick == 400 {
+                s.player(cx, &was, &bot, &[]);
+            }
+        });
+        assert!(matches!(calls[..], [(410, 0x5A4 | 0x5A6)]), "{calls:x?}");
+    }
+
+    /// A capture: 30 frames after the score rises, the scorers' jingle (0x1A4 squirrels, 0x1A7
+    /// Tediz) and a voice at each loser (Tediz 0x662-0x664; C script 0xBB, V c1a read 412).
+    #[test]
+    fn a_capture_cheers_30_frames_on() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let tedi = |slot| Seen {
+            team: 1,
+            ..at(slot, 0.0, 0)
+        };
+        let all = [
+            (at(1, 0.0, 0), at(1, 0.0, 0)),
+            (tedi(2), tedi(2)),
+            (tedi(3), tedi(3)),
+        ];
+        let mut m = MatchView {
+            colors: true,
+            ..Default::default()
+        };
+        let calls = heard(&mut s, &pack, 10..50, |s, cx| {
+            m.scores[0] = u16::from(cx.tick >= 12);
+            s.colors(cx, &m, &all);
+        });
+        let (jingle, voices) = calls.split_first().expect("a jingle");
+        assert_eq!(*jingle, (42, LINES[1].0));
+        assert_eq!(voices.len(), 2, "{calls:x?}");
+        assert!(
+            voices
+                .iter()
+                .all(|v| v.0 == 42 && (0x662..=0x664).contains(&v.1))
+        );
     }
 }

@@ -713,32 +713,58 @@ fn add_props(
 }
 
 /// The level glTF draws every placement, pickups included, as a node named `model@placement`, and
-/// so do War: Total War's props: a taken pickup's node hides until it is back; in Total War, a prop
-/// the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`] says so.
+/// so do War: Total War's props: a taken pickup's node shrinks away ([`shrink`]) and hides until it
+/// is back; in Total War, a prop the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`]
+/// says so (a canister taken shrinks too, the doors and covers just go).
+#[allow(clippy::type_complexity)]
 fn show_pickups(
     game: Query<&MatchView>,
+    timeline: Res<lightyear::prelude::LocalTimeline>,
     names: Query<(Entity, &Name), Added<Name>>,
-    mut nodes: Local<Vec<(u32, Entity)>>,
-    mut visibility: Query<&mut Visibility>,
+    mut nodes: Local<Vec<(u32, Entity, Option<Vec3>, Option<u32>)>>,
+    mut shown: Query<(&mut Visibility, &mut Transform)>,
 ) {
     nodes.extend(
-        (names.iter()).filter_map(|(e, name)| Some((name.rsplit_once('@')?.1.parse().ok()?, e))),
+        (names.iter())
+            .filter_map(|(e, name)| Some((name.rsplit_once('@')?.1.parse().ok()?, e, None, None))),
     );
     let Ok(m) = game.single() else {
         return;
     };
-    for &(placement, entity) in nodes.iter() {
-        let taken = placement < 64 && m.taken >> placement & 1 != 0;
-        let driven = m.total_war && gas::PROPS.iter().any(|p| u32::from(p.0) == placement);
-        let gone = driven && m.props >> placement & 1 == 0;
-        if let Ok(mut v) = visibility.get_mut(entity) {
-            v.set_if_neq(if taken || gone {
-                Visibility::Hidden
-            } else {
-                Visibility::Inherited
-            });
+    let tick = timeline.tick().0;
+    for (placement, entity, base, at) in nodes.iter_mut() {
+        let Ok((mut v, mut t)) = shown.get_mut(*entity) else {
+            continue;
+        };
+        let taken = *placement < 64 && m.taken >> *placement & 1 != 0;
+        let driven = m.total_war && gas::PROPS.iter().any(|p| u32::from(p.0) == *placement);
+        let gone = driven && m.props >> *placement & 1 == 0;
+        let canister = gas::CANISTERS.iter().any(|c| u32::from(c.0) == *placement);
+        // Hidden since tick `at`; one already hidden at first sight, or a door, just hides.
+        let first = base.is_none();
+        let full = *base.get_or_insert(t.scale);
+        *at = match (taken || gone, *at) {
+            (false, _) => None,
+            (true, None) if first || !(taken || canister) => Some(tick.wrapping_sub(3)),
+            (true, None) => Some(tick),
+            (true, at) => at,
+        };
+        let scale = at.map_or(Some(1.0), |a| shrink(tick.wrapping_sub(a)));
+        v.set_if_neq(match scale {
+            Some(_) => Visibility::Inherited,
+            None => Visibility::Hidden,
+        });
+        let scale = full * scale.unwrap_or(1.0);
+        if t.scale != scale {
+            t.scale = scale;
         }
     }
+}
+
+/// A pickup's scale `k` ticks after it is taken (`func_1511DF6C` state 3: −0.26 of its size a
+/// frame; V d1 713-716), None once it is gone.
+pub fn shrink(k: u32) -> Option<f32> {
+    (k < 3).then(|| 1.0 - 0.26 * (k + 1) as f32)
 }
 
 /// Shows the old text readout ([`hud_text`]) over the HUD ([`crate::hud`]), for debugging.
@@ -856,6 +882,19 @@ fn shot(world: &World) -> Screenshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pickup taken shrinks by 0.26 of its size a frame, then hides (V d1 713-716).
+    #[test]
+    fn a_taken_pickup_shrinks_over_3_frames() {
+        let scales = [0, 1, 2, 3, 9].map(shrink);
+        let want = [Some(0.74), Some(0.48), Some(0.22), None, None];
+        for (s, w) in scales.iter().zip(want) {
+            assert!(
+                s.zip(w).map_or(s == &w, |(s, w)| (s - w).abs() < 1e-6),
+                "{scales:?}"
+            );
+        }
+    }
 
     #[test]
     fn model_yaw_turns_plus_z_to_the_game_direction() {

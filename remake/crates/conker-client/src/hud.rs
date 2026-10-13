@@ -9,7 +9,8 @@
 //! and the capture's fade ([`capture_fade`]); War: Beach its strip with the villagers' head and the
 //! team scores, a villager's escape countdown, no radar, the escape's dim and fade in
 //! ([`escape_fade`]), the strike's flash ([`strike_flash`]) and its STATS (FRENCHYS WIN, no row
-//! for a villager).
+//! for a villager). Every mode: the end phase's fade ([`end_fade`]). Fades draw last, over the
+//! whole view and the HUD (V c1a DL 456).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -102,7 +103,8 @@ pub struct Shown {
     /// War: Colors: each flag's carried icon shown this frame (carried, in the blink's shown
     /// phase); `Some` also puts the heads on the strip.
     pub flags: Option<[bool; 2]>,
-    /// War: Colors: the capture's fade, black over the whole view at this alpha.
+    /// Black over the whole view and the HUD at this alpha: War: Colors' capture fade, War: Beach's
+    /// escape fade, the end phase's.
     pub fade: Option<u8>,
     /// Total War: the gas countdown's seconds ([`countdown`]).
     pub countdown: Option<u32>,
@@ -685,7 +687,8 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         return out;
     }
     let mut out = s.haze.map_or_else(Vec::new, |k| haze(&hud.haze, k));
-    // Colors: the capture's fade over everything (I: over the HUD or under it is not read).
+    // A fade over everything, the iris included: the original fills the view after the HUD (V c1a
+    // DL 456: the radar, heads, clock and S digits, then the fill).
     if let Some(alpha) = s.fade.filter(|&a| a > 0) {
         let far = 10_000.0;
         let centre = Anchor(Horizontal::Centre, Vertical::Middle);
@@ -693,7 +696,7 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
             [-far, -far, 2.0 * far, 2.0 * far],
             centre,
             [0, 0, 0, alpha],
-            8.5,
+            FADE_Z,
         ));
     }
     let white = [255; 4];
@@ -1084,6 +1087,16 @@ pub fn capture_fade(out: bool, vis: u16, frames: u32) -> u8 {
     if out { step } else { 255 - step }
 }
 
+/// The fades' z, over every other part of the HUD.
+const FADE_Z: f32 = 9.5;
+
+/// The end phase's fade (phase 7, `func_151E4EE8` → `func_151ED1E0`) on its `k`th frame from 1:
+/// black, alpha +16 a frame (`D_8008FD74` 8 × 2 VIs) to opaque (V c1b DL 428, 434, 436: 0x70, 0xD0,
+/// 0xF0 on phase 7's frames 7, 13, 15). The STATS or the outro cut it.
+pub fn end_fade(k: u32) -> u8 {
+    (16 * k).min(255) as u8
+}
+
 /// War: Beach's escape on the escapee's own view (`command(p, 0x8B, …)`, `beach-presentation.md`
 /// §2): for the freeze's last 30 frames a fade to black over 30 VIs, which the script re-sends every
 /// frame, so the view stays at its first step, alpha 0x11 (V e1 DL 235-250: elapsed 2 of 30; the
@@ -1243,9 +1256,10 @@ fn draw(
         Option<Res<crate::beach::Blasts>>,
     ),
     timeline: Res<LocalTimeline>,
-    (mut fading, mut escaped): (
+    (mut fading, mut escaped, mut ended): (
         Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
         Local<(u8, Option<u32>)>,
+        Local<Option<u32>>,
     ),
     (mut fired, mut zoomed): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
@@ -1303,6 +1317,15 @@ fn draw(
             let since = escaped.1.map(|t| tick.saturating_sub(t));
             if let Some(alpha) = escape_fade(freeze, since).filter(|_| m.beach && m.phase == 0) {
                 shown.fade = Some(alpha);
+            }
+            // The end phase's fade from the tick this client sees it.
+            if m.phase == 1 && ended.is_none() {
+                let read = crate::script_read(tick, own.2.since, Some(m)).unwrap_or(0);
+                info!("end fade from tick {tick} (read {read})");
+            }
+            *ended = (m.phase == 1).then(|| ended.unwrap_or(tick));
+            if let Some(at) = *ended {
+                shown.fade = Some(end_fade(tick.saturating_sub(at) + 1));
             }
             let strikes = blasts.iter().flat_map(|b| &b.strikes);
             shown.strike = (strikes.filter(|s| s.slot == own.1.slot))
@@ -2020,6 +2043,24 @@ mod tests {
         assert_eq!(
             [0, 25, 50].map(|k| capture_fade(false, 100, k)),
             [255, 128, 0]
+        );
+        // A fade covers the HUD and the iris (V c1a DL 456); the end phase's (V c1b DL 428-436).
+        let faded = Shown {
+            fade: Some(0x77),
+            respawn_in: Some(1),
+            ..both
+        };
+        let quads = sprites(&hud, &faded);
+        let top = (quads.iter()).max_by(|a, b| a.z.total_cmp(&b.z)).unwrap();
+        assert_eq!(top.colour, [0, 0, 0, 0x77]);
+        assert_eq!(
+            quads.iter().filter(|q| q.z >= 9.0).count(),
+            1 + 8,
+            "the iris under it"
+        );
+        assert_eq!(
+            [1, 7, 13, 15, 16, 20].map(end_fade),
+            [16, 0x70, 0xD0, 0xF0, 255, 255]
         );
     }
 

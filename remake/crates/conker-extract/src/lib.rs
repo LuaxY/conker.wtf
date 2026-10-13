@@ -731,13 +731,13 @@ pub fn props_level(rom: &Rom) -> Result<(Level, Value)> {
 /// light table is not located, so these are constants (V: `../lab/research/mp-original/
 /// total-war-effects.md` §1, §3, the oracle's light objects and RSP lights): the viewports' ambient
 /// light; the shelter's two white lamps (kind 0x23: on but during the countdown, 0xBA's `obj` and
-/// `obj2` 0xE016; size 55, their flicker not kept), its red alarm light (kind 0x24, behaviour 1:
+/// `obj2` 0xE016; size 55, behaviour 4: they flicker, `flicker`), its red alarm light (kind 0x24, behaviour 1:
 /// the countdown only, 85 + 55 sin φ, φ += 0.1021 a frame); a green light on each canister at home
 /// (`obj(0xE017)`, behaviour 17: 60 + 30 sin φ, φ += 0.2021, at the prop) and one on its carrier
 /// (kind 0x10, size 30). On 0x2B War: Beach's night (V the oracle's light objects and RSP lights,
 /// `../lab/research/mp-original/beach-presentation.md` §7; `calm`: all match): the bluish ambient;
-/// two white lamps (behaviour 4, kind 0xE1A, size 50: they flicker, not kept; the map's two emitters
-/// are their buzz); the exits' two red lights (behaviour 1, kind 0x503: 87 + 43 sin φ, φ += 0.1021).
+/// two white lamps (behaviour 4, kind 0xE1A, size 50: they flicker; the map's two emitters are
+/// their buzz); the exits' two red lights (behaviour 1, kind 0x503: 87 + 43 sin φ, φ += 0.1021).
 fn map_lights(scene: usize) -> assets::Lights {
     use assets::{Light, When};
     let light = |at, rgb, (size, swing, step), when| Light {
@@ -747,15 +747,19 @@ fn map_lights(scene: usize) -> assets::Lights {
         swing,
         step,
         when,
+        flicker: false,
+    };
+    let lamp = |at, size| Light {
+        flicker: true,
+        ..light(at, [255; 3], (size, 0.0, 0.0), When::Calm)
     };
     if scene == BEACH {
-        let lamp = |at| light(at, [255; 3], (50.0, 0.0, 0.0), When::Calm);
         let exit = |at| light(at, [255, 0, 0], (87.0, 43.0, 0.1021), When::Calm);
         return assets::Lights {
             ambient: [0x70, 0x8D, 0xD5],
             lights: vec![
-                lamp([2616.0, -236.0, 8004.0]),
-                lamp([-3032.0, -327.0, 8306.0]),
+                lamp([2616.0, -236.0, 8004.0], 50.0),
+                lamp([-3032.0, -327.0, 8306.0], 50.0),
                 exit([727.0, -952.0, -3710.0]),
                 exit([-1431.0, -952.0, -3643.0]),
             ],
@@ -764,16 +768,11 @@ fn map_lights(scene: usize) -> assets::Lights {
     if scene != SLICE_SCENE {
         return assets::Lights::default();
     }
-    let (white, red, green) = ([255; 3], [255, 0, 0], [0, 255, 0]);
+    let (red, green) = ([255, 0, 0], [0, 255, 0]);
     let canister = (60.0, 30.0, 0.2021);
     let mut lights = vec![
-        light([650.0, -1191.0, 486.0], white, (55.0, 0.0, 0.0), When::Calm),
-        light(
-            [-1101.0, -1201.0, -229.0],
-            white,
-            (55.0, 0.0, 0.0),
-            When::Calm,
-        ),
+        lamp([650.0, -1191.0, 486.0], 55.0),
+        lamp([-1101.0, -1201.0, -229.0], 55.0),
         light(
             [-149.0, -1421.0, -43.0],
             red,

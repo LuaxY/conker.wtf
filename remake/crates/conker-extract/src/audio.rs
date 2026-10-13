@@ -971,27 +971,60 @@ fn code_cues() -> Vec<Cue> {
         play([0x4CF], 0x6590, Some(0x6590), 0, 0, Channel::Free),
         "the gas, from 29 frames before the kill until the masks come off (C script 0xBA 0x402C: obj(0x74CF, 1, 0x6590); V its handle)",
     ));
-    // Mode 4: `func_15103C14`, a record at the carrier heard everywhere; a player without a camera
-    // (a bot) plays the next id, louder.
+    // Mode 4: `func_15103C14(id, who, n, slot, pairs)`, a radio line at the taker heard everywhere,
+    // 20 VIs after its click on (`radio_click`), once per slot (its team's) in 600 VIs: one of n
+    // variants (id + 2·rand % n; n 0: id), and a player without a camera (a bot) the next id,
+    // louder.
+    let radio = |on, ids: Vec<u16>, volume, note: &str| Cue {
+        delay: 10,
+        ..cue(on, record(ids, volume, 32766, 32767), note)
+    };
+    let variants =
+        |id: u16, n: u16, bot: bool| (0..n.max(1)).map(move |k| id + 2 * k + u16::from(bot));
     for (canister, id) in [(0, 0x599), (1, 0x640)] {
-        for (bot, id, volume) in [(false, id, 30000), (true, id + 1, 32700)] {
-            cues.push(cue(
+        for (bot, volume) in [(false, 30000), (true, 32700)] {
+            cues.push(radio(
                 On::Carry { canister, bot },
-                record([id], volume, 32766, 32767),
+                variants(id, 0, bot).collect(),
+                volume,
                 "a canister taken (C script 0xBA 0x4606/0x462E: obj(0x7599 / 0x7640, 4, 0, carrier, canister, 1))",
             ));
         }
     }
-    // War: Colors' flags, the same mode 4 from script 0xBB's pickup (I: the third argument, 2 and 7
-    // here, 0 for the canisters, is unread).
-    for (flag, id) in [(0, 0x5A3), (1, 0x642)] {
-        for (bot, id, volume) in [(false, id, 30000), (true, id + 1, 32700)] {
-            cues.push(cue(
+    // War: Colors' flags, the same mode 4 from script 0xBB's pickup: 2 squirrel lines, 7 Tedi ones
+    // (C; V c1a read 328: (0x5A3, 0, 2, 0, 1), 0x5B0 at 328, 0x5B1 at 365).
+    for (flag, id, n) in [(0, 0x5A3, 2), (1, 0x642, 7)] {
+        for (bot, volume) in [(false, 30000), (true, 32700)] {
+            cues.push(radio(
                 On::Flag { flag, bot },
-                record([id], volume, 32766, 32767),
+                variants(id, n, bot).collect(),
+                volume,
                 "a flag taken (C script 0xBB: obj(0x75A3, 4, 2, carrier, 0, 1) by a squirrel, obj(0x7642, 4, 7, carrier, 1, 1) by a Tedi)",
             ));
         }
+    }
+    cues.extend([
+        cue(
+            On::RadioClick { end: false },
+            play([0x5B0], 25000, Some(25000), 100, 120, Channel::B),
+            "the radio's click on, at the call (C func_15103910; V ev2 read 402, c1a read 328). A player without a \
+             camera: its clicks at volume −25000 (C func_15103AA0; I: unheard), not played",
+        ),
+        cue(
+            On::RadioClick { end: true },
+            play([0x5B1], 30000, Some(30000), 0x7FFE, 0x7FFF, Channel::B),
+            "the radio's click off, when the voice has played (C func_15103910; V ev2 read 511, c1a read 365)",
+        ),
+    ]);
+    // War: Colors: each loser's voice 30 frames after a capture (script 0xBB: obj(0x7657, 0, 0x7659,
+    // 0, 0x5DC0, p | 0x2000, 800, 1000) → `func_1509F354`).
+    for (team, id) in [(0, 0x657), (1, 0x662)] {
+        cues.push(cue(
+            On::Lose { team },
+            record(range(id, 3), 24000, 800, 1000),
+            "a capture's loser, 30 frames after it: one of its team's three, at it, unless it is voicing (C script \
+             0xBB, func_1509F354: squirrels 0x657-0x659, Tediz 0x662-0x664; V c1a read 412: the Tedi bot's 0x664)",
+        ));
     }
     cues.extend(gun_cues());
     cues
@@ -1125,17 +1158,6 @@ fn beach_cues() -> Vec<Cue> {
             0x6A7,
             "a female villager on the plunger (C)",
         ),
-        cue(
-            On::RadioClick { end: false },
-            play([0x5B0], 25000, Some(25000), 100, 120, Channel::B),
-            "the radio's click on, at the call (C func_15103910; V ev2 read 402). A player without a camera: no \
-             click, the record at 0x7FBC (C func_15103AA0, not exported)",
-        ),
-        cue(
-            On::RadioClick { end: true },
-            play([0x5B1], 30000, Some(30000), 0x7FFE, 0x7FFF, Channel::B),
-            "the radio's click off, when the voice has played (C func_15103910; V ev2 read 511)",
-        ),
         detonation(0x2B7, [-319, -273, -3419], 0),
         detonation(0x2B8, [-2038, 1560, -2631], 23),
         detonation(0x2B6, [1519, 947, -2633], 45),
@@ -1170,12 +1192,12 @@ fn beach_cues() -> Vec<Cue> {
 }
 
 /// A map's own sound: its emitters, and the sequence its background plays, its channels and volume.
-/// 0x2D: two bubbling spots (C func_151607A4 → func_151618BC; V: these two positions in every
-/// capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
+/// 0x2D: its two flickering lamps' buzz (C func_151607A4 → func_15160954 → func_151618BC; V: these
+/// two positions in every capture, 25000, 500/1500, one of ten), sequence 19, channels 0-3 (mute mask 0xFFF0). 0x30: no
 /// emitter (V: no positional call but the players' in 25 s of 2 idle humans), channels 0-5 (mask
 /// 0xFFC0, V). 0x34: no emitter, sequence 36, channels 0-5 (V, as 0x30). 0x3F: no emitter, sequence
 /// 84, no channel muted, volume 24000 (`func_1000E40C`, set again every frame; V). 0x2B (War: Beach's
-/// scenario 8, 2 idle humans 25 s): two bubbling spots as 0x2D's by the villagers' starts (V: bursts of
+/// scenario 8, 2 idle humans 25 s): two lamps as 0x2D's by the villagers' starts (V: bursts of
 /// 1100-1108 from `func_151618BC` at both), sequence 77, channels 0-9 (mute mask 0xFC00), volume 18000.
 fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     let spots = match map {
@@ -1187,7 +1209,6 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
         .map(|&at| Emitter {
             at,
             play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
-            start_chance: 0.005,
         })
         .collect();
     let (sequence, channels, volume) = match map {
@@ -1248,6 +1269,26 @@ pub fn pack_audio(
                     note: note.into(),
                 },
             );
+        }
+        // War: Colors' capture jingles: MP3 0x1A4 when the squirrels score, 0x1A7 when the Tediz do.
+        if name == "30" {
+            for (team, id) in [("squirrels", 0x1A4), ("tediz", 0x1A7)] {
+                let file = format!("maps/{name}/jingle-{id:x}.wav");
+                files.push((format!("audio/{file}"), mp3_wav(&rom.asset(&[0x16, id])?)?));
+                let note = format!(
+                    "the capture jingle when the {team} score, for everyone 30 frames after the capture (the \
+                     final one too): centred, full volume, the music ducked as for 0x2B's escape; an MP3 that \
+                     starts later (an outro's voice) takes over (C script 0xBB command({:#x}, 0) → func_1509E640 \
+                     → func_1001263C({id:#x}, 0x7FFF, 0x40); V c1a, c1b read 412)",
+                    0x6000 | id
+                );
+                let line = pack::Line {
+                    file,
+                    volume: 32767,
+                    note,
+                };
+                map.lines.insert(format!("jingle-{team}"), line);
+            }
         }
         if let Some(wav) = background {
             let file = format!("maps/{name}/background.wav");

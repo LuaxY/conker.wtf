@@ -449,6 +449,7 @@ fn strike_lights(
         swing: 0.0,
         step: 0.0,
         when: When::Calm,
+        flicker: false,
     };
     for (e, StrikeLight(slot), mut light) in &mut lights {
         match blasts

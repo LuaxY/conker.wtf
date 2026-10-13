@@ -136,14 +136,12 @@ pub struct Background {
     pub note: String,
 }
 
-/// A spot on the map that plays sounds by itself, in bursts (`func_151607A4`): each tick while
-/// idle, a burst starts with probability `start_chance`; a burst is 1-5 sounds, each followed by
-/// a wait of 1-29 ticks and a 8-20 tick rise before the next.
+/// A flickering lamp's buzz (`func_15160954` → `func_151618BC`): it plays at `at` as each of
+/// its flashes starts, the lamp's `flicker` in `maps/<map>/lights.json` (`func_151607A4`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Emitter {
     pub at: [i16; 3],
     pub play: Play,
-    pub start_chance: f32,
 }
 
 /// What a match sound is played on, besides the clips' events (game code; README.md says how each
@@ -191,6 +189,9 @@ pub enum On {
     /// War: Colors: a player taking flag `flag` (0 the red, 1 the green), at it; `bot`: a player
     /// without a camera.
     Flag { flag: u8, bot: bool },
+    /// War: Colors: a capture's loser (each player of the team that did not score, 30 frames
+    /// after the capture), at it: `team` the loser's.
+    Lose { team: u8 },
     /// A mounted gun (maps 0x30 and 0x34), at the gun: its state (gun+0x232: 1 free, 2 a player
     /// jumping on, 3 manned, 4 firing, 0xB stopped by B or by overheating, 5 left) going from
     /// `from` to `to`; a looping sound plays until the state changes again.
@@ -429,7 +430,6 @@ mod tests {
                         emitters: vec![Emitter {
                             at: [-1101, -1201, -229],
                             play: play(vec![577]),
-                            start_chance: 0.005,
                         }],
                         lines: BTreeMap::from([(
                             "escape".into(),

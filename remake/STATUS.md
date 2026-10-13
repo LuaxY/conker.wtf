@@ -1,5 +1,42 @@
 # Status after wave 6 (2026-10-10)
 
+## Total War and Colors leftovers: the client (2026-10-13)
+**Batch E5, the client half. The lamps of 0x2D's shelter and 0x2B flicker in random bursts, each flash with its
+buzz. A taken pickup shrinks away over 3 frames, the canister too. In War: Colors, 30 frames after a capture the
+scorers' jingle plays for everyone and a voice plays at each loser. The flag and canister lines come over the radio
+with its clicks. Fades (and the end phase's new fade) cover the whole view, the HUD and the iris included. Any
+player's gas-mask put-on muffles the effects through a 520 Hz low-pass. The filter is the mixer's own DSP, so it
+builds for wasm too; it has not been run in a browser.** Research:
+`../lab/research/mp-original/war-leftovers.md` (items 3, 5, 6, 7, 9).
+
+| Part | What |
+|---|---|
+| conker-client `lights.rs` | `Flicker` ports `func_151607A4`/`func_15160954`: steady, a burst of 1-5 flashes starts with chance 0.005 a frame; a flash sets the size to 0, step full/(r·12+8), wait r·28+1 counted down while ≥ 0, then grows back to full. `Flickers` (seeded by the client id) steps in FixedUpdate, not in rollback, while the match is not over. It drives `shine` (the lamp's size) and `tint_room`: on 0x2D (the map with a countdown light) the shelter (trigger 0) is shaded by lit(now)/lit(full) while a lamp flickers |
+| `audio.rs` | A map emitter plays when the lamp at its `at` starts a flash (one of 0x44B-0x454 a flash). `radio()` is shared by the canister, the flag and Beach's plunger lines: busy for 300 frames per slot (canister or flag), a human's click 0x5B0 at once, the line 10 frames later, 0x5B1 once it has played; a bot gets its odd-id line only. `colors()`: a score rise queues the cheer 30 ticks on; then `line()` plays the scorers' jingle and `On::Lose` plays at each loser that is not voicing. `LINES` (escape, the two jingles) duck the music, one at a time; the outro's voice stops a jingle. `mask()`: a put-on muffles, a take-off by a player whose last mask event was a put-on unmuffles, Over resets. `Playing` runs each effect through a `Biquad` (RBJ low-pass, Q 1/√2, 520 Hz), heard while `MUFFLED`. Fix: `Playing` looped every sound that was not in the bank (lines, outro voices, so they never ended); now only the background loops |
+| `render.rs` | `show_pickups`: `shrink(k)` scales a taken pickup 0.74, 0.48, 0.22, then hides it, from the tick the client sees the take; canisters 27/28 too, while the doors and covers just hide; a node hidden when first seen does not shrink |
+| `hud.rs` | Fades at z 9.5 (`FADE_Z`), over everything, the iris included (it was 8.5, under the iris). `end_fade(k)` = min(255, 16k) in phase 1, from the tick it is seen, in every mode; the log line "end fade from tick". |
+| conker-assets | `Light.flicker`; `Emitter { at, play }` (`start_chance` gone); `On::Lose { team }` |
+| conker-extract | `lights.json`: the four lamps (2 on 0x2D, 2 on 0x2B) get `flicker`. `events.json`: `carry` and `flag` become radio cues (variants id + 2k, a bot's id + 1 at 32700, a human's 30000, delay 10); the radio clicks move to the common cues; new `lose` cues (0x657-0x659, 0x662-0x664, 24000, 800-1000); map 30's lines `jingle-squirrels` and `jingle-tediz` (MP3 0x1A4/0x1A7 as WAV). The pack README follows |
+| Pack | Re-exported: `diff -r assets` against a fresh `conker-extract pack` into a temp folder is empty. New files: `audio/common/` 1445-1446, 1604-1615, 1623-1625, 1634-1636 (0x5A5-0x5A6, 0x644-0x64F, 0x657-0x659, 0x662-0x664) and `audio/maps/30/jingle-1a4.wav`, `jingle-1a7.wav`. Changed: `events.json`, `sounds.json`, `maps/2b` and `maps/2d/lights.json`, `README.md` |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| New tests | `lamps_flicker_in_bursts` (200,000 frames, seed 7): 1-5 flashes a burst, all of 1-5 seen, start rate 0.0045-0.0055, dark runs 3-30 frames, ramps 7-20, bursts end at full, one buzz a flash. `lines_end_and_the_muffle_cuts_at_520_hz`: a line ends and the background loops; the filter gives 100 Hz > 0.95, 520 Hz 0.707 ± 0.02, 5 kHz < 0.02. `the_mask_muffles_from_any_put_on`. `a_flag_taken_calls_on_the_radio` (pack): 0x5B0 at once, 0x5A3/0x5A5 at +10, 0x5B1 at +11 headless, nothing again from that slot within 300, a bot's 0x5A4/0x5A6 unclicked. `a_capture_cheers_30_frames_on` (pack): the jingle and a Tediz voice (0x662-0x664) at each of the two losers at +30. `a_taken_pickup_shrinks_over_3_frames`. `colors_matches_the_originals_draws`: the fade is the top quad over the iris; `end_fade` 1, 7, 13, 15, 16 → 16, 0x70, 0xD0, 0xF0, 255 (V c1b DL 428/434/436). `pack_audio_reads_back`: the jingles (22050 Hz, > 1 s), the flag, canister and lose cues |
+| Sounds, `colors/flags.sh capture` with `RUST_LOG=info,conker_client::audio=debug` | Flag take: 0x5B0 read 326, 0x5A3 336, 0x5B1 362 (V c1a 328 / 365); again at 803/813/838. Captures at 400 and 840 (the final one): the squirrels' jingle and Tediz voices 0x662-0x664 at 434 and 873 (+34/+33; V +30); the outro's voice at 910 |
+| Sounds, `total-war/gas.sh gas` (same log level) | Canister taken (server t 1100): 0x5B0 read 700, 0x599 710, 0x5B1 804. P2's mask: `MUFFLE … p=1 masked=true muffled=true` at 1006 in P1's client (another player's put-on), `muffled=false` at its take-off, 1392 |
+| Screens (read) | `total-war/flicker-lit.png` / `flicker-dim.png` (`gas.sh flicker`: ids 2 and 4 at reads 310/330; id 4 buzzed at 301, its shelter and lamps dimmed while the tunnel is not). `colors/end-a.png` / `end-b.png` (new in `flags.sh capture`: the end fade seen from read 883/884, the clock dimmed with the view at 894); the capture set regenerated (`fade-black`: the HUD under the fade) |
+| `bun run test` | All pass except conker-bots `colors_bots_take_a_flag`. That test is not new; conker-bots depends on none of this batch's crates, and the failure comes with the bots lane's uncommitted conker-bots/conker-rules edits. conker-client, conker-extract and conker-assets were re-run after the last edits: pass |
+| `bun run check` | Clippy (all crates, and this batch's with `--tests`) and the web check pass. `cargo fmt --check` flags only `conker-rules/src/game.rs:2076`, a line in the rules lane's uncommitted change. `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` passes |
+
+**Gaps.**
+- **I:** 0x2D's calm lamps are not drawn as lights (the shelter keeps its vertex colours), so a flicker dims the whole shelter by lit(now)/lit(full), not the original's per-vertex light. 0x2B's lamps shine with the flickered size. The flicker steps per client (seeded by its id), so each client sees its own bursts, as each console did. Deathmatch on 2D flickers too (the lamps belong to the map).
+- **C, kept:** any player's put-on muffles the local sound, bots' too (`func_15074664` has no camera test). A death drops the mask without a take-off, so the muffle stays until a wearer's take-off or Over (I: the reset at Over). The muffle filters the effects only, not the background, the lines or the jingles (I: the parameter is set on effects player 1).
+- **I:** a bot's radio clicks (volume −25000) are taken as unheard and not played.
+- **I, latency:** the jingle, the losers' voices and the end fade count from the tick this client sees the change, 3-4 ticks late (the server's tick is not sent).
+- **Rules lane:** the remake's end phase starts at the capture + 41 and Over at + 57; the original is +39 and +55/56.
+- **V, a choice:** the research's recipe says no change for the end phase. But the client drew nothing in Fading, and the DLs show phase 7's fade (V c1b DL 428/434/436), so `end_fade` now draws it, in every mode: phase 7 is shared (C `func_151E53E8`).
+- **Not done:** the end phase's HUD mask (`func_151E53E8`: HUD flags `&= 0xE35F`, the radar and others off). No screen of the shrink: the canister is taken 2 frames after it shows, under its taker, and idle offscreen humans take nothing else.
+
 ## Bots and movement fidelity, part 2 (2026-10-13)
 **Batch E2, the bots. Bots now hear only what the original's bots hear: a grenade's wind-up at its thrower, then
 its fuse at the grenade. Gunfire and blasts make no noise. Query 0xD4 (s126+0x78) gives the drawn weapon from the
@@ -26,12 +63,50 @@ stand and fire at what they can't hit (see Gaps).** Research: `../lab/research/m
 | `bun run test`, `bun run check` | pass (346 tests, with part 1's work in the tree) |
 
 **Gaps.**
-- **V remake, I cause: bots stand and fire at what they can't hit.** HEAD's invented gunfire noise made a shooter hear its own shots and flee (`func_1508B3F8`), which broke these stands. Without it, 2D bots stand for 3,600-8,000 frames (oracle at most 2,975), mostly in AI state 8: 0xBA's 0x2E30 branch, where the enemy is wall-clear in sight (G+0x21B4 bit 0x10000) but beyond the weapon's range. The script asks for no speed, so the bot turns on the spot and fires. Seed 5's p1 fires 1,828 shots and lands 5 at the idle human, 3,634 away: beyond the bolt's 3,162 lock-on, whose pitch is also limited to ±22.5°, and without lock-on the bolt flies level. Seed 3's p1 lands 9 of 1,696 at a sniper 65° above. Untraced: what ends the original's state 8, and whether its bolt without lock-on takes the bot's aim pitch.
+- **Fixed below (E2c): bots stand and fire at what they can't hit.** The cause was the bullets, not state 8: the twin guns (weapon 0x09, not the bolt) flew level along the facing and never reached a target above or below.
 - **V, not ported:** the flame stream's noise (`func_1519A9A4`, V q3s5b3: at the stream's middle, half its length around, up to 352) and 0x34's particle emitters (`func_151A6600`, V o34emit: 500 around, 121 frames; their trigger is untraced).
 - **V remake:** 0x34's longest state-5 episodes (507-1,011 against 182) are now chases across the map, the goal following the enemy's node, not the draw/holster stall. Standoffs remain on 0x34: r34b5s1's 0x23 bot stands 8,608 frames in both builds, in states 15 and 6, firing across heights.
 - **I:** `(4, 0x10)` asks whether any participant is in the trigger; the original tests the humans' view eyes (0xBD's cutaway).
 - **I:** The AI hears the noises of the frame just run; the original pushes them during its frame. The windows' first and last reads match the oracle.
 - **Out of E2's scope:** 0x30 has 2.0 deaths per 4,496 reads at HEAD against the oracle's 9 (part 1's high jump brings it to 4.2). The club's spells are still shorter than the oracle's (median 104-144 against 193).
+
+**Fixed (2026-10-13, E2c): bots stand and fire at what they can't hit.** Only the target's death or a change in
+sight ends AI state 8, in the original as in the remake. The original's stands end because its bots' bullets reach
+targets above and below them. A bot's twin-gun bullet leaves the muzzle toward the first body part or wall on its aim
+ray, from the eye 67.5 up through the aim point (`func_151C62D0` → `func_151D5174` → `func_151C4B0C`, C). Its
+pistol and 0x23 bullets keep the facing and take the pitch byte obj+0x1D1 (`func_15145740`, C), which follows the
+aim's pitch (V o34p). The remake fired all three level along the facing. The oracle stands too: its p3 under the
+idle human's ledge on 2D (3,813 away, 420 up, reads 2735-4564) fired 394 bullets for 0 hits. The aim point restarts
+every 3 frames at 0.25-0.58 of the way, so the bullets hit the ledge's lip; the remake now does the same. That stand
+ended when another bot killed the human. Also on 0x30 (method step 2): a twin-gun bullet on the head (part 0xA) takes
+1 health at once, stunned or not, and below 3 it kills with type 0x20 (`func_151D4DAC`; C, V ohit). In ohit that
+path made 5 of the 6 bullet deaths, all 4 of the human's. Only bullets that test body parts have a head
+(`func_151C229C`'s flag 8): the twin guns' do; the pistol's, 0x23's and, in multiplayer, the mounted gun's do not
+(C; V e_w39, e1). No wire change (protocol 20). Research: `../lab/research/mp-original/bots-fidelity.md` (E2c).
+
+| Part | What |
+|---|---|
+| conker-rules `game.rs` | `Match::aims`: per slot, a bot's eye and unit aim direction (not on the wire). `strike`: a twin-gun bullet is re-aimed from its muzzle at the first part or wall on the ray (`first_part`, `raycast`); a pistol or 0x23 bullet takes the ray's pitch on its facing. `fly_bullets`: a twin-gun body hit at `BULLET_HEAD` (47.25, I: fitted to ohit) or more above the feet (26 less crouched) takes 1 health directly. Below 3 health it is a `SNIPER_RAY` hit instead, with no stun or immunity check (a kill, reaction 0x2E, and a headshot on an enemy) |
+| conker-bots `lib.rs` | `Bots::scopes` fills `m.aims` for each aiming bot: from (x, y + 67.5, z) through `Bots::aim` |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| New tests | conker-rules `a_bots_bullets_follow_its_aim_ray`: a target on a ledge 415 up and 3,600 away. The twin guns hit it with the ray and pass under the ledge without it; the pistol and 0x23 take the ray's pitch. `a_bullet_on_the_head_hurts_through_the_stun` (ohit 1328-1333): a stunned player at 4 health is hit on the head at +55, +60 and +61 and goes to 3, 2, then dead, with reaction 0x2E and a headshot. A body hit at +40 is refused. An unstunned head hit takes 3 → 1 (ohit 2379). The pistol at +60.5 has no head. conker-bots `rom.rs` `no_endless_stand_below_a_ledge_on_0x2d` (2D, 3 bots, seed 5, 4,500 frames): no bot stays within 20 for over 3,000 frames. HEAD fails it: slot 1 stands from frame 1,164. `colors_bots_take_a_flag` now takes at 2,292 |
+| Oracle (`ConkerRecomp.e2c`, scratch `bots-fidelity-scratch/e2c/`) | **obul, obul2, omem** (2D): the eye sits at +67.5 exactly (7,771 of 9,956 rows). The bullets' pitch lies between the muzzle's and the eye's to the aim. The 1,800-frame stand is above. **ohit** (0x30, BRK `func_151D4DAC` with the hit record's +0x58 part and +0x59 kind): 209 body contacts in 4,418 reads, all type 0x1A and kind 3. Head hits (part 0xA) land at +47.3 to +60.6; a living body is hit at +47.2 or less. **o34p** (0x34, obj+0x1D1 and s126 per bot): obj+0x1D1·1.1° follows the aim's pitch for 0x23 (mean error 3.4° where the pitch is over 3°) and 0x09 (1.8°) |
+| `bot_match`, 8 seeds a map (means): deaths / the human's / hp drops (hits + deaths; the head's direct −1 is no hit) / pickups a bot | **2D** (3 bots, 9,000 frames): HEAD 9.8 / 4.0 / 39.0 / 4.9; E2c 12.0 / 4.4 / 52.1 / 6.2; oracle 13 / 5 / 48 / 6. **0x30** (3, 4,496): HEAD 4.2 / 1.6 / 19.6 / 2.8; E2c 4.1 / 1.0 / 17.4 / 3.1; oracle 9 / 4 / 50. **0x34** (3, 4,403): HEAD 4.1 / 1.2 / 14.5 / 3.6; E2c 7.0 / 3.5 / 28.9 / 3.8; oracle 8 / 3 / 37. **0x3F** (15, 1,738, club only): HEAD 17.0 / 2.2 / 106.6; E2c 17.1 / 2.2 / 103.8; oracle 22 / 0 / 158 |
+| 2D: longest stay within 20 units, a bot's best per run (8 seeds) | HEAD 1,971-7,973 (mean 4,319); E2c 1,702-5,934 (mean 3,132); oracle `bot_long3` 1,334-2,975. Seed 8's 5,934 is p1 at the oracle's own spot under the ledge, firing at the human. It lasts until another bot kills the human |
+| `bots.sh` (debug, ports 5970-5978). "Off" is this tree with both changes switched off by a temporary switch, so HEAD in these crates. Each run repeats exactly | **Colors** 150 s: kills off 8, E2c 10; takes 2 / 3; drops 2 / 2; captures 0 / 0. 300 s: kills 17 / 16; takes 3 / 4; captures 1 at 8,154 / 1 at 5,636 (bots1: 2,983 and 6,449, about 20 deaths by 9,000). **Beach** 150 s: the same events in both (an escape, a strike, 11 villager points, [1, 11] at the last), 8 frames apart. Colors ROM runs (11 seeds, 5,400 frames each): deaths off 8.5, E2c 11.5 (bots1: 9, and 21 in 9,898). First take off 1,756-12,375 (2 seeds past 5,400), E2c 1,758-4,787 (none past). No fault, unknown native or panic |
+| `bun run test`, `bun run check` | pass (355 tests) |
+
+**Left.**
+- **V remake: 0x30 deaths are still 4.1 against 9.** The head rule is real (V) but was not 0x30's first divergence (HEAD 4.2 → 4.1). The gap has a different, untraced cause: the weapons the bots hold. A
+  match (v4, 8 seeds) has the twin guns drawn 2,056 frames, the sniper 2,706 and 0x23 893. In o30 the oracle has
+  3,384, 805 and 103. The bots fire 443 shots a match against the oracle's 553 (s126+0x1AB). The oracle lands 209
+  twin-gun contacts in 4,418 reads, mostly on stunned players. Next: what sets the wanted weapon (G+0x2338) and the
+  pickups on 0x30.
+- **I:** the head is a height on the bullets' column, fitted to ohit, not the game's parts (`func_1508114C`).
+  obj+0x1D1's 1.1° steps and its ramp (3 steps a frame, `func_1504C9E4`) are not ported. Neither is the crossbow's
+  pitch without lock-on (o34p: 0x18's obj+0x1D1 is far from the aim's, units untraced).
 
 ## Bots and movement fidelity, part 1 (2026-10-13)
 **Batch E2, movement and rules. Humans and bots have the high jump (state 235, A with Z held: 9 still frames, then
