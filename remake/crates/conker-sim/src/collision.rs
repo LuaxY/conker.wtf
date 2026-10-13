@@ -162,6 +162,21 @@ impl CollisionWorld {
         }
     }
 
+    /// The placement whose model triangle `tri` is ([`Layer::Placement`]), if any.
+    pub fn placement(&self, tri: u32) -> Option<u16> {
+        (self.objects.iter().zip(&self.placed))
+            .find(|(r, _)| r.contains(&tri))
+            .map(|(_, p)| p.0)
+    }
+
+    /// Last frame's floor triangle for the floor query's fast path, unless a floor zone switches
+    /// the path off for a player that started the frame at `start` over `floor_y`
+    /// (`CameraLevel::full_floor`).
+    pub fn last_floor(&self, start: [f32; 3], floor_y: f32, floor: Option<Floor>) -> Option<u32> {
+        let full = (self.camera.as_ref()).is_some_and(|c| c.full_floor(start, floor_y));
+        floor.filter(|_| !full).map(|f| f.tri)
+    }
+
     /// The wall layer `k`'s quadtree (0 terrain, 1 secondary), one node per line in walk order: the game
     /// builds the same tree at load (checked against its RAM in `tests/oracle.rs`).
     pub fn wall_tree(&self, k: usize) -> String {

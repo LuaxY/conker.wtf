@@ -60,13 +60,18 @@ impl Body {
     }
 
     /// The camera's eye (object type 0x2D, `func_1512BB10`): `size` (cam+0x95C) across and long, `height`
-    /// (cam+0x960) tall, centred on the eye (C: func_1507C3E0, func_15044660; not traced).
+    /// (cam+0x960) tall, its centre half the height above the eye: `func_15044660`'s type-0x2D case zeroes
+    /// the centre, then falls through to the common tail, which sets `height >> 1` (C: func_1507C3E0,
+    /// func_15044660; V: scene 0x34's 415 camera sweeps, `tests/oracle.rs`). The tail reads bytes of the
+    /// object `func_1512BB10` builds on its stack and never sets: +5 = 5 would keep 0, +4 = 0x28 or 0x25
+    /// other heights; the captures show none of them.
     pub fn camera(size: f32, height: f32) -> Self {
+        let height = height as i32 as i16 as i32;
         Self {
             half_width: size as i32 as i16 as i32,
             radius: size as i32 as i16 as i32,
-            height: (height as i32 as i16) as f32,
-            center_y: 0.0,
+            height: height as f32,
+            center_y: (height >> 1) as f32,
         }
     }
 }

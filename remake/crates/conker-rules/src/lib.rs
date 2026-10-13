@@ -20,6 +20,7 @@ pub mod projectile;
 pub mod rng;
 pub mod spawn;
 pub mod surface;
+pub mod traps;
 pub mod weapon;
 
 pub use game::{Arena, Event, Fighter, Match, Phase, Settings};

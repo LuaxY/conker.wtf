@@ -1,5 +1,146 @@
 # Status after wave 6 (2026-10-10)
 
+## Deathmatch maps: traps, zones, the restart fade (2026-10-13)
+**Batch E10, the rules half. 0x34's pressure plates (placements 6-9) sink and rise as the original's and switch on its
+traps: 27 fire jets for 120 frames, the electric floor for 151; one touch kills, credited to the presser. Its 7 burning
+cones hit, throw and set alight. The action-1 records of 0x30, 0x34 and 0x3F are the floor search's zones. The camera's
+box sits half its height above the eye, which fixes 0x34's corridor sweep. RESTART fades for 17 ticks (`MatchView`
+phase 3). Protocol 23. The client draws the plates at their y, the jets' flames and the electric floor's bolts and
+arcs, with their sounds.** Research: `../lab/research/mp-original/dm-maps-results.md` §1-2, §5.5 (scratch
+`dm-maps-results-scratch/out`: box34, trap34, elec34, cone34, cone34k, c34cam).
+
+| Part | What |
+|---|---|
+| conker-camera `volume.rs` | `CameraLevel.floor_zones`: the type-1 records with action 1 or 3, on at load. `full_floor(pos, floor_y)`: the last zone the player is in has action 1 (obj+0xF8 bit 2, C) |
+| conker-sim `collision.rs`, `movement.rs` | `last_floor(start, floor_y, floor)`: last frame's triangle for the floor query's fast path, none inside a full-search zone. Used by the ground step, the air step, the burning run and the knock-back. `placement(tri)`. Agent A: `Body::camera`'s centre is `height >> 1` above the eye (`func_15044660`'s type-0x2D case falls through to the common tail, C; V the game's results sit 30 + 30·n.y off the wall plane) |
+| conker-rules `traps.rs` (new) | `parse` (kind 12, action 9: the fire jets by word 0x1C in the plates' lists at 0x800A2380/238C/2398, the electric boxes 43 and 82 by arg 8), `Plate::step` (`func_151177C0` then the contact routine: 0 → 2 on contact; 2 sinks 6, to −10 → 3 and the callback; 3 holds while stood on, else 1; 1 rises 3), `Traps::step` (the clocks, the plates, the switch-on with the owner = the lowest slot on the plate), `hits`, `on()`, `offsets()`, `seat` (`CollisionWorld::shift` on placements 6-9) |
+| conker-rules `game.rs`, `damage.rs`, `flame.rs`, `surface.rs` | `Match.traps`. At the frame's start `trap_hits`: each player inside a trap that is on takes `TRAP_FIRE` (0x34: reaction 0x2B, 7) or `TRAP_SPARK` (0x2E: 0x21, 7), guarded, at its own facing, credited to the owner. After the players `cones`: grounded, alive, on a kind-0xE floor → `CONE` (type 1: 0x10, −1, xz 7, yv 55, g 2), unguarded, no attacker, and `Burn::new(None)` (`Burn.attacker` is an `Option`). At the frame's end `plates`: the contacts (floor on the plate, ≤ `CONTACT` above), `Traps::step`, the riders moved by the plate's dy. The flame hit (0x10, lethal or not) keeps its 0x69 until a landing that bounces under 28 and 5 frames in; a lethal one then falls (0x58 52, 0x59; V cone34k). A death that starts grounded on kind 0xE/0x13 plays `CONE_DEATH` (clip 0x2D8, 20 frames I, then the dead pose). `places`' doc: the slot clause is dead code |
+| conker-sim `net.rs`, conker-server | `PROTOCOL_ID` 23. `MatchView.plates` ([i8; 4], below rest) and `traps` (u32, bit k = trap k on). `phase` 3 = RESTART's fade, `restart_in` 17 → 1 there: the votes set the next match 17 ticks on (`RESTART_FADE`), the deadline at once; votes clear at each match start. `Ai::traps()` at setup and at each restart; `traps::seat` before the frame. Log: `TRAPS t=… plate k down: n traps on for slot …` |
+| conker-client (hooks) | `seat_props` seats the plates on 0x34; phase 3 is over for the prediction, the HUD text (`lib.rs`) and the muffle and music (`audio.rs`); `lights.rs`' `< 2` already was. `outro.rs` keeps `== 2`: `results.rs` needs `outro::results` false in phase 3 to ignore the pad |
+| conker-bots | No native to add: 0xBD's prop command 7, command 4, trigger query 0x10 and `query(0x2000, 0xAC)` are answered already. The ROM tests' Deathmatch helper has the traps (as the server) |
+| conker-client `traps.rs` (new, map 34 only; agent B) | The plates at rest + `MatchView.plates` (PostUpdate, after `show_pickups` puts the props back at rest). A jet that is on: its flame quad turned to the camera, scrolling, flickering and fading to the top (C, V), particles from its base (rate C, motion and sizes I). The electric floor: bolts from (303, 39, 2591) down and arcs on each box's base, cyan 9-point ribbons (C, V; reach and the arcs' ends I, lifted 4). A burning player's particles (I). `audio.rs`: 0x1AA at the middle jet of each row (record flag 8: traps 1, 4, 17, … = records 28, 31, 64, V), 0x236 once for the floor at (303, −417, 2591), looped while on, stopped as their bit goes |
+| conker-extract `traps.rs` (new; agent B) | `maps/34/traps/flame.png` (blob 0x916), `puff.png` (0xBA6), `arc.png` (0x753), `audio/maps/34/0566.wav` (0x1AA stays `common/0426.wav`); `pack-readme.md` |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| `floor_zones_switch_the_fast_path_off` (conker-sim oracle, the sequential replay) | zones 8 / 33 / 6. Rows off: 0x30 374 → 160 (214 fixed, 0 broken), 0x34 2,471 → 2,311 (161 fixed, 1 broken), 0x3F 8 → 8 |
+| `the_plates_replay_box34` (conker-rules) | the 4 plates' y and state equal box34's RAM on all 310 reads; 5 bottomings (6 at 59 and 101, 7 at 88 and 129, 9 at 28) |
+| `the_plates_hold_the_0x34_floors` (ROM, `s4_h1b15`) | contacts and plates equal box34's RAM on 312 reads; grounded rows off: 937 with the plates at rest → 63 with them moving (26,444 rows); 14 bottomings, no one in a trap that is on |
+| `the_traps_of_0x34` (ROM) | the plates' lists equal the ROM's 9-byte arrays; 27 fire ids 0-26, the electric boxes 43 and 82, all off at load; none on 0x2D |
+| `a_plate_sets_off_its_traps` (ROM; V trap34, elec34: put on at read 80) | P2 in jet 1 hit in frame 83, P4 on the electric floor in 84, both to 0 health; kills [1, 0, 1, 0]; the jet on frames 83-202 (120), the floor 84-234 (151, as elec34's `func_1515FBC4` calls) |
+| `a_cone_throws_and_burns` (ROM; V cone34k) | hit in frame 40: health 0, y velocity 55, alight with no attacker; y within 0.005 of the oracle's over reads 41-139 (the hop, bounces 28 and 16); 0x69 to read 112, then 0x58, not 0x2D8 |
+| `a_death_on_a_cone_plays_0x2d8`, `restart_fades_for_17_ticks`, `places` | a death starting grounded on kind 0xE plays 0x2D8, on kind 5 the fall; `restarting` 17 at D, 1 at D + 16, none at D + 17; the research's [1, 4] |
+| Agent A: `corridor_camera_calls_match_the_game`, `corridor_camera_matches_the_game` (c34cam) | sweeps that differed 143 of 415 → 0, rays 475/475; the eye at reads 219-290 (up to 344 off) → 0, reads 113-335 within 0.004; 0x2D's camera outputs unchanged |
+| `bots_set_off_the_0x34_traps` (conker-bots ROM, 15 bots, 1,737 frames) | seed 1: 5 presses, 5 trap kills, no unknown native. The oracle: 14 presses, no one inside a trap that is on |
+| Run `bots.sh` (port 5970, `MAP=34 BOTS=15`, 90 s) | 48/48 ok, no faults or unknown natives; 15 `TRAPS` lines; e.g. plate 1 by slot 13 at t 707, slot 8 killed in its jets at 791 credited to 13; walking into one's own jets is a suicide (t 172, 436, 610) |
+| Run `../lab/screens/map34/rules.sh trap` (port 5972; 2 idle humans, 1 life, warps at read 300) | `TRAPS t=306 plate 0 down: 9 traps on for slot Some(0)`, `Hit { victim: 1, attacker: 0, damage: 7, lethal: true }` at read 303 (F + 3); slot 0's HUD: kills 1. Both press A on the results: "next match at tick 948", started at 965; again 1399 → 1416 (17 ticks of phase 3) |
+| Run `rules.sh cone` (port 5974) | read 300: `Hit { victim: 1, attacker: 1, damage: 1, lethal: false }` (unowned); the burn's ticks are refused (immune), as cone34's health stays 5 |
+| Screens (`../lab/screens/map34/traps.sh`, port 5978, 1280 × 720) | `jets.png` (plate 6's row lit), `electric.png` (a bolt and a floor arc, slot 1 on plate 9), `burning.png` (slot 2 alight from cone 1), `plate-up.png` / `plate.png` (plate 6 at rest, then down: a pixel diff shows it moved) |
+| `bun run test` (all lanes' edits in the tree) | 402 pass, 1 ignored, 0 fail |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1389 files (map 1a and the Heist characters from the other exporter lane included) |
+| Run `rules.sh camera` (port 5976, c34's script from start record 9, `DRAWN` lines) | the walk completes. The eye starts at the record's eye (y 995), the original's re-cut after its poke (650), so the two differ by 345 in y to read 200; from read 260 within about 50, the positions within 40 (a live run's timing) |
+
+**Gaps.**
+- **I:** `CONTACT` = 5 (box34: contacts set 3.9 and 1.9 above the plate, not 23.5 and 25.5). The riders go with the plate
+  every frame; the original's lag it by a frame at times (box34 58-60, 99-101). 0x2D8's 20 frames are its clip's length.
+  The flame hit's 0x69 ends one frame early (read 112 against 113): the rule "a landing bouncing under 28" fits e_w15
+  and cone34(k) only. The lethal flame hit's sequence (0x69, 0x58, 0x59) is V for the cone, I for the flamethrower.
+- **V, other:** the bots spend 2-3 times the oracle's frames in the traps' zones (seeds 1-4: 3-10 presses, 3-7 kills a
+  minute against 14 and none): their paths, not the traps. The deadline starts the next match without the fade (the
+  original's deadline quits).
+- **Prediction:** a client's `Match` has no traps, so a local player on a moving plate, in a jet or on a cone is
+  corrected by the server (a few units on a plate; the hop and the kill arrive as corrections).
+- **Camera, agent A:** from read 336 the remake's target eye drifts (camera logic, not the sweep); at reads 643-774 the
+  original's eye is 40 above a y 79 platform and the remake's is not (I: the camera's floor clearance). `walls.rs`'
+  unused `dd3` branch sets `at[2] = 0.8`, which the original's delay slot undoes.
+- **Client, agent B:** the electric floor's sparks (blobs 0x904, 0x908, 0x1042) are not drawn; the arcs run edge to
+  edge where the oracle's are about 150 long with their ends inside the box; a burning player's fire is drawn on 0x34
+  only. In `plate.png` the player's feet look a little sunk into the plate (unchecked).
+- Not ported: the camera script's zones (0x30's 0x3C/0x3D, 0x34's 0x6D: only the depth-buffer occlusion swing, which
+  the remake lacks); kind 17 (read by nothing). Not this batch: §5.7's hits tests and the headshot on every 0x2E hit.
+
+## Map 0x1A, the Vault, and the Heist characters: the pack (2026-10-13)
+**Batch M2, the pack half. The pack has map 0x1A (the Vault, Heist's map and Deathmatch scenario 6) like the other
+maps, the Wise Guy (59) with Heist's four team looks, the money bag (87), the bat (0x19) and the tommy gun (0x38) in
+hand, on the HUD and in sound, and 0x1A's music. Research unknown 1 is settled: a team changes one texture of model
+59, nothing else (V). No rules, server or client change: M2b plays it.** Research: `../lab/research/mp-original/heist.md`;
+the oracle's answers: `../lab/oracle/map1a/props_pickups_lights.md` (props, pickups, lights), `../lab/oracle/map1a/teams/`
+(team looks), `../lab/audio/map1a/` (music).
+
+| Part | What |
+|---|---|
+| conker-extract `lib.rs` | `VAULT`, `WISE_GUY`, `CASH`. With 0x1A in `--map`: 59 on the Tedi's rig (as the villagers), 87 as a prop character (own rig, as the flags). `pickup_table` (0x1A's 8 pickups in manager order: placements 10, 1, 2, 3 the tommy gun, bazooka, knives, crossbow, which roam; 8, 9 sniper rifles, 11, 12 grenades, on spots 8-11) and `ai_script` (0xB7). Spots are nodes by id (byte 7, not the index) + (0, 60, 0). `hidden_placements(0x1A)` = 4-7. `map_lights` reads 0x1A's 34 type-9 triggers. Team looks: `team_ids` (the model's texture table, header word 6, entries 1-4), `bind_segment` (segment 0x0A → team 0's texture in the glTF), `characters/59/textures/team-0..3.png`, `character.json` `teams`. `HELD_CLIPS` + 0x10E (bat), 0x1DD (tommy) |
+| extract-scene | `deathmatch_solid(0x1A)` = [0] |
+| conker-extract `hud.rs` | Icons: 0x19 `atlas` (25, 20) 22 × 7, 0x38 `atlas2` (25, 19) 22 × 9 (V) |
+| conker-extract `audio.rs` | `MATCH_CLIPS` + the bat's 0x10E, 0x110 and the tommy gun's 0x1DD-0x1E0, 0x253, 0x254. The tommy gun's loop: 719 while firing, then 727 and one of 747-749 at 16000 (C `func_1000EFB4`, as the twin guns'). Battle cries with it: the squirrel's, the Wise Guy's (1347-1350, one start in four). Pickup sounds: 688 for 0x38; the Wise Guy's voices (1346; 1342/1343 on the bazooka). Hit reactions: bat as the club, tommy as the pistol (I). Cues of a character not packed are dropped. `map_sounds("1a")`: song 30, all 16 channels, volume 8000 (C `func_150000B0`, V); emitters: the two lamps (as 0x2D's) and the five switching lights (1099-1108 at 16000, 500/1000, as each comes back on; C). The bases' four zones (1116) come from `zones()` as is |
+| conker-assets | `Pickup.respawn`, `Pickup.roams`; `Character.teams` (`Teams`: material, textures); `Lights.switching`; `nav.json` keeps the header's word 2 and each node's byte 15 (`{"word_2", "nodes"}` on 0x1A only; other maps' files unchanged). The sample pack covers each; round trips stay bit-exact |
+| Tests | `tests/pack.rs`: 0x1A in the read-back (ROM path, solid rule, spawns, pickups on spots, nav, triggers, AI 0xB7, level glTF), a Vault block (lifts 4, no kill gate, respawn and roams, lights, 59's clips, lift 49, team material and PNGs, 87's rig). `tests/rom.rs`: 18 held models, the bat's and the tommy gun's events |
+| `../lab/audio/map1a/background_loop.wav` | Song 30 recorded on the oracle (DM scenario 6, players moved out of their bases' zones; Heist's scenario 0 plays the same song, correlation 1.000): period 4,873,056 samples (221.301 s at 22,020 Hz, 26,484 audio blocks), cut from 60.2 s with a 0.5 s crossfade, seam difference 0. Tools: `../lab/oracle/map1a/tools/` |
+| Pack | Re-exported (`--force`, `--map 1a --background 1a=../lab/audio/map1a/background_loop.wav` in `bun run pack`). New: `maps/1a/` (level 75 textures, collision 1892 faces, 32 spawns, 8 pickups, 68 triggers, nav, ai.bin, 34 lights), `characters/59/`, `characters/87/`, `audio/characters/59/` (20 WAVs), `audio/maps/1a/`. Changed: `weapons/deathmatch/held.*` (18 models, 2 new textures), `hud/hud.json`, `audio/events.json`, `audio/sounds.json`, `pack.json`, `README.md` |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| Oracle: team looks (`ConkerRecomp.m1`, runs tm4, tm4b DLs 96/100, tm8, h4i) | Model 59's material 2 draws segment 0x0A: REDS 7246, BLUES 7230, GREENS 7231, YELLOWS 7232 (CI8 32 × 32, RGBA16 palette). Prim, env and fog colours and every other command are the same for all teams. The pack's `team-0..3.png` equal the oracle's RAM textures within 1 (5-bit rounding) once flipped upright and de-interleaved (`../lab/oracle/map1a/team_pngcmp.py`) |
+| Oracle: props, pickups, lights (dm3, dm15, hs7, lt3, walls6c/6d/13; `props_pickups_lights.md`) | Solid {0} only (13 is drawn but the match sets `+0x4F` 0x20 on it; lldb: only 0 is ever a candidate). 4-7 hidden all match. Every pickup is at its node + (0, 60, 0) on 63,121 pickup-frames, 0 mismatches. k4-k7 on spots 8-11. Respawn 300. 34 lights = the 34 type-9 triggers, ambient (94, 94, 96), every level vertex lit |
+| Oracle: HUD icons | 0x19 and 0x38's rects as above (V) |
+| conker-assets tests | 10 pass: the sample covers `respawn`, `roams`, `teams`, `switching`, `word_2`, `byte_15`; round trips bit-exact |
+| conker-extract tests | `pack_reads_back_as_the_rom_path`, `pack_audio_reads_back` (0x1A's background, zones, emitters, song note; the tommy gun's and the Wise Guy's cues; 59's clip events), `tests/rom.rs` pass |
+| `bun run test` (`--no-fail-fast`) | 400 pass, 1 ignored |
+| `bun run check` | `cargo fmt --check` fails only on the other lanes' files (`conker-extract/tests/traps.rs`, `conker-server/src/main.rs`); clippy (`-D warnings`, all crates) and the web check pass |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1389 files |
+| Native screenshot of 0x1A | Not taken: `conker-server --map 1a` refuses the map ("not 2d, 30, 34, 3f or 2b"), so the client cannot load it before M2b |
+
+**Gaps.**
+- **I:** k0-k3's start spots: the game picks random free ones of spots 0-7 (V: dm3 [3, 5, 6, 0], dm15 [6, 7, 4, 2], hs7 [0, 2, 7, 3]); the pack puts each on the spot nearest its placement (`position`, and its level node).
+- **I:** the tommy gun's hit reactions use the pistol bullet's numbers (heist.md: type 0x35 not traced); the bat's are the club's (C, shared handler).
+- **I:** the switching lights' chances are per frame (C gives the chances; the oracle's on/off spans agree with per frame).
+- **V, not in the pack's model:** 0x1A's base zones stop when the player leaves (V, read 25), while `zones` says "starts on the first entry and never stops" (0x2B's, V). Only zone 0x37's sound is restarted by the script at read 24.
+- **V, not in the pack's model:** the pulse lights' size is truncated (trunc(50 + 40 sin φ)); the original lights each level vertex by its 10 nearest lights.
+- **C:** the header's word 2 (61) and node byte 15 of 0x1A's nav graph are kept as is; their meaning is not known (the bots ignore both).
+- **C:** the money bag's logical-to-pair mapping (README) is read from its bank-02 table; its 0.4 scale is the scene record's (heist.md).
+- The outro actors 71 and 134 are not packed (M4).
+
+**Handoff to M2b (rules, server, client).**
+- Rules: `conker_bots::script(0x1A)` → 0xB7 (the pack's `ai.bin` already is); `weapon::pickups(0x1A)`: move `VAULT_PICKUPS`/`VAULT_SPOTS` from conker-extract into conker-rules (then `pickup_table` can call it). Respawn from `pickups.json` (300 VIs). Roaming: at each (re)appearance a random spot of `roams` no other pickup stands on (manager flags 3 for k0-k3, 2 for k4-k7). The server refuses `--map 1a`: add it.
+- Weapons: the bat 0x19 (start item; draw 0x10E, shown at 15; put away 0x110, hidden at 14 (held events, C); idle 0x10F; swing 0x113, hit 10 frames in, 1 damage). The tommy gun 0x38 (draw 0x1DD, shown at 11; put away 0x1DE, hidden at 12, so heist.md's "idle 0x1DE/0x1DF" is 0x1DE put away, 0x1DF idle; fire 0x1E0 standing, 0x253 moving, 0x254 above speed 20; 1 bullet per 4 frames, 2 damage, 26-unit knock-back over 3 frames, 18-frame stun; no reload; the 0x1A2 recoil climb).
+- Characters: every Heist player is class 1, model 59; `characters("1a")` adds "59". Its team look: in `character.json` `teams`, material 2's texture ← `textures/team-<team>.png`. Radar blips by team: REDS ff3737, BLUES 4040ff, GREENS 78ff16, YELLOWS ffb11e (V).
+- Client: roaming pickups move their level node to the server's position at each (re)appearance; `lights.json` `switching` and the switching lights' emitters; the level lit everywhere (as 2b's relight, ambient (94, 94, 96)); the background (song 30); the zones' stop on leaving.
+- M3/M4: the money bag (87, `characters/87/`, packed with 0x1A) and the outro actors.
+
+## The results screen's details (2026-10-13)
+**Batch E10, the client half. An eliminated player's view is the original's one view: black over the whole HUD, with
+only the skull on it (and the end fade later). The chosen STATS button pulses: its lit tiles go over its dim ones at the
+STATS' alpha × (3v + 63) / 256, a 32-frame triangle. The stick between the buttons steps through its six frames and
+back. In the end phase's fade the radar, kills and rank go at once, the clock a frame later. RESTART's 17-frame fade is
+drawn from `MatchView` phase 3 (protocol 23, the rules lane's). Docs: the P3/P4 colours, the accuracy rule and ties;
+the STATUS notes the research found wrong are corrected in place.** Research:
+`../lab/research/mp-original/dm-maps-results.md` §5 (5.1-5.8).
+
+| Part | What |
+|---|---|
+| conker-client `hud.rs` | Out: `black(255, OUT_Z)` at z 7.0, over every HUD part (the reticle, scope and gun sight at 6.0-6.5 too); the skull at 7.5; a War strip at 8.0 over it (I). `Shown.ending` is the end phase's frame k from 1: no radar, kills or rank, and no clock from k = 2. `Shown.results` also carries the STATS' alpha and the VI counter (2·tick). The alpha is applied in `sprites` (it was a multiply over every quad in `draw`). The chosen button draws its `image` at 255 and its `lit` over it at `glow(a, vi)` = min(255, (a·(3v + 63)) >> 8), t = (2·vi) & 0x7F, v = t < 64 ? t : 127 − t. `stick(vi)`: n = (vi >> 1) % 10, 10 − n from 6, a 32-texel uv step. `restart_fade(m)` = `end_fade(17 − restart_in)` in phase 3; `draw` then shows only that fade (no HUD, no STATS). `black()` is shared by the fades |
+| `results.rs` | Doc only. In phase 3 `outro::results` is false, so the menu resets and ignores the pad |
+| conker-extract `hud.rs` | `stick.png` is the six tiles 0x7E7..0x7EC side by side (192 × 32; it was 0x7E8 alone). The P3/P4 colours' comment is C (the table 0x800ABA90). `pack-readme.md`: the pulse, the stick's frames |
+| conker-assets `hud.rs` | `Results`' doc: the lit pulse, the stick's strip. No new field: the ping-pong is the original's code, and the strip's width / 32 gives the frames |
+| Pack | Re-exported (`--force`): `hud/stick.png` (192 × 32), `hud/end.json` (the stick texture's size) and `README.md` changed |
+
+| Check (2026-10-13) | Result |
+|---|---|
+| New tests (conker-client) | `the_out_view_is_black_over_the_hud`: every quad but the black, skull and fade is under the black; the skull is over it, the fade over both; a TW strip at black + 1. `the_end_phase_hides_the_radar_kills_and_rank`: at k = 1 only the clock's 4 glyphs, no radar; at k = 2 no glyphs; health and weapon stay (7 atlas quads), and the TW strip. `the_stats_button_pulses_and_the_stick_steps`: glow(255) = 62, 107, 110, 155, 203, 206, 251 at v = 0, 15, 16, 31, 47, 48, 63; glow(0x80, v = 63) = 0x7E; period 32 frames; stick [0, 1, 2, 3, 4, 5, 4, 3, 2, 1]. With the pack at a = 0x80: RESTART at 255 under its lit at 0x7E, QUIT and STATS at 0x80; frame 3's uv is 96..128. `restart_fades_from_restart_in` (a constructed `MatchView`): `restart_in` 17..1 gives 0, 16 … 240, 255; phases 0-2 give none. `rows_colour_by_port_and_share_ties`: 4 humans are coloured 0-3, and the pack's colours are red, blue, green, yellow. Humans in slots 0-1, bots in 2-3, shots 0, 5, 0, 0: places [1, 4] ([1, 4, 1, 1] with 4 humans). Extended: `the_out_skull_grows_then_shrinks` (sides 4, 6 … 30, 32, 32). conker-extract `pack_hud_reads_back`: the stick is 192 × 32 |
+| Screens (`../lab/screens/end/details.sh`, ports 5980/5982; 2d, 2 offscreen humans, 1 life, untimed, slot 0 warped over the pit at read 300) | Kill gate at read 312, the end fade from 363-364. `out-p1.png` (read 345, the out player): black and the skull only; before, the lives digit, score and rank showed on the black. `out-p2.png` (368, the other player in the fade): health and the lives digit, no radar, score or rank; its floor is 0.67× its brightness under the STATS (the fade at k ≈ 5). `pulse-p1.png` and `pulse-p2.png` (reads 400 and 412, one per client). `pulse-crops.png` crops RESTART and the stick from both: the letters' green mean is 76 vs 171, and the stick is in two frames |
+| `bun run test` (`--no-fail-fast`, the other lanes' edits in the tree) | 390 pass, 1 ignored, 1 fails: conker-extract `pack_audio_reads_back` expects no `characters/59` audio, which the exporter lane's Heist work adds |
+| `bun run check` | `cargo fmt --check` fails only on the other lanes' files (conker-rules `game.rs`, `traps.rs`, `tests/rom.rs`; conker-extract `lib.rs`, `audio.rs`, `tests/rom.rs`; conker-assets `lib.rs`). Its clippy step (all crates, `-D warnings`) and the web check pass |
+| Pack (`bun run pack --force`, then `../lab/tools/verify-pack.sh`) | "pack equal", 1271 files (with the exporter lane's work in the tree) |
+| `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass. Clippy (`--tests`) and `cargo fmt --check` are clean on this batch's files |
+
+**Gaps.**
+- **Outside this lane, fixed since (the top section):** phase 3 counts as over in `lib.rs` (the prediction, the HUD text) and `audio.rs` (the muffle, the music); `lights.rs`' `< 2` already did; `places`' doc no longer claims a slot rule. §5.7's rules tests (a blast on 2 enemies: +2 hits; a burn: +1 a tick; immune: 0; own: 0) and the headshot on every reaction-0x2E hit are the rules lane's.
+- **V, a choice:** the original shows the STATS once more on RESTART's first frame (fade 0). Here phase 3 draws no STATS, so that frame shows the frozen level alone (the research's recipe).
+- **I:** the stick's counter `0x80085CD0` and the glow's `0x800BE9AC` are both taken as 2·tick; their phase against the original's is not read. The strip over the black follows the split screen's text list (V t1d); in one view the original covers it too.
+- **Checked, unchanged:** `end_fade` draws 16 on the first phase-1 tick this client sees, while the original is 0 on F and 16 on F + 1 (V b_kl2). The client sees phase 1 3-4 ticks late (E5's gap), so the +1 stays.
+- No screen of RESTART's fade: the server's phase 3 was not in the tree when the screens were taken, so the constructed-`MatchView` test is the check. No screen of the clock going either: the scenario is untimed, so it has no clock.
+
 ## War: Beach's environment (2026-10-13)
 **Batch E7. War: Beach has the original's night. The level is lit per vertex, as CBFD lights it: the ambient, the
 lamps with their flicker, the red pulses, a strike's red light, and the sweeping ground lights (a white light crossing
@@ -204,7 +345,7 @@ builds for wasm too; it has not been run in a browser.** Research:
 - **I, latency:** the jingle, the losers' voices and the end fade count from the tick this client sees the change, 3-4 ticks late (the server's tick is not sent).
 - **Rules lane:** the remake's end phase starts at the capture + 41 and Over at + 57; the original is +39 and +55/56.
 - **V, a choice:** the research's recipe says no change for the end phase. But the client drew nothing in Fading, and the DLs show phase 7's fade (V c1b DL 428/434/436), so `end_fade` now draws it, in every mode: phase 7 is shared (C `func_151E53E8`).
-- **Not done:** the end phase's HUD mask (`func_151E53E8`: HUD flags `&= 0xE35F`, the radar and others off). No screen of the shrink: the canister is taken 2 frames after it shows, under its taker, and idle offscreen humans take nothing else.
+- **Done in E10** ("The results screen's details"): the end phase's HUD mask (`func_151E53E8`: HUD flags `&= 0xE35F`, the radar and others off). No screen of the shrink: the canister is taken 2 frames after it shows, under its taker, and idle offscreen humans take nothing else.
 
 ## Bots and movement fidelity, part 2 (2026-10-13)
 **Batch E2, the bots. Bots now hear only what the original's bots hear: a grenade's wind-up at its thrower, then
@@ -1194,8 +1335,9 @@ and the caveman's sounds are in the pack but were not listened to (native runs o
 Gaps:
 - The cavemen and the club (above, per slot) are the caveman agent's; the oracle cannot show a human's respawn on 0x3F
   (the crash).
-- Trigger kinds 5 and 18 and the per-frame music volume call are unread; the camera hints (5) and volumes (6) are
-  ignored as on 0x30.
+- Trigger kinds 5 and 18: nothing reads them (C, V; corrected 2026-10-13, `dm-maps-results.md` §3a). The per-frame
+  music volume call is song 0x54's hook `func_1000CA18`, a constant 24000 off scene 0x37 sent every frame: the remake's
+  24000 already (§3b). The 6 action-1 records are the floor search's zones (the top section), not camera volumes.
 - `conker-sim`'s `WALL_PLACEMENTS` (10, 11) are 0x2D's on every map: on 0x3F they are the twin guns' and the katana's
   models (on 0x30 the same placements are pickups too). 0x30's Colors flags (placements 18, 19) and its placement 0
   are hidden in its Deathmatch but still drawn there (left as they are: 0x30 unchanged). Both fixed since (the top section).
@@ -1285,9 +1427,11 @@ Gaps:
 - The crossbow and the shotgun need their port (another agent's work); the mounted gun is left out.
 - A bot can loop for a long while near its start: in the 5-bot run bot 0 stayed unarmed all match, running and
   jumping (state 55) between nav nodes 60-62 by record 7, later 28/29 on the low floor; untraced.
-- Kind 0xE's `func_1507CD64(obj, 0xD)` call is not modelled (no oracle player stood on it in 60 s). Trigger kinds new
-  on 0x34 (12: 29 records, 17: 1) are unread; dispatch-2 placements 6 and 9 move by 10 in y in the oracle, static here.
-  Camera script zones and volumes as on 0x30 (not ported).
+- Corrected 2026-10-13 (the top section): kind 0xE is the burning cones (a hit, a hop, set alight; `func_1507CD64(obj,
+  0xD)` is the death clip 0x2D8 when a death starts grounded on one); kind 12 is the traps that placements 6-9, the
+  pressure plates (all four sink 10), switch on; kind 17 (record 56) is read by nothing in Deathmatch. The 33 action-1
+  records are the floor search's zones; the camera script's zone (0x6D) only switches off the occlusion swing, which
+  the remake lacks.
 
 ## Match settings, the end and the results (2026-10-11)
 **The server takes the original's SET-UP options (`--time 3-10|unlimited`, `--lives 1-5`, `--kills 0-10`, `--skill
@@ -1314,15 +1458,21 @@ the HUD has no clock and shows the lives left (the original's digit); a player o
 | Chrome (after both agents, `web/build.sh web`, 4,423,488 B brotli) | `--kills 1 --bots 3` on 0x2D: the STATS screen over the level (`../lab/screens/end/chrome-results.png`), a held Space = "slot 3 votes to restart" and the next match at once; on 0x30 the match plays (`chrome-map30-1.png`). A DevTools key tap (down and up in the same tick) is no press: the menu reads the pad per tick, like the game |
 | Next match's RNG | with `--kills 1` no respawn ran the rules' RNG, so every next match replayed the last (the same grenade at read 213); the next match now goes on from the bots' RNG (`Bots::rng`) |
 
-Gaps:
-- The skull is drawn at its full 32 x 32 (the original grows it from 8 x 8 over 16 frames) and the level still draws
-  in an eliminated player's view (the original draws only the sky). The lit button does not pulse.
-- During the fade the original hides the radar, score and rank (HUD flags `&= 0xE35F`); the remake keeps them.
-- `hits` counts every hit taken from another player (burns and multi-victim blasts too; when the original's
-  `gGameState+0x66` counts is untraced); the flame counts no shots; headshots only from rays and aimed shots (bullets
-  have no head test in the rules). P3/P4 row colours are inferred (their labels' green and yellow).
-- RESTART starts the next match at once (the original fades 17 frames); a finished match with no human left waits for
-  one to join. Tied bots share a place (the original orders them by slot; bots are not listed).
+Gaps (corrected 2026-10-13 from `../lab/research/mp-original/dm-maps-results.md` §5; see "The results screen's
+details"):
+- The skull grows as the original's (`hud::skull_byte`, E5: 4 px on the out frame, 32 from the 14th). Since E10 the out
+  view's black covers the HUD, as in one view; the level still draws under it (the original skips its 3D pass: the
+  same picture). Since E10 the lit button pulses and the stick moves.
+- Since E10 the end phase hides the radar, score and rank (HUD flags `&= 0xE35F`), and the clock a frame later.
+- `hits` counts as the original's `gGameState+0x66` (C, its one writer `func_151E5FF4`): +1 per damage run by a human of
+  another team, so per bullet, per victim per swing or blast, per burn tick, never a self-hit. Left: the flame counts no
+  shots; headshots only from rays and aimed shots (the original counts every reaction-0x2E hit). P3/P4's row colours are
+  the original's (C: the table 0x800ABA90, green 00ff00, yellow ffff00).
+- RESTART's 17-frame fade: the client draws it from `MatchView` phase 3 (E10), which the server publishes since (the
+  top section); the deadline still starts the next match at once.
+  A finished match with no human left waits for one to join. Ties: humans with equal score and shots share a place and
+  bots get none, as in the original (the slot clause in `func_151E565C` is dead code; this note's "tied bots by slot"
+  was wrong).
 
 ## Deathmatch on scene 0x30 (2026-10-11)
 **`conker-server --map 30` plays Deathmatch on scene 0x30 (the original's scenario 5); `--map 2d` (default) is
@@ -1353,8 +1503,9 @@ Gaps:
   ticks): their goal, node 29, lies inside lift 4's box, so the lift fires before they arrive and the AI keeps the goal.
   The original's bots ride the same pair too (s10 player 9: 4 rides in 380 reads) but wander 100-150 reads between
   rides; why the original's AI changes its goal is untraced.
-- 0x30's camera script zones are not ported (`CameraLevel` has 0x2D's only); its 8 action-1 camera volumes are
-  ignored, as on 0x2D. The mounted guns are left out. No team modes (Colors' tables are only used for the sides).
+- 0x30's camera script zones (0x3C, 0x3D) only switch off the depth-buffer occlusion swing, which the remake lacks: no
+  port (2026-10-13). Its 8 action-1 records are not camera volumes but the floor search's zones, ported since (the top
+  section). The mounted guns are left out. No team modes (Colors' tables are only used for the sides).
 
 ## HUD (2026-10-11)
 **The match shows the original's Deathmatch HUD, natively and in the browser, from the pack's `hud/`: chocolate health
@@ -1407,7 +1558,8 @@ showing through), `hurt-p1.png` the shooter at read 760: full health, the twin g
 width, the clock at the bottom).
 
 Gaps:
-- The rank on a tie: here everyone with the most kills is 1st; the original showed 1st or 2nd at 0-0 (rule not read).
+- The rank on a tie (corrected 2026-10-13): the rule is read (`func_151E565C`, C) and `places` follows it: kills −
+  deaths, then fewer shots; equal score and shots share the place. The 1st or 2nd at 0-0 was the shots tie-break.
 - The iris's timing comes from one death (health poked to 0: 134 frames, the iris in the last 88). The remake's deaths
   differ (twin guns 151 frames, a grenade 87), so the table is keyed on the frames left before the respawn: a grenade
   death starts it at once and mid-way. Its centre is fixed at the place the original's settled ((150, 91): the dying

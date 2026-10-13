@@ -1273,7 +1273,12 @@ fn follow_floor(
     y_vel: f32,
 ) {
     let pushed = p.pos[0] != pre[0] || p.pos[2] != pre[2];
-    let prev = if pushed { None } else { p.floor.map(|f| f.tri) };
+    // `p.floor_y` is still the frame start's (the zones' floor test).
+    let prev = if pushed {
+        None
+    } else {
+        world.last_floor(old, p.floor_y, p.floor)
+    };
     let floor = world.floor(p.pos[0], p.pos[2], stepped_y, old[1], prev);
     p.floor = floor;
     p.floor_y = floor.map_or(crate::collision::NO_FLOOR, |f| f.y);
@@ -1398,7 +1403,7 @@ fn air(
     let prev = if pushed.is_some() {
         None
     } else {
-        p.floor.map(|f| f.tri)
+        world.last_floor(old, p.floor_y, p.floor)
     };
     let floor = world.floor(p.pos[0], p.pos[2], p.pos[1], old[1], prev);
     p.floor_y = floor.map_or(crate::collision::NO_FLOOR, |f| f.y);

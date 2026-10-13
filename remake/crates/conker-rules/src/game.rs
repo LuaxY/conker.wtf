@@ -41,6 +41,7 @@ use crate::projectile::{
     self, BOLT_STEP, Bullet, Grenade, Rocket, Shot, hits_body, local_to_world, raycast, rise_along,
 };
 use crate::spawn::{self, Placement, Spawn};
+use crate::traps::{self, Traps};
 use crate::weapon::{self, Attack, Gives, Pickup, Weapon};
 use std::collections::BTreeSet;
 
@@ -669,8 +670,9 @@ impl Standing {
 /// Each player's place, 1 the best, as the original ranks them (`func_151E565C`; 0 for `None`, a
 /// free slot): a player out of lives keeps the place it went out on; the others rank among
 /// themselves by kills − deaths, those at the kill limit `kill_limit` (once reached) above the
-/// rest, then fewer shots (s126+0x1AA) first. Still tied, they share the place (the game's slot
-/// rule only orders bots, which have no rank there).
+/// rest, then fewer shots (s126+0x1AA) first. Still tied, they share the place: the game's third
+/// clause (the lower slot first, for `t < s` below `0x80082FA0` = humans − 1) never fires (C; V
+/// t5_b `0x800E0AC0` = 01 03 00 00). Bots count among the others but get no place there.
 pub fn places(all: &[Option<Standing>], kill_limit: u8) -> Vec<u8> {
     let in_play = || all.iter().flatten().filter(|s| s.out == 0);
     let reached = kill_limit > 0 && in_play().any(|s| s.kills >= u16::from(kill_limit));
@@ -773,6 +775,9 @@ pub struct Match {
     pub guns: Vec<Gun>,
     /// War: Beach's plunger (stepped in Beach only).
     pub plunger: Plunger,
+    /// Scene 0x34's pressure plates and traps (`Traps::new`; none elsewhere, and none in a
+    /// client's copy: their hits are the server's).
+    pub traps: Traps,
 }
 
 /// Where shooter `s` saw player `v` this frame (`seen(s, v)`; lag compensation): `None` tests `v`
@@ -852,6 +857,7 @@ impl Match {
             aims: Vec::new(),
             guns: Vec::new(),
             plunger: Plunger::default(),
+            traps: Traps::default(),
         }
     }
 
@@ -890,7 +896,7 @@ impl Match {
             p.taken = p.taken.filter(|t| t.0 != i);
         }
         for f in &mut self.players {
-            f.burn = f.burn.filter(|b| b.attacker != i);
+            f.burn = f.burn.filter(|b| b.attacker != Some(i));
         }
         self.let_go(i);
         self.players[i] = Fighter::vacant(self.tick);
@@ -988,6 +994,7 @@ impl Match {
         }
         self.pickups(arena, &mut ev);
         self.gas.step();
+        self.trap_hits(&mut ev);
         for g in &mut self.guns {
             g.leave = g.leave.saturating_sub(1);
         }
@@ -999,6 +1006,7 @@ impl Match {
             let input = inputs.get(i).copied().unwrap_or_default();
             self.player(i, &input, arena, world, seen, &mut late, &mut ev);
         }
+        self.cones(&mut ev);
         self.mounted_guns(world, seen, &mut ev);
         if self.settings.beach {
             let stood = (self.players.iter().enumerate()).position(|(i, f)| {
@@ -1025,6 +1033,9 @@ impl Match {
                     }
                 }
             }
+        }
+        if !self.traps.list.is_empty() {
+            self.plates(world);
         }
         self.burn(&mut ev);
         self.fly_bullets(seen, &mut ev);
@@ -2321,7 +2332,7 @@ impl Match {
                         }
                         let away = away_from(world, centre, p);
                         if self.hurt(v, &kind, true, false, away, Some(i), ev) {
-                            self.players[v].burn = Some(Burn::new(i));
+                            self.players[v].burn = Some(Burn::new(Some(i)));
                         }
                     }
                 }
@@ -2526,6 +2537,83 @@ impl Match {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
+    /// Scene 0x34's traps at the frame's start (each player's trigger loop before its move,
+    /// `func_150A11C4` → `func_1515F270`): a player inside a trap that is on takes its hit,
+    /// credited to the trap's owner; a direct hit, refused while immune or stunned, at the
+    /// victim's own facing (C; V trap34 and elec34: the first touch kills, the presser credited).
+    fn trap_hits(&mut self, ev: &mut Vec<Event>) {
+        let on: Vec<usize> = (0..self.traps.list.len())
+            .filter(|&k| self.traps.hits(k))
+            .collect();
+        for k in on {
+            let t = self.traps.list[k];
+            let owner = self.traps.owner[k].filter(|o| !self.free.contains(o));
+            let kind = match t.electric {
+                true => damage::TRAP_SPARK,
+                false => damage::TRAP_FIRE,
+            };
+            for v in 0..self.players.len() {
+                let (f, b) = (&self.players[v], &self.players[v].body);
+                if self.free.contains(&v) || f.out > 0 || !t.contains(b.pos, b.floor_y) {
+                    continue;
+                }
+                let facing = b.facing;
+                self.hurt(v, &kind, false, true, facing, owner, ev);
+            }
+        }
+    }
+
+    /// Scene 0x34's burning cones (floor kind 0xE): a living player on one at its move's end
+    /// takes the cone's hit, unguarded and unowned, and catches fire (`func_1504CB98`'s end with
+    /// obj+0x28 = 0, C; V cone34: hit in its first frame there, burn ticks with no attacker).
+    fn cones(&mut self, ev: &mut Vec<Event>) {
+        for v in 0..self.players.len() {
+            let (f, b) = (&self.players[v], &self.players[v].body);
+            let on = b
+                .floor
+                .is_some_and(|fl| fl.surface & 0x1F == 0xE && fl.y == b.pos[1]);
+            if self.free.contains(&v) || f.out > 0 || f.health == 0 || b.airborne || !on {
+                continue;
+            }
+            let facing = b.facing;
+            if self.hurt(v, &damage::CONE, false, false, facing, None, ev) {
+                self.players[v].burn = Some(Burn::new(None));
+            }
+        }
+    }
+
+    /// Scene 0x34's plates at the frame's end: the props' update of the next frame, with the
+    /// contacts this frame's floor queries set (the lowest slot on each, `traps::CONTACT`). A
+    /// plate that moves takes its riders with it (`func_1511473C`), on the collision the next
+    /// frame's `traps::seat` moves; one reaching the bottom switches its traps on.
+    fn plates(&mut self, world: &CollisionWorld) {
+        let on = |f: &Fighter| {
+            (f.body.floor)
+                .filter(|fl| f.body.pos[1] - fl.y <= traps::CONTACT)
+                .and_then(|fl| world.placement(fl.tri))
+        };
+        let stood = traps::PLATES.map(|n| {
+            (0..self.players.len())
+                .find(|&i| !self.free.contains(&i) && on(&self.players[i]) == Some(n))
+        });
+        let moved = self.traps.step(stood);
+        for (n, dy) in traps::PLATES.into_iter().zip(moved).filter(|m| m.1 != 0) {
+            let dy = f32::from(dy);
+            for f in &mut self.players {
+                let b = &mut f.body;
+                if let Some(fl) = b
+                    .floor
+                    .as_mut()
+                    .filter(|fl| world.placement(fl.tri) == Some(n))
+                    && !b.airborne
+                {
+                    fl.y += dy;
+                    (b.pos[1], b.floor_y) = (b.pos[1] + dy, b.floor_y + dy);
+                }
+            }
+        }
+    }
+
     /// The fires lit by flames (`func_151905BC` each frame after the players): a hit every 125
     /// VIs, refused while the host is immune or stunned; the host burns while the fire lasts and
     /// [`flame::AFTERBURN`] frames more.
@@ -2543,7 +2631,7 @@ impl Match {
         let f = &mut self.players[v];
         (f.burn, f.heat) = ((b.life > 0).then_some(b), flame::AFTERBURN);
         if hit {
-            self.hurt(v, &flame::BURN, false, true, 0, Some(b.attacker), ev);
+            self.hurt(v, &flame::BURN, false, true, 0, b.attacker, ev);
         }
     }
 
@@ -2729,15 +2817,22 @@ impl Match {
             f.immune = 90;
         }
         // Blown up, the first state lasts until the frame after the first landing (a landing sets
-        // the floor, which every airborne frame takes).
-        let over = if (reaction, lethal, step) == (0x2B, false, 0) {
-            f.body.floor.is_some()
-        } else {
-            t - f.since >= u32::from(seq[usize::from(step)].1)
+        // the floor, which every airborne frame takes); the flame's hit until one past its 5 frames
+        // that bounces less than the first landing's most (V e_w15: the flame's hop of 5 down at
+        // 831, over at 833; V cone34, cone34k: 0x69 through the cone's hop and its first bounce of
+        // 28, over at 113, the frame after the next landing's, I: one frame early, at 112).
+        let landed = f.body.floor.is_some();
+        let over = match (reaction, lethal, step) {
+            (0x2B, false, 0) => landed,
+            (0x10, _, 0) => {
+                landed && f.body.y_vel < BLAST_BOUNCE && t - f.since >= u32::from(seq[0].1)
+            }
+            _ => t - f.since >= u32::from(seq[usize::from(step)].1),
         };
         if over {
             let step = step + 1;
-            if lethal && step == 1 && !matches!(reaction, 0x2C | damage::GATE) {
+            let dead = matches!(reaction, 0x2C | damage::GATE | damage::CONE_DEATH);
+            if lethal && step == 1 && !dead {
                 self.villager_down(i);
             }
             let f = &mut self.players[i];
@@ -2766,6 +2861,18 @@ impl Match {
             );
             if lethal && step == 1 {
                 (f.stun, f.immune) = (STUN_DEAD, 255);
+            }
+            // A death that starts grounded on a kind 0xE or 0x13 floor plays 0x2D8, not the fall
+            // (`func_1507CD64(obj, 0xD)` from 0x1504D0D0, C; rare: the cone's hop carries its
+            // victim off, V cone34k).
+            let cone = (f.body.floor).is_some_and(|fl| matches!(fl.surface & 0x1F, 0xE | 0x13));
+            if f.anim == anim::DEATH_FALL && cone && !f.body.airborne {
+                let dead = Action::Hurt {
+                    reaction: damage::CONE_DEATH,
+                    lethal: true,
+                    step: 0,
+                };
+                f.set(dead, damage::CONE_DEATH_CLIP, t);
             }
         }
         // Hit on its seat, a gunner stays there, its trigger working (`func_15065A5C`'s case 0x1B
@@ -3154,7 +3261,8 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
         -9.0,
     );
     b.pos = swept.pos;
-    if let Some(fl) = world.floor(b.pos[0], b.pos[2], old[1], old[1], b.floor.map(|f| f.tri)) {
+    let prev = world.last_floor(old, b.floor_y, b.floor);
+    if let Some(fl) = world.floor(b.pos[0], b.pos[2], old[1], old[1], prev) {
         (b.pos[1], b.floor, b.floor_y) = (fl.y, Some(fl), fl.y);
     }
     let (mx, mz) = (b.pos[0] - old[0], b.pos[2] - old[2]);
@@ -3345,7 +3453,7 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             let prev = if pushed {
                 None
             } else {
-                b.floor.map(|fl| fl.tri)
+                world.last_floor(old, b.floor_y, b.floor)
             };
             let floor = world.floor(b.pos[0], b.pos[2], stepped_y, old[1], prev);
             if let Some(fl) = floor.filter(|fl| fl.y > stepped_y - movement::SNAP_DOWN) {
@@ -3657,6 +3765,46 @@ mod tests {
             .collect();
         assert_eq!(hits, [(48, 1), (48 + 59 + 63, 1)]);
         assert_eq!(m.players[1].health, 4);
+    }
+
+    /// A death that starts grounded on a cone's floor (kind 0xE) plays 0x2D8, anywhere else the
+    /// fall (`func_1507CD64`'s cause 0xD from 0x1504D0D0, C).
+    #[test]
+    fn a_death_on_a_cone_plays_0x2d8() {
+        for (surface, clip) in [(0xE, damage::CONE_DEATH_CLIP), (5, anim::DEATH_FALL)] {
+            let (arena, mut m, _) = duel();
+            let big = 20_000.0;
+            let w = CollisionWorld::new([
+                (
+                    [[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]],
+                    surface,
+                ),
+                (
+                    [[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]],
+                    surface,
+                ),
+            ]);
+            let dying = Action::Hurt {
+                reaction: 0x22,
+                lethal: true,
+                step: 0,
+            };
+            let f = &mut m.players[1];
+            f.health = 0;
+            f.set(dying, anim::HIT, 0);
+            f.body.floor = w.floor(146.5, 0.0, 0.0, 0.0, None);
+            let mut anims = Vec::new();
+            for _ in 0..30 {
+                run(&mut m, &arena, &w, 1, |_| 0);
+                anims.push(m.players[1].anim);
+            }
+            assert!(anims.contains(&clip), "{surface:#x}: {anims:x?}");
+            assert_eq!(
+                anims.contains(&anim::DEATH_FALL),
+                surface == 5,
+                "{anims:x?}"
+            );
+        }
     }
 
     /// A grenade pushes a player under it straight out to 32.74 in xz (V ctl_cd, e_gren).
@@ -4086,8 +4234,8 @@ mod tests {
         ];
         m.pickups[0].taken = Some((2, 5));
         m.pickups[1].taken = Some((1, 5));
-        m.players[0].burn = Some(Burn::new(1));
-        m.players[2].burn = Some(Burn::new(2));
+        m.players[0].burn = Some(Burn::new(Some(1)));
+        m.players[2].burn = Some(Burn::new(Some(2)));
         m.remove_player(1);
         let owners = |v: &[(u32, Bullet)]| v.iter().map(|b| b.1.owner).collect::<Vec<_>>();
         assert_eq!(owners(&m.bullets), [0, 2]);
@@ -4097,7 +4245,7 @@ mod tests {
             (Some((2, 5)), None)
         );
         assert_eq!(m.players[0].burn, None);
-        assert_eq!(m.players[2].burn.map(|b| b.attacker), Some(2));
+        assert_eq!(m.players[2].burn.and_then(|b| b.attacker), Some(2));
         m.step(&arena, &[], &w);
         assert_eq!(m.players[1], Fighter::vacant(0), "not stepped");
         assert_eq!((m.next_slot(), m.join(third), m.next_slot()), (1, 1, 3));
@@ -4386,6 +4534,14 @@ mod tests {
         // A 0-0 start: everyone shares 1st until someone fires (V: lab/hud kill, 2 shots → 2nd).
         assert_eq!(places(&[s(0, 0, 0, 0), s(0, 0, 0, 0)], 0), [1, 1]);
         assert_eq!(places(&[s(0, 0, 2, 0), s(0, 0, 0, 0)], 0), [2, 1]);
+        // Humans in slots 0-1, bots in 2-3, all 0-0: the shots part P1 and P2, not the slot (V t5_b).
+        assert_eq!(
+            places(
+                &[s(0, 0, 0, 0), s(0, 0, 5, 0), s(0, 0, 0, 0), s(0, 0, 0, 0)],
+                0
+            )[..2],
+            [1, 4]
+        );
     }
 
     /// Friendly fire (V Total War's `ff_*`): full damage and the victim's death, but no hit, kill

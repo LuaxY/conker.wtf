@@ -1514,6 +1514,90 @@ fn floors_match_the_game_on_other_maps() {
     }
 }
 
+/// The floor zones (`CameraLevel::full_floor`: type-1 action-1 records, which switch the floor
+/// query's same-triangle fast path off): the other maps' captures replayed per player, row after
+/// row, each grounded row's floor queried from the last row's floor triangle as the movement does
+/// (`CollisionWorld::last_floor`), against the same replay with the fast path everywhere. With the
+/// zones, 0x30 fixes 214 rows and breaks none, 0x34 fixes 161 and breaks 1, 0x3F is unchanged (V
+/// research `e10_fast_path_zones`; the rows still off are the replay's: it starts each run from a
+/// full query and does not move the 0x34 plates).
+#[test]
+fn floor_zones_switch_the_fast_path_off() {
+    let Some(rom) = std::env::var_os("CONKER_ROM") else {
+        return;
+    };
+    let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
+    for (scene, run, zones, fixed, worse) in [
+        (0x30, "map30/s5_h1b15", 8, 214, 0),
+        (0x34, "map34/s4_h1b15", 33, 161, 1),
+        (0x3F, "map3f/s7_h1b15", 6, 0, 0),
+    ] {
+        let Ok(text) = std::fs::read_to_string(PathBuf::from(ORACLE).join(run).join("trace.csv"))
+        else {
+            return;
+        };
+        let mut world = scene_world(&rom, scene);
+        let level = CameraLevel::new(scene as u16, &rom.asset(&[0x0C, scene, 5]).unwrap());
+        assert_eq!(level.floor_zones.len(), zones);
+        world.camera = Some(level);
+        let mut lines = text.lines();
+        let header: HashMap<&str, usize> = (lines.next().unwrap().split(',').enumerate())
+            .map(|(i, h)| (h, i))
+            .collect();
+        let mut rows: Vec<(u32, u32, [f32; 3], f32)> = Vec::new();
+        for c in lines.map(|l| l.split(',').collect::<Vec<_>>()) {
+            if c[header["mp"]] != "1" {
+                continue;
+            }
+            let f = |k: &str| c[header[k]].parse::<f32>().unwrap();
+            let pos = ["x", "y", "z"].map(f);
+            rows.push((f("player") as u32, f("read") as u32, pos, f("floor_y")));
+        }
+        rows.sort_by_key(|r| (r.0, r.1));
+        let (mut n, mut was_off, mut off, mut gained, mut lost) = (0, 0, 0, 0, 0);
+        let (mut fast, mut zoned) = (None, None);
+        let mut last: Option<(u32, u32, [f32; 3], f32)> = None;
+        for &(pl, read, pos, floor_y) in &rows {
+            let Some((.., lpos, lfloor)) = last.filter(|l| l.0 == pl && l.1 + 1 == read) else {
+                last = Some((pl, read, pos, floor_y));
+                (fast, zoned) = (None, None);
+                continue;
+            };
+            last = Some((pl, read, pos, floor_y));
+            let a = world.floor(
+                pos[0],
+                pos[2],
+                pos[1],
+                lpos[1],
+                fast.map(|f: conker_sim::collision::Floor| f.tri),
+            );
+            let b = world.floor(
+                pos[0],
+                pos[2],
+                pos[1],
+                lpos[1],
+                world.last_floor(lpos, lfloor, zoned),
+            );
+            (fast, zoned) = (a, b);
+            if pos[1] != floor_y || read < 30 {
+                continue;
+            }
+            let bad = |h: Option<conker_sim::collision::Floor>| {
+                h.is_none_or(|h| (h.y - floor_y).abs() > 0.5)
+            };
+            n += 1;
+            was_off += bad(a) as u32;
+            off += bad(b) as u32;
+            gained += (bad(a) && !bad(b)) as u32;
+            lost += (!bad(a) && bad(b)) as u32;
+        }
+        eprintln!(
+            "{run}: {n} grounded rows, off {was_off} with the fast path everywhere, {off} with the zones ({gained} fixed, {lost} broken)"
+        );
+        assert!(n > 0 && gained >= fixed && lost <= worse);
+    }
+}
+
 /// The high jump on scene 0x30 against the research traces (`../lab/research/mp-original/
 /// bots-fidelity-scratch`): `q2za`, the human crouched at the spawn with Z+A pressed at read 50
 /// (`za.txt`), reads 49-79 (the one-player match ends at 80); `q2s5w`, bot 12 running into the wall at
@@ -1602,4 +1686,149 @@ fn high_jump_matches_the_game() {
             worst[0], worst[1]
         );
     }
+}
+
+/// The E10 research scratch (`lab/research/mp-original/dm-maps-results-scratch`).
+const E10: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../lab/research/mp-original/dm-maps-results-scratch"
+);
+
+/// The camera's wall rays and eye sweeps on scene 0x34's corridor near start record 9 (`out/c34cam/
+/// camcalls.csv`, reads 23-436: P1 walks down the corridor and back toward the camera), bit for bit. 140
+/// sweeps push the eye off the corridor's walls, which only match with the box centred half its height
+/// above the eye ([`Body::camera`]).
+#[test]
+fn corridor_camera_calls_match_the_game() {
+    let Some(rom) = std::env::var_os("CONKER_ROM") else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(format!("{E10}/out/c34cam/camcalls.csv")) else {
+        return;
+    };
+    let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
+    let world = scene_world(&rom, 0x34);
+    let (mut rays, mut sweeps, mut bad) = (0, 0, Vec::new());
+    // cam+0x2C, cam+0x84 at the mode dispatch, and the cut flag cam+0x23C (logged as it changes: the
+    // first change's old value is the capture's start): a cut lifts the step cap (`0x1512BE6C`).
+    let (mut mode, mut flags) = (8u32, 0u32);
+    let mut cut = text.lines().find_map(|l| {
+        l.split(',')
+            .nth(1)
+            .filter(|&k| k == "cut")
+            .map(|_| l.split(',').nth(3) == Some("1"))
+    });
+    for line in text.lines() {
+        let c: Vec<&str> = line.split(',').collect();
+        let hex = |i: usize| u32::from_str_radix(c[i].trim_start_matches("0x"), 16).unwrap();
+        let f = |i: usize| c[i].parse::<f32>().unwrap();
+        match c[1] {
+            "mode" => (mode, flags) = (hex(3), hex(4)),
+            "cut" => cut = Some(c[4] == "1"),
+            "ray" => {
+                rays += 1;
+                let got = world.ray([f(3), f(4), f(5)], [f(6), f(7), f(8)], f(9));
+                let want = (c[10] != "0").then(|| f(11));
+                if got.map(|h| h.dist.to_bits()) != want.map(f32::to_bits) {
+                    bad.push(format!(
+                        "read {} ray: got {:?} want {want:?}",
+                        c[0],
+                        got.map(|h| h.dist)
+                    ));
+                }
+            }
+            "sweep" => {
+                sweeps += 1;
+                let (from, to, size) = ([f(2), f(3), f(4)], [f(5), f(6), f(7)], [f(8), f(9)]);
+                let (hits, want) = (c[14].parse::<u32>().unwrap(), [f(15), f(16), f(17)]);
+                let opts = Sweep {
+                    any_slope: true,
+                    long_step: cut == Some(true) || mode == 0x100,
+                    no_secondary: flags & 0x1_0000 != 0,
+                    no_objects: flags & 0x8000_0000 != 0,
+                    ..Sweep::default()
+                };
+                let got = world.sweep(from, to, &Body::camera(size[0], size[1]), &opts, 0.0);
+                if got.pos.map(f32::to_bits) != want.map(f32::to_bits)
+                    || (got.hits > 0) != (hits > 0)
+                {
+                    bad.push(format!(
+                        "read {} sweep {from:?} -> {to:?}: got {:?} hits {} want {want:?} hits {hits}",
+                        c[0], got.pos, got.hits
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    eprintln!(
+        "corridor: {rays} rays, {sweeps} sweeps, {} differ",
+        bad.len()
+    );
+    for b in bad.iter().take(20) {
+        eprintln!("  {b}");
+    }
+    assert!(rays > 0 && sweeps > 0 && bad.is_empty());
+}
+
+/// The follow camera on scene 0x34's corridor (`out/c34/trace.csv.gz`, P1 from start record 9: down the
+/// −z ramp, back toward the camera, then the +x corridor), fed the original's player rows (open loop),
+/// against the original's eye. Walking back toward the camera (reads 219-290), the eye's box slides along
+/// the corridor's walls.
+#[test]
+fn corridor_camera_matches_the_game() {
+    let Some(rom) = std::env::var_os("CONKER_ROM") else {
+        return;
+    };
+    let Ok(gz) = std::process::Command::new("gzip")
+        .args(["-dc", &format!("{E10}/out/c34/trace.csv.gz")])
+        .output()
+    else {
+        return;
+    };
+    if !gz.status.success() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("conker-e10-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("c34.csv"), gz.stdout).unwrap();
+    let rows = trace_of(dir.join("c34").to_str().unwrap(), "0").unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let rom = extract_core::Rom::new(std::fs::read(rom).unwrap()).unwrap();
+    let mut world = scene_world(&rom, 0x34);
+    world.acos = AcosTable::from_game_data(&rom.game_data().unwrap());
+    world.camera = Some(CameraLevel::new(
+        0x34,
+        &rom.asset(&[0x0C, 0x34, 5]).unwrap(),
+    ));
+    let start = rows.iter().position(|r| r.read == START).unwrap();
+    let mut cam = camera(&rows[start]);
+    // The camera spawned from a row lacks the game's spring state: it converges by read 113. From read
+    // 336 (the +x walk) the remake's target eye drifts from the game's (conker-camera; the sweeps match).
+    const FROM: u32 = 113;
+    const TO: u32 = 335;
+    let (mut worst, mut later) = ((0.0f32, 0u32), (0.0f32, 0u32));
+    for pair in rows[start..].windows(2) {
+        let (row, next) = (&pair[0], &pair[1]);
+        let (buttons, stick_x, stick_y) = row.input;
+        let input = Input {
+            stick_x,
+            stick_y,
+            buttons,
+            camera_yaw: row.yaw,
+        };
+        cam.step_view(conker_sim::follow::view(&next.state), &input, &world);
+        let (e, w) = (cam.cam.eye, next.eye);
+        let d = ((e[0] - w[0]).powi(2) + (e[1] - w[1]).powi(2) + (e[2] - w[2]).powi(2)).sqrt();
+        let max = match next.read {
+            ..FROM => continue,
+            FROM..=TO => &mut worst,
+            _ => &mut later,
+        };
+        if d > max.0 {
+            *max = (d, next.read);
+        }
+    }
+    eprintln!("corridor camera: worst {worst:?} in reads {FROM}-{TO}, {later:?} after");
+    assert!(worst.0 < 0.01, "{worst:?}");
 }

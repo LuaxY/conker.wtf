@@ -130,7 +130,7 @@ use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
 use conker_rules::{Arena, Placement, Rng, Spawn, gun, place};
-use conker_rules::{beach, colors};
+use conker_rules::{beach, colors, traps};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
@@ -159,6 +159,10 @@ const START_MARGIN: u32 = 150;
 const LIVE_READ: u32 = 23;
 /// Ticks of position history: 2 s, more than any view lag a playable connection has.
 const HISTORY: usize = 60;
+/// RESTART's fade: the ticks from the votes to the next match (the original's: the STATS one more
+/// frame, then black +16 a frame, 255 on the 17th, the match on the 18th read; V t5_r, C
+/// `func_151E4EE8`, `func_151ED1E0`).
+const RESTART_FADE: u32 = 17;
 /// The bot skills' names (`--skill`), as the SET-UP screen shows them.
 const SKILLS: [&str; 5] = ["inbred", "crap", "normal", "bastard", "einstein"];
 
@@ -399,6 +403,7 @@ fn main() {
     game.ai = Ai::new([pack.nav, pack.triggers, pack.ai, pack.class], scene as u8)
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
     game.m.guns = gun::spawn(usize::from(scene));
+    game.m.traps = game.ai.traps();
     app.add_observer(on_link)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
@@ -591,6 +596,11 @@ impl Ai {
         ai.assets()
             .map(|a| Bots::new(a, &[], &[0], DEFAULT_SKILL, Rng::default()))??;
         Some(ai)
+    }
+
+    /// The map's plates and traps, all at rest and off (scene 0x34's; none elsewhere).
+    fn traps(&self) -> traps::Traps {
+        traps::Traps::new(u16::from(self.scene), &self.data[1])
     }
 
     fn assets(&self) -> Option<Assets<'_>> {
@@ -814,6 +824,15 @@ impl Game {
     fn results_at(&self) -> Option<u32> {
         let outro = self.winner().map_or(0, |t| self.outros[usize::from(t)]);
         Some(self.m.ended_at? + END_DELAY + FADE + 1 + outro)
+    }
+
+    /// Over, RESTART's fade: the ticks left before the next match, `RESTART_FADE` on the tick the
+    /// votes were in down to 1 (`MatchView` phase 3); `None` otherwise.
+    fn restarting(&self, t: u32) -> Option<u32> {
+        let start = self
+            .start
+            .filter(|_| !self.started && self.m.phase() == Phase::Over)?;
+        start.checked_sub(t).filter(|&left| left > 0)
     }
 
     /// Over: ticks before the next match starts anyway: [`RESULTS`] once the results show, more
@@ -1282,11 +1301,15 @@ fn simulate(
     let some_human = humans.peek().is_some();
     let voted = humans.all(|s| game.votes.contains(&s));
     if game.m.phase() == Phase::Over
+        && game.started
         && game.setup.wait == 0
         && some_human
         && (voted || game.restart_in(t) == 0)
     {
-        (game.start, game.started) = (Some(t), false);
+        // RESTART fades to black first (phase 3, `RESTART_FADE` ticks); the deadline starts the
+        // next match at once (the original's deadline quits, with no fade).
+        let fade = if voted { RESTART_FADE } else { 0 };
+        (game.start, game.started) = (Some(t + fade), false);
         game.votes.clear();
         // The RNG goes on from the bots' (they draw the most): a match no draw of the rules' RNG
         // ran in (a kill limit of 1, no respawn) would otherwise replay the last one.
@@ -1331,12 +1354,14 @@ fn simulate(
         game.m = Match {
             free: std::mem::take(&mut game.m.free),
             guns: gun::spawn(usize::from(game.ai.scene)),
+            traps: game.ai.traps(),
             ..Match::new(&game.arena, fighters, game.m.rng, t)
         }
         .with(game.setup.settings);
         game.ai.lifts = Lifts::new(&game.ai.data[1], game.ai.scene);
         game.restart_bots();
         game.won = None;
+        game.votes.clear();
         if game.m.settings.time.is_some() {
             game.m.timer -= 2 * (game.setup.first_read as i32 - (LIVE_READ as i32 - 1));
         }
@@ -1413,9 +1438,12 @@ fn simulate(
     for &(p, place) in &rides {
         info!("t={t} slot {p} takes the lift to record {}", place.index);
     }
-    // War: Beach's plunger: its collision where the prop is this frame.
+    // War: Beach's plunger and 0x34's plates: their collision where the props are this frame.
     if game.m.settings.beach {
         beach::seat(&mut world.0, game.m.plunger.y);
+    }
+    if !game.m.traps.list.is_empty() {
+        traps::seat(&mut world.0, game.m.traps.offsets());
     }
     // The AI script's effects (Total War's gas) go in before the step, its hits' events first.
     let mut events = Vec::new();
@@ -1524,6 +1552,19 @@ fn simulate(
     {
         if let (None, Some(c)) = (was.carrier, f.carrier) {
             info!("COLORS t={t} flag {k} taken by slot {c}");
+        }
+    }
+    // 0x34's plates going down and the traps they switch on, with the slot they credit.
+    let (traps, was) = (&game.m.traps, &pre.traps);
+    for k in 0..traps.plates.len() {
+        if traps.plates[k].state == 3 && was.plates[k].state != 3 {
+            let on =
+                (0..traps.list.len()).filter(|&j| traps.list[j].plate == k && was.left[j] == 0);
+            let owner = on.clone().find_map(|j| traps.owner[j]);
+            info!(
+                "TRAPS t={t} plate {k} down: {} traps on for slot {owner:?}",
+                on.count()
+            );
         }
     }
     for k in 0..game.m.guns.len() {
@@ -1751,9 +1792,13 @@ fn publish(
         kill_limit: s.kills,
         radar: s.radar,
         total_war: s.total_war,
-        restart_in: game.restart_in(m.tick) as u16,
+        restart_in: match game.restarting(m.tick) {
+            Some(left) => left as u16,
+            None => game.restart_in(m.tick) as u16,
+        },
         winner: game.winner(),
         phase: match m.phase() {
+            _ if game.restarting(m.tick).is_some() => 3,
             Phase::Playing => 0,
             Phase::Fading => 1,
             Phase::Over => 2,
@@ -1801,6 +1846,8 @@ fn publish(
         holders: [holder(beach_g::SNIPER), holder(beach_g::BAZOOKA)],
         plunger: m.plunger.y,
         cooldown: beach.map_or(0, |b| b.globals().i32(beach_g::COOLDOWN).max(0) as u16),
+        plates: m.traps.offsets(),
+        traps: m.traps.on(),
     });
 }
 
@@ -2093,6 +2140,23 @@ mod tests {
         g.won = Some(g.winner());
         g.m.players[1].kills = 0;
         assert_eq!((g.winner(), g.results_at()), (Some(1), Some(over + 400)));
+    }
+
+    /// RESTART voted at tick D (over): phase 3 for 17 ticks, `restart_in` 17 down to 1, the next
+    /// match on D + 17 (V t5_r: A read at R, the STATS on R + 1, black on R + 17, the new match on
+    /// R + 18).
+    #[test]
+    fn restart_fades_for_17_ticks() {
+        let mut g = game(Setup::default());
+        g.m.ended_at = Some(100);
+        let d = 100 + END_DELAY + FADE + 50;
+        g.m.tick = d;
+        assert_eq!(g.restarting(d), None);
+        (g.start, g.started) = (Some(d + RESTART_FADE), false);
+        let left: Vec<_> = (d..d + 18).map(|t| g.restarting(t)).collect();
+        assert_eq!(left[0], Some(17));
+        assert_eq!(left[16], Some(1));
+        assert_eq!(left[17], None);
     }
 
     /// `--public` takes the game port unless it names one; the token endpoint defaults to port + 1.

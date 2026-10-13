@@ -1,8 +1,9 @@
 //! The end of a match: the results over the frozen level ([`crate::hud`] draws them; in War: Total
 //! War after the winner's outro, [`crate::outro`]), and their
 //! menu. RESTART votes for the next match (conker-sim's [`Restart`]: the server starts it once every
-//! human voted, or on its own after its countdown); QUIT leaves: the browser goes back to the
-//! landing page (`index.html`), the native client exits.
+//! human voted, or on its own after its countdown, past RESTART's 17-frame fade: phase 3,
+//! [`crate::hud::restart_fade`], where the menu, shown no more, ignores the pad); QUIT leaves: the
+//! browser goes back to the landing page (`index.html`), the native client exits.
 
 use bevy::prelude::*;
 use conker_sim::movement::{BUTTON_A, Input};

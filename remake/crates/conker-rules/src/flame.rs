@@ -44,8 +44,8 @@ pub struct Burn {
     pub acc: u16,
     /// Frames the fire has left.
     pub life: u16,
-    /// Who lit it (the hits' attacker).
-    pub attacker: usize,
+    /// Who lit it (the hits' attacker; none for a cone's, scene 0x34's kind-0xE floors).
+    pub attacker: Option<usize>,
 }
 
 /// The burn hit's period (VIs) and the fire's life (frames).
@@ -55,7 +55,7 @@ pub const BURN_LIFE: u16 = 125;
 pub const AFTERBURN: u16 = 10;
 
 impl Burn {
-    pub fn new(attacker: usize) -> Self {
+    pub fn new(attacker: Option<usize>) -> Self {
         Self {
             acc: 5,
             life: BURN_LIFE,
@@ -123,10 +123,10 @@ mod tests {
     /// combat4_e_w15: lit at 828 (+0x94 = 5 there), it hits at 887 and 950, and burns 125 frames.
     #[test]
     fn burn_ticks() {
-        let mut b = Burn::new(0);
+        let mut b = Burn::new(Some(0));
         let hits: Vec<u32> = (828..1000).filter(|_| b.life > 0 && b.step()).collect();
         assert_eq!(hits, [887, 950]);
-        let mut b = Burn::new(0);
+        let mut b = Burn::new(Some(0));
         assert_eq!(
             (828..1000)
                 .take_while(|_| {

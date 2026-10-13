@@ -470,7 +470,8 @@ pub struct Lives {
 /// top left at `label` (the first row's), then its place (the rank's suffixes as in `(1st)`),
 /// accuracy (hits × 100 / shots, %), kills, headshots and deaths centred on `columns`, in its
 /// `colours[n]` over a `shadow` one pixel right and down; and the menu: `restart` and `quit`, the
-/// chosen one lit, and the `stick` between them.
+/// chosen one's `lit` pulsing over its `image`, and the `stick` between them (its texture holds
+/// its frames side by side, `image` the first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Results {
     pub anchor: Anchor,

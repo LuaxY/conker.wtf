@@ -112,9 +112,9 @@ fn slice_in_memory() {
         assert_eq!(e["logicalIds"], serde_json::json!(c.logical));
     }
 
-    // The weapons and the grenade in the hand: 13 models (the twin guns are two), and the gas mask
-    // in the hand and on the head, one mesh each but the crossbow, a child object with a list per
-    // joint.
+    // The weapons and the grenade in the hand: 15 models (the twin guns are two; map 0x1A's bat and
+    // tommy gun), and the gas mask in the hand and on the head, one mesh each but the crossbow, a
+    // child object with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -122,7 +122,19 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 16);
+    assert_eq!(slice.held.len(), 18);
+    // The bat (bank 09 #0x38) in the right hand from its draw 0x10E (15 ticks in), away at 0x110
+    // (its holster: the club's 0x2C3 is not it); the tommy gun (#0x5F) from 0x1DD at 11, away at
+    // 0x1DE at 12 (ROM clip events, C).
+    let find = |entry| slice.held.iter().find(|h| h.entry == entry).unwrap();
+    let (bat, tommy) = (find(0x38), find(0x5F));
+    assert_eq!((bat.joint, tommy.joint), (9, 9));
+    assert_eq!(bat.create[0], (0x10E, 15.0));
+    assert_eq!(bat.remove[0], (0x110, 14.0));
+    assert_eq!(
+        (tommy.create.clone(), tommy.remove.clone()),
+        (vec![(0x1DD, 11.0)], vec![(0x1DE, 12.0)])
+    );
     for (i, h) in slice.held.iter().enumerate() {
         let node = held["scenes"][i]["nodes"][0].as_u64().unwrap() as usize;
         let mesh = held["nodes"][node]["mesh"].as_u64().unwrap() as usize;

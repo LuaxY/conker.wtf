@@ -177,12 +177,23 @@ pub enum Gives {
 
 /// A pickup on the map: its placement, what it gives and where it is (conker-rules'
 /// `Arena::pickups`, in the multiplayer weapon manager's order).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pickup {
     pub placement: u16,
     pub gives: Gives,
     #[serde(serialize_with = "ints3")]
     pub position: [f32; 3],
+    /// VIs (2 a frame) until a taken pickup is back (MP+0xEAC); absent: the rules' own (240).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respawn: Option<u16>,
+    /// The spots it moves to at each (re)appearance, a random one no other pickup stands on, in
+    /// the game's spot order (0x1A's roaming weapons); empty (absent): it stays at `position`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "ints3s"
+    )]
+    pub roams: Vec<[f32; 3]>,
 }
 
 /// Ids and length of one character animation, in the character glTF's animation order.
@@ -235,13 +246,19 @@ pub struct Held {
 }
 
 /// `maps/<map>/lights.json`: the level's point lights the client draws (War: Total War's on `2d`,
-/// none elsewhere) and the ambient light its lit draws start from (CBFD's lighting: a lit vertex's
+/// War: Beach's on `2b`, the level's own 34 on `1a`, none elsewhere) and the ambient light its lit draws start from (CBFD's lighting: a lit vertex's
 /// colour times the ambient plus each light's colour times min(1, `size` × 2048 / d²), the vertex
 /// `d` units from it).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lights {
     pub ambient: [u8; 3],
     pub lights: Vec<Light>,
+    /// The lights (indices in `lights`) that switch on and off at random, each by itself (light
+    /// behaviour 255, 0x1A's kinds 0x900-0xD00): each frame an on one goes off with chance 35/1000,
+    /// an off one on with 70/1000 (C `func_15100340` → `func_151616D0` → `func_151604A0`; per frame I,
+    /// the oracle's spans agree); empty (absent) elsewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switching: Vec<usize>,
 }
 
 /// A point light at `at`, of `rgb`, `size + swing × sin φ` big, φ stepping `step` a frame (from
@@ -289,6 +306,19 @@ pub struct Character {
     /// k: the glTF primitives whose `extras.list` is k). Empty (absent) for the other characters.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub looks: std::collections::BTreeMap<u8, u8>,
+    /// Heist's team looks drawn with this model (the Wise Guy's); absent for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teams: Option<Teams>,
+}
+
+/// A character's look per team: one material's texture swapped (the game binds it to segment 0x0A
+/// per team).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Teams {
+    /// The glTF material that draws it (its own texture is team 0's).
+    pub material: usize,
+    /// Per team (Heist's REDS, BLUES, GREENS, YELLOWS), its PNG, relative to the character's folder.
+    pub textures: Vec<String>,
 }
 
 /// What a match on one map, with its characters and one weapon set, reads from the pack: the
@@ -429,8 +459,8 @@ impl Trigger {
     }
 }
 
-/// One navigation node (`[0x19, scene]`: a u16 count, a zero u16, 16-byte nodes, zero padding to
-/// 8 bytes).
+/// One navigation node (`[0x19, scene]`: a u16 count, a u16 ([`NavFile`]), 16-byte nodes, zero
+/// padding to 8 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct Node {
     pos: [i16; 3],
@@ -440,35 +470,65 @@ struct Node {
     /// Neighbour node indices, 255 = none.
     next: [u8; 5],
     barrier: u8,
+    /// `+0xF`: zero on the maps but 0x1A's node 2 (0x14); the bots don't read it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    byte_15: u8,
 }
 
-fn parse_nav(bytes: &[u8]) -> Option<Vec<Node>> {
-    let count = usize::from(u16::from_be_bytes([*bytes.first()?, *bytes.get(1)?]));
-    let body = bytes.get(4..4 + 16 * count)?;
-    Some(
-        body.as_chunks::<16>()
-            .0
-            .iter()
-            .map(|r| Node {
-                pos: [0, 2, 4].map(|o| i16::from_be_bytes([r[o], r[o + 1]])),
-                band: r[6],
-                id: r[7],
-                half: r[8],
-                next: [r[9], r[10], r[11], r[12], r[13]],
-                barrier: r[14],
-            })
-            .collect(),
-    )
+fn is_zero(b: &u8) -> bool {
+    *b == 0
 }
 
-fn nav_bytes(nodes: &[Node]) -> Vec<u8> {
+/// `nav.json`: the nodes, or, when the graph's u16 at +2 is not zero (0x1A's 0x3D, unread), that
+/// word and the nodes.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum NavFile {
+    Nodes(Vec<Node>),
+    Graph { word_2: u16, nodes: Vec<Node> },
+}
+
+impl NavFile {
+    fn new(word_2: u16, nodes: Vec<Node>) -> Self {
+        match word_2 {
+            0 => Self::Nodes(nodes),
+            _ => Self::Graph { word_2, nodes },
+        }
+    }
+
+    fn parts(&self) -> (u16, &[Node]) {
+        match self {
+            Self::Nodes(nodes) => (0, nodes),
+            Self::Graph { word_2, nodes } => (*word_2, nodes),
+        }
+    }
+}
+
+fn parse_nav(bytes: &[u8]) -> Option<NavFile> {
+    let word = |o: usize| Some(u16::from_be_bytes([*bytes.get(o)?, *bytes.get(o + 1)?]));
+    let body = bytes.get(4..4 + 16 * usize::from(word(0)?))?;
+    let nodes = (body.as_chunks::<16>().0.iter())
+        .map(|r| Node {
+            pos: [0, 2, 4].map(|o| i16::from_be_bytes([r[o], r[o + 1]])),
+            band: r[6],
+            id: r[7],
+            half: r[8],
+            next: [r[9], r[10], r[11], r[12], r[13]],
+            barrier: r[14],
+            byte_15: r[15],
+        })
+        .collect();
+    Some(NavFile::new(word(2)?, nodes))
+}
+
+fn nav_bytes(word_2: u16, nodes: &[Node]) -> Vec<u8> {
     let mut out = (nodes.len() as u16).to_be_bytes().to_vec();
-    out.extend([0, 0]);
+    out.extend(word_2.to_be_bytes());
     for n in nodes {
         out.extend(n.pos.iter().flat_map(|v| v.to_be_bytes()));
         out.extend([n.band, n.id, n.half]);
         out.extend(n.next);
-        out.extend([n.barrier, 0]);
+        out.extend([n.barrier, n.byte_15]);
     }
     out.resize(out.len().next_multiple_of(8), 0);
     out
@@ -547,7 +607,8 @@ impl Slice {
                 return Err(invalid(triggers, format!("[{i}]"), why));
             }
         }
-        let nodes: Vec<Node> = parse_json(nav, &bytes(nav)?)?;
+        let graph: NavFile = parse_json(nav, &bytes(nav)?)?;
+        let (word_2, nodes) = graph.parts();
         if nodes.len() > usize::from(NO_NODE) {
             return Err(invalid(nav, "(graph)", "at most 255 nodes"));
         }
@@ -581,7 +642,7 @@ impl Slice {
             spawns: parse_json(spawns, &bytes(spawns)?)?,
             pickups: parse_json(pickups, &bytes(pickups)?)?,
             triggers: records.iter().flat_map(Trigger::bytes).collect(),
-            nav: nav_bytes(&nodes),
+            nav: nav_bytes(word_2, nodes),
             characters: (files[13..].iter())
                 .map(|f| parse_json(f, &bytes(f)?))
                 .collect::<Result<_>>()?,
@@ -654,8 +715,9 @@ impl Slice {
                 "holds bytes the pack does not keep",
             ));
         }
-        let nodes = parse_nav(&self.nav).unwrap_or_default();
-        if nav_bytes(&nodes) != self.nav {
+        let graph = parse_nav(&self.nav).unwrap_or(NavFile::Nodes(vec![]));
+        let (word_2, nodes) = graph.parts();
+        if nav_bytes(word_2, nodes) != self.nav {
             return Err(invalid(
                 &nav,
                 "(graph)",
@@ -667,7 +729,7 @@ impl Slice {
             (spawns, to_json(&self.spawns, 2)),
             (pickups, to_json(&self.pickups, 2)),
             (triggers, to_json(&records, 2)),
-            (nav, to_json(&nodes, 1)),
+            (nav, to_json(&graph, 1 + usize::from(word_2 != 0))),
             (held, to_json(&self.held, 2)),
             (acos, to_json(&self.acos, 1)),
             (sink, to_json(&self.sink, 1)),
@@ -699,6 +761,10 @@ impl Serialize for Num {
 
 fn ints3<S: Serializer>(v: &[f32; 3], s: S) -> Result<S::Ok, S::Error> {
     v.map(Num).serialize(s)
+}
+
+fn ints3s<S: Serializer>(v: &[[f32; 3]], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(v.iter().map(|p| p.map(Num)))
 }
 
 fn points<S: Serializer>(v: &[[f32; 3]; 3], s: S) -> Result<S::Ok, S::Error> {
@@ -858,6 +924,7 @@ mod tests {
             half: 40,
             next,
             barrier: 0,
+            byte_15: 0,
         };
         Slice {
             collision: vec![
@@ -894,15 +961,28 @@ mod tests {
                     placement: 12,
                     gives: Gives::Weapon(0x09),
                     position: [1.0, 2.0, 3.0],
+                    respawn: None,
+                    roams: vec![],
                 },
                 Pickup {
                     placement: 33,
                     gives: Gives::Grenades,
                     position: [-1.0, 0.0, 3.5],
+                    respawn: Some(300),
+                    roams: vec![[-1.0, 0.0, 3.5], [4.0, -0.0, 0.25]],
                 },
             ],
             triggers: [record(1, 6.1e-5, 333.8), record(8, 0.0, -0.0)].concat(),
-            nav: nav_bytes(&[node([1, NO_NODE, NO_NODE, NO_NODE, NO_NODE]), node([0; 5])]),
+            nav: nav_bytes(
+                0x3D,
+                &[
+                    node([1, NO_NODE, NO_NODE, NO_NODE, NO_NODE]),
+                    Node {
+                        byte_15: 0x14,
+                        ..node([0; 5])
+                    },
+                ],
+            ),
             lights: Lights {
                 ambient: [50, 50, 52],
                 lights: [When::Countdown, When::Shown(27)]
@@ -916,6 +996,7 @@ mod tests {
                         flicker: when == When::Shown(27),
                     })
                     .into(),
+                switching: vec![1],
             },
             outros: vec![sample_outro()],
             characters: vec![
@@ -924,6 +1005,10 @@ mod tests {
                     clips: vec![],
                     root_clips: vec![],
                     looks: [(0x11, 0x3A), (0x1C, 0x0C)].into(),
+                    teams: Some(Teams {
+                        material: 2,
+                        textures: vec!["textures/team-0.png".into(), "textures/team-1.png".into()],
+                    }),
                 },
                 Character {
                     model_lift: 43,
@@ -941,6 +1026,7 @@ mod tests {
                         end: -9,
                     }],
                     looks: Default::default(),
+                    teams: None,
                 },
             ],
             held: vec![Held {
@@ -1125,6 +1211,11 @@ mod tests {
         .chain(s.spawns.iter().flat_map(|p| p.camera))
         .chain(s.pickups.iter().flat_map(|p| p.position))
         .chain(
+            s.pickups
+                .iter()
+                .flat_map(|p| p.roams.iter().flatten().copied()),
+        )
+        .chain(
             s.held
                 .iter()
                 .flat_map(|h| h.create.iter().chain(&h.remove).map(|e| e.1)),
@@ -1167,6 +1258,20 @@ mod tests {
             "{collision}"
         );
         assert_eq!(collision.matches("\"layer\"").count(), 3);
+        // The graph's word and a node's byte 15 only when not zero.
+        let nav = String::from_utf8(files["maps/2d/nav.json"].clone()).unwrap();
+        assert!(
+            nav.starts_with("{\n  \"word_2\": 61,\n  \"nodes\": [\n    {"),
+            "{nav}"
+        );
+        assert_eq!(nav.matches("\"byte_15\":20").count(), 1, "{nav}");
+        // A pickup's respawn and roaming spots only when it has them.
+        let pickups = String::from_utf8(files["maps/2d/pickups.json"].clone()).unwrap();
+        assert_eq!(pickups.matches("\"respawn\"").count(), 1, "{pickups}");
+        assert!(
+            pickups.contains("\"respawn\": 300,\n    \"roams\": [[-1,0,3.5],[4,-0.0,0.25]]"),
+            "{pickups}"
+        );
     }
 
     #[test]

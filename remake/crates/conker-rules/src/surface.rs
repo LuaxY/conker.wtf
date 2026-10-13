@@ -2,15 +2,16 @@
 //! player's floor query copies to obj+0x184 each frame. The game reads three fields of it (C):
 //! - bits 0-4, the [kind](Surface::kind) (`func_1510F8CC` is `word & 0x1F`). It indexes the sink table
 //!   ([`SINK`]), picks impact effects when a projectile hits the face (`func_150E1D14` →
-//!   `func_150E1AB0`), and kinds 0xE and 0x13 call `func_1507CD64(obj, 0xD)` where every other kind
-//!   calls it with 0. Of scene 0x2D's kinds (0, 1, 3, 4, 5, 9, 0xA), only 0xA has a sink entry.
+//!   `func_150E1AB0`), and a death that starts grounded on kind 0xE or 0x13 is `func_1507CD64(obj,
+//!   0xD)`, clip 0x2D8 (0x1504D0D0), where every other kind's is cause 0. Kind 0xE (0x34's 7 cones)
+//!   also burns: a living player grounded on one takes `damage::CONE` (end of `func_1504CB98`; both
+//!   in `game::Match`). Of scene 0x2D's kinds (0, 1, 3, 4, 5, 9, 0xA), only 0xA has a sink entry.
 //! - bits 28-30, the [slide class](Surface::slide), copied to `0x800CC27C` by the movement code
 //!   (`func_1504CB98`). Scene 0x2D's 0x60000005 faces (class 6) are the steep sides of the two
 //!   central structures (normal.y 0.35-0.79): an idle player slides down them.
 //! - bits 12-15 (`func_15051558` tests them against 3 and 4; meaning unread): 0 on every 0x2D word.
 //!
-//! Untraced: what the 0xA kind's obj+0xAA byte drives, kinds 0xE/0x13's `func_1507CD64` call, and
-//! classes other than 0 and 6.
+//! Untraced: what the 0xA kind's obj+0xAA byte drives, and classes other than 0 and 6.
 
 /// A face's surface word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

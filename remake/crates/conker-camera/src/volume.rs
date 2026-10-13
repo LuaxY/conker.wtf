@@ -207,6 +207,9 @@ pub struct CameraLevel {
     pub skip_objects: Vec<CameraVolume>,
     /// The camera hints ([`CameraLevel::hint_cut`]).
     pub hints: Vec<CameraHint>,
+    /// Not the camera's: the type-1 records of action 1 or 3 (`kind`), player zones that switch
+    /// the floor query's same-triangle fast path off or on ([`CameraLevel::full_floor`]).
+    pub floor_zones: Vec<CameraHint>,
 }
 
 impl CameraLevel {
@@ -222,7 +225,29 @@ impl CameraLevel {
                 .filter_map(|&i| records.get(i).map(CameraVolume::parse_record))
                 .collect(),
             hints: CameraHint::parse_table(table),
+            floor_zones: records
+                .iter()
+                .filter(|r| r[0x15] >> 2 == 1 && matches!(r[0x17], 1 | 3) && r[0x14] == 0)
+                .map(|r| CameraHint {
+                    zone: CameraVolume::parse_record(r),
+                    on_floor: r[0x16] & 1 != 0,
+                    kind: r[0x17],
+                    command: 0,
+                })
+                .collect(),
         }
+    }
+
+    /// Whether the player's floor is searched in full this frame (obj+0xF8 bit 2 clear), at the
+    /// frame's start at `pos` over `floor_y`: the last floor zone containing it decides, action 1
+    /// yes, action 3 no; outside them the multiplayer scenes set the bit (`func_150829D8`), so no.
+    /// The player's trigger loop (`func_150A11C4`) runs it; the bit gates the fast path
+    /// (`func_150A3FC4`) in `func_1504CB98` and `func_15058898` (C; V z30, z34: 18,688 and 18,704
+    /// rows, 1 and 39 off, the latter `s126+0x56` ≠ 0, I).
+    pub fn full_floor(&self, pos: [f32; 3], floor_y: f32) -> bool {
+        (self.floor_zones.iter().rev())
+            .find(|z| z.contains(pos, pos, floor_y))
+            .is_some_and(|z| z.kind == 1)
     }
 
     /// Whether the hints cut the camera this frame ([`crate::CameraState::hint_cut`]): the last hint

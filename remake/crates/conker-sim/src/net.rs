@@ -64,7 +64,10 @@ use serde::{Deserialize, Serialize};
 /// heights ([`MatchView::lifts`], their collision predicted).
 /// 22: the fighter's mount carries the jump on's seat and the gun's fire process (conker-rules'
 /// `Mount`: the local gunner's shots are predicted).
-pub const PROTOCOL_ID: u64 = 22;
+/// 23: scene 0x34's plates and traps ([`MatchView`]'s `plates` and `traps`; the fighter's fire may
+/// have no owner, a cone's), the floor zones (the fast path off in them), and RESTART's fade
+/// ([`MatchView::phase`] 3).
+pub const PROTOCOL_ID: u64 = 23;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -201,12 +204,16 @@ pub struct MatchView {
     /// the match ranks them (`team_places`, `team_result`), no kill limit.
     pub total_war: bool,
     /// Over: ticks before the next match starts anyway (every human voting [`Restart`] starts it
-    /// sooner): [`RESULTS`] once the results show, more through a War outro before them.
+    /// sooner): [`RESULTS`] once the results show, more through a War outro before them. In phase
+    /// 3, the ticks left of RESTART's fade: 17 on the tick the votes are in, down to 1 on the last
+    /// tick before the next match.
     pub restart_in: u16,
     /// War: the winning team (0 the squirrels, 1 the Tediz; conker-rules' `team_result`), fixed
     /// once over; `None` a DRAW, or not a War mode.
     pub winner: Option<u8>,
-    /// 0 playing, 1 the end fade, 2 over (the results).
+    /// 0 playing, 1 the end fade, 2 over (the results), 3 RESTART's fade to the next match (17
+    /// ticks, `restart_in`; the original's `func_151E4EE8`: black +16 a frame over the frozen
+    /// scene, 255 on its 17th frame). The 40 s deadline restarts at once (the original quits).
     pub phase: u8,
     /// The tick the match started at and the oracle read it stands for (scripted clients key their
     /// script on it; `None` until the server's `--wait` players have joined).
@@ -253,6 +260,11 @@ pub struct MatchView {
     pub holders: [Option<u16>; 2],
     pub plunger: f32,
     pub cooldown: u16,
+    /// Scene 0x34 (conker-rules' `traps`): the pressure plates' y below rest (placements 6-9, 0
+    /// to −10; `traps::seat` puts their collision there), and bit k: trap k of `traps::parse`'s
+    /// list (the trigger table's kind-12 records in table order) is on.
+    pub plates: [i8; 4],
+    pub traps: u32,
 }
 
 /// What a client showed of the other players when it sampled its input for `tick`: their states

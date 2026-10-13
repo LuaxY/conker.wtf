@@ -9,8 +9,8 @@
 //! and the capture's fade ([`capture_fade`]); War: Beach its strip with the villagers' head and the
 //! team scores, a villager's escape countdown, no radar, the escape's dim and fade in
 //! ([`escape_fade`]), the strike's flash ([`strike_flash`]) and its STATS (FRENCHYS WIN, no row
-//! for a villager). Every mode: the end phase's fade ([`end_fade`]). Fades draw last, over the
-//! whole view and the HUD (V c1a DL 456).
+//! for a villager). Every mode: the end phase's fade ([`end_fade`]) and RESTART's
+//! ([`restart_fade`]). Fades draw last, over the whole view and the HUD (V c1a DL 456).
 //!
 //! One implementation, native and in the browser: textured quads (unlit, alpha-blended
 //! `StandardMaterial`s) on render layer 1, which a second, orthographic camera draws over the view
@@ -95,9 +95,13 @@ pub struct Shown {
     pub respawn_in: Option<u16>,
     /// Untimed: the lives left.
     pub lives: Option<u8>,
-    /// Out of lives, and through a takeover's cut: the view black, the skull centred at this
-    /// half-size in px ([`skull_byte`]), no radar.
+    /// Out of lives, and through a takeover's cut: the view black over the HUD, the skull centred
+    /// at this half-size in px ([`skull_byte`]).
     pub skull: Option<u8>,
+    /// The end phase's `k`th frame from 1: its HUD flags (`&= 0xE35F`, `func_151E53E8`) drop the
+    /// radar, kills and rank; the clock, drawn by phase 0's handler (`func_151DDC20`), goes from
+    /// k = 2 (V b_kl2).
+    pub ending: Option<u32>,
     /// War: Total War: the team strip's numbers, [0] the squirrels', [1] the Tediz': their kills,
     /// untimed (`lives` shown) their lives left; in place of the own kills and rank. War: Colors:
     /// the team scores.
@@ -112,9 +116,10 @@ pub struct Shown {
     pub countdown: Option<u32>,
     /// Total War: frames into this player's gassed screen (1-150, [`Combat::haze`]).
     pub haze: Option<u32>,
-    /// The match is over: the results' rows ([`rows`]: each with its colour) and the menu's choice
-    /// (0 RESTART, 1 QUIT).
-    pub results: Option<(Vec<Row>, usize)>,
+    /// The match is over: the results' rows ([`rows`]: each with its colour), the menu's choice
+    /// (0 RESTART, 1 QUIT), the STATS' alpha ([`stats_alpha`]) and the VI counter (2 a frame: the
+    /// chosen button's [`glow`], the [`stick`]).
+    pub results: Option<(Vec<Row>, usize, u8, u32)>,
     /// Over in Total War: the results' header.
     pub header: Option<Header>,
     /// War: Beach: its strip ([`Hud::beach`]) in place of Total War's, its STATS header.
@@ -538,30 +543,57 @@ pub fn header(all: &[(bool, &Combat)], own_team: u8, winner: Option<u8>) -> Head
 }
 
 /// Total War's team strip (`func_151E9D18`), or War: Beach's (`t`): each team's icon (`lives`:
-/// untimed) and number, kept at `anchor`.
-fn strip(hud: &Hud, t: &Strip, numbers: [u32; 2], lives: bool, anchor: Anchor) -> Vec<Sprite> {
+/// untimed) and number, kept at `anchor`, at `z`.
+fn strip(
+    hud: &Hud,
+    t: &Strip,
+    numbers: [u32; 2],
+    lives: bool,
+    anchor: Anchor,
+    z: f32,
+) -> Vec<Sprite> {
     let icons = if lives { &t.lives } else { &t.kills };
     (0..2)
         .flat_map(|team| {
             let rect = t.rects[team].map(f32::from);
-            let mut out = vec![quad(&icons[team], rect, anchor, [255; 4], 5.0)];
+            let mut out = vec![quad(&icons[team], rect, anchor, [255; 4], z)];
             let number = Text {
                 anchor,
                 ..t.numbers[team].clone()
             };
-            out.extend(text(hud, &numbers[team].to_string(), None, &number, 5.0));
+            out.extend(text(hud, &numbers[team].to_string(), None, &number, z));
             out
         })
         .collect()
 }
 
-/// The results over the frozen level: the header, the columns' icons, a row per human, the menu
-/// with `choice` lit; in Total War (`header`) its header over the rest, which goes `down` lower.
+/// The chosen menu button's lit tiles' alpha over its dim ones (`func_15043384`, C; V t5_b, t5_r
+/// env alphas 0x7E, 0x6E, 0x9B, 0xCE, 0x3E, 0xCB): the STATS' alpha `a` × (3v + 63) / 256, v a
+/// triangle of the VI counter `vi` (`0x800BE9AC`, 2 a frame) over 32 frames: 62 to 251 at a = 255.
+pub fn glow(a: u8, vi: u32) -> u8 {
+    let t = (2 * vi) & 0x7F;
+    let v = if t < 64 { t } else { 127 - t };
+    ((u32::from(a) * (3 * v + 63)) >> 8).min(255) as u8
+}
+
+/// The stick's frame between the buttons (sprite 0x1A: tile 0x7E7 + frame), one step a frame
+/// there and back over 10 frames: n = (`0x80085CD0` >> 1) % 10, 10 − n from 6 (V t5_b,
+/// `dm-maps-results-scratch/results/stick.py`; I: that counter is taken as `vi`, its phase not
+/// read).
+pub fn stick(vi: u32) -> u32 {
+    let n = (vi >> 1) % 10;
+    if n < 6 { n } else { 10 - n }
+}
+
+/// The results over the frozen level: the header, the columns' icons, a row per human, the menu's
+/// choice other than `choice` and the stick at its frame (`vi`: [`stick`]); in Total War
+/// (`header`) its header over the rest, which goes `down` lower. The chosen button is
+/// [`sprites`]'.
 fn results(
     hud: &Hud,
     end: &End,
     rows: &[Row],
-    choice: usize,
+    (choice, vi): (usize, u32),
     header: Option<Header>,
     beach: bool,
 ) -> Vec<Sprite> {
@@ -580,9 +612,13 @@ fn results(
         }
     };
     let mut out: Vec<Sprite> = (std::iter::once(&r.header).chain(team_header))
-        .chain([&r.stick])
         .map(|p| quad(&p.image, rect(p.rect), p.anchor, white, 5.0))
         .collect();
+    let p = &r.stick;
+    let mut s = quad(&p.image, rect(p.rect), p.anchor, white, 5.0);
+    let dx = 32.0 * stick(vi) as f32;
+    (s.uv[0], s.uv[2]) = (s.uv[0] + dx, s.uv[2] + dx);
+    out.push(s);
     for p in &r.icons {
         let [x, y, w, h] = p.rect;
         out.push(quad(
@@ -593,10 +629,8 @@ fn results(
             5.0,
         ));
     }
-    for (k, b) in [&r.restart, &r.quit].into_iter().enumerate() {
-        let image = if k == choice { &b.lit } else { &b.image };
-        out.push(quad(image, rect(b.rect), b.anchor, white, 5.0));
-    }
+    let b = if choice == 0 { &r.quit } else { &r.restart };
+    out.push(quad(&b.image, rect(b.rect), b.anchor, white, 5.0));
     // More rows than the original's 4 humans: the 4 rows' height shared out, each row scaled down
     // to fit (around its label's and each column's top), above the menu.
     let s = (4.0 / rows.len() as f32).min(1.0);
@@ -750,33 +784,40 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // heads too (HUD flag 0x2000: `func_151E9D18`'s icon row 0, C; V e0 DL 360).
     let untimed = s.lives.is_some();
     let heads = untimed || s.flags.is_some();
+    let white = [255; 4];
     let team_strip = if s.beach {
         &hud.beach.strip
     } else {
         &hud.strip
     };
-    if let (Some((rows, choice)), Some(end)) = (&s.results, &hud.end) {
-        let mut out = results(hud, end, rows, *choice, s.header, s.beach);
+    if let (Some((rows, choice, alpha, vi)), Some(end)) = (&s.results, &hud.end) {
+        let mut out = results(hud, end, rows, (*choice, *vi), s.header, s.beach);
         // War: the strip under the rows, live (`func_151EA15C`; V 0x800E0BD3 = 2).
         if let Some(n) = s.strip {
-            out.extend(strip(hud, team_strip, n, heads, end.results.anchor));
+            out.extend(strip(hud, team_strip, n, heads, end.results.anchor, 5.0));
         }
+        for q in &mut out {
+            q.colour[3] = (u32::from(q.colour[3]) * u32::from(*alpha) / 255) as u8;
+        }
+        // The chosen button: its dim tiles opaque even while the STATS fade in, its lit ones
+        // pulsing over them ([`glow`]; V t5_b, t5_r: env alpha 0xFF under them in every dump).
+        let b = if *choice == 0 {
+            &end.results.restart
+        } else {
+            &end.results.quit
+        };
+        let at = b.rect.map(f32::from);
+        out.push(quad(&b.image, at, b.anchor, white, 5.0));
+        let lit = [255, 255, 255, glow(*alpha, *vi)];
+        out.push(quad(&b.lit, at, b.anchor, lit, 5.1));
         return out;
     }
     let mut out = s.haze.map_or_else(Vec::new, |k| haze(&hud.haze, k));
     // A fade over everything, the iris included: the original fills the view after the HUD (V c1a
     // DL 456: the radar, heads, clock and S digits, then the fill).
     if let Some(alpha) = s.fade.filter(|&a| a > 0) {
-        let far = 10_000.0;
-        let centre = Anchor(Horizontal::Centre, Vertical::Middle);
-        out.push(solid(
-            [-far, -far, 2.0 * far, 2.0 * far],
-            centre,
-            [0, 0, 0, alpha],
-            FADE_Z,
-        ));
+        out.push(black(alpha, FADE_Z));
     }
-    let white = [255; 4];
     // Untimed: the lives left; out of them, the skull.
     if let (Some(n), Some(end)) = (s.lives, &hud.end) {
         let l = &end.lives;
@@ -785,23 +826,23 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
         let [x, y] = l.at.map(f32::from);
         out.push(quad(digit, [x, y, w, h], l.anchor, white, 3.0));
     }
-    // Out: the view black (over its haze and gun, under the HUD), the skull on its rect's centre
-    // (`func_1507DB6C`, V t1d DL 430, 444).
+    // Out: the view's 3D pass skipped (`func_150195A0`), the iris an opaque black over the HUD and
+    // its text, then the skull on its rect's centre (`func_1507DB6C`; V a_solo DL 384: the sky,
+    // the lives digit, score and rank, the black, the skull). Only the War strip shows over it (I:
+    // the split screen's text list, flushed after the iris, V t1d).
     if let (Some(half), Some(end)) = (s.skull, &hud.end) {
-        let (k, far) = (&end.skull, 10_000.0);
-        let centre = Anchor(Horizontal::Centre, Vertical::Middle);
-        let whole = [-far, -far, 2.0 * far, 2.0 * far];
-        out.push(solid(whole, centre, [0, 0, 0, 255], 0.7));
+        let k = &end.skull;
+        out.push(black(255, OUT_Z));
         let [x, y, w, h] = k.rect.map(f32::from);
         let (cx, cy, half) = (x + w / 2.0, y + h / 2.0, f32::from(half));
         let rect = [cx - half, cy - half, 2.0 * half, 2.0 * half];
-        out.push(quad(&k.image, rect, k.anchor, white, 3.0));
+        out.push(quad(&k.image, rect, k.anchor, white, OUT_Z + 0.5));
     }
     // Radar: the disc, then a blip per player in range, with a bar on another level's.
     let r = &hud.radar;
     let [cx, cy] = r.centre;
     let half = r.size / 2.0;
-    let radar = s.radar && s.skull.is_none();
+    let radar = s.radar && s.skull.is_none() && s.ending.is_none();
     if radar {
         out.push(quad(
             &r.disc,
@@ -864,8 +905,12 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     // Kills and rank (HUD flags 0x400, 0x800), or Total War's team strip (0x200 timed, 0x100
     // untimed: C `func_150918EC`, `func_151E89A0`), and the clock.
     match s.strip {
-        Some(n) => out.extend(strip(hud, team_strip, n, heads, team_strip.anchor)),
-        None => {
+        Some(n) => {
+            // Out: over the black, its numbers' shadows too.
+            let z = if s.skull.is_some() { OUT_Z + 1.0 } else { 5.0 };
+            out.extend(strip(hud, team_strip, n, heads, team_strip.anchor, z));
+        }
+        None if s.ending.is_none() => {
             out.extend(text(hud, &s.kills.to_string(), None, &hud.score, 5.0));
             out.extend(text(
                 hud,
@@ -875,13 +920,14 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
                 5.0,
             ));
         }
+        None => {}
     }
     // Colors: each carried flag's icon (HUD flag 0x8000), blinking.
     for (f, _) in s.flags.iter().flatten().enumerate().filter(|f| *f.1) {
         let p = &hud.flags[f];
         out.push(quad(&p.image, p.rect.map(f32::from), p.anchor, white, 5.0));
     }
-    if let Some(secs) = s.secs {
+    if let Some(secs) = s.secs.filter(|_| s.ending.is_none_or(|k| k < 2)) {
         let clock = format!("{}:{:02}", secs / 60, secs % 60);
         out.extend(text(hud, &clock, None, &hud.clock, 5.0));
     }
@@ -1174,12 +1220,34 @@ pub fn capture_fade(out: bool, vis: u16, frames: u32) -> u8 {
 
 /// The fades' z, over every other part of the HUD.
 const FADE_Z: f32 = 9.5;
+/// The out view's black: over the HUD, the reticle, scope and gun sight included (6.0-6.5), under
+/// the strike's flash, the iris and the fades.
+const OUT_Z: f32 = 7.0;
+
+/// Black over the whole view at `alpha`.
+fn black(alpha: u8, z: f32) -> Sprite {
+    let far = 10_000.0;
+    let centre = Anchor(Horizontal::Centre, Vertical::Middle);
+    solid(
+        [-far, -far, 2.0 * far, 2.0 * far],
+        centre,
+        [0, 0, 0, alpha],
+        z,
+    )
+}
 
 /// The end phase's fade (phase 7, `func_151E4EE8` → `func_151ED1E0`) on its `k`th frame from 1:
 /// black, alpha +16 a frame (`D_8008FD74` 8 × 2 VIs) to opaque (V c1b DL 428, 434, 436: 0x70, 0xD0,
 /// 0xF0 on phase 7's frames 7, 13, 15). The STATS or the outro cut it.
 pub fn end_fade(k: u32) -> u8 {
     (16 * k).min(255) as u8
+}
+
+/// RESTART's fade (phase 3): the end phase's again, over the frozen level without the STATS, from 0
+/// as the server counts `restart_in` down from 17 (V t5_r: A at read R, the STATS on R+1, then
+/// 16k on R+1+k, 255 on R+17, the new match on R+18; C `func_151E4EE8`, `func_151ED1E0`).
+pub fn restart_fade(m: &MatchView) -> Option<u8> {
+    (m.phase == 3).then(|| end_fade(17u32.saturating_sub(u32::from(m.restart_in))))
 }
 
 /// The STATS' alpha on their `k`th frame from 1: +4 a VI from 0 (V tw4 DL 858-880, cs1 990-1002;
@@ -1323,6 +1391,7 @@ fn shown(
         respawn_in: (c.health == 0 && c.respawn_in > 0).then_some(c.respawn_in),
         lives: (m.time == 0 && !m.colors && !m.beach).then_some(c.lives_left),
         skull: None,
+        ending: None,
         strip: match m.colors || m.beach {
             true => Some(m.scores.map(u32::from)),
             false => m.total_war.then_some(strip),
@@ -1387,9 +1456,14 @@ fn draw(
     if *status != NetStatus::Connected {
         return;
     }
-    let quads = match playing.running(&outros) {
-        Some((o, k)) => outro(&a.hud, o, k),
-        None => {
+    let quads = match (playing.running(&outros), restart_fade(m)) {
+        (Some((o, k)), _) => outro(&a.hud, o, k),
+        // RESTART: only its fade over the frozen level (the skull's clock kept, for the next match).
+        (None, Some(alpha)) => {
+            skull.0 = timeline.tick().0;
+            vec![black(alpha, FADE_Z)]
+        }
+        (None, None) => {
             let tick = timeline.tick().0;
             let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick);
             // Colors' fade from the tick this client saw it change (the match's tick is not sent);
@@ -1430,7 +1504,8 @@ fn draw(
             }
             *ended = (m.phase == 1).then(|| ended.unwrap_or(tick));
             if let Some(at) = *ended {
-                shown.fade = Some(end_fade(tick.saturating_sub(at) + 1));
+                let k = tick.saturating_sub(at) + 1;
+                (shown.fade, shown.ending) = (Some(end_fade(k)), Some(k));
             }
             // Out: the skull from the tick this client sees it, shrinking after a takeover; the
             // results clear it.
@@ -1479,24 +1554,18 @@ fn draw(
             } else {
                 *zoomed = Default::default();
             }
-            if m.phase == 2 {
+            *stats = (m.phase == 2).then(|| stats.unwrap_or(tick));
+            if let Some(at) = *stats {
                 let all: Vec<_> = (roster.iter())
                     .map(|(id, c)| (!matches!(id.0, PeerId::Local(_)), c))
                     .collect();
                 let teams = crate::outro::team_mode(m);
                 let rows = rows(&all, m.kill_limit, teams, m.winner, m.beach);
-                shown.results = Some((rows, menu.choice));
+                let alpha = stats_alpha(tick - at + 1);
+                shown.results = Some((rows, menu.choice, alpha, 2 * tick));
                 shown.header = teams.then(|| header(&all, own.1.team, m.winner));
             }
-            let mut quads = sprites(&a.hud, &shown);
-            *stats = shown.results.is_some().then(|| stats.unwrap_or(tick));
-            if let Some(at) = *stats {
-                let alpha = u32::from(stats_alpha(tick - at + 1));
-                quads
-                    .iter_mut()
-                    .for_each(|q| q.colour[3] = (u32::from(q.colour[3]) * alpha / 255) as u8);
-            }
-            quads
+            sprites(&a.hud, &shown)
         }
     };
     for s in quads {
@@ -1874,6 +1943,172 @@ mod tests {
             (skull_byte(52, true, 2), skull_byte(0, true, u32::MAX)),
             (60, 60)
         );
+        // Its side on the k-th frame out (V a_solo, DL 384-399): 2k + 4 px, 32 from k = 14.
+        let sides: Vec<u8> = (0..16)
+            .scan(0, |b, _| {
+                *b = skull_byte(*b, true, 1);
+                Some(2 * ((*b + 4) / 4))
+            })
+            .collect();
+        let want: Vec<u8> = (0..16).map(|k| (2 * k + 4).min(32)).collect();
+        assert_eq!(sides, want);
+    }
+
+    /// Out, in one view (V a_solo DL 384: the sky, the lives digit, score and rank, the black, the
+    /// skull): the black over every part of the HUD, the skull over it, the end phase's fade over
+    /// both; Total War's strip over the black (I).
+    #[test]
+    fn the_out_view_is_black_over_the_hud() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            return;
+        };
+        let out = Shown {
+            skull: Some(16),
+            lives: Some(0),
+            reticle: true,
+            scope: Some(0.5),
+            fade: Some(0x40),
+            ..state()
+        };
+        let quads = sprites(&hud, &out);
+        let z = |colour: Rgba| quads.iter().find(|q| q.colour == colour).unwrap().z;
+        let (black, fade) = (z([0, 0, 0, 255]), z([0, 0, 0, 0x40]));
+        let skull = (quads.iter().find(|q| q.tex == texture("skull")))
+            .unwrap()
+            .z;
+        assert!(black < skull && skull < fade);
+        let under = quads.iter().filter(|q| q.z < black).count();
+        assert_eq!(under, quads.len() - 3, "all but the black, skull and fade");
+        let tw = Shown {
+            strip: Some([1, 0]),
+            ..out
+        };
+        let strip = (sprites(&hud, &tw).into_iter()).filter(|q| q.tex == texture("teams"));
+        assert!(strip.map(|q| q.z).eq([black + 1.0; 2]));
+    }
+
+    /// The end phase (V b_kl2): no radar, kills or rank from its first frame, the clock gone from
+    /// the second; health and the weapon stay (HUD flags 0x10, 0x4), Total War's strip too (0x200).
+    #[test]
+    fn the_end_phase_hides_the_radar_kills_and_rank() {
+        let Some(hud) = pack_hud() else { return };
+        let playing = Shown {
+            weapon: 0x09,
+            ..state()
+        };
+        let first = Shown {
+            ending: Some(1),
+            ..playing.clone()
+        };
+        let second = Shown {
+            ending: Some(2),
+            ..playing.clone()
+        };
+        assert_eq!(rects(&hud, &playing, &texture("radar")).len(), 1);
+        assert!(rects(&hud, &first, &texture("radar")).is_empty());
+        let clock = glyphs(&hud, &first);
+        assert!(clock.len() == 4 && clock.iter().all(|g| g[1] >= 198.0));
+        assert!(glyphs(&hud, &second).is_empty());
+        assert_eq!(rects(&hud, &second, &texture("atlas")).len(), 6 + 1);
+        let tw = Shown {
+            strip: Some([2, 4]),
+            ..second
+        };
+        assert_eq!(rects(&hud, &tw, &texture("teams")).len(), 2);
+    }
+
+    /// The chosen button's glow, 62 to 251 over 32 frames at a = 255 (V t5_b, t5_r env alphas 0x3E,
+    /// 0x6E, 0x9B, 0xCB, 0xCE; 0x7E at a = 0x80), its dim tiles opaque under it while the rest fade
+    /// in; the stick there and back over 10 frames.
+    #[test]
+    fn the_stats_button_pulses_and_the_stick_steps() {
+        // vi = 2·tick: v = 0, 15, 16, 31, 47, 48, 63 at ticks 0, 28, 4, 24, 20, 12, 16.
+        assert_eq!(
+            [0, 28, 4, 24, 20, 12, 16].map(|t| glow(255, 2 * t)),
+            [62, 107, 110, 155, 203, 206, 251]
+        );
+        assert_eq!((glow(0x80, 32), glow(255, 64)), (0x7E, 62));
+        let frames: Vec<u32> = (0..10).map(|t| stick(2 * t)).collect();
+        assert_eq!(frames, [0, 1, 2, 3, 4, 5, 4, 3, 2, 1]);
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            return;
+        };
+        let over = Shown {
+            results: Some((vec![(0, [1, 0, 0, 0, 0])], 0, 0x80, 32)),
+            ..state()
+        };
+        let quads = sprites(&hud, &over);
+        let alpha = |name: &str| -> Vec<u8> {
+            (quads.iter().filter(|q| q.tex == texture(name)))
+                .map(|q| q.colour[3])
+                .collect()
+        };
+        assert_eq!(
+            [alpha("restart"), alpha("restart_lit"), alpha("quit")],
+            [[255], [0x7E], [0x80]]
+        );
+        assert!(alpha("stats") == [0x80] && alpha("quit_lit").is_empty());
+        // Tick 3: the stick's frame 3, 96 texels into its strip.
+        let over = Shown {
+            results: Some((vec![], 1, 255, 6)),
+            ..state()
+        };
+        assert_eq!(
+            rects(&hud, &over, &texture("stick")),
+            [([132.0, 164.0, 32.0, 32.0], [96.0, 0.0, 128.0, 32.0])]
+        );
+    }
+
+    /// RESTART's fade from a constructed `MatchView` (phase 3, `restart_in` 17 down to 1): 0, then
+    /// +16 a frame, 255 on the last (V t5_r: A at read 300, DL 302 0x20, DL 310 0xA0); none in the
+    /// other phases.
+    #[test]
+    fn restart_fades_from_restart_in() {
+        let m = |phase, restart_in| MatchView {
+            phase,
+            restart_in,
+            ..MatchView::default()
+        };
+        let fades: Vec<_> = (1..=17).rev().map(|n| restart_fade(&m(3, n))).collect();
+        let want: Vec<_> = (0..17).map(|k| Some(end_fade(k))).collect();
+        assert_eq!(fades, want);
+        assert_eq!(
+            (want[1], want[15], want[16]),
+            (Some(16), Some(240), Some(255))
+        );
+        assert_eq!([0, 1, 2].map(|p| restart_fade(&m(p, 10))), [None; 3]);
+    }
+
+    /// Four humans' rows in red, blue, green and yellow by port (C `func_151EA15C`: the table
+    /// 0x800ABA90). Ties (`func_151E565C`, C, V t5_b): humans in slots 0-1, bots in 2-3, all 0-0,
+    /// shots 0, 5, 0, 0: P1 1st, P2 4th; equal score and shots share a place, bots get none.
+    #[test]
+    fn rows_colour_by_port_and_share_ties() {
+        let c = |slot, shots| Combat {
+            slot,
+            shots,
+            ..Combat::default()
+        };
+        let all = [c(0, 0), c(1, 5), c(2, 0), c(3, 0)];
+        let with = |humans: usize| -> Vec<Row> {
+            let all: Vec<_> = (all.iter().enumerate())
+                .map(|(n, c)| (n < humans, c))
+                .collect();
+            rows(&all, 0, false, None, false)
+        };
+        let four = with(4);
+        assert!(four.iter().map(|r| r.0).eq(0..4));
+        assert!(four.iter().map(|r| r.1[0]).eq([1, 4, 1, 1]));
+        assert!(with(2).iter().map(|r| r.1[0]).eq([1, 4]));
+        if let Some(end) = pack_hud().and_then(|h| h.end) {
+            let rgb = [
+                [255, 0, 0, 255],
+                [0, 0, 255, 255],
+                [0, 255, 0, 255],
+                [255, 255, 0, 255],
+            ];
+            assert_eq!(end.results.colours, rgb);
+        }
     }
 
     /// The lives digit, the skull and the results where the oracle drew them (`lab/research/
@@ -1909,7 +2144,7 @@ mod tests {
             [144.0, 106.0, 4.0, 4.0]
         );
         let over = Shown {
-            results: Some((vec![(0, [1, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])], 1)),
+            results: Some((vec![(0, [1, 9, 2, 0, 1]), (1, [3, 0, 0, 0, 1])], 1, 255, 0)),
             ..state()
         };
         let at = |name: &str| -> Vec<[f32; 4]> {
@@ -1950,7 +2185,12 @@ mod tests {
         // The text and labels' lowest bottom and tallest quad, with n rows.
         let block = |n: usize| {
             let over = Shown {
-                results: Some(((0..n).map(|n| (n % 2, [1, 99, 22, 0, 11])).collect(), 0)),
+                results: Some((
+                    (0..n).map(|n| (n % 2, [1, 99, 22, 0, 11])).collect(),
+                    0,
+                    255,
+                    0,
+                )),
                 header: Some(Header::Draw),
                 ..state()
             };
@@ -2085,7 +2325,7 @@ mod tests {
         // Over: SQUIRRELS WIN, the columns' icons at y 89, the labels at 104, P1 (a Tedi) in blue
         // at 106, P2 (a squirrel) in red at 121; the strip in the results' anchor.
         let over = |header| Shown {
-            results: Some((vec![(1, [2, 0, 0, 0, 0]), (0, [1, 50, 1, 0, 0])], 0)),
+            results: Some((vec![(1, [2, 0, 0, 0, 0]), (0, [1, 50, 1, 0, 0])], 0, 255, 0)),
             header: Some(header),
             ..timed.clone()
         };
@@ -2304,7 +2544,7 @@ mod tests {
         assert_eq!(rows(&all, 0, true, Some(0), true), [(1, [2, 0, 0, 0, 0])]);
         assert_eq!(header(&all, 1, Some(0)), Header::Team(0));
         let over = |header| Shown {
-            results: Some((rows(&all, 0, true, Some(0), true), 0)),
+            results: Some((rows(&all, 0, true, Some(0), true), 0, 255, 0)),
             header: Some(header),
             ..villager.clone()
         };

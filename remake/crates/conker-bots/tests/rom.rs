@@ -1506,7 +1506,7 @@ fn deathmatch(
         ai: &data[2],
         class: &data[3],
     };
-    let world = world(rom, scene);
+    let mut world = world(rom, scene);
     let spawns: Vec<Spawn> = (extract_scene::scene_spawns(rom, scene).unwrap().iter())
         .map(|s| Spawn {
             pos: s.position,
@@ -1539,6 +1539,8 @@ fn deathmatch(
         })
         .collect();
     let mut m = Match::new(&arena, fighters, r, 23);
+    // 0x34's plates and traps, as the server has them.
+    m.traps = conker_rules::traps::Traps::new(scene as u16, assets.triggers);
     let slots: Vec<usize> = (1..=bots).collect();
     let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, rng).unwrap();
     let mut lifts = Lifts::new(assets.triggers, scene as u8);
@@ -1549,6 +1551,9 @@ fn deathmatch(
             .collect();
         for &slot in &lifted {
             ai.lifted(slot);
+        }
+        if !m.traps.list.is_empty() {
+            conker_rules::traps::seat(&mut world, m.traps.offsets());
         }
         ai.tick(&m, &arena, &world, &mut inputs);
         ai.scopes(&mut m);
@@ -1618,6 +1623,37 @@ fn no_jump_loop_in_the_0x34_corridor() {
         "{:?}",
         bots.unknown
     );
+}
+
+/// 0x34 with 15 bots for the oracle's 60 s (`s4_h1b15`, 1,737 frames): the bots press the plates
+/// on their way and the traps kill some (script 0xBD neither seeks nor avoids them). The oracle's:
+/// 14 presses, no one in a trap while on (conker-rules' `the_plates_hold_the_0x34_floors`); seeds
+/// 1-4 here: 3-10 presses, 3-7 kills, the bots 2-3 times as many frames in the traps' zones (I: the
+/// bots' paths, not the traps).
+#[test]
+fn bots_set_off_the_0x34_traps() {
+    let Some(rom) = rom() else { return };
+    let (mut presses, mut kills, mut alive) = (0, 0, [true; 16]);
+    let mut was = [0u8; 4];
+    let bots = deathmatch(&rom, 0x34, 15, 1, 1737, |m, _| {
+        let state = m.traps.plates.map(|p| p.state);
+        presses += (0..4).filter(|&k| was[k] == 2 && state[k] == 3).count();
+        was = state;
+        for (p, f) in m.players.iter().enumerate() {
+            let b = &f.body;
+            let inside = (0..m.traps.list.len())
+                .any(|k| m.traps.left[k] > 0 && m.traps.list[k].contains(b.pos, b.floor_y));
+            kills += u32::from(alive[p] && f.health == 0 && inside);
+            alive[p] = f.health > 0;
+        }
+    });
+    eprintln!("0x34: {presses} presses, {kills} trap kills");
+    assert!(
+        bots.unknown.is_empty() && bots.faults == 0,
+        "{:?}",
+        bots.unknown
+    );
+    assert!(presses > 0 && kills > 0, "{presses} {kills}");
 }
 
 /// 0x2D, seed 5: no bot stands (within 20 in x and z) over 3,000 frames, the oracle's longest

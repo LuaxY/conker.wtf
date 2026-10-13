@@ -163,7 +163,8 @@ pub struct Zone {
 }
 
 /// A flickering lamp's buzz (`func_15160954` → `func_151618BC`): it plays at `at` as each of
-/// its flashes starts, the lamp's `flicker` in `maps/<map>/lights.json` (`func_151607A4`).
+/// its flashes starts, the lamp's `flicker` in `maps/<map>/lights.json` (`func_151607A4`); or a
+/// switching light's (0x1A's, `switching`): as it switches back on (`func_151604A0`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Emitter {
     pub at: [i16; 3],

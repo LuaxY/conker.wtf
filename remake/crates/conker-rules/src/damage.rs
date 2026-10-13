@@ -134,6 +134,22 @@ pub const DOORWAY: DamageType = ty(0x0E, 0x41, 0.0, -50.0, 7.0, 1, 0, 0);
 pub const DETONATION: DamageType = ty(0x2C, 0x07, 0.0, 0.0, 0.0, 0, 0x80 | 30, 0);
 pub const STRIKE: DamageType = ty(0x47, 0x40, 0.0, 0.0, 4.0, 30, 0x80 | 36, 0);
 
+/// Scene 0x34's traps (`crate::traps`): a fire jet's hit, type 0x34 (`func_151A6B68`), and the
+/// electric floor's, 0x2E (`func_1515FBC4`), both kills (C, the RAM table; V trap34, elec34).
+pub const TRAP_FIRE: DamageType = ty(0x2B, 0x07, 7.0, 50.0, 4.0, 1, 0x80 | 10, 0x0036);
+pub const TRAP_SPARK: DamageType = ty(0x21, 0x07, 7.0, 50.0, 4.0, 1, 0x80 | 3, 0x0004);
+/// Scene 0x34's burning cones (floor kind 0xE): type 1, the flame's hit with 1 damage, the move
+/// angle kept and a hop of 55 (`func_1504CB98`'s end, C; V cone34: health 6 → 5, y velocity 55,
+/// speed 7, state 0x69). Its fire burns on ([`crate::flame::Burn`], no owner).
+pub const CONE: DamageType = ty(0x10, 0x41, 7.0, 55.0, 2.0, 1, 0, 0x0226);
+/// The port's reaction for a death that starts grounded on a kind 0xE or 0x13 floor
+/// (`func_1507CD64(obj, 0xD)` at 0x1504D0D0, C): clip [`CONE_DEATH_CLIP`] instead of the fall.
+pub const CONE_DEATH: u8 = 0x80 | 0xD;
+/// Its clip, 0x2D8, for its 20 ticks (the pack's character 117, pair 652; I: its length in
+/// frames, as 0x58's 54 ticks play 52 frames).
+pub const CONE_DEATH_CLIP: u16 = 0x2D8;
+pub const CONE_DEATH_FRAMES: u16 = 20;
+
 /// The damage type the script's player commands 0x2A and 0x2B name.
 pub fn script_type(id: i32) -> Option<DamageType> {
     match id {
@@ -236,6 +252,12 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         (0x31, false) => &[(anim::DEATH_BLAST, 37)],
         // The flame's hit: the burning that follows is the movement's (`Fighter::burn`).
         (0x10, false) => &[(anim::FLAME_HIT, 5)],
+        // A lethal one falls from it (V cone34k: 0x69, then 0x58 for 52 frames, then 0x59).
+        (0x10, true) => &[
+            (anim::FLAME_HIT, 5),
+            (anim::DEATH_FALL, 52),
+            (anim::DEAD, 81),
+        ],
         // Weapon 0x14's body hit: class 117's reaction 0x20 entry, 0xD3 for 30 frames (C).
         (0x20, false) => &[(anim::HIT_SHOT, 30)],
         // A lethal one falls from it (V combat5_cb_e2: 0xD3 30, 0x58 52; the dead pose's 81 as
@@ -258,6 +280,8 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         (0x0E, true) => &[(anim::DOORWAY_HIT, 59), (anim::DOORWAY_DEAD, 87)],
         // The clip is the one it fell in (`Match::fall_kill` keeps it); this one is unused.
         (GATE, _) => &[(anim::DEAD, GATE_FRAMES)],
+        // A death started on a cone (`Match::hurt_frame` switches to it from the fall).
+        (CONE_DEATH, _) => &[(CONE_DEATH_CLIP, CONE_DEATH_FRAMES), (anim::DEAD, 81)],
         (_, false) => STAGGER,
         (_, true) => SHOT_DEAD,
     }

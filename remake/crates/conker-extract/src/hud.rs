@@ -147,7 +147,9 @@ fn image(texture: &str, rect: [u16; 4]) -> Image {
 /// of row `n / 3` (its top and height from the tables at 0x800873B4 and 0x800873BC), 22 wide;
 /// weapon 0x39's is cell 10 of the second atlas, 3 texels lower, and the shotgun's (0x37) its cell
 /// 7; cell 1 (0x16) is a texel shorter; the club's (0x40) cell 4, 3 texels higher and 20 wide
-/// (drawn a pixel right of the others: not kept).
+/// (drawn a pixel right of the others: not kept). Map 0x1A's: the bat (0x19, any item without an
+/// icon on scene 0x1A) cell 4, 4 texels lower and 2 shorter (drawn a pixel lower: not kept); the
+/// tommy gun (0x38) cell 4 of the second atlas, 3 texels lower.
 fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
     const TOPS: [u16; 5] = [4, 16, 25, 39, 53];
     const HEIGHTS: [u16; 5] = [12, 9, 14, 12, 10];
@@ -169,6 +171,8 @@ fn weapon_icons() -> std::collections::BTreeMap<u8, Image> {
         (0x18, cell("atlas", 6, 0)),
         (0x37, cell("atlas2", 7, 3)),
         (0x40, image("atlas", [25, 13, 20, 9])),
+        (0x19, image("atlas", [25, 20, 22, 7])),
+        (0x38, cell("atlas2", 4, 3)),
     ]
     .into()
 }
@@ -491,7 +495,8 @@ pub fn pack_hud(rom: &Rom) -> Result<(crate::Files, Hud)> {
 /// (name, first texture id, tiles across, smooth): what the end of a match draws, RGBA32 32 x 32
 /// tiles stored for a LOADBLOCK without dxt (odd rows' texels at x ^ 2); a sprite of several tiles
 /// (`.game` data's sprite records at 0x800859E0: tiles across, the first id) is one PNG. The stick
-/// is 0x7E8, the tile drawn (its record names 0x7E7). V: `lab/research/mp-original` (STATS screen).
+/// is its 6 frames 0x7E7..0x7EC side by side (sprite 0x1A draws 0x7E7 + frame: V t5_b, `lab/
+/// research/mp-original/dm-maps-results.md` §5.3). V: `lab/research/mp-original` (STATS screen).
 const END_TEXTURES: [(&str, usize, usize, bool); 18] = [
     ("lives", 0xD14, 1, false),
     ("skull", 0xD0F, 1, true),
@@ -500,7 +505,7 @@ const END_TEXTURES: [(&str, usize, usize, bool); 18] = [
     ("restart_lit", 0x810, 2, false),
     ("quit", 0x7FC, 2, false),
     ("quit_lit", 0x7FE, 2, false),
-    ("stick", 0x7E8, 1, false),
+    ("stick", 0x7E7, 6, false),
     ("stat_icons", 0x888, 1, false),
     ("stat_deaths", 0x887, 1, false),
     ("players", 0x843, 1, false),
@@ -558,7 +563,8 @@ fn end_layout(textures: std::collections::BTreeMap<String, Texture>) -> End {
             label: [60, 64],
             rows: [66, 15],
             columns: [112, 140, 166, 196, 226],
-            // P1 red, P2 blue (V); P3 green, P4 yellow (I: their labels' colours).
+            // By the human's port (C `func_151EA15C`: the table 0x800ABA90, V RAM t5_b, t6_win): P1
+            // red, P2 blue, P3 green, P4 yellow.
             colours: vec![
                 [255, 0, 0, 255],
                 [0, 0, 255, 255],

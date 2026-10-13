@@ -25,6 +25,7 @@ pub mod outro;
 pub mod render;
 pub mod results;
 pub mod smooth;
+pub mod traps;
 
 /// Browser fetches: the asset pack's data files and the connect token.
 #[cfg(target_family = "wasm")]
@@ -650,7 +651,7 @@ pub fn hud_text(c: &Combat, m: &MatchView) -> String {
     }
     match m.phase {
         1 => out += "\nTIME UP",
-        2 => out += "\nMATCH OVER",
+        2 | 3 => out += "\nMATCH OVER",
         _ => {}
     }
     out
@@ -701,7 +702,7 @@ pub fn known_match(
     grenades: &[(u32, Grenade)],
     arena: &Arena,
 ) -> Match {
-    let named = (grenades.iter().map(|g| g.1.owner)).chain(own.burn.map(|b| b.attacker));
+    let named = (grenades.iter().map(|g| g.1.owner)).chain(own.burn.and_then(|b| b.attacker));
     let mut players = vec![None; named.max().map_or(0, |s| s + 1)];
     for (s, f) in others.into_iter().chain([(slot, own)]) {
         if players.len() <= s {
@@ -767,6 +768,9 @@ pub fn run(cfg: Config, slice: Slice, hud: Hud, sound: Option<Audio>, script: Ve
             StatesPlugin,
         ));
     } else {
+        if scene == conker_rules::traps::SCENE {
+            traps::build(&mut app, &triggers);
+        }
         render::build(&mut app, slice, &cfg);
         hud::build(&mut app, hud);
     }
@@ -1174,7 +1178,8 @@ fn own_tick(
 }
 
 /// War: Beach's plunger collision where the server last had the prop (`conker_rules::beach::seat`),
-/// and scene 0x2D's doors and covers where its props stand (`conker_rules::gas::seat`).
+/// scene 0x2D's doors and covers where its props stand (`conker_rules::gas::seat`), and scene 0x34's
+/// pressure plates (`conker_rules::traps::seat`).
 /// ponytail: a predicted presser stands on the server's y, a round trip behind its own; the server
 /// corrects it.
 fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Config>) {
@@ -1186,6 +1191,9 @@ fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Co
     }
     if map_scene(&cfg.map) == Some(0x2D) {
         conker_rules::gas::seat(&mut world.0, m.total_war, m.props, m.lifts);
+    }
+    if map_scene(&cfg.map) == Some(conker_rules::traps::SCENE) {
+        conker_rules::traps::seat(&mut world.0, m.plates);
     }
 }
 
@@ -1215,7 +1223,7 @@ fn predict(
     mut shows: ResMut<Shows>,
 ) {
     let tick = timeline.tick().0;
-    let over = game.iter().any(|m| m.phase == 2) || !sync.is_none_or(|s| s.is_synced());
+    let over = game.iter().any(|m| m.phase >= 2) || !sync.is_none_or(|s| s.is_synced());
     let settings = game
         .iter()
         .next()
@@ -1295,7 +1303,7 @@ fn predict_again(
     shows: Res<Shows>,
 ) {
     let tick = timeline.tick().0;
-    let over = game.iter().any(|m| m.phase == 2) || !sync.is_none_or(|s| s.is_synced());
+    let over = game.iter().any(|m| m.phase >= 2) || !sync.is_none_or(|s| s.is_synced());
     let settings = game
         .iter()
         .next()

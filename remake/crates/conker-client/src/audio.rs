@@ -149,6 +149,8 @@ struct Pack {
     ready_zone: Option<CameraVolume>,
     /// The map's sound zones ([`conker_assets::audio::Zone`]) and their trigger records' tests.
     zones: Vec<(conker_assets::audio::Zone, CameraVolume)>,
+    /// Scene 0x34's traps ([`crate::traps::sounding`]).
+    traps: Vec<conker_rules::traps::Trap>,
 }
 
 impl Pack {
@@ -166,6 +168,10 @@ impl Pack {
         for c in &mut clips {
             c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
         }
+        let traps = match map == "34" {
+            true => conker_rules::traps::parse(triggers),
+            false => Vec::new(),
+        };
         let ready_zone = (map == "2b")
             .then(|| triggers.as_chunks::<0x34>().0.get(READY_ZONE))
             .flatten()
@@ -195,6 +201,7 @@ impl Pack {
             lines,
             ready_zone,
             zones,
+            traps,
         }
     }
 }
@@ -249,6 +256,8 @@ enum Owner {
     Outro(usize),
     /// A map's sound zone (an index of its `zones`).
     Zone(usize),
+    /// Scene 0x34's trap (an index of its `traps`).
+    Trap(usize),
     World,
 }
 
@@ -1305,6 +1314,40 @@ impl Sounds {
         }
     }
 
+    /// Scene 0x34's traps' sounds while they are on ([`crate::traps::sounding`]), started again
+    /// whenever one ends (their records' flag 8), stopped as they go off.
+    fn traps(&mut self, cx: &Cx, m: &MatchView) {
+        let on: Vec<_> = crate::traps::sounding(&cx.pack.traps, m.traps).collect();
+        self.stop(|v| matches!(v.owner, Owner::Trap(k) if on.iter().all(|s| s.trap != k)));
+        for s in on {
+            let owner = Owner::Trap(s.trap);
+            if self.voices.iter().any(|v| !v.stopped && v.owner == owner) {
+                continue;
+            }
+            let cents = (self.rng.next_u32() & s.pitch) as i16;
+            let play = Play {
+                sounds: vec![s.id],
+                volume: s.volume,
+                own: None,
+                near: s.near,
+                far: s.far,
+                channel: Channel::Free,
+                chance: 255,
+                if_idle: false,
+                pitch: [cents; 2],
+                ticks: None,
+            };
+            let src = Src {
+                owner,
+                pos: s.at,
+                follows: None,
+                tag: None,
+                flat: false,
+            };
+            self.start(cx, &play, &play.sounds, 1.0, src);
+        }
+    }
+
     /// A radio line `on` (its character's) at `p` (`func_15103C14`), unless slot `busy` spoke one in
     /// the last [`RADIO_GAP`] ticks: the click on at once on its voice slot, the line its cue's
     /// `delay` later, the click off once that has played (`func_15103910`; a bot's own line and
@@ -1507,7 +1550,7 @@ impl Sounds {
             }
             // The music plays on through a War outro and its STATS (V: no stop from the match's
             // start to the bar scene's songs).
-            (2, _) if !crate::outro::team_mode(m) => {
+            (2 | 3, _) if !crate::outro::team_mode(m) => {
                 self.stop(|v| v.id == BACKGROUND || v.id == STEM)
             }
             _ => {}
@@ -1780,12 +1823,13 @@ fn hear(
     s.match_sounds(&cx, m, &all, &flashed);
     s.beach(&cx, m, &all);
     s.zones(&cx, &all);
+    s.traps(&cx, m);
     s.colors(&cx, m, &all);
     s.clicks_off(&cx, &all);
     s.outro_sounds(&cx, running);
     s.duck_music(&cx);
     // The muffle ends with the match (I: the original's sound mode with its scene).
-    if m.phase == 2 && s.muffled {
+    if m.phase >= 2 && s.muffled {
         (s.muffled, s.wearers) = (false, HashSet::new());
         debug!("MUFFLE t={tick} read={read}: off, over");
     }

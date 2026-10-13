@@ -112,7 +112,7 @@ fn pack_reads_back_as_the_rom_path() {
     let bytes = std::fs::read(path).unwrap();
     let rom = Rom::new(bytes.clone()).unwrap();
     let start = Instant::now();
-    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B].map(|scene| PackMap {
+    let maps = [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A].map(|scene| PackMap {
         scene,
         background: None,
         song: None,
@@ -326,17 +326,22 @@ fn pack_reads_back_as_the_rom_path() {
     check_gltf(&dir, &conker_assets::props_gltf(PACK_MAP), &gltf.glb());
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert_eq!(manifest.source_rom_sha1, extract_core::US_SHA1);
-    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b"]);
+    assert_eq!(manifest.maps, ["2d", "30", "34", "3f", "2b", "1a"]);
     assert_eq!(
-        manifest.characters[..5],
-        ["128", "117", "136", "156", "157"]
+        manifest.characters[..6],
+        ["128", "117", "136", "156", "157", "59"]
     );
 
     // Each map's solid placements (the oracle's RAM) are those with collision flags less its
-    // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data.
-    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B] {
-        let (pickups, _) = weapon::pickups(scene as u16).unwrap();
-        let hidden = conker_extract::hidden_placements(scene);
+    // pickups (`+0x4F |= 0x20`) and its hidden ones: the game's layer-2 filter on ROM data. On 0x1A
+    // the match sets 0x20 on every placement but 0, so its drawn 13 is not solid (V,
+    // `lab/oracle/map1a/props_pickups_lights.md` §1).
+    for scene in [0x2D, 0x30, 0x34, 0x3F, 0x2B, 0x1A] {
+        let (pickups, _) = conker_extract::pickup_table(&rom, scene).unwrap();
+        let mut hidden = conker_extract::hidden_placements(scene).to_vec();
+        if scene == 0x1A {
+            hidden.push(13);
+        }
         let placements = extract_scene::scene_placements(&rom, scene).unwrap();
         let solid: Vec<usize> = (placements.iter().enumerate())
             .filter(|(i, p)| p.has_collision() && !hidden.contains(i))
@@ -350,14 +355,15 @@ fn pack_reads_back_as_the_rom_path() {
         );
     }
 
-    // Maps 0x30, 0x34, 0x3F and 0x2B against the ROM path: the same reads (only their solid
-    // placements), their pickups on the oracle's spots (0x30's and 0x2B's, their models moved there
-    // in the level) or on their placements (0x34's, 0x3F's).
+    // Maps 0x30, 0x34, 0x3F, 0x2B and 0x1A against the ROM path: the same reads (only their solid
+    // placements), their pickups on the oracle's spots (0x30's, 0x2B's and 0x1A's, their models
+    // moved there in the level) or on their placements (0x34's, 0x3F's).
     let maps = [
         ("30", 0x30, 25),
         ("34", 0x34, 12),
         ("3f", 0x3F, 16),
         ("2b", 0x2B, 12),
+        ("1a", 0x1A, 32),
     ];
     for (name, scene, records) in maps {
         let names = conker_assets::Slice::files(name, &PACK_CHARACTERS, PACK_WEAPONS);
@@ -385,7 +391,7 @@ fn pack_reads_back_as_the_rom_path() {
         let gives: Vec<_> = (map.pickups.iter())
             .map(|p| (p.placement, p.position.map(|v| v as i16)))
             .collect();
-        let (pickups, spots) = weapon::pickups(scene as u16).unwrap();
+        let (pickups, spots) = conker_extract::pickup_table(&rom, scene).unwrap();
         let table: Vec<_> = (pickups.iter().enumerate())
             .map(|(k, p)| {
                 let at = placements[usize::from(p.placement)].position;
@@ -393,13 +399,72 @@ fn pack_reads_back_as_the_rom_path() {
             })
             .collect();
         assert_eq!(gives, table);
-        let [nav, triggers, ai, _] =
+        let [nav, triggers, _, _] =
             conker_bots::Assets::paths(scene).map(|p| rom.asset(&p).unwrap().into_owned());
-        assert_eq!([&map.nav, &map.triggers, &map.ai], [&nav, &triggers, &ai]);
+        let ai = rom
+            .asset(&[0x14, conker_extract::ai_script(scene)])
+            .unwrap();
+        assert_eq!([&map.nav, &map.triggers, &map.ai], [&nav, &triggers, &*ai]);
         let level = conker_extract::map_level(&rom, scene).unwrap();
         let glb = extract_level::to_gltf(&level, &textures, "").unwrap().glb();
         check_gltf(&dir, &conker_assets::level_gltf(name), &glb);
     }
+
+    // Map 0x1A, the Vault (`lab/research/mp-original/heist.md`, `lab/oracle/map1a/`): script 0xB7,
+    // four lifts and no kill gate; k0-k3 roam spots 0-7 and every pickup is back after 300 VIs (V);
+    // its 34 lights (4 pulsing bases, 2 flickering lamps, 5 switching); the Wise Guy (59) on the
+    // Tedi's clips, model lift 49 (V), its team look the texture of material 2 (V: REDS 7246, BLUES
+    // 7230, GREENS 7231, YELLOWS 7232).
+    let mut names = PACK_CHARACTERS.to_vec();
+    names.push("59");
+    let vault = conker_assets::Slice::load("1a", &names, PACK_WEAPONS, read).unwrap();
+    assert_eq!(conker_extract::ai_script(0x1A), 0xB7);
+    assert_eq!(conker_rules::lift::parse(&vault.triggers, 0x1A).len(), 4);
+    assert!(conker_rules::lift::kill_gates(&vault.triggers).is_empty());
+    let roams = &vault.pickups[0].roams;
+    assert_eq!(roams.len(), 8);
+    for (k, p) in vault.pickups.iter().enumerate() {
+        assert_eq!(p.respawn, Some(300));
+        assert_eq!(p.roams.len(), if k < 4 { 8 } else { 0 });
+        assert!(k >= 4 || &p.roams == roams);
+    }
+    assert_eq!(vault.pickups[6].position, [-338.0, 510.0, 2396.0]);
+    assert_eq!(vault.lights.ambient, [94, 94, 96]);
+    assert_eq!(vault.lights.lights.len(), 34);
+    assert_eq!(vault.lights.switching, [10, 11, 12, 20, 29]);
+    let flicker = vault.lights.lights.iter().filter(|l| l.flicker).count();
+    let pulse = vault
+        .lights
+        .lights
+        .iter()
+        .filter(|l| l.swing != 0.0)
+        .count();
+    assert_eq!((flicker, pulse), (2, 4));
+    let wise_guy = &vault.characters[3];
+    assert_eq!(wise_guy.model_lift, 49);
+    assert_eq!(
+        (&wise_guy.clips, &wise_guy.root_clips),
+        (&pack.characters[1].clips, &pack.characters[1].root_clips)
+    );
+    let teams = wise_guy.teams.as_ref().unwrap();
+    let gltf: Value = serde_json::from_slice(files["characters/59/character.gltf"]).unwrap();
+    let material = &gltf["materials"][teams.material];
+    assert_eq!(material["extras"]["image"], "flat 7246 mode 0");
+    let image = material["pbrMetallicRoughness"]["baseColorTexture"]["index"].as_u64();
+    let uri = gltf["images"][image.unwrap() as usize]["uri"]
+        .as_str()
+        .unwrap();
+    let pngs: Vec<&[u8]> = (teams.textures.iter())
+        .map(|t| files[format!("characters/59/{t}").as_str()])
+        .collect();
+    assert_eq!(pngs[0], files[format!("characters/59/{uri}").as_str()]);
+    assert!((1..4).all(|t| !pngs[..t].contains(&pngs[t])));
+    assert!(pack.characters.iter().all(|c| c.teams.is_none()));
+    // The money bag (87) is drawn on its own rig: 5 joints, 12 clips, no character.json.
+    let cash: Value = serde_json::from_slice(files["characters/87/character.gltf"]).unwrap();
+    assert_eq!(cash["skins"][0]["joints"].as_array().unwrap().len(), 5);
+    assert_eq!(cash["animations"].as_array().unwrap().len(), 12);
+    assert!(!files.contains_key("characters/87/character.json"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -452,12 +517,14 @@ fn pack_audio_reads_back() {
     let fourth = wav(&[6, 7], 22020);
     let fifth = wav(&[8], 22020);
     let song = wav(&[9], 22020);
+    let sixth = wav(&[10, 11], 22020);
     let maps = [
         (0x2D, &background),
         (0x30, &other),
         (0x34, &third),
         (0x3F, &fourth),
         (0x2B, &fifth),
+        (0x1A, &sixth),
     ]
     .map(|(scene, wav)| PackMap {
         scene,
@@ -480,7 +547,9 @@ fn pack_audio_reads_back() {
             "characters/136",
             "characters/156",
             "characters/157",
+            "characters/59",
             "common",
+            "maps/1a",
             "maps/2b",
             "maps/2d",
             "maps/30",
@@ -521,6 +590,7 @@ fn pack_audio_reads_back() {
         ("34", &third),
         ("3f", &fourth),
         ("2b", &fifth),
+        ("1a", &sixth),
     ] {
         let file = format!("audio/{}", audio.events.maps[name].background[0].file);
         assert_eq!(files[file.as_str()], &wav[..]);
@@ -625,7 +695,12 @@ fn pack_audio_reads_back() {
     let mut names = PACK_CHARACTERS.to_vec();
     names.extend(["156", "157"]);
     let pack = conker_assets::Slice::load("2b", &names, PACK_WEAPONS, read).unwrap();
-    for (name, character) in names.iter().zip(&pack.characters) {
+    let mut vault = PACK_CHARACTERS.to_vec();
+    vault.push("59");
+    let wise_guy = conker_assets::Slice::load("1a", &vault, PACK_WEAPONS, read).unwrap();
+    names.push("59");
+    let characters = pack.characters.iter().chain(&wise_guy.characters[3..]);
+    for (name, character) in names.iter().zip(characters) {
         for e in &audio.events.characters[*name] {
             assert!(MATCH_CLIPS.contains(&e.clip), "{name} {:#x}", e.clip);
             assert!(
@@ -695,6 +770,19 @@ fn pack_audio_reads_back() {
         clips: vec![0x7C, 0x20D],
     };
     assert_eq!(cue(&firing, None), Some(vec![719]));
+    // The Vault's (`heist.md`; C): the tommy gun's loop as the twin guns', the Wise Guy's battle cry
+    // and pickup voices.
+    let tommy = On::Firing {
+        weapon: 0x38,
+        clips: vec![0x1E0, 0x253, 0x254],
+    };
+    assert_eq!(cue(&tommy, None), Some(vec![719]));
+    assert_eq!(cue(&tommy, Some("59")), Some((1347..=1350).collect()));
+    let pickup = |weapon| On::Pickup {
+        gives: Gives::Weapon(weapon),
+    };
+    assert_eq!(cue(&pickup(0x38), None), Some(vec![688]));
+    assert_eq!(cue(&pickup(0x16), Some("59")), Some(vec![1342, 1343]));
     // The mounted guns (`mounted-gun.md` §4.4; V the oracle's sound calls).
     assert_eq!(cue(&On::Gun { from: 3, to: 4 }, None), Some(vec![0x616]));
     assert_eq!(cue(&On::GunStop, None), Some(vec![0x618, 0x619, 0x61A]));
@@ -768,6 +856,34 @@ fn pack_audio_reads_back() {
         ]
     );
     assert_eq!(audio.sounds.sounds[&0x4A7].file, "maps/2b/1191.wav");
+    // 0x1A's (V `lab/audio/map1a/`): its bases' hum, triggers 0x34-0x37; its 2 lamps and 5
+    // switching lights; song 30 at 8000.
+    let vault = &audio.events.maps["1a"];
+    let zones: Vec<_> = (vault.zones.iter())
+        .map(|z| {
+            (
+                z.trigger,
+                z.play.sounds.clone(),
+                z.play.volume,
+                z.play.near,
+                z.play.far,
+            )
+        })
+        .collect();
+    assert_eq!(
+        zones,
+        (0x34..=0x37)
+            .map(|t| (t, vec![1116], 16350, 797, 903))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(audio.sounds.sounds[&1116].file, "maps/1a/1116.wav");
+    let volumes: Vec<u16> = vault.emitters.iter().map(|e| e.play.volume).collect();
+    assert_eq!(volumes, [25000, 25000, 16000, 16000, 16000, 16000, 16000]);
+    assert!(
+        vault.background[0]
+            .note
+            .contains("sequence 30, channels 0-15, at volume 8000")
+    );
     assert!(
         ["2d", "30", "34", "3f"]
             .iter()
@@ -866,6 +982,8 @@ fn pack_hud_reads_back() {
     assert_eq!(hud.to_json(), files[HUD]);
     let end = End::load(|p| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
     assert_eq!(end.to_json(), files[END]);
+    // The STATS stick's 6 frames side by side (0x7E7..0x7EC).
+    assert_eq!(end.textures["stick"].size, [192, 32]);
     let manifest: conker_assets::Manifest = serde_json::from_slice(files["pack.json"]).unwrap();
     assert!(manifest.hud);
     let png_size = |file: &str| {

@@ -342,17 +342,19 @@ pub fn read_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>)> {
 /// (`../lab/audio/tools/mp_anims.py` over `../lab/oracle/trajectories/*.raw`, 105 ids), and the
 /// crossbow's and the shotgun's walks (0xEC, 0x1F5: conker-anim's, untraced), and item 0x40's
 /// (the club's: `combat6_*` traces, `../lab/oracle/caveman_README.md`), and War: Total War's gas
-/// mask put on and taken off (0x14E, 0x151: `../lab/research/mp-original/total-war-effects.md` §4).
-pub const MATCH_CLIPS: [u16; 117] = [
+/// mask put on and taken off (0x14E, 0x151: `../lab/research/mp-original/total-war-effects.md` §4),
+/// and map 0x1A's bat (draw 0x10E, 0x110) and tommy gun (draw 0x1DD, idles 0x1DE/0x1DF, fire
+/// 0x1E0, 0x253, 0x254) (C `func_15065A5C`; V `../lab/research/mp-original/heist.md` h3, h4).
+pub const MATCH_CLIPS: [u16; 125] = [
     0x0, 0x1, 0x2, 0x9, 0xF, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x21, 0x2B, 0x32, 0x36, 0x37, 0x38,
     0x4C, 0x58, 0x59, 0x69, 0x76, 0x77, 0x78, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0xBD, 0xC5, 0xC6,
     0xCF, 0xD3, 0xE2, 0xE4, 0xE7, 0xEB, 0xEC, 0xF0, 0xF3, 0xF4, 0xF7, 0xF8, 0xF9, 0xFB, 0xFC,
-    0x102, 0x103, 0x10A, 0x10C, 0x10F, 0x111, 0x112, 0x113, 0x119, 0x11A, 0x11B, 0x11C, 0x11D,
-    0x120, 0x121, 0x122, 0x124, 0x129, 0x12A, 0x12B, 0x144, 0x14E, 0x151, 0x152, 0x153, 0x155,
-    0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162, 0x163, 0x164,
-    0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D, 0x1EA, 0x1EB,
-    0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235,
-    0x238, 0x26E, 0x28E, 0x2C2, 0x2C3,
+    0x102, 0x103, 0x10A, 0x10C, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x119, 0x11A, 0x11B,
+    0x11C, 0x11D, 0x120, 0x121, 0x122, 0x124, 0x129, 0x12A, 0x12B, 0x144, 0x14E, 0x151, 0x152,
+    0x153, 0x155, 0x156, 0x157, 0x158, 0x159, 0x15A, 0x15B, 0x15C, 0x15D, 0x15E, 0x15F, 0x162,
+    0x163, 0x164, 0x165, 0x166, 0x168, 0x16B, 0x16F, 0x176, 0x177, 0x17E, 0x18A, 0x19C, 0x19D,
+    0x1DD, 0x1DE, 0x1DF, 0x1E0, 0x1EA, 0x1EB, 0x1ED, 0x1EE, 0x1EF, 0x1F3, 0x1F4, 0x1F5, 0x1F6,
+    0x1F7, 0x1F8, 0x20D, 0x21E, 0x22C, 0x235, 0x238, 0x253, 0x254, 0x26E, 0x28E, 0x2C2, 0x2C3,
 ];
 /// Bank 0x12 entry `class`: the character's voice table, sound words for event ids 2000.. (C
 /// `func_15016850` loads it, `func_1506E46C` reads it; V: the RAM copy for class 117).
@@ -551,8 +553,10 @@ fn footsteps(rom: &Rom, kinds: &BTreeSet<u8>) -> Result<Footsteps> {
 /// (`[0x0F, entry]`, header word 2; 0x18-byte entries, byte 0 the reaction, word 1 its sound word)
 /// names the voice; `func_15060A30` plays it on slot B. The mounted gun's (0x1B, its bullet entry
 /// 0x2C) plays only when the hit does not kill (V `mounted-gun-scratch/gc`: gcQ the squirrel's 887
-/// at 24000 on a hit, gcQK nothing on the kill).
-const REACTIONS: [(u8, u8); 19] = [
+/// at 24000 on a hit, gcQK nothing on the kill). Map 0x1A's bat (0x19) swings as the club (the same
+/// `func_150641D8(0x113, 0x113, 0x119)`, C); its tommy gun's (0x38) bullet has the pistol bullet's
+/// numbers (I, `heist.md` §3.1).
+const REACTIONS: [(u8, u8); 22] = [
     (0x09, 0x21),
     (0x39, 0x21),
     (0x23, 0x31),
@@ -572,6 +576,9 @@ const REACTIONS: [(u8, u8); 19] = [
     (0x40, 0x25),
     (0x40, 0x26),
     (0x1B, 0x31),
+    (0x19, 0x25),
+    (0x19, 0x26),
+    (0x38, 0x21),
 ];
 
 fn hit_voices(rom: &Rom, game_data: &[u8], class: usize, character: &str) -> Result<Vec<Cue>> {
@@ -648,6 +655,11 @@ fn code_cues() -> Vec<Cue> {
     };
     let mut squirrel_fire = record(range(1404, 6), 32767, 500, 1000);
     squirrel_fire.chance = 63;
+    // The tommy gun's firing clips: standing, moving, above speed 20 (the list at 0x800996C8).
+    let tommy = || On::Firing {
+        weapon: 0x38,
+        clips: vec![0x1E0, 0x253, 0x254],
+    };
     let mut cues = vec![
         Cue {
             then: vec![
@@ -670,10 +682,51 @@ fn code_cues() -> Vec<Cue> {
                     weapon: 0x09,
                     clips: vec![0x7C, 0x20D],
                 },
-                squirrel_fire,
+                squirrel_fire.clone(),
                 "a squirrel's battle cry, one start in four, cut when firing stops (C func_15065A5C: class 0x80; V sq_e_w09)",
             )
         },
+        Cue {
+            then: vec![
+                record([727], 32767, 500, 1000),
+                record(range(747, 3), 16000, 500, 1000),
+            ],
+            ..cue(
+                tommy(),
+                record([719], 32767, 500, 1000),
+                "tommy gun: the twin guns' loop while firing (its clips, 0x800996C8), then the tail and a case (C func_15065A5C case 0x38, func_1000EFB4 by the sound 0x2CF)",
+            )
+        },
+        Cue {
+            character: Some("128".into()),
+            ..cue(
+                tommy(),
+                squirrel_fire,
+                "a squirrel's battle cry with the tommy gun, as with the twin guns (C func_15065A5C case 0x38: class 0x80)",
+            )
+        },
+    ];
+    // The Wise Guy's (0x3B) battle cry with the twin guns and the tommy gun: one of 0x543-0x546, one
+    // start in four, cut when firing stops (C func_15065A5C cases 9 and 0x38, func_1000F568).
+    let mut wise_guy_fire = record(range(1347, 4), 32767, 500, 1000);
+    wise_guy_fire.chance = 63;
+    for on in [
+        On::Firing {
+            weapon: 0x09,
+            clips: vec![0x7C, 0x20D],
+        },
+        tommy(),
+    ] {
+        cues.push(Cue {
+            character: Some("59".into()),
+            ..cue(
+                on,
+                wise_guy_fire.clone(),
+                "a Wise Guy's battle cry, one start in four, cut when firing stops (C func_15065A5C: class 0x3B)",
+            )
+        });
+    }
+    cues.extend([
         cue(
             On::Shot { weapon: 0x39 },
             record([755, 756], 32000, 500, 1500),
@@ -919,7 +972,7 @@ fn code_cues() -> Vec<Cue> {
             play([1541], 26000, Some(26000), 299, 300, Channel::Free),
             "the scope coming up (C func_15126378, camera code; V e_w24, ctlw_k10)",
         ),
-    ];
+    ]);
     // Pickups (C func_1511DD98, by the pickup's class; V pick57 688, pick87 81, the bot's 1454; the
     // crossbow's class 0x3D and the shotgun's 0x5E, scene 0x34's placements: C).
     for (weapon, id) in [
@@ -934,6 +987,7 @@ fn code_cues() -> Vec<Cue> {
         (0x16, 1546),
         (0x18, 1090),
         (0x37, 688),
+        (0x38, 688),
     ] {
         let mut c = cue(
             On::Pickup {
@@ -954,13 +1008,40 @@ fn code_cues() -> Vec<Cue> {
         play([81], 9000, Some(9000), 100, 1000, Channel::Free),
         "pickup (C func_1511DD98; V pick87)",
     ));
-    for weapon in [0x09, 0x39, 0x24, 0x16, 0x23, 0x37] {
+    for weapon in [0x09, 0x39, 0x24, 0x16, 0x23, 0x37, 0x38] {
         cues.push(Cue {
             character: Some("128".into()),
             ..cue(
                 On::Pickup { gives: Gives::Weapon(weapon) },
                 play([1383], 26000, Some(26000), 100, 1000, Channel::Free),
                 "a squirrel's voice on the pickup (C func_1511DD98: class 0x80; 0x23's 15 ticks later)",
+            )
+        });
+    }
+    // The Wise Guy's (0x3B): 0x542 on the twin guns, pistol, tommy gun and shotgun (classes 0x39,
+    // 0x5C-0x5E); on the bazooka (class 0x3A) 0x53E or 0x53F in place of its 1546.
+    for (weapon, ids) in [
+        (0x09, &[1346][..]),
+        (0x39, &[1346]),
+        (0x38, &[1346]),
+        (0x37, &[1346]),
+        (0x16, &[1342, 1343]),
+    ] {
+        cues.push(Cue {
+            character: Some("59".into()),
+            ..cue(
+                On::Pickup {
+                    gives: Gives::Weapon(weapon),
+                },
+                play(
+                    ids.iter().copied(),
+                    26000,
+                    Some(26000),
+                    100,
+                    1000,
+                    Channel::Free,
+                ),
+                "a Wise Guy's voice on the pickup (C func_1511DD98: model 0x3B)",
             )
         });
     }
@@ -1221,21 +1302,40 @@ fn beach_cues() -> Vec<Cue> {
 /// 84, no channel muted, volume 24000 (`func_1000E40C`, set again every frame; V). 0x2B (War: Beach's
 /// scenario 8, 2 idle humans 25 s): two lamps as 0x2D's by the villagers' starts (V: bursts of
 /// 1100-1108 from `func_151618BC` at both), sequence 77, channels 0-9 (mute mask 0xFC00), volume 18000.
+/// 0x1A (Heist and Deathmatch scenario 6, the same; V `../lab/audio/map1a/`): two lamps as 0x2D's (V
+/// 98-99 buzzes each in 8,653 reads); its five switching lights (`lights.json` `switching`), each
+/// switch back on one of 1099-1108 at 16000, 500/1000 (C func_15100340 → func_151616D0 →
+/// func_151604A0, message 0x1C; V 191-219 each); sequence 30, no channel muted (mask 0), volume 8000
+/// (C func_150000B0: the scene record's song, V).
 fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
     let spots = match map {
         "2d" => &[[-1101, -1201, -229], [650, -1191, 486]][..],
         "2b" => &[[2616, -236, 8004], [-3032, -327, 8306]],
+        "1a" => &[[5770, 299, -199], [-6631, 336, -167]],
         _ => &[],
     };
-    let emitters = (spots.iter())
-        .map(|&at| Emitter {
-            at,
-            play: play(range(1099, 10), 25000, None, 500, 1500, Channel::Free),
-        })
+    let switching = match map {
+        "1a" => &[
+            [230, 306, -2040],
+            [1887, 300, 739],
+            [-528, 342, 5632],
+            [-153, 283, -5940],
+            [-2708, 329, -1110],
+        ][..],
+        _ => &[],
+    };
+    let buzz = |at, volume, far| Emitter {
+        at,
+        play: play(range(1099, 10), volume, None, 500, far, Channel::Free),
+    };
+    let lamps = spots.iter().map(|&at| buzz(at, 25000, 1500));
+    let emitters = lamps
+        .chain(switching.iter().map(|&at| buzz(at, 16000, 1000)))
         .collect();
     let (sequence, channels, volume) = match map {
         "2d" => (19, "0-3", 32000),
         "2b" => (77, "0-9", 18000),
+        "1a" => (30, "0-15", 8000),
         "34" => (36, "0-5", 32000),
         "3f" => (84, "0-15", 24000),
         _ => (19, "0-5", 32000),
@@ -1246,8 +1346,9 @@ fn map_sounds(map: &str) -> (Vec<Emitter>, u8, &'static str, u16) {
 /// A map's sound zones: its trigger records of kind 2 (`+0x15 >> 2`, `func_150A11C4` → `func_150A23E4`,
 /// C; V on 0x2B's 0x23 and 0x24, `../lab/research/mp-original/beach-environment.md` §5). Each plays
 /// sound `+0x1C >> 16` at its centre at volume (`+0x17` & 0x7F)·0x147, near `+0x1C & 0xFFFF`, far
-/// `+0x18`, centred (flag 0x100), by horizontal distance for shape 0 (bit 0x8000 of the far); only
-/// 0x2B has any.
+/// `+0x18`, centred (flag 0x100), by horizontal distance for shape 0 (bit 0x8000 of the far): 0x2B's
+/// two, 0x1A's four (its bases' 1116; V `../lab/audio/map1a/`: they played while idle players stood
+/// in 0x35 and 0x37).
 fn zones(triggers: &[u8]) -> Vec<conker_assets::audio::Zone> {
     let records = triggers.as_chunks::<0x34>().0.iter().enumerate();
     (records.filter(|(_, r)| r[0x15] >> 2 == 2))
@@ -1349,6 +1450,8 @@ pub fn pack_audio(
         characters.insert(folder.clone(), clip_sounds(rom, &game_data, class)?);
         cues.extend(hit_voices(rom, &game_data, class, &folder)?);
     }
+    // No cues for a character the pack leaves out (the Wise Guy's without map 0x1A).
+    cues.retain(|c| (c.character.as_ref()).is_none_or(|n| characters.contains_key(n)));
     let mut files = Vec::new();
     let mut map_events = BTreeMap::new();
     for (name, background, stem) in maps {
@@ -1491,6 +1594,14 @@ pub fn pack_audio(
     // The outros' script sounds (`outros.json`), in their map's folder.
     for (name, ids) in outro_sounds {
         add(&mut ids.iter().copied(), format!("maps/{name}"));
+    }
+    // Scene 0x34's traps' sounds (`crate::traps`), in its folder.
+    let traps = crate::map_name(crate::traps::SCENE);
+    if maps.iter().any(|m| m.0 == traps) {
+        add(
+            &mut crate::traps::SOUNDS.into_iter(),
+            format!("maps/{traps}"),
+        );
     }
     for id in events.sound_ids() {
         owner
