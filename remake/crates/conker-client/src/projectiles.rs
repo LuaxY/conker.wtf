@@ -15,7 +15,10 @@
 //!   rolling forward 30° a frame from 40° up (V knife DLs 121-132); the crossbow's bolt at 0.5,
 //!   turning 30° a frame about its length from 60° (V bolt2 DLs 151-158). A knife and a bolt share
 //!   the shots' list: the crossbow's are bolts ([`look`]; the shooter is the player nearest where
-//!   it appears).
+//!   it appears). On 0x1A and 0x3F the grenades are item 0x3A's ([`LOB`]): its rig at clip 0 (its
+//!   empty pair's pose, the bent fuse), at its own scale 1.0, 28 above the object (its obj+0xC8),
+//!   upright with +z along the throw, never turning, through the bounces and at rest (V
+//!   `held-client-scratch` l1a DLs 133-220, l3f DLs 140-200).
 //! - The flame stream (V flame DLs 106-170, the stream's 15 records at 0x8021DFF0 and its ribbon's
 //!   batches): while the fire clip plays, from [`conker_rules::flame::DELAY`] frames on, a flame
 //!   point a frame leaves the nozzle ([`NOZZLE`]); the ribbon runs from the nozzle through the
@@ -38,54 +41,83 @@ use conker_rules::projectile::raycast;
 use conker_sim::net::{Collision, Combat, MatchView};
 use lightyear::prelude::LocalTimeline;
 
+use crate::held::{LOB as LOB_RIG, Lob, Rigged, pose_rig, rig_ready};
 use crate::render::{MODEL_SCALE, Model};
 
-/// How a projectile is drawn: its glTF scene, its scale, its pitch (degrees up from its flight)
-/// and roll (about its length) on its first frame, and their change a frame.
+/// What a projectile's model is: a glTF scene of `projectiles.gltf`, or item 0x3A's rig
+/// ([`Rigged`]) showing its list `k` in clip 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    Scene(usize),
+    Lob(usize),
+}
+
+/// How a projectile is drawn: its model, its scale, how far above its position (model units),
+/// its pitch (degrees up from its flight) and roll (about its length) on its first frame, and
+/// their change a frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
-    pub scene: usize,
+    pub shape: Shape,
     pub scale: f32,
+    pub lift: f32,
     pub pitch: [f32; 2],
     pub roll: [f32; 2],
 }
 
 pub const GRENADE: Look = Look {
-    scene: 0,
+    shape: Shape::Scene(0),
     scale: MODEL_SCALE,
+    lift: 0.0,
     pitch: [32.7, -32.7],
     roll: [0.0; 2],
 };
 pub const ROCKET: Look = Look {
-    scene: 1,
+    shape: Shape::Scene(1),
     scale: 0.047,
+    lift: 0.0,
     pitch: [0.0; 2],
     roll: [0.0; 2],
 };
 pub const KNIFE: Look = Look {
-    scene: 2,
+    shape: Shape::Scene(2),
     scale: MODEL_SCALE,
+    lift: 0.0,
     pitch: [40.0, -30.0],
     roll: [0.0; 2],
 };
+/// The bolt's scene (also the crossbow's loaded bolt, [`crate::held`]).
+pub const BOLT_SCENE: usize = 3;
 pub const BOLT: Look = Look {
-    scene: 3,
+    shape: Shape::Scene(BOLT_SCENE),
     scale: MODEL_SCALE,
+    lift: 0.0,
     pitch: [0.0; 2],
     roll: [60.0, -30.0],
 };
+/// Item 0x3A's thrown grenade, its rig's list `k` (V l1a, l3f: its joint 0 at scale 1.0, 28.0
+/// above the object, obj+0xC8).
+pub const fn lob(k: usize) -> Look {
+    Look {
+        shape: Shape::Lob(k),
+        scale: 1.0,
+        lift: 28.0,
+        pitch: [0.0; 2],
+        roll: [0.0; 2],
+    }
+}
 
 /// A landed grenade's pitch keeps this much of itself a frame (I: V's damped wobble, −98° at the
 /// bounce, then −59°, −17°, −18°, 7°, 12°, −3° every other frame).
 pub const SETTLE: f32 = 0.775;
 
 /// The look of list `k` of the [`MatchView`] (the shots, the grenades, the rockets) fired with
-/// `weapon`.
-pub fn look(k: usize, weapon: u8) -> Look {
-    match k {
-        0 if weapon == 0x18 => BOLT,
-        0 => KNIFE,
-        1 => GRENADE,
+/// `weapon`; `lob`: item 0x3A's list where C-down lobs it ([`Lob`]).
+pub fn look(k: usize, weapon: u8, lob: Option<usize>) -> Look {
+    match (k, lob) {
+        (0, _) if weapon == 0x18 => BOLT,
+        (0, _) => KNIFE,
+        (1, Some(list)) => self::lob(list),
+        (1, None) => GRENADE,
         _ => ROCKET,
     }
 }
@@ -118,6 +150,19 @@ pub struct Projectile;
 
 pub fn build(app: &mut App) {
     app.init_resource::<Flights>();
+    app.add_systems(Update, pose_lobs);
+}
+
+/// Item 0x3A's thrown grenades show their rig's clip 0 (the game's once thrown, V p1a: clip 0,
+/// clock 0 from the throw's first frame).
+fn pose_lobs(
+    lobs: Query<&Rigged, With<Projectile>>,
+    mut animators: Query<&mut AnimationPlayer>,
+    mut joints: Query<&mut Transform>,
+) {
+    for rig in &lobs {
+        pose_rig(rig, (0, 0.0), &mut animators, &mut joints);
+    }
 }
 
 /// The pose of a projectile with look `l`, moving along `dir`, `age` frames after it was first
@@ -135,11 +180,12 @@ pub fn pose(l: &Look, dir: Vec3, age: f32, landed: Option<(f32, f32)>) -> Quat {
 /// Follows the [`MatchView`]'s shots, grenades and rockets: each list keeps its order (new ones go
 /// last), so each projectile is the next of the new list within reach of where it was; then poses
 /// their models.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn fly(
     game: Query<&MatchView>,
     timeline: Res<LocalTimeline>,
     assets: Res<AssetServer>,
+    lob: Res<Lob>,
     mut flights: ResMut<Flights>,
     mut models: Query<(&mut Transform, &mut Visibility), With<Projectile>>,
     players: Query<(&Transform, &Combat), (With<Model>, Without<Projectile>)>,
@@ -175,7 +221,7 @@ pub(crate) fn fly(
                         // It settles from its last frame in the air, two before the bounce shows.
                         let at = tick.saturating_sub(2);
                         let age = at.saturating_sub(fl.born) as f32;
-                        fl.landed = Some((at, pose_pitch(&GRENADE, age)));
+                        fl.landed = Some((at, pose_pitch(&fl.look, age)));
                     }
                     fl.vel = Some(vel);
                     let along = if k == 1 { vel.with_y(0.0) } else { vel };
@@ -201,7 +247,7 @@ pub(crate) fn fly(
                 entity: entity.id(),
                 pos: p,
                 vel: None,
-                look: look(k, shooter.map_or(0, |s| s.1.weapon)),
+                look: look(k, shooter.map_or(0, |s| s.1.weapon), lob.0),
                 heading: Vec3::Z,
                 born: tick,
                 landed: None,
@@ -221,12 +267,16 @@ pub(crate) fn fly(
             let landed = fl.landed.map(|(at, p)| (tick.saturating_sub(at) as f32, p));
             if let Ok((mut t, mut v)) = models.get_mut(fl.entity) {
                 if *v == Visibility::Hidden {
-                    commands
-                        .entity(fl.entity)
-                        .insert(WorldAssetRoot(f.scenes[l.scene].clone()));
+                    let mut e = commands.entity(fl.entity);
+                    match l.shape {
+                        Shape::Scene(s) => e.insert(WorldAssetRoot(f.scenes[s].clone())),
+                        Shape::Lob(k) => e
+                            .insert(Rigged::spawn(LOB_RIG, k, &assets))
+                            .observe(rig_ready),
+                    };
                     *v = Visibility::Inherited;
                 }
-                *t = Transform::from_translation(fl.pos)
+                *t = Transform::from_translation(fl.pos + Vec3::Y * l.lift)
                     .with_rotation(pose(&l, fl.heading, age, landed))
                     .with_scale(Vec3::splat(l.scale));
             }
@@ -482,8 +532,18 @@ mod tests {
         assert!((pose_pitch(&GRENADE, 26.0) + 98.1).abs() < 1.0);
         let rest = pose(&GRENADE, bolt, 0.0, Some((40.0, -98.0)));
         assert!(z(rest).distance(bolt) < 0.01);
-        assert_eq!(look(0, 0x18), BOLT);
-        assert_eq!(look(0, 0x14), KNIFE);
+        assert_eq!(look(0, 0x18, None), BOLT);
+        assert_eq!(look(0, 0x14, Some(0)), KNIFE);
+        // Item 0x3A's grenade on 0x1A and 0x3F: upright, +z along the throw, never turning (V l1a
+        // DLs 133-220: joint 0's z (−0.992, 0, 0.122), its throw's heading, y up).
+        assert_eq!(look(1, 0, None), GRENADE);
+        let l = look(1, 0, Some(1));
+        assert_eq!((l.shape, l.scale, l.lift), (Shape::Lob(1), 1.0, 28.0));
+        let heading = Vec3::new(-0.992, 0.0, 0.122).normalize();
+        for (age, landed) in [(3.0, None), (40.0, Some((10.0, pose_pitch(&l, 30.0))))] {
+            let q = pose(&l, heading, age, landed);
+            assert!(z(q).distance(heading) < 1e-5 && (q * Vec3::Y).distance(Vec3::Y) < 1e-5);
+        }
     }
 
     /// The stream against flame DL 130's records: a point 41.7 a frame along the stream, rising

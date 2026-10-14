@@ -164,6 +164,7 @@ use conker_rules::game::{Action, Event, Fighter, Match, Phase, Settings};
 use conker_rules::game::{END_DELAY, FADE, SPAWN_IMMUNE, teams_result};
 use conker_rules::gas::{self, Effect};
 use conker_rules::net::Fighting;
+use conker_rules::parts::{self, Poses};
 use conker_rules::projectile::{Bullet, hits_body};
 use conker_rules::spawn::{Starts, starts};
 use conker_rules::weapon::{self, Attack, Gives, Pickup};
@@ -709,6 +710,10 @@ fn main() {
         .unwrap_or_else(|| fail(format!("{}: bad bot data", dir.display())));
     game.m.guns = gun::spawn(usize::from(scene));
     game.m.traps = game.ai.traps();
+    game.poses = Poses::load(&parts::models(scene, game.setup.cheats), |p| {
+        std::fs::read(dir.join(p))
+    })
+    .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
     app.add_observer(on_link)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
@@ -1004,6 +1009,9 @@ struct Game {
     vault: bool,
     /// The team screen's BALANCE (C `D_8008FDC4`, [`TeamRow::bots`]), set by the first human.
     balance: i8,
+    /// The players' poses for the body-part hit test (the pack's models with parts; none in the
+    /// tests: the fitted volumes).
+    poses: Poses,
 }
 
 impl Game {
@@ -1031,6 +1039,7 @@ impl Game {
             cavemen: false,
             vault: false,
             balance: 0,
+            poses: Poses::default(),
         }
     }
 
@@ -2383,12 +2392,18 @@ fn simulate(
         let view: View = views.get(s).copied().flatten()?;
         history.at(v, view.tick, view.overstep)
     };
+    // The body parts where the last frame drew them, then this frame's poses (`Match::parts`).
+    game.poses.place(&mut game.m);
     let pre = game.m.clone();
-    events.extend(match () {
+    let stepped = match () {
         _ if warm_up => Vec::new(),
         _ if game.setup.lagcomp => game.m.step_seen(&game.arena, &inputs, &world, &seen),
         _ => game.m.step(&game.arena, &inputs, &world),
-    });
+    };
+    if !warm_up {
+        game.poses.tick(&game.m, &stepped);
+    }
+    events.extend(stepped);
     lag(&pre, &game.m, &events, &world, &seen, &views, t);
     for (p, (was, f)) in pre.players.iter().zip(&game.m.players).enumerate() {
         let high = |f: &Fighter| f.body.state == state::HIGH_JUMP;

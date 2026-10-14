@@ -13,6 +13,7 @@ use conker_camera::CameraState;
 use conker_camera::math::yaw_of;
 use conker_rules::Rng;
 use conker_rules::game::{Arena, Event, Fighter, Match};
+use conker_rules::parts::Poses;
 use conker_rules::projectile::{Bullet, raycast};
 use conker_rules::spawn::Spawn;
 use conker_rules::weapon::BULLET_RANGE;
@@ -105,6 +106,25 @@ fn scene() -> Option<&'static Scene> {
             Some(Scene { world, arena })
         })
         .as_ref()
+}
+
+/// `COMBAT_POSES=last|this`: the body parts posed on the pack's glTF (`conker_rules::parts`), from
+/// the poses the last frame drew (the game's) or this frame's (the step run once on a copy first);
+/// unset or without the pack (`CONKER_ASSETS`, else `<repo>/assets`), the fitted volumes.
+fn poses() -> Option<(&'static Poses, bool)> {
+    static POSES: OnceLock<Option<Poses>> = OnceLock::new();
+    let this = match std::env::var("COMBAT_POSES").ok()?.as_str() {
+        "this" => true,
+        "last" => false,
+        _ => return None,
+    };
+    let poses = POSES.get_or_init(|| {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let dir = PathBuf::from(dir);
+        Poses::load(&[117, 136], |p| std::fs::read(dir.join(p))).ok()
+    });
+    Some((poses.as_ref()?, this))
 }
 
 fn world() -> Option<&'static CollisionWorld> {
@@ -286,6 +306,8 @@ struct Raw {
     scope: Option<[f32; 2]>,
     /// What the camera reads: s126+0x78 and s126+0x11A = 2.
     camera: (u8, bool),
+    /// obj+0xB4: ticks into the clip.
+    time: f32,
 }
 
 /// Match rows (mp 1) by (read, player).
@@ -312,6 +334,7 @@ fn trace(name: &str) -> Option<HashMap<(u32, usize), Row>> {
                 item: s[0x75],
                 grenades: s[0x19A],
                 camera: (s[0x78], s[0x11A] == 2),
+                time: f32::from_be_bytes(o[0xB4..0xB8].try_into().unwrap()),
                 scope: (s[0x197] == 2).then(|| {
                     [0x16C, 0x170].map(|k| f32::from_be_bytes(s[k..k + 4].try_into().unwrap()))
                 }),
@@ -488,6 +511,7 @@ fn seen(m: &Match, p: usize) -> Seen {
             grenades: f.grenades,
             scope: None,
             camera: (0, false),
+            time: 0.0,
         },
     }
 }
@@ -897,6 +921,23 @@ fn replay(c: &Case) -> Option<Report> {
         .collect();
     let mut m = Match::new(&sc.arena, players, Rng::default(), start);
     m.timer = rows[&(start, 0)].timer;
+    // The clocks as the trace shows them at the start (id, time, rate; no blend).
+    let mut posed = poses().map(|(p, this)| {
+        let mut p = p.clone();
+        p.clocks = (0..2)
+            .map(|k| {
+                let r = &rows[&(start, k)];
+                let clock = conker_anim::AnimPlayer {
+                    id: r.raw.anim,
+                    time: r.raw.time,
+                    rate: r.rate,
+                    ..Default::default()
+                };
+                (clock, m.players[k].body.speed_percent)
+            })
+            .collect();
+        (p, this)
+    });
     let dump = std::env::var("COMBAT_DUMP").ok().and_then(|v| {
         let mut it = v.split(':');
         Some((
@@ -961,7 +1002,21 @@ fn replay(c: &Case) -> Option<Report> {
         let percent = [0, 1].map(|p| m.players[p].body.speed_percent);
         // Bullets at the start of their update in frame t: the ones carried over, then the new ones.
         let carried: Vec<[f32; 3]> = m.bullets.iter().map(|b| b.1.pos).collect();
+        if let Some((p, this)) = &posed {
+            p.place(&mut m);
+            if *this {
+                let mut next = m.clone();
+                let events = next.step(&sc.arena, &inputs, &sc.world);
+                let mut q = p.clone();
+                q.tick(&next, &events);
+                q.place(&mut next);
+                m.parts = next.parts;
+            }
+        }
         let events = m.step(&sc.arena, &inputs, &sc.world);
+        if let Some((p, _)) = &mut posed {
+            p.tick(&m, &events);
+        }
         let mut sim_bullets = carried;
         sim_bullets.extend(events.iter().filter_map(|e| match e {
             Event::Shot { pos, .. } => Some(*pos),
@@ -1151,7 +1206,8 @@ fn combat_traces() {
         for e in r.extra.iter().take(10) {
             eprintln!("    extra   {e:?}");
         }
-        if c.known == usize::MAX {
+        // `COMBAT_ALL`: print every case, assert none.
+        if c.known == usize::MAX || std::env::var_os("COMBAT_ALL").is_some() {
             continue;
         }
         assert!(

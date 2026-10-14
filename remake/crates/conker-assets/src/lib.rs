@@ -19,11 +19,13 @@
 //!
 //! No file system here: [`Slice::load`] reads through a closure, so the same code runs where the
 //! files are on disk and in a browser that fetched them first ([`Slice::files`] lists them). The
-//! glTF files are not read here; Bevy's glTF loader loads them by path ([`level_gltf`] etc.).
+//! glTF files are not read here (Bevy's glTF loader loads them by path, [`level_gltf`] etc.), but
+//! for a character's joints and clips ([`pose::Skeleton`], the server's body parts).
 
 pub mod audio;
 pub mod hud;
 pub mod outro;
+pub mod pose;
 pub mod race;
 pub mod raptor;
 
@@ -136,8 +138,8 @@ pub fn held_gltf(weapons: &str) -> String {
 
 /// The projectiles in flight: glTF scenes 0-5 the thrown grenade, the rocket, the knife, the bolt
 /// (both crossbows'), Tank's shell and the bone knife, at the origin with +z along the flight; 6
-/// and 7 item 0x3A's thrown grenade on 0x1A (bank 01 #137) and on 0x3F (#186), in their bind pose
-/// (clip 0, the empty one, the game's once thrown).
+/// and 7 item 0x3A's thrown grenade on 0x1A (bank 01 #137) and on 0x3F (#186), in their rest pose
+/// (the game draws it in its clip 0, the fuse bent: [`RIGS`]' `lob`).
 pub fn projectiles_gltf(weapons: &str) -> String {
     format!("weapons/{weapons}/projectiles.gltf")
 }
@@ -148,10 +150,11 @@ pub fn projectiles_gltf(weapons: &str) -> String {
 /// joints (`joint_00`..) with its clips (`pair_NNNN_anim_IIII`, as a character's), the k-th entry
 /// drawn by the primitives whose `extras.list` is k: the entries share one rig and one clip set
 /// (C: equal joints and clips). `crossbow`: the crossbow 0x18's 0x6E and War: Raptor's bone
-/// crossbow 0x41's 0x2F, 3 joints (the nock `joint_01`, the loaded bolt's `joint_02`), clips 1 (a
-/// one-tick pose), 2 (the fire, 31 ticks) and 3 (the holster, 36), clip 0 the bind pose. `lob`:
-/// item 0x3A's grenade on 0x1A (0x89) and on 0x3F (0xBA), 4 joints, clips 1 (30 ticks), 2 (24) and
-/// 3 (30), clip 0 the bind pose.
+/// crossbow 0x41's 0x2F, 3 joints (the nock `joint_01`, the loaded bolt's `joint_02`), clips 0 (the
+/// draw's bind pose), 1 (a one-tick pose), 2 (the fire, 31 ticks) and 3 (the holster, 36). `lob`:
+/// item 0x3A's grenade on 0x1A (0x89) and on 0x3F (0xBA), 4 joints, clips 0 (once thrown: the fuse
+/// bent), 1 (30 ticks), 2 (24) and 3 (30). Clip 0 is an empty pair's one frame, its channels'
+/// bases; a clip keys some joints only, the others are at rest.
 pub const RIGS: [(&str, [usize; 2]); 2] = [("crossbow", [0x6E, 0x2F]), ("lob", [0x89, 0xBA])];
 
 pub fn rig_gltf(weapons: &str, rig: &str) -> String {
@@ -701,7 +704,8 @@ fn nav_bytes(word_2: u16, nodes: &[Node]) -> Vec<u8> {
     out
 }
 
-fn parse_json<T: DeserializeOwned>(file: &str, bytes: &[u8]) -> Result<T> {
+/// A pack JSON file's value (`file` names it in the error).
+pub fn parse_json<T: DeserializeOwned>(file: &str, bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|source| Error::Json {
         file: file.into(),
         source,

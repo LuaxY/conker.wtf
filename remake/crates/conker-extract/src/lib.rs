@@ -21,10 +21,11 @@ pub use conker_assets::{ClipInfo, PACK_CHARACTERS, PACK_MAP, PACK_WEAPONS, RootC
 use conker_rules::weapon::{self, Gives};
 pub use extract_character::Held;
 use extract_character::{
-    Character, DEATHMATCH_PLAYER, FPS, ROUTE_BANK, SQUIRREL_SOLDIER, action_records, bind_pivots,
-    held_models, matrix_slot, parse_attachment, parse_effect, parse_model, parse_routes,
+    Character, DEATHMATCH_PLAYER, FPS, Layout, ROUTE_BANK, SQUIRREL_SOLDIER, action_records,
+    bind_pivots, held_models, matrix_slot, parse_attachment, parse_effect, parse_model,
+    parse_routes,
 };
-use extract_core::{Rom, TEXTURE_COUNT, Textures, US_SHA1};
+use extract_core::{Rom, TEXTURE_COUNT, Table, Textures, US_SHA1};
 use extract_gbi::Material;
 use extract_level::{
     Gltf, IDENTITY, Instance, Level, Mesh, Model, bind_material, bundle_segments, scene_level,
@@ -556,11 +557,21 @@ fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
 }
 
 /// [`assets::RIGS`] entry `entries`: one model on the first's rig with its clips, list k the k-th
-/// entry's (each has one list; C: the same joints and clips, `tests/pack.rs`).
+/// entry's (each has one list; C: the same joints and clips, `tests/pack.rs`). An empty pair (clip
+/// 0) still poses the joints, at its descriptor's channel bases (a frame of zero bits): it gets
+/// that one frame (V `../lab/research/mp-original/held-client-scratch` l1a, l3f: the thrown item
+/// 0x3A's joints 1-3 turned −12.5°, −24.1°, −26.4° about z, its pair 0's bases; the crossbow's are
+/// 0, its rest).
 pub fn rig(rom: &Rom, entries: [usize; 2]) -> Result<Character> {
     let mut rig = Character::load(rom, entries[0])?;
     let other = parse_model(&rom.asset(&[0x01, entries[1]])?, &rom.game_data()?)?;
     rig.model.lists.extend(other.lists);
+    let anims = rom.asset(&[2, rig.anim_entry])?;
+    let table = Table::parse(&anims)?;
+    for clip in rig.clips.iter_mut().filter(|c| c.frames.is_empty()) {
+        let layout = Layout::parse(&table.payload(2 * clip.pair)?)?;
+        clip.frames = vec![layout.frame(&vec![0; layout.stride])?];
+    }
     Ok(rig)
 }
 

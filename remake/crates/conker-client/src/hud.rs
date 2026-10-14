@@ -36,6 +36,7 @@ use conker_assets::hud::{
 use conker_assets::outro::{Outro, tip};
 use conker_rules::game::{Standing, places, teams_places};
 use conker_rules::net::Fighting;
+use conker_rules::projectile::{LOB_HOLD, LOB_PULL};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
@@ -76,8 +77,10 @@ pub struct Shown {
     pub health: u8,
     /// The held weapon (0: none).
     pub weapon: u8,
-    /// Grenades left while one is in the hand.
+    /// Grenades left while one is in the hand; `lob`: item 0x3A's (its icon,
+    /// [`conker_assets::hud::Grenades::lob_icon`]).
     pub grenades: Option<u8>,
+    pub lob: bool,
     pub kills: u16,
     pub rank: usize,
     /// Seconds left on the clock; `None` untimed (the original draws no clock, `func_151DDC20`).
@@ -1095,12 +1098,16 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     match s.grenades {
         Some(n) => {
             let g = &hud.grenades;
-            let [_, _, w, h] = g.icon.rect.map(f32::from);
+            let (icon, at) = match (&g.lob_icon, g.lob_at) {
+                (Some(i), Some(at)) if s.lob => (i, at),
+                _ => (&g.icon, g.at),
+            };
+            let [_, _, w, h] = icon.rect.map(f32::from);
             for k in 0..n {
-                let x = f32::from(g.at[0] + g.step * i16::from(k));
+                let x = f32::from(at[0] + g.step * i16::from(k));
                 out.push(quad(
-                    &g.icon,
-                    [x, f32::from(g.at[1]), w, h],
+                    icon,
+                    [x, f32::from(at[1]), w, h],
                     g.anchor,
                     white,
                     3.0,
@@ -1672,7 +1679,11 @@ fn shown(
 ) -> Shown {
     let (p, c, camera, anim) = own;
     let clock = &anim.0;
-    let in_hand = [GRENADE_PULL, GRENADE_HOLD].contains(&clock.id)
+    // Item 0x3A's from its pull to its throw (V held-pack-scratch p1a, p3f DLs 110, 126; gone by
+    // 140, 8 frames into the throw).
+    let lob = [LOB_PULL, LOB_HOLD].contains(&clock.id);
+    let in_hand = lob
+        || [GRENADE_PULL, GRENADE_HOLD].contains(&clock.id)
         || (clock.id == GRENADE_THROW && clock.time < THROW_IN_HAND);
     let (eye, at) = camera.drawn.view(&camera.follow);
     let ahead = Vec2::new(at.x - eye.x, at.z - eye.z).normalize_or(Vec2::NEG_Y);
@@ -1776,6 +1787,7 @@ fn shown(
             c.weapon
         },
         grenades: in_hand.then_some(c.grenades),
+        lob,
         kills: c.kills,
         rank: usize::from(places(&all, m.kill_limit)[0]),
         secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
@@ -2250,6 +2262,12 @@ mod tests {
             .collect();
         assert_eq!(g, [275.0, 264.0, 253.0]);
         assert!(rects(&hud, &s, &texture("atlas")).is_empty());
+        // Item 0x3A's: the bomb, 11 x 14 at x 247, 236, 225 and y 6 (V held-pack-scratch p1a DL 110).
+        let lob = Shown { lob: true, ..s };
+        let g: Vec<[f32; 4]> = (rects(&hud, &lob, &texture("grenade")).iter())
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(g, [247.0, 236.0, 225.0].map(|x| [x, 6.0, 11.0, 14.0]));
         // Score "0", rank "(1st)", clock "9:48" (and its shadow, one right and down).
         let text = glyphs(&hud, &state());
         assert_eq!(text[0], [135.0, 6.0, 143.0, 17.0]);

@@ -18,6 +18,8 @@ conker-camera = { path = "../conker-camera" }
 # animation ids of the weapon, hit and death states come from conker-anim.
 conker-sim = { path = "../conker-sim" }
 conker-anim = { path = "../conker-anim" }
+# The body parts' poses (`parts`): the pack's character glTF and spheres (data only, no I/O).
+conker-assets = { path = "../conker-assets" }
 
 [dev-dependencies]
 # ROM tests (CONKER_ROM) check the constants against .game data and scan every scene's surface words.

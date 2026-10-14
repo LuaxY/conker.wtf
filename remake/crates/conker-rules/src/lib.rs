@@ -18,6 +18,7 @@ pub mod heist;
 pub mod lift;
 #[cfg(feature = "net")]
 pub mod net;
+pub mod parts;
 pub mod projectile;
 pub mod race;
 pub mod raptor;

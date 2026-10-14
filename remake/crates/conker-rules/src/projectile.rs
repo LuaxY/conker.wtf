@@ -142,6 +142,78 @@ pub fn hits_sphere(p: [f32; 3], dir: [f32; 3], len: f32, c: [f32; 3], r: f32) ->
     (t <= len).then_some(t)
 }
 
+/// The head's part: the hit record's +0x58 for a head sphere (`func_151D4DAC`, `func_15081E78`).
+pub const HEAD: u8 = 0xA;
+
+/// One body-part sphere where the last frame drew it: its joint matrix · its offset (world space),
+/// its radius × the scale, its joint (matrix slot) and part.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sphere {
+    pub centre: [f32; 3],
+    pub radius: f32,
+    pub joint: u8,
+    pub part: u8,
+}
+
+/// A player's body parts for this frame's hit tests (`../lab/research/mp-original/held-leftovers.md`
+/// §2; [`crate::game::Match::parts`]): the broad sphere (radius and centre height above the feet,
+/// × the scale), the joints the head pop hides (obj+0x9C), the spheres in the table's order, and
+/// the feet they were placed at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BodyParts {
+    pub broad: [f32; 2],
+    pub hidden: u32,
+    pub spheres: Vec<Sphere>,
+    pub origin: [f32; 3],
+}
+
+/// `func_151452C4`: how far along the ray from `o` along the unit `d` it meets the sphere at `c`
+/// of radius `r`: where it enters, or where it leaves when `o` is inside; none behind `o`.
+pub fn ray_sphere(o: [f32; 3], d: [f32; 3], c: [f32; 3], r: f32) -> Option<f32> {
+    let f = sub(c, o);
+    let b = dot(f, d);
+    let q = dot(f, f) - b * b;
+    if r * r < q {
+        return None;
+    }
+    let s = (r * r - q).sqrt();
+    let t = if b < s { b + s } else { b - s };
+    (t >= 0.0).then_some(t)
+}
+
+impl BodyParts {
+    /// `func_1508114C`: the ray from `p` along the unit `dir` against the player whose feet are at
+    /// `at`, its spheres moved by `shift` (where its shooter saw it, less [`Self::origin`]). The broad
+    /// sphere first: a miss is no hit. Then each sphere in the table's order but the hidden
+    /// joints': a hit replaces the best one if it is the first, or nearer and of a part ≥ the
+    /// best's (so a head sphere, once best, keeps it against a nearer body sphere). The distance
+    /// along the ray and the part; the caller compares the distance with its reach.
+    pub fn hit(
+        &self,
+        p: [f32; 3],
+        dir: [f32; 3],
+        at: [f32; 3],
+        shift: [f32; 3],
+    ) -> Option<(f32, u8)> {
+        let [r, h] = self.broad;
+        ray_sphere(p, dir, [at[0], at[1] + h, at[2]], r)?;
+        let mut best: Option<(f32, u8)> = None;
+        for s in &self.spheres {
+            // `1 << joint` on a 32-bit word: MIPS shifts by the low 5 bits.
+            if self.hidden >> (s.joint & 31) & 1 != 0 {
+                continue;
+            }
+            let c = core::array::from_fn(|i| s.centre[i] + shift[i]);
+            if let Some(t) = ray_sphere(p, dir, c, s.radius)
+                && best.is_none_or(|(d, part)| t < d && s.part >= part)
+            {
+                best = Some((t, s.part));
+            }
+        }
+        best
+    }
+}
+
 /// The first of [`HEAD_PART`] and [`TORSO_PART`] of a player at `body` that the segment meets:
 /// how far along, and whether it is the head.
 pub fn hits_parts(
@@ -206,6 +278,9 @@ pub struct Bullet {
     pub angle: u16,
     pub owner: usize,
     pub kind: DamageType,
+    /// It tests body parts (`func_151C229C`'s flag 8, [`BodyParts`]): the twin guns' and the
+    /// pistol's; not 0x23's, the tommy gun's or the mounted gun's (C). Set by the shooter.
+    pub parts: bool,
 }
 
 impl Bullet {
@@ -227,6 +302,7 @@ impl Bullet {
             angle: angle | 1,
             owner,
             kind,
+            parts: false,
         }
     }
 
@@ -253,6 +329,7 @@ impl Bullet {
             angle: angle | 1,
             owner,
             kind,
+            parts: false,
         }
     }
 
@@ -726,6 +803,46 @@ mod tests {
         assert_eq!((frames, r.at(r.reach())), (4, [1000.0, 50.0, 0.0]));
         let mut s = Shot::fire(&w, 0, [0.0, 50.0, 0.0], 0, crate::damage::SHOT_BODY);
         assert_eq!((0..20).take_while(|_| s.advance()).count(), 13); // 13·75 = 975 < 1000
+    }
+
+    /// `func_151452C4`: the entry ahead, the exit from inside, nothing behind or beside.
+    #[test]
+    fn ray_sphere_as_the_game() {
+        let x = [1.0, 0.0, 0.0];
+        assert_eq!(ray_sphere([0.0; 3], x, [10.0, 0.0, 0.0], 2.0), Some(8.0));
+        assert_eq!(
+            ray_sphere([9.0, 0.0, 0.0], x, [10.0, 0.0, 0.0], 2.0),
+            Some(3.0)
+        );
+        assert_eq!(ray_sphere([13.0, 0.0, 0.0], x, [10.0, 0.0, 0.0], 2.0), None);
+        assert_eq!(ray_sphere([0.0; 3], x, [10.0, 3.0, 0.0], 2.0), None);
+    }
+
+    /// `func_1508114C`: the broad sphere first, then table order, a hit replacing the best only if
+    /// nearer and of a part ≥ the best's; hidden joints skipped.
+    #[test]
+    fn parts_keep_the_table_order() {
+        let sphere = |x: f32, joint, part| Sphere {
+            centre: [x, 50.0, 0.0],
+            radius: 5.0,
+            joint,
+            part,
+        };
+        let at = [100.0, 0.0, 0.0];
+        let ray = |p: &BodyParts| p.hit([0.0, 50.0, 0.0], [1.0, 0.0, 0.0], at, [0.0; 3]);
+        let mut p = BodyParts {
+            broad: [60.0, 50.0],
+            hidden: 0,
+            spheres: vec![sphere(110.0, 12, HEAD), sphere(95.0, 0, 0)],
+            origin: at,
+        };
+        assert_eq!(ray(&p), Some((105.0, HEAD))); // the nearer body sphere doesn't replace the head
+        p.spheres.reverse();
+        assert_eq!(ray(&p), Some((90.0, 0))); // nor the farther head the body
+        p.hidden = 1;
+        assert_eq!(ray(&p), Some((105.0, HEAD)));
+        p.broad = [60.0, 150.0]; // the broad sphere missed: no hit at all
+        assert_eq!(ray(&p), None);
     }
 
     /// combat4_pitch24 from the scope's eye 18.4 off player 2's axis, 142 ahead, 2.9 below its

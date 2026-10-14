@@ -132,6 +132,9 @@ pub mod combat {
     pub const CROSSBOW_FIRE: u16 = 0xFC;
     pub const CROSSBOW_AIM: u16 = 0x10A;
     pub const CROSSBOW_AIMED: u16 = 0x10C;
+    /// War: Raptor's bone crossbow (0x41): draw 64, fire 29 (conker-rules' weapon table; V r10).
+    pub const BONE_CROSSBOW_DRAW: u16 = 0x2C8;
+    pub const BONE_CROSSBOW_FIRE: u16 = 0x2C9;
     /// The shotgun (0x37): draw 13, idle, holster 13 (rate 1.4); Z plays 0x1F4 (45) or, one shot
     /// in four, 0x235 (71) (V combat5_ctlw37, sg3).
     pub const SHOTGUN_DRAW: u16 = 0x1F7;

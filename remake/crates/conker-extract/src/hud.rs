@@ -246,6 +246,7 @@ fn layout(textures: std::collections::BTreeMap<String, Texture>, font: Vec<Glyph
             step: -11,
             icon: image("grenade", [6, 8, 5, 20]),
             lob_icon: Some(image("grenade", [16, 15, 11, 14])),
+            lob_at: Some([247, 6]),
         },
         score: Text {
             anchor: Anchor(H::Centre, V::Top),

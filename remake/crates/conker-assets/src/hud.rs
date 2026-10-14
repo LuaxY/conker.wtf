@@ -103,11 +103,14 @@ pub struct Grenades {
     pub at: [i16; 2],
     pub step: i16,
     pub icon: Image,
-    /// Item 0x3A's (the lobbed grenade on 0x1A and 0x3F) instead of `icon`, at the same places
+    /// Item 0x3A's (the lobbed grenade on 0x1A and 0x3F) instead of `icon`, from `lob_at` by `step`
     /// (`../lab/research/mp-original/held-pack-scratch`, V p1a and p3f DLs 110 and 126: texels [16, 15,
-    /// 11, 14] of the same texture, the bomb, while the item is 0xBA); absent in a pack before it.
+    /// 11, 14] of the same texture, the bomb, at (247, 6), (236, 6), (225, 6) while the item is 0xBA);
+    /// absent in a pack before them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lob_icon: Option<Image>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lob_at: Option<[i16; 2]>,
 }
 
 /// A line of text: centred on `at[0]` (`align` "centre") or starting there ("left"), its top at

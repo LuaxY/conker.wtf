@@ -2550,6 +2550,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "conker-anim",
+ "conker-assets",
  "conker-camera",
  "conker-sim",
  "extract-character",

@@ -2107,6 +2107,7 @@ fn child_object_rigs() {
         assert_eq!(
             animations,
             [
+                "pair_0000_anim_0000",
                 "pair_0001_anim_0001",
                 "pair_0002_anim_0002",
                 "pair_0003_anim_0003"
@@ -2122,6 +2123,22 @@ fn child_object_rigs() {
     assert_eq!(
         (lob.model.joints.len(), clips),
         (4, vec![(0, 10), (1, 30), (2, 24), (3, 30)])
+    );
+    // The rigs' clip 0, an empty pair, is its descriptor's bases: the crossbow's rest, item 0x3A's
+    // bent fuse (V held-client-scratch l1a DLs 133-220: joints 1-3 turned about z by these).
+    let base = |entries| {
+        let rig = conker_extract::rig(&rom, entries).unwrap();
+        let clip = rig.clips.iter().find(|c| c.pair == 0).unwrap();
+        assert_eq!(clip.frames.len(), 1);
+        clip.frames[0].rotations.clone()
+    };
+    assert!(base([0x6E, 0x2F]).iter().all(|r| *r == [0, 0, 0]));
+    let lob = base([0x89, 0xBA]);
+    assert_eq!(lob[1..], [[0, 0, 63264], [0, 0, 61152], [0, 0, 60736]]);
+    let q = extract_character::quaternion(lob[1]);
+    assert!(
+        (q[2] + 0.109).abs() < 0.001 && (q[3] - 0.994).abs() < 0.001,
+        "{q:?}"
     );
 }
 

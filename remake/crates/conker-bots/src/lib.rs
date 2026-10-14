@@ -34,6 +34,7 @@ use conker_rules::game::{Action, Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
 use conker_rules::tank;
+use conker_rules::traps::{self, Traps};
 use conker_rules::weapon::Gives;
 use conker_rules::{Rng, beach, colors};
 use conker_sim::collision::CollisionWorld;
@@ -134,6 +135,8 @@ pub struct Bots {
     /// Per participant: where it stood at the last [`Bots::tick`] ([`brain::Body::prev`]).
     prev: Vec<[f32; 3]>,
     noises: Vec<([f32; 3], f32)>,
+    /// Per trap of 0x34: the frames its emitter is heard on ([`jets`]).
+    emit: Vec<u8>,
     /// The trigger records and their switches ([`World::zones`]).
     zones: Vec<(CameraHint, bool)>,
     rng: Rng,
@@ -177,6 +180,7 @@ impl Bots {
             guns: vec![Scope::default(); n],
             prev: Vec::new(),
             noises: Vec::new(),
+            emit: Vec::new(),
             zones: (assets.triggers.as_chunks::<0x34>().0.iter())
                 .map(|r| {
                     let zone = CameraVolume::parse_record(r);
@@ -359,6 +363,7 @@ impl Bots {
     /// hears ([`noises`]).
     pub fn observe(&mut self, events: &[Event], m: &Match) {
         self.noises = noises(m);
+        self.noises.extend(jets(&m.traps, &mut self.emit));
         let k = |slot: usize| self.slots.iter().position(|&s| s == Some(slot));
         for e in events {
             match *e {
@@ -857,15 +862,28 @@ impl Bots {
     }
 }
 
-/// The noises the AI hears from the frame [`Match::step`] just ran (`func_1508B20C`'s callers,
-/// C), each 900 around: a grenade's wind-up at its thrower, from 18 frames into the pull until it
-/// leaves the hand (`func_15033AD8`), then its fuse at the grenade until it goes off
-/// (`func_15054F74`). V q5gren2: pulled at read 42, the thrower heard 60-84, the grenade 85-203;
-/// q5cook: 60-116, 117-177. No gun is heard, mounted or not, and a blast is silent (V q5m2: 22 MG
-/// shots, no noise; q5gren2, q5cook: none after the fuse; C: no caller under the MG's fire
-/// `func_150FC614`). ponytail: two sources are not ported, the flame stream's (`func_1519A9A4`, V
-/// q3s5b3: at the stream's middle, half its length around, to 352) and 0x34's particle emitters'
-/// (`func_151A6600`, V o34emit: 500 around, 121 frames, their trigger untraced).
+/// 0x34's fire jets as the AI hears them: while a plate's jets burn, the emitter of each row's middle
+/// jet (the record's command 1) is heard 500 around (`func_151A6600` → `func_1508B20C` while its
+/// +0x127 ≠ 0, C), from the jets' first burning frame to the frame after their last, 121 frames.
+/// The electric floor has no emitter. V noise34 (plate 6 stood on from read 80, the jets burning
+/// 83-202 as trap34): records 28, 31 and 64 heard 83-203; o34emit, bots' presses: 121 frames, the
+/// three middle jets of plate 6, then of plate 7. A bot that hears one walks out of the 500
+/// (`World`'s `noises`). `emit`: per trap, the frames its emitter has left.
+fn jets(t: &Traps, emit: &mut Vec<u8>) -> Vec<([f32; 3], f32)> {
+    emit.resize(t.list.len(), 0);
+    let middle = |k: &usize| t.list[*k].command == 1 && !t.list[*k].electric;
+    (0..t.list.len())
+        .filter(middle)
+        .filter_map(|k| {
+            emit[k] = match t.left[k] == traps::FIRE_FRAMES - 1 {
+                true => traps::FIRE_FRAMES as u8 + 1,
+                false => emit[k].saturating_sub(1),
+            };
+            (emit[k] > 0).then(|| (t.list[k].zone.zone.center.map(f32::from), 500.0))
+        })
+        .collect()
+}
+
 /// The bag's walker reaches a node this near it, across (I: the game's NPC mover, `func_1504A730`
 /// on obj+0x25C, is unported; this clears the bag's turning circle at 17.5 a frame).
 const ARRIVE: f32 = 60.0;
@@ -916,6 +934,14 @@ fn walk(n: &mut Npc, c: &Cash, graph: &Graph, world: &CollisionWorld) -> Option<
     Some(Effect::CashAt([x, y, z], yaw, true))
 }
 
+/// The noises the AI hears from the frame [`Match::step`] just ran (`func_1508B20C`'s callers,
+/// C), each 900 around: a grenade's wind-up at its thrower, from 18 frames into the pull until it
+/// leaves the hand (`func_15033AD8`), then its fuse at the grenade until it goes off
+/// (`func_15054F74`). V q5gren2: pulled at read 42, the thrower heard 60-84, the grenade 85-203;
+/// q5cook: 60-116, 117-177. No gun is heard, mounted or not, and a blast is silent (V q5m2: 22 MG
+/// shots, no noise; q5gren2, q5cook: none after the fuse; C: no caller under the MG's fire
+/// `func_150FC614`). 0x34's fire jets are [`jets`]. ponytail: the flame stream's noise is not
+/// ported (`func_1519A9A4`, V q3s5b3: at the stream's middle, half its length around, to 352).
 fn noises(m: &Match) -> Vec<([f32; 3], f32)> {
     /// The throw's release, frames into it (conker-rules' `RELEASE`).
     const RELEASE: u32 = 14;
@@ -1129,6 +1155,46 @@ mod tests {
             assert!(noises(&m).is_empty(), "frame {t}");
         }
         assert!(shots > 0);
+    }
+
+    /// 0x34's jets against the oracle (noise34: plate 6 stood on from read 80, its jets burning
+    /// 83-202 as trap34): the middle jet of the row is heard 500 around on frames 83-203; its
+    /// neighbours and the electric floor (plate 9, stood on too) never are.
+    #[test]
+    fn the_jets_are_heard_while_they_burn() {
+        let record = |at: [i16; 3], arg: u32, id: u32, command: u32| {
+            let mut r = [0u8; 0x34];
+            for (k, v) in at.iter().enumerate() {
+                r[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+            }
+            (r[0x15], r[0x17]) = (12 << 2, 9);
+            for (o, w) in [(0x18, arg), (0x1C, id), (0x20, command)] {
+                r[o..o + 4].copy_from_slice(&w.to_be_bytes());
+            }
+            r
+        };
+        let table = [
+            record([-2442, -382, 3257], 4, 0, 0),
+            record([-2587, -379, 3247], 4, 1, 1),
+            record([-2710, -379, 3231], 4, 2, 0),
+            record([301, -401, 2624], 8, 0, 0),
+        ]
+        .concat();
+        let mut t = Traps::new(traps::SCENE, &table);
+        let (mut emit, mut burning, mut heard) = (Vec::new(), Vec::new(), Vec::new());
+        for frame in 0..300 {
+            if t.hits(1) {
+                burning.push(frame);
+            }
+            let on = (frame >= 80).then_some(0);
+            t.step([on, None, None, on]);
+            for (pos, r) in jets(&t, &mut emit) {
+                assert_eq!((pos, r), ([-2587.0, -379.0, 3247.0], 500.0));
+                heard.push(frame);
+            }
+        }
+        assert_eq!(burning, (83..=202).collect::<Vec<_>>());
+        assert_eq!(heard, (83..=203).collect::<Vec<_>>());
     }
 
     #[test]

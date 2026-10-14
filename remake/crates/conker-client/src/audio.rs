@@ -57,7 +57,9 @@ use conker_assets::outro::{Outro, frame};
 use conker_assets::{Held, Manifest, Pickup};
 use conker_camera::volume::CameraVolume;
 use conker_rules::net::Fighting;
-use conker_rules::projectile::{BOLT_STEP, Grenade, ROCKET_SPEED, SHOT_STEP};
+use conker_rules::projectile::{
+    BOLT_STEP, Grenade, LOB, LOB_HOLD, LOB_PULL, LOB_THROW, ROCKET_SPEED, SHOT_STEP,
+};
 use conker_rules::weapon::{Attack, Weapon, weapon};
 use conker_rules::{Rng, beach, gun};
 use conker_sim::collision::NO_FLOOR;
@@ -160,6 +162,8 @@ struct Pack {
     zones: Vec<(conker_assets::audio::Zone, CameraVolume)>,
     /// Scene 0x34's traps ([`crate::traps::sounding`]).
     traps: Vec<conker_rules::traps::Trap>,
+    /// Its grenades are item 0x3A's (`Arena::lob`): their bounces and blast are [`LOB`]'s.
+    lob: bool,
 }
 
 impl Pack {
@@ -212,6 +216,7 @@ impl Pack {
             ready_zone,
             zones,
             traps,
+            lob: false,
         }
     }
 
@@ -237,7 +242,11 @@ pub fn build(
     triggers: &[u8],
     seed: u64,
 ) {
-    app.insert_resource(Pack::new(audio, held, pickups, map, triggers));
+    let lob = (app.world().get_resource::<crate::MatchArena>()).is_some_and(|a| a.0.lob);
+    app.insert_resource(Pack {
+        lob,
+        ..Pack::new(audio, held, pickups, map, triggers)
+    });
     app.insert_resource(Sounds {
         rng: Rng::new(seed | 1),
         duck: DUCK[0],
@@ -335,8 +344,10 @@ impl Src {
 #[derive(Clone, Copy)]
 struct Seen {
     slot: u16,
-    /// Its body ([`crate::body`]): its character's sounds.
+    /// Its body ([`crate::body`]): its character's sounds; its class, whose clip plays the
+    /// clock's (conker-rules' `characters::clip`: the events are that clip's).
     body: usize,
+    class: u8,
     pos: [f32; 3],
     clock: AnimPlayer,
     /// The weapon held (0: none) and drawn: the local player's prediction, the others' [`Combat`].
@@ -709,6 +720,11 @@ fn burning(p: &Seen) -> bool {
     [FLAME_HIT, BURNING, BURN_END].contains(&p.clock.id)
 }
 
+/// The owner of item 0x3A's lit fuse while it is in `p`'s hand (no grenade yet: birth `u32::MAX`).
+fn lit(p: &Seen) -> Owner {
+    Owner::Grenade(u32::MAX, usize::from(p.slot))
+}
+
 /// The projectiles of last tick's list `old` that `new` no longer has. Lists keep their order (new
 /// ones go last), so each one left is the next of `new` within `step` of where it was.
 pub(crate) fn gone(
@@ -868,8 +884,9 @@ impl Sounds {
     fn player(&mut self, cx: &Cx, was: &Seen, is: &Seen) {
         let me = Src::player(is);
         let clips = &cx.pack.clips[is.body];
-        let first = clips.partition_point(|c| c.clip < is.clock.id);
-        for e in clips[first..].iter().take_while(|c| c.clip == is.clock.id) {
+        let id = conker_rules::characters::clip(is.class, is.clock.id);
+        let first = clips.partition_point(|c| c.clip < id);
+        for e in clips[first..].iter().take_while(|c| c.clip == id) {
             if !passes(&was.clock, &is.clock, e.time) {
                 continue;
             }
@@ -962,8 +979,23 @@ impl Sounds {
                 {
                     self.start(cx, &cue.play, &cue.play.sounds, 1.0, me);
                 }
+                // Item 0x3A's lit fuse from the pull's first frame, in the hand with its thrower,
+                // handed to the grenade at its birth ([`Self::grenades`]).
+                On::Lit { weapon: LOB } if is.clock.id == LOB_PULL && was.clock.id != LOB_PULL => {
+                    let at = Src {
+                        owner: lit(is),
+                        tag: Some(i),
+                        ..me
+                    };
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, at);
+                }
                 _ => {}
             }
+        }
+        // A pull or throw left before the grenade flew (a death, the blast in the hand).
+        let lobbing = |p: &Seen| [LOB_PULL, LOB_HOLD, LOB_THROW].contains(&p.clock.id);
+        if lobbing(was) && !lobbing(is) {
+            self.stop(|v| v.owner == lit(is));
         }
         if is.health < was.health {
             let (lethal, w) = (is.health == 0, is.hit);
@@ -982,7 +1014,8 @@ impl Sounds {
                 self.gibs(cx, w, is);
             }
             // A grenade cooked too long goes off in the thrower's hand: no grenade flies.
-            if w == GRENADE && [GRENADE_PULL, GRENADE_HOLD].contains(&was.clock.id) {
+            let pulls = [GRENADE_PULL, GRENADE_HOLD, LOB_PULL, LOB_HOLD];
+            if w == GRENADE && pulls.contains(&was.clock.id) {
                 self.world(cx, is.pos, |on| *on == On::Explosion { weapon: GRENADE });
             }
         }
@@ -1128,6 +1161,7 @@ impl Sounds {
     /// one is gone, which stops them.
     fn grenades(&mut self, cx: &Cx, now: &[(u32, Grenade)]) {
         let cues = &cx.pack.audio.events.cues;
+        let item = if cx.pack.lob { LOB } else { GRENADE };
         for &(birth, g) in now {
             let owner = Owner::Grenade(birth, g.owner);
             let src = Src {
@@ -1146,6 +1180,9 @@ impl Sounds {
                 if was.is_none() && v.owner == thrower && hiss {
                     (v.owner, v.until) = (owner, None);
                 }
+                if was.is_none() && v.owner == Owner::Grenade(u32::MAX, g.owner) {
+                    (v.owner, v.follows) = (owner, None);
+                }
                 if v.owner == owner && v.follows.is_none() {
                     v.pos = g.pos;
                 }
@@ -1153,13 +1190,16 @@ impl Sounds {
             let bounced = was.is_some_and(|w| w.1.y_vel < 0.0 && g.y_vel > 5.0);
             for (i, cue) in cues.iter().enumerate() {
                 let sounds = match cue.on {
-                    On::Bounce { weapon: GRENADE } if bounced && !cue.play.sounds.is_empty() => {
+                    On::Bounce { weapon }
+                        if weapon == item && bounced && !cue.play.sounds.is_empty() =>
+                    {
                         let k = self.shuffle(cue.play.sounds.len());
                         Some(core::slice::from_ref(&cue.play.sounds[k]))
                     }
                     // Released with the fuse's last 60 ticks left (a cook timer below 120 VIs).
-                    On::Fuse { weapon: GRENADE }
-                        if cx.tick + 60 >= g.fuse
+                    On::Fuse { weapon }
+                        if weapon == item
+                            && cx.tick + 60 >= g.fuse
                             && g.fuse > birth + 60
                             && !self
                                 .voices
@@ -1191,7 +1231,7 @@ impl Sounds {
         {
             let owner = Owner::Grenade(*birth, g.owner);
             self.stop(|v| v.owner == owner);
-            self.world(cx, g.pos, |on| *on == On::Explosion { weapon: GRENADE });
+            self.world(cx, g.pos, |on| *on == On::Explosion { weapon: item });
         }
         self.grenades = old;
         self.grenades.clear();
@@ -2026,7 +2066,7 @@ impl Sounds {
     }
 
     /// The match's sounds: weapon 0x14's shots (one sound a tick in flight, the wall's when one is
-    /// gone without hurting anyone near it), pickups taken (by the nearest player), Total War's gas
+    /// gone without hurting anyone near it; a bolt's none), pickups taken (by the nearest player), Total War's gas
     /// (at the listener while it is out), the background (from the first tick of play to the match's
     /// end) and the lamps' buzz (an emitter at each lamp in `flashed`, a flash starting this tick, or
     /// on 0x1A a switching light coming back on).
@@ -2059,7 +2099,8 @@ impl Sounds {
         // player stands within 7.5 frames of its flight ahead, 0x100 off its heading
         // (`func_150538CC`'s type 6 → `func_1505DDA8`, C).
         let old = std::mem::take(&mut self.shots);
-        let mut was = old.iter().zip(std::mem::take(&mut self.bolts));
+        let flags = std::mem::take(&mut self.bolts);
+        let mut was = old.iter().zip(flags.iter().copied());
         for (k, &pos) in m.shots.iter().enumerate() {
             // The shot it was last tick (`gone`'s pairing: new ones come last).
             let from = was.find(|(o, _)| dist2(**o, pos) <= 4.0 * BOLT_STEP * BOLT_STEP);
@@ -2102,6 +2143,12 @@ impl Sounds {
             }
         }
         for pos in gone(&old, &m.shots, 2.0 * SHOT_STEP) {
+            // A bolt on a wall is silent (V xsnd2 160, 272: `func_15060F28` removes it and
+            // `func_10010AA8` stops its sounds, none played).
+            let k = old.iter().position(|o| *o == pos);
+            if k.and_then(|k| flags.get(k)).is_some_and(|f| f.0) {
+                continue;
+            }
             let hurt =
                 |p: &(Seen, Seen)| p.1.health < p.0.health && dist2(p.1.pos, pos) < 150.0 * 150.0;
             if !players.iter().any(hurt) {
@@ -2361,6 +2408,7 @@ fn hear(
         let seen = Seen {
             slot: c.slot,
             body: crate::body(c, &pack.characters),
+            class: c.class,
             pos: p.pos,
             clock: anim.0,
             weapon,
@@ -3069,6 +3117,7 @@ mod tests {
         Seen {
             slot,
             body: conker_sim::movement::Side::Tediz as usize,
+            class: conker_rules::beach::TEDI_CLASS,
             pos: [x, 0.0, 0.0],
             clock: AnimPlayer::default(),
             weapon,
@@ -3384,7 +3433,8 @@ mod tests {
     }
 
     /// A bolt plays no flight sound, but its pass once, the first frame a player stands ahead of
-    /// it within 7.5 frames of its flight (C `func_150538CC`'s type 6); a knife one sound a tick.
+    /// it within 7.5 frames of its flight (C `func_150538CC`'s type 6), and none on a wall; a knife
+    /// one sound a tick, and its wall's.
     #[test]
     fn a_bolt_passes_once() {
         let Some(pack) = map_pack("2d") else { return };
@@ -3395,23 +3445,30 @@ mod tests {
         let fly = |weapon| {
             let mut s = Sounds::default();
             let (shooter, target) = (player(1, 0.0, weapon), player(2, -2000.0, 0));
-            heard(&mut s, &pack, 100..115, |s, cx| {
+            heard(&mut s, &pack, 100..116, |s, cx| {
                 let z = -50.0 - BOLT_STEP * (cx.tick - 100) as f32;
                 let m = MatchView {
-                    shots: vec![[0.0, 0.0, z]],
+                    shots: [[0.0, 0.0, z]]
+                        .into_iter()
+                        .filter(|_| cx.tick < 115)
+                        .collect(),
                     ..default()
                 };
                 s.match_sounds(cx, &m, &[(shooter, shooter), (target, target)], &[]);
             })
             .into_iter()
-            .filter(|i| matches!(i.1, 559 | 560 | 1086..=1089))
+            .filter(|i| matches!(i.1, 559 | 560 | 1086..=1089 | 176 | 1113 | 1114))
             .collect::<Vec<_>>()
         };
         let bolt = fly(BOLTS);
         assert!(matches!(bolt[..], [(109, 1086..=1089)]), "{bolt:?}");
         let knife = fly(SHOTS);
-        assert_eq!(knife.len(), 15);
-        assert!(knife.iter().all(|i| [559, 560].contains(&i.1)), "{knife:?}");
+        assert_eq!(knife.len(), 16);
+        assert!(
+            knife[..15].iter().all(|i| [559, 560].contains(&i.1)),
+            "{knife:?}"
+        );
+        assert!(matches!(knife[15], (115, 176 | 1113 | 1114)), "{knife:?}");
     }
 
     /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);
@@ -3554,6 +3611,83 @@ mod tests {
             s.player(&cx(&pack, 1), &was, &is);
             assert_eq!(s.voices.iter().any(|v| v.id == 1278), popped);
         }
+    }
+
+    /// The grenade's pull and throw sound as the clip each class plays (V sq_e_gren: the squirrel's
+    /// 0x175 plays 1548, its 0x16C 1420; e_gren: the Tedi's 0x16B 1237, its 0x176 nothing).
+    #[test]
+    fn grenade_clips_sound_as_each_class_plays_them() {
+        let Some(pack) = colors_pack() else { return };
+        let heard = |class, side: Side, id, from, to| {
+            let mut s = Sounds::default();
+            let was = Seen {
+                class,
+                body: side as usize,
+                clock: clock(id, from, 1.0),
+                ..at(1, 100.0, GRENADE)
+            };
+            let is = Seen {
+                clock: clock(id, to, 1.0),
+                ..was
+            };
+            s.player(&cx(&pack, 1), &was, &is);
+            s.voices.iter().map(|v| v.id).collect::<Vec<_>>()
+        };
+        use conker_sim::movement::Side;
+        assert_eq!(heard(4, Side::Squirrels, GRENADE_PULL, 24.0, 26.0), [1548]);
+        assert!(heard(3, Side::Tediz, GRENADE_PULL, 24.0, 26.0).is_empty());
+        let throw = heard(4, Side::Squirrels, GRENADE_THROW, 2.0, 3.5);
+        assert!(matches!(throw[..], [889 | 891 | 1420]), "{throw:?}");
+        let throw = heard(3, Side::Tediz, GRENADE_THROW, 2.0, 3.5);
+        assert!(matches!(throw[..], [1235 | 1237]), "{throw:?}");
+    }
+
+    /// Item 0x3A (V s1a): the fuse 0x96 from the pull's first frame with its thrower, then with the
+    /// grenade; its bounce (0x186-0x188) takes its place, 0x26's blast; a pull left before the
+    /// throw stops it.
+    #[test]
+    fn the_lobs_fuse_follows_the_grenade() {
+        let Some(pack) = map_pack("1a") else { return };
+        let pack = Pack { lob: true, ..pack };
+        let mut s = Sounds::default();
+        let was = at(1, 100.0, 0);
+        let is = Seen {
+            clock: clock(LOB_PULL, 0.0, 1.0),
+            ..was
+        };
+        s.player(&cx(&pack, 100), &was, &is);
+        let fuse = |s: &Sounds| {
+            s.voices
+                .iter()
+                .find(|v| v.id == 0x96 && !v.stopped)
+                .map(|v| (v.owner, v.follows))
+        };
+        assert_eq!(fuse(&s), Some((lit(&is), Some(1))));
+        let g = |y_vel| Grenade {
+            pos: [300.0, 0.0, 0.0],
+            y_vel,
+            speed: 0.0,
+            angle: 0,
+            state: 0,
+            floor: None,
+            owner: 1,
+            fuse: 400,
+        };
+        s.grenades(&cx(&pack, 110), &[(110, g(-3.0))]);
+        assert_eq!(fuse(&s), Some((Owner::Grenade(110, 1), None)));
+        let calls = heard(&mut s, &pack, 111..113, |s, cx| match cx.tick {
+            112 => s.grenades(cx, &[]),
+            _ => s.grenades(cx, &[(110, g(6.0))]),
+        });
+        assert!(
+            matches!(calls[..], [(111, 0x186..=0x188), (112, 1549)]),
+            "{calls:x?}"
+        );
+        assert_eq!(fuse(&s), None, "the bounce took its place");
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &was, &is);
+        s.player(&cx(&pack, 101), &is, &was);
+        assert_eq!(fuse(&s), None, "the pull left");
     }
 
     #[test]

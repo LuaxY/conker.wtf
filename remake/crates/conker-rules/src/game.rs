@@ -927,6 +927,13 @@ pub struct Match {
     /// bullets head from the muzzle to the first body part or wall on it, the pistol's and 0x23's
     /// take its pitch ([`Self::strike`]).
     pub aims: Vec<Option<([f32; 3], [f32; 3])>>,
+    /// Per slot, its body parts where the last frame drew them (the game tests the joint matrices
+    /// of the last draw), for the parts-tested hits: the twin guns' and the pistol's bullets, the
+    /// sniper's ray, aimed shots, bolts and knives ([`projectile::BodyParts`]). A server fills it
+    /// before each step from the pack's poses (`crate::parts`); not on the wire. `None` for a slot:
+    /// its model has no parts (the cylinder, `func_15081C20`, no head). Empty (client prediction,
+    /// the replays without a pack): the fitted cylinder and axis spheres stand in for everyone.
+    pub parts: Vec<Option<projectile::BodyParts>>,
     /// The scene's mounted guns ([`gun::spawn`]; none in a client's copy: their touch and fire are
     /// the server's, a gunner's own frame is predicted from its [`Fighter::gun`]).
     pub guns: Vec<Gun>,
@@ -1020,6 +1027,7 @@ impl Match {
             heist: Heist::default(),
             reach: Vec::new(),
             aims: Vec::new(),
+            parts: Vec::new(),
             guns: Vec::new(),
             plunger: Plunger::default(),
             traps: Traps::default(),
@@ -2381,9 +2389,10 @@ impl Match {
                                 f.rounds -= u8::from(w.rounds > 0);
                                 f.shots = f.shots.saturating_add(1);
                                 let muzzle = local_to_world(pos, facing, *m);
-                                strikes.push(Strike::Bullet(Bullet::fire(
-                                    world, i, muzzle, facing, kind,
-                                )));
+                                // The twin guns' and the pistol's test body parts (C).
+                                let b = Bullet::fire(world, i, muzzle, facing, kind);
+                                let parts = matches!(w.id, 0x09 | 0x39);
+                                strikes.push(Strike::Bullet(Bullet { parts, ..b }));
                             }
                         }
                     }
@@ -2783,7 +2792,9 @@ impl Match {
                     let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
                     if len > 0.0 {
                         let dir = to.map(|c| c / len);
+                        let parts = b.parts;
                         b = Bullet::aimed(world, i, b.pos, dir, b.speed, b.kind);
+                        b.parts = parts;
                     }
                 }
                 // The tommy gun's climb lifts its bullets (`func_1504CB98`, C; I: added to the
@@ -2793,7 +2804,9 @@ impl Match {
                     let h = b.dir[0].hypot(b.dir[2]).max(f32::EPSILON);
                     let (sin, cos) = (b.dir[1].atan2(h) + climb).sin_cos();
                     let dir = [b.dir[0] / h * cos, sin, b.dir[2] / h * cos];
+                    let parts = b.parts;
                     b = Bullet::aimed(world, i, b.pos, dir, b.speed, b.kind);
+                    b.parts = parts;
                 }
                 ev.push(Event::Shot {
                     player: i,
@@ -3078,11 +3091,50 @@ impl Match {
             .map(|(v, _, head)| (v, head))
     }
 
+    /// `func_15081690`'s walk with body parts, given the poses ([`Self::parts`]): the nearest
+    /// player (but `owner`) the segment meets as `owner` saw it, how far along, and whether on the
+    /// head (part 0xA). A player with parts takes `func_1508114C`'s test (a falling corpse too, V
+    /// e_w39: a bullet pops its head), one without (its model has none) the cylinder
+    /// `func_15081C20`, no head; neither lying still ([`anim::DEAD`], V e_w09: 4 of 4 through).
+    fn first_posed(
+        &self,
+        owner: usize,
+        from: [f32; 3],
+        dir: [f32; 3],
+        len: f32,
+        seen: Seen,
+    ) -> Option<(usize, f32, bool)> {
+        (0..self.players.len())
+            .filter(|&v| v != owner && self.players[v].anim != anim::DEAD)
+            .filter_map(|v| {
+                let (f, at) = (&self.players[v], self.seen_pos(seen, owner, v));
+                let hit = match self.parts.get(v).and_then(Option::as_ref) {
+                    Some(p) => {
+                        // Where the last frame drew it; where the shooter saw it under lag.
+                        let shift = seen(owner, v)
+                            .map_or([0.0; 3], |s| core::array::from_fn(|i| s[i] - p.origin[i]));
+                        let hit = p.hit(from, dir, at, shift).filter(|h| h.0 <= len);
+                        hit.map(|(d, part)| (d, part == projectile::HEAD))
+                    }
+                    None => {
+                        let crouched = matches!(
+                            f.body.state,
+                            movement::state::CROUCH | movement::state::CROUCH_WALK
+                        );
+                        hits_body(from, dir, len, at, f.hitbox(), crouched).map(|d| (d, false))
+                    }
+                };
+                hit.map(|(d, head)| (v, d, head))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
     /// `func_15081E78` for an instant ray or an aimed shot: the first player whose head or torso
-    /// ([`projectile::hits_parts`]) the segment meets, how far along, and whether it is the head
-    /// (type 0x20, it kills; C) or the body (the weapon's own type; V combat4_pitch24). A raptor
-    /// has no head part: every bolt and knife on one hits for 1 (V raptor b1r: 103 of 103; the
-    /// remake's head test made 9 of the raptor bots' 21 deaths one-shot kills).
+    /// the segment meets, how far along, and whether it is the head (type 0x20, it kills; C) or
+    /// the body (the weapon's own type; V combat4_pitch24). With the poses, [`Self::first_posed`];
+    /// without, [`projectile::hits_parts`]' axis spheres, where a raptor has no head part: every
+    /// bolt and knife on one hits for 1 (V raptor b1r: 103 of 103; the remake's head test made 9
+    /// of the raptor bots' 21 deaths one-shot kills; its 7 spheres are all part 0).
     fn first_part(
         &self,
         owner: usize,
@@ -3091,6 +3143,9 @@ impl Match {
         len: f32,
         seen: Seen,
     ) -> Option<(usize, f32, bool)> {
+        if !self.parts.is_empty() {
+            return self.first_posed(owner, from, dir, len, seen);
+        }
         (0..self.players.len())
             .filter(|&v| v != owner && self.players[v].anim != anim::DEAD)
             .filter_map(|v| {
@@ -3724,19 +3779,25 @@ impl Match {
     fn fly_bullets(&mut self, seen: Seen, ev: &mut Vec<Event>) {
         for (born, mut b) in std::mem::take(&mut self.bullets) {
             // A body stops the bullet even when the hit is refused (dead, stunned or immune).
-            if let Some((v, head)) = self.first_body(b.owner, b.pos, b.dir, b.reach(), seen) {
+            // Bullets that test body parts have a head (`func_151C229C`'s flag 8, [`Bullet::parts`]):
+            // the twin guns' and the pistol's (its spawner `func_150FED30` sets it, C; V e_w39: a
+            // bullet pops the corpse's head at read 970; V pc3: a crouched Tedi's head, part 0xA,
+            // 177.7 along); not 0x23's, the tommy gun's (I: `func_150FE860`) or, in multiplayer, the
+            // mounted gun's (C; V e1: its hit takes 2). With the poses ([`Self::parts`]) the head is
+            // part 0xA; without, the twin guns' is a height ([`BULLET_HEAD`], fitted to ohit) and
+            // the pistol's none (that height would make e_w39's level body hits at +48.6, 2 each,
+            // head hits).
+            let hit = match b.parts && !self.parts.is_empty() {
+                true => (self.first_posed(b.owner, b.pos, b.dir, b.reach(), seen))
+                    .map(|(v, _, head)| (v, head)),
+                false => (self.first_body(b.owner, b.pos, b.dir, b.reach(), seen))
+                    .map(|(v, head)| (v, head && b.kind == damage::TWIN_BULLET)),
+            };
+            if let Some((v, head)) = hit {
                 // `func_151D4DAC`: a hit on the head (part 0xA) takes 1 health at once, stunned
                 // or not, and below 3 kills with type 0x20, which no stun or immunity refuses (C;
-                // V ohit: stunned hits at +55 take 4 → 3 → 2 → dead, at +40 nothing). Bullets that
-                // test body parts have a head (`func_151C229C`'s flag 8): the twin guns' and the
-                // pistol's (its spawner `func_150FED30` sets it, C; V e_w39: a bullet pops the
-                // corpse's head at read 970); not 0x23's, the tommy gun's (I: `func_150FE860`) or,
-                // in multiplayer, the mounted gun's (C; V e1: its hit takes 2).
-                // ponytail: the pistol's head stays off: [`BULLET_HEAD`]'s height (fitted to the
-                // twin guns') would make e_w39's level body hits at +48.6 (2 each, V) head hits;
-                // on with the model's head part (part 0xA) instead of a height.
+                // V ohit: stunned hits at +55 take 4 → 3 → 2 → dead, at +40 nothing).
                 let f = &mut self.players[v];
-                let head = head && b.kind == damage::TWIN_BULLET;
                 if head && f.health > 0 && !self.waiting.contains(&v) {
                     if f.health >= 3 {
                         f.health -= 1;
@@ -5031,6 +5092,42 @@ mod tests {
         assert_eq!(shot(&mut m, &arena, &w, 55.0), (1, STUN_HIT));
         let (arena, mut m, w) = duel();
         assert_eq!(shot(&mut m, &arena, &w, 60.5), (4, STUN_HIT));
+    }
+
+    /// With the poses ([`Match::parts`]): a pistol bullet on the head sphere (part 0xA) takes 1
+    /// and its own 2 (V pc3: 6 → 3), on a body sphere 2, between the spheres nothing (the broad
+    /// sphere alone is no hit); the tommy gun's bullets keep the cylinder, no head. A slot with no
+    /// parts (its model has none) takes the cylinder too.
+    #[test]
+    fn posed_bullets_hit_the_parts() {
+        let shot = |h: f32, parts: bool, table: Option<projectile::BodyParts>| {
+            let (arena, mut m, w) = duel();
+            let at = m.players[1].body.pos;
+            m.parts = vec![None, table];
+            let b = Bullet::fire(&w, 0, [50.0, at[1] + h, 0.0], 0, damage::PISTOL_BULLET);
+            m.bullets = vec![(m.tick, Bullet { parts, ..b })];
+            m.step(&arena, &[Input::default(); 2], &w);
+            m.players[1].health
+        };
+        let at = [146.5, 0.0, 0.0];
+        let sphere = |y: f32, r: f32, part| projectile::Sphere {
+            centre: [at[0], y, at[2]],
+            radius: r,
+            joint: if part == projectile::HEAD { 12 } else { 0 },
+            part,
+        };
+        let tedi = Some(projectile::BodyParts {
+            broad: [58.5, 47.5],
+            hidden: 0,
+            spheres: vec![sphere(60.0, 19.0, projectile::HEAD), sphere(25.0, 12.0, 0)],
+            origin: at,
+        });
+        assert_eq!(shot(60.0, true, tedi.clone()), 3);
+        assert_eq!(shot(25.0, true, tedi.clone()), 4);
+        assert_eq!(shot(90.0, true, tedi.clone()), 6);
+        assert_eq!(shot(60.0, false, tedi.clone()), 4); // the tommy gun's: the cylinder
+        assert_eq!(shot(90.0, false, tedi), 6);
+        assert_eq!(shot(60.0, true, None), 4);
     }
 
     /// `remove_player`: nobody changes slot; the leaver's projectiles, pickups and fires go, its
@@ -6357,8 +6454,8 @@ mod tests {
         assert_eq!(m.players[0].action, Action::Free);
     }
 
-    /// 0x1A's roaming pickups (V dm6): the first frame puts k0-k3 on four spots of 0-7; one taken
-    /// at t is back at t + 150 on a spot no pickup stood on.
+    /// 0x1A's roaming pickups (V dm6, v1a3, v1a7): the first frame puts k0-k3 on four spots of 0-7;
+    /// one taken at t keeps its spot until it is back at t + 150 on a spot no pickup stood on.
     #[test]
     fn vault_pickups_roam() {
         let (_, m, w) = duel();

@@ -227,7 +227,9 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
         .find(|l| l.when == conker_assets::When::Carried)
         .cloned();
     crate::lights::build(app, slice.lights, &slice.triggers);
-    crate::held::build(app, slice.held, carried);
+    let lob = (app.world().get_resource::<crate::MatchArena>()).is_some_and(|a| a.0.lob);
+    let lob = lob.then(|| usize::from(conker_sim::net::map_scene(&cfg.map) == Some(0x3F)));
+    crate::held::build(app, slice.held, carried, lob);
     crate::flags::build(app);
     crate::guns::build(app);
     crate::tank::build(app, &slice.characters, &cfg.map);

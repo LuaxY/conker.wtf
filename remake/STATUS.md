@@ -1,5 +1,277 @@
 # Status after wave 6 (2026-10-10)
 
+## Held weapons: the crossbow and item 0x3A in the client (2026-10-14)
+**Batch L2b, wave G2, the client lane. The crossbow and the bone crossbow are drawn from their own rig and posed by
+the holder's clip: the bind pose in the draw, the fire clip at the holder's clock, the holster clip, else the one-tick
+pose. The loaded bolt shows on fire ticks 6-10, and the holster's op 41 hides the crossbow at t14. Item 0x3A's grenade
+(0x1A, 0x3F) is in the hand from the pull's first frame to the throw's first, posed by the frames since the pull at
+its own scale 1.0. In flight it shows its rig's clip 0 (the bent fuse). Its fuse loops from the pull, and it bounces
+and blasts with its own cues. The HUD shows its bomb icon. A bolt that hits a wall is silent, as in the original. Class
+clips now sound as the class plays them (0x175/0x16C in the pack). The aim laser was traced on the oracle but is not
+drawn (Left).** Research: `../lab/research/mp-original/held-client-scratch/`: `run.sh` (plain runs, DL dumps; `CHARS`
+added), `snd.sh` (lldb sound calls, `EXTRA` breaks), on the private `ConkerRecomp.g2a`; `tools/dlshot.py` (a
+flat-shaded DL render, the child objects in orange), `xbow.py`, `lobjoints.py`, `lobmtx.py`, `clipsample.py`;
+`code/func_1506BF5C.c`; `scripts/` (`cb.txt`, `c3.txt`, `laser.txt`); `out/` (the sound runs' calls). Runs: cbs (the
+crossbow, DLs 100-233), l1a, l3f (item 0x3A, DLs 126-220), xsnd, xsnd2 (a bolt on a wall), remapA, remapB (the model
+remap), las2, lasd (the laser, sound calls and DLs 258, 270, 300). Screens: `../lab/screens/held-client/` (`shots.sh`,
+ports 5970-5974).
+
+**The wire did not change** (`PROTOCOL_ID` stays 35), **nor the shared simulation.** The client draws from state
+that is already replicated: the clip and clock, the weapon, the cook timer, and the shots. **The pack changed**
+(re-exported, "pack equal"). The rigs gain clip 0, `hud.json` gains `grenades.lob_at`, and the clip sounds gain
+0x16C/0x175.
+
+| Part | What |
+|---|---|
+| conker-client `held.rs` | **`Rigged`** (a child object from its own rig: the list it shows, its animator with clips 0-3, each joint's rest, the loaded bolt, and a strong `Handle<Gltf>`: without one the clips unloaded and no rig animated), `rig_ready`, `pose_rig` (every joint at rest, then the clip's keys). **`crossbow_pose`** (`func_15054A94`; held-leftovers §1): draw (0xFB, 0x2C8) → clip 0; fire (0xFC, 0x2C9) → clip 2 at the clock, to 30; holster 0xC6 → clip 3, to 35; else clip 1 at 0. **`loaded_bolt`**: the fire clock in [6, 11), `projectiles.gltf`'s bolt under the rig's `joint_02`. The holster's removal at t14 is `held.json`'s (0xC6, 14) through `shows`. **Item 0x3A**: `Lob` (the map's list: 0 on 0x1A, 1 on 0x3F, `None` elsewhere); `hang` hangs this map's model only; `show` keys it on 0x1F9/0x1FA (the pull and hold, no events). **`lob_pose`** (clip 2 at 0-22, then clip 1 looping on 30) by **`since_pull`** (from the cook timer: the local player's predicted, the others' replicated). **`unscale_lobs`**: its root's scale undoes the player's and the clip's, so it is drawn at 1.0 |
+| conker-client `projectiles.rs` | **`Shape`** (`Scene(i)` or `Lob(k)`), `Look::lift`, **`lob(k)`**: the rig's clip 0, scale 1.0, 28 above the object, upright, +z along the throw, never turning (`pose_lobs`). `look(k, weapon, lob)` |
+| conker-client `hud.rs` | `Shown::lob`: the grenades row shows `lob_icon` from `lob_at` (247, 6) by `step` while 0x1F9/0x1FA plays |
+| conker-client `audio.rs` | **Item 0x3A** (`Pack::lob`, from `MatchArena`): `On::Lit { weapon: 0x3A }` (0x96) starts at the pull's first frame, at the holder. The grenade takes it over at its birth, so its first bounce stops it, as the original's one sound at a time. It stops if the pull ends without a throw. Bounces and blast use `LOB`'s cues; the in-hand blast covers 0x1F9/0x1FA. **The bolt on a wall** plays nothing; the knife's impact stays. **Class clips**: a player's clip events are looked up under `characters::clip(class, id)` (`Seen::class`) |
+| conker-extract `lib.rs` (pack) | `rig()`: an empty pair (clip 0) gets one frame at its descriptor's channel bases. The crossbow's are its rest; item 0x3A's turn joints 1-3 by −12.5°, −24.1°, −26.4° about z (the bent fuse) |
+| conker-extract `hud.rs`, conker-assets `hud.rs` (pack) | `Grenades::lob_at` [247, 6] |
+| conker-extract `audio.rs` (pack) | `MATCH_CLIPS` gains 0x16C and 0x175 (everyone but the Tediz pulls and throws with them) |
+| conker-anim `lib.rs` | `combat::BONE_CROSSBOW_DRAW` 0x2C8, `BONE_CROSSBOW_FIRE` 0x2C9 |
+| conker-client `render.rs` | Passes the map's `Lob` list to `held::build` |
+| conker-assets `lib.rs`, `pack-readme.md` | Docs: the rigs' clip 0, the thrown grenade's pose, `lob_at` |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| client `the_crossbow_follows_its_holder` (new) | Both crossbows: draw → (0, 0); fire t9 → (2, 9), t30.5 → (2, 30); holster t7 → (3, 7), t35.9 → (3, 35); the aim, the aimed shot, the idle and the run → (1, 0). The loaded bolt on clocks 6-10, not 11, not in 0x10C |
+| client `the_lobbed_grenade_follows_its_pull` (new) | p1a's reads 102 → (2, 0), 124 → (2, 22), 125 → (1, 0), 131 → (1, 6), 155 → (1, 0); `since_pull` 0 and 23 frames |
+| client `projectiles_turn_as_the_original`, `layout_matches_the_originals_draws` (extended) | The lob's shape, scale and lift; upright with +z along l1a's heading in flight and at rest. The bombs at x 247, 236, 225, y 6, 11 × 14 |
+| client `the_lobs_fuse_follows_the_grenade` (new, map 1a) | 0x96 at the pull; the grenade born at tick 110 takes it; 0x186-0x188 at 111, the blast (1549) at 112; the fuse gone after the bounce; a pull left without a throw stops it |
+| client `grenade_clips_sound_as_each_class_plays_them` (new) | A squirrel's pull plays 1548 at t25 and its throw one of 889/891/1420. A Tedi's pull plays nothing and its throw one of 1235/1237 |
+| client `a_bolt_passes_once` (extended) | Gone at tick 115: the bolt plays only its pass (109); the knife's last sound is its impact (176, 1113 or 1114) |
+| extract (ROM) `child_object_rigs` (extended) | Both rigs name clips 0-3. Clip 0 is one frame: the crossbow's at rest; the lob's joints 1-3 at (0, 0, 63264), (0, 0, 61152), (0, 0, 60736) |
+| Screens: the crossbow | `crossbow-fire-t8.png`, `-t9.png` (fire clock 8 and 9 from cbs's camera); `crossbow-fire-vs-dl147.png` (cbs DL 147 \| t8 \| t9: the string and the nock as the oracle's); `crossbow-bolt-window.png` (reads 854, 855, 859, 860: the bolt on 855 and 859 only) |
+| Screens: item 0x3A | `lob-1a-pull.png` (read 775), `lob-1a-hold.png` (787), `lob-1a-flight-side.png` (812), `lob-3f-787.png` (l3f's camera), `lob-hold-vs-dl126.png` (l3f DL 126 \| ours: the hand, the size, the fuse up) |
+| Pack | `bun run pack --force`, then `lab/tools/verify-pack.sh`: pack equal (2103 files) |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | 563 pass, 1 ignored (with the body-part and bots lanes' work in the tree); `check` passes (fmt, clippy on every package, `web/app`); wasm clippy passes |
+
+**Findings** (V the runs above; C the code; I inferred).
+- **The lob's frame** (V l3f DL 126, l1a). The grenade's root is the clip's root (pull and hold: translation (26.7,
+  −18.4, 4.6) and its turn) in the hand's frame (`joint_09`) normalised. The glTF's `joint_09` relative to `joint_00`
+  matches the oracle's. The pull's clip 2 grows the root from 0.06, so the grenade appears small. l1a's DL 133 was
+  already past the throw (read 130).
+- **The thrown lob** (V l1a DLs 133-220, l3f DLs 140-200): clip 0 (the bent fuse), joint 0 at 1.0, 28 above the
+  object, upright with +z on the throw's heading. It never turns, even at rest.
+- **The oracle draws the crossbow a frame behind its clock** (V cbs). DL 147 holds the fire clock 9 but draws the
+  t8 pose (I: the drawn matrices are the last update's). We draw each clock's own pose, as the recipe says. In our run
+  (Z at read 850, clock = read − 849) the loaded bolt shows on reads 855-859, the clocks 6-10.
+- **A bolt on a wall is silent** (V xsnd2: calls 160, 272; xsnd). `func_151D3480` (the wall test) leads to
+  `func_15060F28` (the removal), then `func_10010AA8(bolt, 4)` stops the bolt's sounds. No sound starts.
+- **The model remap** (C `func_1506BF5C`; V remapA, remapB). The compared model is rec = *(0x800D1C90 + 4·model). If
+  rec[4] ≠ 0, it is *(u8*)*(0x80086CAC + 4·rec[5]). Only models 0-4 remap (to 0), and 150 stays 150. The pack's
+  per-model filter therefore already gives the original's sounds on every pick (Conker is folder 0). What differed
+  was the clip id: every class but the Tediz plays 0x175/0x16C (`func_15065A5C`), so those clips' events were missing.
+  0x176 has no sound events.
+- **The aim laser** (C `func_151026BC` → `func_15100600`, effect type 3; V las2, lasd on 0x18, `laser.txt`):
+  - **Its life.** Pressing Z while aiming (0x10A) makes it. Releasing Z fires the aimed shot (0x10C, sound 1091) and
+    ends it. While it is on, the aimer hears a 2D sound 1232 at 2000; `func_15101090` stops that handle.
+  - **The dot.** A 4-vertex quad of about 15 units on the hit surface: I8 64 × 64 at 0x802288F0, clamped. Both
+    players' views draw it.
+  - **The beam.** A 4-vertex quad about 27 wide from the muzzle to the dot (about 1190 long): I8 128 × 32 at
+    0x80229900, wrapped in s (s −2979 to −31738). Only the other players' views draw it.
+  - **The look.** Combiner 0xFF9BFF/0xFF36FF7F, env (FF, 00, 00, C2): the Tedi (0x75) is red, as the brief's colour
+    rule says.
+- **The thrown lob appears a few frames late** (I). It is drawn from the server's `MatchView`, behind the predicted
+  throw. A server hiccup (one 213-unit jump seen) can exceed `fly`'s 60-a-frame reach, and the flight respawns.
+
+**Left.**
+- **The aim laser is not drawn.** In the original it lives between the Z press and the Z release. The rules fire the
+  aimed crossbow on the Z press (`game.rs`, not this lane), so it would never show. Three things are needed: (1) the
+  rules' release-fire; (2) one bit on the wire for "Z held while aiming" (it isn't there; not added, being moot until
+  (1)); (3) the dot and beam textures in the pack (not extracted). Sound 1232 isn't played either.
+- **The lob's fuse sparks** (white quads on the oracle) are not drawn.
+- **The crossbow's frame lag**: we draw one frame ahead of the oracle (above). Matching it is `crossbow_pose(anim,
+  clock − 1)`.
+
+## Body parts: the hit test (2026-10-14)
+**Batch L2c, wave G2. The server now tests the twin guns' and the pistol's bullets, the sniper's ray, aimed shots,
+bolts and knives against each player's body-part spheres, as the original does (`func_1508114C`). The spheres sit on
+the joints of the pose the last frame drew, posed from the pack's glTF. The pistol now has a head: on pc3's ray, a
+crouched Tedi's head (part 0xA) is 177.72 along (the oracle's 177.7), and the hit takes 6 → 3. A standing Tedi's neck is
+now missed, where the cylinder hit it. e_w39's 4 pass-through gaps close (bullet rows 19/19, 15 before). e_w09 matches
+119 of 122 rows (122 with the cylinder): the last bullet meets the hit reaction's flung hand. The 0x23, tommy gun and
+mounted gun bullets keep the cylinder. Without a table (client prediction, replays without a pack) the rules run as
+before. Deaths a match stay near the oracle's. In the server's bots matches they rise to 15 on 2D (oracle 13) and 13 on
+0x34 (oracle about 16). In `bot_match` they fall to 10.6 on 2D and hold at 12.8 on 0x34.**
+Research: no new oracle runs. Evidence comes from the traced replays (`lab/oracle/trajectories`): obj+0x84 and +0xB4
+per row, and the `_lldb` bullet calls (`func_151C2734`'s position each frame).
+
+**The wire did not change** (`PROTOCOL_ID` stays 35): `Match::parts` and `Bullet::parts` are not sent. **The shared
+simulation changed only behind the table.** The client never fills `Match::parts`. With it empty, `first_part` and
+`fly_bullets` take the old paths byte for byte. The default replays' numbers are unchanged.
+
+| Part | What |
+|---|---|
+| conker-assets `pose.rs` (new) | **`Skeleton`**: `parse` reads the joints (`joint_NN`), rest TRS and every clip's channels from a character's glTF and bin. `posed_by` poses a mesh-only pick on another folder's clips, its translations shifted by the rest difference. `sample` is linear with shortest-arc slerp, held past the ends. `model` composes joint → model transforms. `blend` is also new. `parse_json` is public |
+| conker-rules `parts.rs` (new) | **`Poses`**: `models(scene, cheats)` (the sides', the scene's own, the allowed picks); `load` (models without `parts` get none). **`tick`** drives each slot's clock as the client's `tick_anims` does for a remote player. Two rules differ: a clip a hit started stays at time 0 for that frame, and it fades in fresh from the pose showing. **`place`** puts the spheres at pos + Ry(facing + 90°) · scale · (joint · offset + (0, lift, 0)), radius × scale. It also applies the twist on `joint_01` (keeping the head), pins the creep root, cross-fades by the clock, and hides 0xF000 on a popped zombie. None in Race and Tank |
+| conker-rules `projectile.rs` | **`ray_sphere`** (`func_151452C4`). **`BodyParts::hit`** (`func_1508114C`): the broad sphere first (a miss is no hit). Then the table's order, skipping hidden joints: a sphere replaces the best if it is the first, or nearer with part ≥ the best's. **`Bullet::parts`** (flag 8). `HEAD` = 0xA |
+| conker-rules `game.rs` | **`Match::parts`** (per slot; `None`: a model without parts, the cylinder, no head). **`first_posed`**: the parts test; corpses lying still (`DEAD`) let everything through. Under lag compensation the spheres move by where the shooter saw the victim, less where they were placed (`BodyParts::origin`). `first_part` uses it when there is a table. `fly_bullets`: 0x09's and 0x39's bullets (`parts`) take it with the head on part 0xA. The pistol's ponytail exclusion is gone |
+| conker-server `main.rs` | `Game::poses`, loaded at start from the pack. `place` runs before each step, `tick` after it on the step's events. A slot without a clock yet (a joiner's first tick) gets `None` for that tick |
+| conker-bots `examples/bot_match.rs` | Fills the table as the server does (from the pack; `BOT_PARTS=0`: the cylinder). The ROM tests keep the cylinder |
+| conker-rules `tests/combat.rs` | `COMBAT_POSES=last\|this`: the replays with the poses (the clocks seeded from obj+0x84 and +0xB4); `COMBAT_ALL` prints every case and asserts none |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| assets `the_tedis_head_crouched_and_standing` (new) | 117's clip 0x16 at tick 16: the head sphere 43.7 above the feet; 0xF at 22: 70.0; Conker on 117's clips |
+| assets `slerp_takes_the_short_way_and_blend_mixes`; rules `ray_sphere_as_the_game`, `parts_keep_the_table_order` (new) | Pass |
+| rules `posed_bullets_hit_the_parts` (new) | A hand-made table. Pistol on the head: 6 → 3; on a body sphere: 4; between the spheres (broad sphere only): no hit. Tommy gun (no flag): the cylinder. A `None` slot: the cylinder |
+| rules `the_pistol_meets_the_crouched_head_and_passes_the_standing_neck` (new, the pack) | pc3's ray. Crouched: head 177.72 along, 6 → 3. Standing: no hit, 6. Without a table: the cylinder, 4 |
+| rules `combat_traces` (the cylinder; asserts unchanged) | Pass |
+| `bun run test` | 562 pass, 1 ignored |
+| `bun run check`; wasm clippy (`conker-client`) | Clippy passes on every package but conker-client. Fails only in other lanes' in-progress files. `cargo fmt --check`: conker-client `audio.rs`, `held.rs`, `hud.rs`, `projectiles.rs`; conker-extract `audio.rs`, `tests/rom.rs`. Clippy (native and wasm): `projectiles.rs:184` `fly`, too many arguments. `web/app` check passes |
+
+| Replay (rows as the oracle's) | Cylinder | Poses, last frame's | Poses, this frame's |
+|---|---|---|---|
+| e_w39 bullets | 15/19 | 19/19 | 19/19 |
+| e_w09 bullets | 122/122 | 119/122 | 86/122 |
+| combat4_pitch24 events | 25/25 | 25/25 | 25/25 (19/25 before the hit-clip rule) |
+| combat4_w14 P2's position (max error) | 0.010 | 0.128 from 850 | 0.140 from 849 |
+| The other 52 cases | | as the cylinder | as the cylinder |
+
+| Server run (`bots.sh BOTS=3 TIME=5`, 1 idle human; ports 5976, 5978) | Before (cylinder) | After (parts) | Oracle |
+|---|---|---|---|
+| 2D, seeds 1 and 2: deaths | 12, 9 (hits 32, 51) | 16, 14 (hits 62, 61) | 13 (`bot_long3`, 5 minutes) |
+| 0x34, seeds 1 and 2: deaths | 3, 10 (hits 7, 33) | 13, 13 (hits 31, 56) | 8 in 4,403 reads (q3s4b3); 10 and 9 in about 5,200 (o34b3s0, s1) |
+| Faults, panics | none | none; the known FAIL of a bot that never died (0x34 seed 2; before: seeds 1 and 2) | |
+
+| `bot_match` (deterministic; `BOT_PARTS=0` / the pack) | Cylinder | Parts | Oracle |
+|---|---|---|---|
+| 2D, 3 bots, 9,000 frames, seeds 1-8: deaths | 13.75 (11-18) | 10.6 (4-14) | 13 |
+| 0x34, 3 bots, 9,000 frames, seeds 1-8: deaths | 12.0 (7-17) | 12.75 (6-18) | about 16 (above) |
+| 0x30, 3 bots, 4,496 frames, seeds 1-8: deaths / twin-gun shots, hp drops, ratio (`hits.py`) | 4.9 / 396, 11.0, 0.028 | 5.25 / 405, 13.0, 0.032 | 6.0 / 281, 20.4, 0.073 |
+
+**Findings** (V the replays; C the code; I inferred).
+- **The last frame's pose** (V). Testing this frame's pose (the step run first on a copy) loses 33 more e_w09 rows. It
+  also lost 6 of pitch24's events before the hit-clip rule.
+- **A hit's clip starts a frame late** (V). The hit lands after the victim's own update. In 43 of 46 traced 0x11D
+  starts, the first row shows time 0, while a clip the player's own update starts shows its rate (0x7C: 1.0). Advanced
+  at once, the reaction's flung hand (joint 9, r 5.5, about 38 lateral at +37) stopped 6 of e_w09's right-gun bullets.
+  Lethal hits too: e_w09's and e_w39's kills (0x11D) and pitch24's (0x17E) start at 0. Without them, e_w09 loses a row.
+  Only combat4_w14's aimed kill shows 0x17E at 1.0.
+- **The hit's fade starts fresh** (I, V e_w09). Three hits came while the last reaction was still fading to idle.
+  With conker-anim's "back to the clip we were fading from", that fade took 1023 − weight and stopped 3 more bullets.
+- **Corpses lying still** (V e_w09, 2 bullets): `DEAD` (0x59) lets bullets through, as before. A falling corpse is
+  still tested (V e_w39: its head pops).
+- **Seeded clocks**: a replay clock seeded mid-clip had no length (`play` sets it). `tick` now sets it every frame,
+  which made combat4_w14's idle loop at 52 as the game's.
+- **Item 5**: `game.rs` already names `func_150FED30` the pistol's and `func_150FE860` the tommy gun's (I). The
+  research note `bots-fidelity.md` (E2c, lines 320-326) is stale: it gives `func_150FE860` to the pistol and says the
+  pistol's flag is 0. pc3 (6 → 3 on the head) shows the pistol's bullets test parts.
+
+**Left.**
+- **e_w09's last bullet** (3 rows). Our hit reaction is at t2 with the idle at 0.51 when the right-gun bullet's second
+  segment starts 3.5 from the hand. The game's pose mixer is unread (conker-anim: weight / 1023 linear, blend 4, I).
+- **Aimed shots meet the idle head nearer**: combat4_w14 lands 132.0 ahead, the game 134.2 (the cylinder's fitted
+  sphere also gives 134.2). The ray grazes the r 11 head sphere, so the push angle is 85 off and P2 drifts 0.13 over
+  its fall.
+- **Lag compensation moves the spheres** to where the shooter saw the victim; it does not rewind the pose.
+- **ohit** backs `a_bullet_on_the_head_hurts_through_the_stun`, which runs the cylinder path. Its 12 head hits were
+  not replayed with the parts.
+- **The sniper's hits on 0x30 fell** (bot_match, 5.6 → 3.0 a run) with the parts. The oracle's count was not split.
+- **The client draws a hit's clip a frame early** and its blend comes back (the client's lane).
+- **Hits before the victim's update**: an earlier slot's strike (V w14's aimed kill, 0x17E at 1.0; melee: 0x10F 28 at
+  0, 10 not) may land before the victim's own update. `tick` treats every hit as landing after it.
+- **The server's `LAGCOMP` log** (`tested_bullets`, `first_hit`) still reports the cylinder.
+
+## Deathmatch bots: the leftovers (2026-10-14)
+**Batch G2, the bots' lane. 0x34's bots flee a burning row of fire jets as the original's: the game makes a noise of
+radius 500 at each row's middle jet while it burns (`func_151A6600`, V), which the remake never heard, so its bots
+walked on into the flames. Deaths in a jet over the oracle's minute with 15 bots went from 5.8 a run to 1.0 (oracle
+0-4, mean 1.5). The ROM harness and `bot_match` now seat the mounted guns as the server does. With them and 5 oracle
+seeds, 0x30's "4.1 deaths against 9" is 4.9 against 6.0: the 9 was one seed (o30s0, also the 50 hp drops). The bots
+still hold the sniper rifle and 0x23 two or three times as long as the original's (Left). A 0x34 bot on the mounted
+gun stays there until it dies or the match ends, in both games. The Vault's pickups take a new spot at their return,
+not at the take (V); the remake already did. The crossbow's pitch and the sniper's hit rate are not done (Left).**
+Research: `../lab/research/mp-original/dm-bots-leftovers-scratch/`: `tools/` (`run.sh`, `lldb.sh`, `t34.py` the traps,
+`ez.py` the electric floor's box, `hits.py` shots and hits per weapon, `held.py` held and drawn, `gun.py` gun spells,
+`roam.py` the Vault's pickups, `o30.py`, `roles.py`, `goal.py`, `bystate.py`, `spells.py`, `takes.py`), `out/`. Runs on
+the private `ConkerRecomp.g2c` (`CONKER_FIXED_DT=1`, an idle human; other seeds by poking the RNG's low word
+0x800885B4 at read 22):
+- o30s0-s4: 0x30 (scenario 5), 3 bots, 4,519 reads, s126 p1-p3 and G each read. s0 is unpoked (the old o30).
+- t34s0-s4: 0x34 (scenario 4), 15 bots, 60 s, with props 6-9's +0x70 words (the plates). s0 is unpoked (`s4_h1b15`);
+  s1 stopped at 470 reads (unused).
+- o34b3s0, o34b3s1, o34b5s0: 0x34 with 3 and 5 bots, 4,400 reads, s126 and G.
+- noise34 (lldb, `combat_lldb.py`): the human poked onto plate 0 at read 80; every `func_1508B20C` call (all from
+  `func_151A6600`): radius 500 at the middle jets of plate 0's three rows (x −2587, −1528, 1586), each read 83-203.
+- v1a3, v1a7: 0x1A Deathmatch (scenario 6), 3 and 7 bots, with G+0xF70..+0x1170 (holders, timers, spots).
+
+**The wire did not change** (`PROTOCOL_ID` untouched), **nor the shared simulation**: the jets' noise is the bots'
+observation only (server-side AI input).
+
+| Part | What |
+|---|---|
+| conker-bots `lib.rs` | **`jets`**: per trap of 0x34, the frames its emitter is heard on (`Bots::emit`). A row's middle jet (trigger command 1, not the electric floor) is a noise of radius 500 at its zone's centre from the frame its trap is set (`left` = `FIRE_FRAMES` − 1, the bottoming's next) for 121 frames, as `func_151A6600` adds it (C; V noise34). `observe` appends them to the frame's noises, so `func_1508B3F8` sends the bots within 500 to the walkway node outside. The `noises` doc sat on `const ARRIVE`; it is on `fn noises` again |
+| conker-bots `tests/rom.rs` | `play()` seats `gun::spawn(scene)` (the ROM tests had no mounted guns). `bots_set_off_the_0x34_traps` counts deaths in a trap that hits (`Traps::hits`, not `left > 0`) per kind, and asserts at most 4 in a jet (the oracle's most) |
+| conker-bots `examples/bot_match.rs` | The mounted guns and 0x34's traps (seated each frame) as the server has them. The csv adds `role, drawn, gdc, enemy, attacking, shots`; the summary adds the plates' presses, the deaths and the living's frames in each kind of trap, on and at all |
+| conker-rules `weapon.rs`, `game.rs` | Docs only: `Roaming` and `vault_pickups_roam` cite v1a3 and v1a7 |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| bots `the_jets_are_heard_while_they_burn` (new) | Plates 0 and 3 stood from frame 80: jet 1 burns 83-202 and is heard 83-203 at (−2587, −379, 3247), radius 500; the side jets and the electric floor never |
+| bots ROM `bots_set_off_the_0x34_traps` (seed 1) | 23 presses, deaths [0 in a jet, 1 on the electric floor]; without the noise [9, 3], which fails |
+| bots ROM (all, with the guns in `play()`) | 26 pass |
+| `bots.sh` (debug, ports 5980-5988, 150 s; the other lanes' work in the tree) | **0x34** `BOTS=7` seeds 1, 2: 23/24 ok each, 15 and 13 deaths, 18 and 15 plate presses; bot 1 (a plate-0 presser) never dies, the one FAIL line. The same tree with the noise off: 24 and 16 deaths, 26 and 18 presses; seed 1 has the same FAIL, seed 2 none (the histories part at the first press). **0x30** `BOTS=3` seeds 1, 2: 11/12 ok each; one bot never dies (seed 1) or never hits (seed 2), as in earlier runs (the noise is empty off 0x34). **0x1A** `BOTS=3` seed 1: 12/12. No fault, unknown native or panic |
+| `bot_match` 0x34, 3 bots, 4,403 frames, 8 seeds | deaths 7.1 (5-9), hp drops 21.0; oracle o34b3s0-s1: 8 and 9 deaths |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`) | `test` passes (562, 1 ignored). `check` fails on the other lanes' work in progress: `cargo fmt` in their files (client, server, extract, hit test, as they change) and clippy's `too_many_arguments` on conker-client `projectiles.rs` `fly`, wasm clippy too (`web/app`'s check not reached). This lane's files are clean (clippy `-p conker-bots --all-targets` passes) |
+
+The numbers below are `bot_match` runs of this tree. Its `Match::parts` is empty, so the hit test there is the
+fitted cylinder and axis spheres, with the body-part work (G2b) in progress in `game.rs` and `projectile.rs`.
+
+| 0x34, 15 bots, 1,737 frames (means; ranges) | Before (no noise) | After | Oracle (t34 s0, s2-s4) |
+|---|---|---|---|
+| plate presses | 21.7 (14-26) | 24.7 (18-34) | 20 (14-33) |
+| deaths in a jet | 5.8 (2-10) | 1.0 (0-2) | 1.5 (0-4) |
+| deaths on the electric floor | 1.2 (0-2) | 1.3 (0-3) | 0.25 (0-1) |
+| the living's frames in a burning jet (the oracle's 31 at 0 deaths: `t34.py`'s window or the kill rule, untraced) | (not split) | 1 (0-2) | 16 (0-31) |
+| the living's frames on the live electric floor | (not split) | 139 (48-270) | 15 (0-58) |
+| the living's frames in the zones, on or off: jets / electric | (not split) | 129 / 944 | 209 / 259 |
+
+| 0x30, 3 bots, 4,496 frames | Remake, 8 seeds | Oracle o30s0-s4 |
+|---|---|---|
+| deaths / hp drops a run | 4.9 (3-8) / 21.8 (12-28) | 6.0 (4-9) / 28 (15-50) |
+| held / drawn frames a run: twin guns 0x09 | 3,790 / 1,922 | 4,981 / 1,824 |
+| sniper 0x24 | 3,612 / 2,650 | 1,723 / 837 |
+| 0x23 | 1,822 / 692 | 800 / 63 |
+| mounted gun (drawn) | 395 | 1,388 |
+| twin-gun shots / hp drops given to the shooter / ratio | 397 / 11.0 / 0.028 | 281 / 20.4 / 0.073 |
+| mounted-gun spells | 2 in 8 runs, both to the end | 4 in 5 runs: 2 to the end (1,628, 2,953 frames), 2 ended by the gunner's death (155, 2,205) |
+
+**Findings** (V the runs; C the code).
+- **The jets' noise** (noise34, C). While a row burns, `func_151A6600` calls `func_1508B20C(x, y, z, 500)` each frame
+  for the row's middle jet only (record command 1), from the frame after the plate bottoms for 121 frames. The
+  electric floor has no emitter. The bots then flee as from a shot (`func_1508B3F8`).
+- **The electric floor.** The remake's bots stay on its box 3.6 times as long (944 frames a run against 259) and die
+  there 1.3 times a run against 0.25. They are not passing: in `bot_match` seed 5, p3, role 2 with the twin guns
+  drawn, stands in AI state 4 at (276, −399, 2817) for 560 frames, firing 120 shots at p4 and p14 200-1,900 away
+  and landing a few. A long stand like this ends when someone dies, so it ties to the twin guns' hit rate below.
+- **0x30's deaths** (o30s0-s4). The oracle ranges 4-9 deaths and 15-50 drops over 5 seeds; the old "9" and "50" are
+  s0. With the mounted guns seated, the remake is 3-8 and 12-28. The twin guns are now drawn as long as the
+  original's. The sniper and 0x23 are held 2.1 and 2.3 times as long, and drawn 3.2 and 11 times: in state 6 with a
+  bot enemy, 0x23 is drawn 43% of the time against 14% (`goal.py`). The takes a run match (`takes.py`), so the bots
+  holding them live longer: the twin guns land 0.028 drops a shot against 0.073.
+- **The mounted gun** (o30s0-s4, o34b3s0-s1, o34b5s0). Every spell is a role-4 bot's and none ends while the gunner
+  lives: it camps until it dies or the match ends. The remake's script and gun rules do the same; no change.
+- **The Vault's roam** (v1a3, v1a7). 8 and 18 returns. At a take the spot (G+0x10F0) stays and the timer goes to
+  300 VIs; 150 frames on the pickup is back on a new spot no pickup's spot is, its own included (v1a3 k2: taken at 486
+  on spot 6, back at 636 on 4 while k0, k1 and k3 held 3, 5 and 0). The remake's `Roaming::pick` at each return is
+  this rule.
+
+**Left.**
+- **V remake: the twin guns' hit rate** (0.028 drops a shot against 0.073 on 0x30). It keeps the sniper and 0x23 bots
+  alive longer and the electric-floor stands going. Re-measure with the body-part hit test in `bot_match`
+  (`Match::parts` filled), then the pitch byte obj+0x1D1's 1.1° steps and its 3-a-frame ramp (`func_1504C9E4`), still
+  not ported.
+- **0x23 drawn in state 6** (43% against 14% with a bot enemy): the draw rules of 0xBB (0x3530-0x3722, G+0x1EDC,
+  G+0x24F8, query (5, 0x22)) were not traced against it.
+- **The mounted gun is taken less** on 0x30 (2 spells in 8 runs against 4 in 5).
+- **Not done: the crossbow's pitch** (o34p: 0x18's obj+0x1D1 is far from the aim's, units untraced) **and the sniper's
+  hit rate**. The remake's sniper ray does not step the shot counter (`shots` 0 with 0x24 drawn, the oracle's
+  s126+0x1AB 4.0 a run), so its rate cannot be read from `bot_match` yet. The hp drops given to a bot with 0x24 drawn
+  are 5.8 a run against 1.6, as it is drawn 3.2 times as long.
+
 ## Race: the leftovers (2026-10-14)
 **Batch G1, the Race lane. Route 12's 3 bots now lap as L2's: 1067-1081 frames against 1063-1081 (934 before). The
 cause was the leader's deaths. In L2 the second bot takes the missile at placement 6 from 324 above it and fires at

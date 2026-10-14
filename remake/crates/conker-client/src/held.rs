@@ -11,22 +11,219 @@
 //! The aimed gun's twist ([`conker_sim::movement::PlayerState::twist`]) turns the upper body
 //! (`joint_01`, the arms and the guns with it) toward the aim; the head keeps the legs' facing
 //! ([`twist`]).
+//! The child objects ([`RIGS`]: the crossbows, item 0x3A's grenade) are drawn from their own rig
+//! ([`Rigged`]), posed from the holder's state as `func_15054A94` does (C;
+//! `../lab/research/mp-original/held-leftovers.md` §1): the crossbow by its holder's clip
+//! ([`crossbow_pose`], its loaded bolt [`loaded_bolt`]) in the hand's frame, item 0x3A's grenade by
+//! the frames since its pull ([`lob_pose`]) at its own scale 1.0, in the hand's frame without the
+//! hand's scale (V `held-client-scratch` p1a DLs 110, 126: its root in the normalised hand frame is
+//! its clip's root; the crossbow's joint 0 is at the hand's scale, cbs DLs 100-233).
 
 use crate::render::MODEL_SCALE;
 use crate::{Anim, Config};
-use bevy::gltf::Gltf;
+use bevy::gltf::{Gltf, GltfExtras};
 use bevy::prelude::*;
-use bevy::world_serialization::WorldAssetRoot;
+use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 use conker_anim::AnimPlayer;
-use conker_anim::combat::{GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW, MASK_OFF, MASK_ON};
-use conker_assets::{Held, Light, PACK_WEAPONS, held_gltf, props_gltf};
+use conker_anim::combat::{
+    BONE_CROSSBOW_DRAW, BONE_CROSSBOW_FIRE, CROSSBOW_DRAW, CROSSBOW_FIRE, CROSSBOW_HOLSTER,
+    GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW, MASK_OFF, MASK_ON,
+};
+use conker_assets::{
+    Held, Light, PACK_WEAPONS, RIGS, held_gltf, projectiles_gltf, props_gltf, rig_gltf,
+};
 use conker_rules::net::Fighting;
+use conker_rules::projectile::{COOK, LOB_HOLD, LOB_PULL};
 use conker_rules::weapon::weapon;
 use conker_sim::net::{Combat, MatchView, Player};
 use lightyear::prelude::Predicted;
 
 #[derive(Resource)]
 struct HeldModels(Vec<Held>);
+
+/// Item 0x3A's grenade on this map: its [`RIGS`] list (0 #137 on 0x1A, 1 #186 on 0x3F: the
+/// thrown object is 0xBA on 0x3F, 0x89 elsewhere, C); `None` where C-down pulls item 0x26.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct Lob(pub Option<usize>);
+
+/// [`RIGS`]' entries: the crossbows' rig and item 0x3A's.
+pub(crate) const CROSSBOW: usize = 0;
+pub(crate) const LOB: usize = 1;
+/// A rig's clips 0-3 (glTF animation names; clip 0 its empty pair's pose, the descriptor's bases:
+/// the crossbow's rest, the grenade's bent fuse).
+const RIG_CLIPS: [&str; 4] = [
+    "pair_0000_anim_0000",
+    "pair_0001_anim_0001",
+    "pair_0002_anim_0002",
+    "pair_0003_anim_0003",
+];
+/// The crossbow's fire and holster clips' lengths (ticks): the copied clock stops a tick short
+/// (`func_1507C324`: min(parent time, length − 1), C).
+const XBOW_FIRE_TICKS: f32 = 31.0;
+const XBOW_HOLSTER_TICKS: f32 = 36.0;
+/// The loaded bolt hangs from the crossbow's `joint_02` (action 0x51, bank-09 #0x35, drawn with
+/// that joint's matrix: V cbs DL 147) while the fire clip's clock is in this range.
+const BOLT_JOINT: &str = "joint_02";
+const LOADED: std::ops::Range<f32> = 6.0..11.0;
+/// Item 0x3A's grenade plays its pull (clip 2) for this many frames after the pull's first, then
+/// its hold (clip 1, looping on its 30 ticks) (V held-pack-scratch p1a: clip 2 at 0-22 on reads
+/// 102-124, clip 1 from 0 on 125).
+const LOB_PULL_TICKS: u32 = 22;
+const LOB_HOLD_TICKS: u32 = 30;
+
+/// The crossbow's clip and time (ticks) for its holder in clip `anim` at `clock`
+/// (`func_15054A94`, C; V `held-leftovers-scratch` cb): the draw shows clip 0 (the bind pose),
+/// the fire clip 2 and the holster clip 3 at the holder's clock, anything else (the idle, the
+/// moves, the aim and the aimed shot) clip 1, a one-tick pose.
+pub fn crossbow_pose(anim: u16, clock: f32) -> (usize, f32) {
+    match anim {
+        CROSSBOW_DRAW | BONE_CROSSBOW_DRAW => (0, 0.0),
+        CROSSBOW_FIRE | BONE_CROSSBOW_FIRE => (2, clock.min(XBOW_FIRE_TICKS - 1.0)),
+        CROSSBOW_HOLSTER => (3, clock.min(XBOW_HOLSTER_TICKS - 1.0)),
+        _ => (1, 0.0),
+    }
+}
+
+/// Whether the crossbow holds its loaded bolt: its holder's fire clip's clock in [6, 11) (action
+/// 0x51 made at 6, gone at 11 as the bolt leaves; C; V cbd/cbs: drawn in DLs 145-149).
+pub fn loaded_bolt(anim: u16, clock: f32) -> bool {
+    matches!(anim, CROSSBOW_FIRE | BONE_CROSSBOW_FIRE) && LOADED.contains(&clock)
+}
+
+/// Item 0x3A's grenade's clip and time `f` frames after the pull's first: the pull (clip 2) at f
+/// up to 22, then the hold (clip 1) from 0, a tick a frame.
+pub fn lob_pose(f: u32) -> (usize, f32) {
+    match f.checked_sub(LOB_PULL_TICKS + 1) {
+        None => (2, f as f32),
+        Some(k) => (1, (k % LOB_HOLD_TICKS) as f32),
+    }
+}
+
+/// Frames since item 0x3A's pull, from its cook timer ([`COOK`] at the pull, 2 VIs less a frame).
+pub fn since_pull(cook: u16) -> u32 {
+    u32::from(COOK.saturating_sub(cook) / 2)
+}
+
+/// A child object drawn from its own rig: `rig` its [`RIGS`] entry, `list` the draw list it
+/// shows; once its scene is in ([`rig_ready`]), its animator with clips 0-3, every joint's rest
+/// (a clip keys only some of them: the others are at rest) and the crossbow's loaded bolt. `gltf`
+/// keeps the rig's glTF (its clips) loaded.
+#[derive(Component)]
+pub(crate) struct Rigged {
+    rig: usize,
+    list: usize,
+    gltf: Handle<Gltf>,
+    animator: Option<(Entity, Vec<AnimationNodeIndex>)>,
+    rest: Vec<(Entity, Transform)>,
+    bolt: Option<Entity>,
+}
+
+impl Rigged {
+    /// The rig's scene, and the component for list `list` of [`RIGS`] entry `rig`.
+    pub(crate) fn spawn(rig: usize, list: usize, assets: &AssetServer) -> impl Bundle {
+        let gltf = rig_gltf(PACK_WEAPONS, RIGS[rig].0);
+        (
+            WorldAssetRoot(assets.load(format!("{gltf}#Scene0"))),
+            Self {
+                rig,
+                list,
+                gltf: assets.load(gltf),
+                animator: None,
+                rest: Vec::new(),
+                bolt: None,
+            },
+        )
+    }
+}
+
+/// A rig's scene is in: the other list's primitives hide, its `AnimationPlayer` gets clips 0-3,
+/// its joints' rest is kept, and the crossbow's loaded bolt (`projectiles.gltf`'s bolt) goes under
+/// its `joint_02`, hidden.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rig_ready(
+    ready: On<WorldInstanceReady>,
+    children: Query<&Children>,
+    parts: Query<(Option<&Name>, &Transform, Option<&GltfExtras>)>,
+    animators: Query<(), With<AnimationPlayer>>,
+    mut rigs: Query<&mut Rigged>,
+    assets: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut commands: Commands,
+) {
+    let Ok(mut rig) = rigs.get_mut(ready.entity) else {
+        return;
+    };
+    let mut animator = None;
+    for e in children.iter_descendants(ready.entity) {
+        animator = animator.or(animators.contains(e).then_some(e));
+        let Ok((name, t, extras)) = parts.get(e) else {
+            continue;
+        };
+        let list = extras.and_then(|x| {
+            let v = serde_json::from_str::<serde_json::Value>(&x.value).ok()?;
+            v.get("list")?.as_u64()
+        });
+        if list.is_some_and(|l| l != rig.list as u64) {
+            commands.entity(e).insert(Visibility::Hidden);
+        }
+        let Some(name) = name.filter(|n| n.starts_with("joint_")) else {
+            continue;
+        };
+        rig.rest.push((e, *t));
+        if rig.rig == CROSSBOW && name.as_str() == BOLT_JOINT {
+            let bolt = format!(
+                "{}#Scene{}",
+                projectiles_gltf(PACK_WEAPONS),
+                crate::projectiles::BOLT_SCENE
+            );
+            let bolt = (WorldAssetRoot(assets.load(bolt)), Visibility::Hidden);
+            rig.bolt = Some(commands.spawn((bolt, Transform::IDENTITY, ChildOf(e))).id());
+        }
+    }
+    let clips = gltfs.get(&rig.gltf).and_then(|g| {
+        (RIG_CLIPS.iter())
+            .map(|c| g.named_animations.get(*c).cloned())
+            .collect::<Option<Vec<_>>>()
+    });
+    let (Some(animator), Some(clips)) = (animator, clips) else {
+        warn!("{}: no animation player, or clips missing", RIGS[rig.rig].0);
+        return;
+    };
+    let (graph, nodes) = AnimationGraph::from_clips(clips);
+    (commands.entity(animator)).insert(AnimationGraphHandle(graphs.add(graph)));
+    rig.animator = Some((animator, nodes));
+}
+
+/// Shows rig `rig` in clip `clip` at `time` (ticks): every joint at rest, then the clip's keys.
+pub(crate) fn pose_rig(
+    rig: &Rigged,
+    (clip, time): (usize, f32),
+    animators: &mut Query<&mut AnimationPlayer>,
+    joints: &mut Query<&mut Transform>,
+) {
+    for (joint, rest) in &rig.rest {
+        if let Ok(mut t) = joints.get_mut(*joint) {
+            t.set_if_neq(*rest);
+        }
+    }
+    let Some((animator, nodes)) = &rig.animator else {
+        return;
+    };
+    let (Ok(mut animator), Some(&node)) = (animators.get_mut(*animator), nodes.get(clip)) else {
+        return;
+    };
+    let stale: Vec<_> = (animator.playing_animations())
+        .map(|(n, _)| *n)
+        .filter(|&n| n != node)
+        .collect();
+    for n in stale {
+        animator.stop(n);
+    }
+    (animator.play(node))
+        .set_speed(0.0)
+        .set_seek_time(time / conker_sim::TICK_HZ as f32);
+}
 
 /// A player's held models: (index into [`HeldModels`], the entity under its joint).
 #[derive(Component)]
@@ -47,17 +244,39 @@ struct GasHands(Entity, Option<Entity>);
 /// not read; joint and offset fitted.
 pub const GAS_JOINT: (u8, [f32; 3]) = (0, [0.0, -30.0, 24.0]);
 
-/// The systems that hang the held models on every player's joints and show them.
-pub fn build(app: &mut App, held: Vec<Held>, carried: Option<Light>) {
+/// The systems that hang the held models on every player's joints and show them; `lob`: item
+/// 0x3A's [`Lob`] list on this map.
+pub fn build(app: &mut App, held: Vec<Held>, carried: Option<Light>, lob: Option<usize>) {
     app.insert_resource(HeldModels(held));
     app.insert_resource(CarryLight(carried));
-    app.add_systems(Update, (hang, show, hang_gas, show_gas).chain());
+    app.insert_resource(Lob(lob));
+    app.add_systems(Update, (hang, show, pose, hang_gas, show_gas).chain());
     app.add_systems(
         PostUpdate,
-        twist
+        (twist, unscale_lobs)
             .after(bevy::app::AnimationSystems)
             .before(bevy::transform::TransformSystems::Propagate),
     );
+}
+
+/// Item 0x3A's grenade in the hand is drawn at its own scale (1.0), not the hand's: its root's
+/// scale undoes its ancestors' (the player's 0.5 and the clip's: V p1a DL 110, a hand at 0.269).
+fn unscale_lobs(
+    rigs: Query<(Entity, &Rigged, &Visibility, Has<ChildOf>)>,
+    parents: Query<&ChildOf>,
+    mut transforms: Query<&mut Transform>,
+) {
+    for (hand, rig, v, held) in &rigs {
+        if rig.rig != LOB || !held || *v == Visibility::Hidden {
+            continue;
+        }
+        let scale: f32 = (parents.iter_ancestors(hand))
+            .map(|e| transforms.get(e).map_or(1.0, |t| t.scale.x))
+            .product();
+        if let Ok(mut t) = transforms.get_mut(hand) {
+            t.set_if_neq(Transform::from_scale(Vec3::splat(scale.recip())));
+        }
+    }
 }
 
 /// A player's upper body (`joint_01`) and head (`joint_12`), which the twist turns.
@@ -149,15 +368,23 @@ pub fn mask_shows(h: &Held, masked: bool, clock: &AnimPlayer) -> bool {
     }
 }
 
-/// Once a player's model is in the world, every held model goes under its joint, hidden. The glTF
-/// loads after the character's (two GLBs loading at once overflowed the IO thread's stack, see
-/// `render::load_characters`).
+/// The [`RIGS`] entry and list of held model `h`, if it is a child object with its own rig.
+fn rig_of(h: &Held) -> Option<(usize, usize)> {
+    (RIGS.iter().enumerate())
+        .find_map(|(r, (_, e))| Some((r, e.iter().position(|&e| e == h.entry)?)))
+}
+
+/// Once a player's model is in the world, every held model goes under its joint, hidden: a child
+/// object as its rig ([`Rigged`]; item 0x3A's grenade only where C-down pulls it), the others as
+/// `held.gltf`'s scene. The glTF loads after the character's (two GLBs loading at once overflowed
+/// the IO thread's stack, see `render::load_characters`).
 #[allow(clippy::too_many_arguments)]
 fn hang(
     players: Query<Entity, (With<Anim>, Without<Hands>)>,
     children: Query<&Children>,
     names: Query<&Name>,
     held: Res<HeldModels>,
+    lob: Res<Lob>,
     assets: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     mut gltf: Local<Option<Handle<Gltf>>>,
@@ -184,13 +411,22 @@ fn hang(
         };
         let hands = (held.0.iter().enumerate())
             .filter_map(|(i, h)| {
-                let hand = commands.spawn((
-                    WorldAssetRoot(g.scenes[i].clone()),
+                let at = (
                     Transform::IDENTITY,
                     Visibility::Hidden,
                     ChildOf(joint(h.joint)?),
-                ));
-                Some((i, hand.id()))
+                );
+                let hand = match rig_of(h) {
+                    Some((LOB, list)) if lob.0 != Some(list) => return None,
+                    Some((rig, list)) => {
+                        let rig = Rigged::spawn(rig, list, &assets);
+                        commands.spawn((rig, at)).observe(rig_ready).id()
+                    }
+                    None => commands
+                        .spawn((WorldAssetRoot(g.scenes[i].clone()), at))
+                        .id(),
+                };
+                Some((i, hand))
             })
             .collect();
         let mut player = commands.entity(player);
@@ -298,14 +534,62 @@ fn show(
         let racer = combat.is_some() && race;
         for &(i, entity) in &hands.0 {
             let h = &held.0[i];
+            // Item 0x3A's grenade (made by code, no events: `hang` hangs this map's only) from
+            // the pull's first frame to the throw's first (V p1a: s126+0x75 0xBA, the object a
+            // child until 0x1FC).
+            let lob = rig_of(h).is_some_and(|r| r.0 == LOB);
             let shown = !raptor
                 && match h.create.iter().any(|c| c.0 == MASK_ON) {
                     _ if racer => clip_shows(h, &anim.0),
+                    _ if lob => [LOB_PULL, LOB_HOLD].contains(&anim.0.id),
                     true => mask_shows(h, masked, &anim.0),
                     false => shows(h, weapon_id, drawn, &anim.0, class),
                 };
             if let Ok(mut v) = visibility.get_mut(entity) {
                 v.set_if_neq(match shown {
+                    true => Visibility::Inherited,
+                    false => Visibility::Hidden,
+                });
+            }
+        }
+    }
+}
+
+/// Poses each player's shown child objects: the crossbow by its clip (and its loaded bolt), item
+/// 0x3A's grenade by the frames since its pull (the local player's predicted cook timer, the
+/// others' replicated one).
+#[allow(clippy::type_complexity)]
+fn pose(
+    players: Query<(
+        &Anim,
+        &Hands,
+        Option<&Combat>,
+        Option<&Fighting>,
+        Has<Predicted>,
+    )>,
+    rigs: Query<(&Rigged, &Visibility)>,
+    mut bolts: Query<&mut Visibility, Without<Rigged>>,
+    mut animators: Query<&mut AnimationPlayer>,
+    mut joints: Query<&mut Transform>,
+) {
+    for (anim, hands, combat, fighting, predicted) in &players {
+        let cook = match (fighting, combat) {
+            (Some(f), _) if predicted => f.state.cook,
+            (_, Some(c)) => c.cook,
+            _ => COOK,
+        };
+        let a = &anim.0;
+        for &(_, hand) in &hands.0 {
+            let Some((rig, _)) = rigs.get(hand).ok().filter(|r| *r.1 != Visibility::Hidden) else {
+                continue;
+            };
+            let clip = match rig.rig {
+                CROSSBOW => crossbow_pose(a.id, a.time),
+                _ => lob_pose(since_pull(cook)),
+            };
+            pose_rig(rig, clip, &mut animators, &mut joints);
+            if let Some(Ok(mut b)) = rig.bolt.map(|b| bolts.get_mut(b)) {
+                b.set_if_neq(match loaded_bolt(a.id, a.time) {
                     true => Visibility::Inherited,
                     false => Visibility::Hidden,
                 });
@@ -395,6 +679,51 @@ mod tests {
         assert_eq!(held(cave, clock(GRENADE_PULL, 19.0, 1.0)), [false, true]);
         assert_eq!(held(cave, clock(GRENADE_HOLD, 3.0, 1.0)), [false, true]);
         assert_eq!(held(cave, clock(GRENADE_THROW, 15.0, 1.0)), [false, false]);
+    }
+
+    /// The crossbow's clip from its holder's (`held-leftovers.md` §1's recipe; V cb: 0 in the
+    /// draw, 2 in the hip shot, 1 through the aim and the aimed shot, 3 in the holster), the
+    /// copied clock stopping a tick short; the loaded bolt for clocks 6 to 11 of the fire.
+    #[test]
+    fn the_crossbow_follows_its_holder() {
+        use conker_anim::combat::{CROSSBOW_AIM, CROSSBOW_AIMED, CROSSBOW_IDLE};
+        assert_eq!(crossbow_pose(CROSSBOW_DRAW, 30.0), (0, 0.0));
+        assert_eq!(crossbow_pose(BONE_CROSSBOW_DRAW, 30.0), (0, 0.0));
+        assert_eq!(crossbow_pose(CROSSBOW_FIRE, 9.0), (2, 9.0));
+        assert_eq!(crossbow_pose(BONE_CROSSBOW_FIRE, 9.0), (2, 9.0));
+        assert_eq!(crossbow_pose(CROSSBOW_FIRE, 30.5), (2, 30.0));
+        assert_eq!(crossbow_pose(CROSSBOW_HOLSTER, 7.0), (3, 7.0));
+        assert_eq!(crossbow_pose(CROSSBOW_HOLSTER, 35.9), (3, 35.0));
+        for id in [
+            CROSSBOW_AIM,
+            CROSSBOW_AIMED,
+            CROSSBOW_IDLE,
+            conker_anim::id::RUN,
+        ] {
+            assert_eq!(crossbow_pose(id, 12.0), (1, 0.0));
+        }
+        let loaded: Vec<f32> = (0..30)
+            .map(|t| t as f32)
+            .filter(|&t| loaded_bolt(CROSSBOW_FIRE, t))
+            .collect();
+        assert_eq!(loaded, [6.0, 7.0, 8.0, 9.0, 10.0]);
+        assert!(loaded_bolt(BONE_CROSSBOW_FIRE, 6.0) && !loaded_bolt(CROSSBOW_FIRE, 11.0));
+        assert!(!loaded_bolt(CROSSBOW_AIMED, 8.0));
+    }
+
+    /// Item 0x3A's grenade against p1a (`held-pack-scratch/out/anim_p1a.out`): its pull (clip 2)
+    /// at 0-22 on reads 102-124, then its hold (clip 1) from 0, looping on 30; the frames since
+    /// the pull from the cook timer (240 at the pull, 2 less a frame).
+    #[test]
+    fn the_lobbed_grenade_follows_its_pull() {
+        let read = |r: u32| lob_pose(r - 102);
+        assert_eq!(read(102), (2, 0.0));
+        assert_eq!(read(124), (2, 22.0));
+        assert_eq!(read(125), (1, 0.0));
+        assert_eq!(read(131), (1, 6.0));
+        assert_eq!(read(125 + 30), (1, 0.0));
+        assert_eq!(since_pull(COOK), 0);
+        assert_eq!(since_pull(COOK - 2 * 23), 23);
     }
 
     /// The gas mask's models (events as extracted, ROM-tested in extract-character) at the put-on's

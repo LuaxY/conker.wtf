@@ -767,7 +767,9 @@ pub const VAULT_RESPAWN: u16 = 150;
 /// pickups, at each appearance (the first frame, then each return), stand on a random one of
 /// `spots` that no pickup's last spot is, their own included (taken ones keep theirs): `(int)(r ·
 /// 0.99999 · n)` for an RNG draw r, drawn again until free (C; V dm6: 5 returns, each on a spot
-/// none stood on). Scene 0x1A's k0-k3 ([`VAULT_ROAMING`], [`VAULT_SPOTS`] 0-7); none elsewhere.
+/// none stood on; v1a3 and v1a7, scratch `dm-bots-leftovers-scratch`: 8 and 18 returns, G+0x10F0
+/// kept from the take to the return, then a new spot). Scene 0x1A's k0-k3 ([`VAULT_ROAMING`],
+/// [`VAULT_SPOTS`] 0-7); none elsewhere.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Roaming {
     pub count: usize,
