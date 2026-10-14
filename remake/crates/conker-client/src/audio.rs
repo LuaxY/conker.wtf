@@ -51,6 +51,7 @@ use conker_anim::combat::{
 use conker_assets::audio::Line;
 use conker_assets::audio::{
     Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, Follow, On, Play, Sound,
+    WATER_STEPS,
 };
 use conker_assets::outro::{Outro, frame};
 use conker_assets::{Held, Manifest, Pickup};
@@ -59,6 +60,7 @@ use conker_rules::net::Fighting;
 use conker_rules::projectile::{BOLT_STEP, Grenade, ROCKET_SPEED, SHOT_STEP};
 use conker_rules::weapon::{Attack, Weapon, weapon};
 use conker_rules::{Rng, beach, gun};
+use conker_sim::collision::NO_FLOOR;
 use conker_sim::movement::atan2_u16;
 use conker_sim::net::{BulletView, Combat, GunView, MatchView, Player, PlayerId, RacerView};
 use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
@@ -349,7 +351,8 @@ struct Seen {
     cook: u16,
     scope: bool,
     local: bool,
-    /// The floor's surface kind (bits 0-4 of its word) and the horizontal speed: footsteps.
+    /// The floor's surface kind (bits 0-4 of its word; [`WATER_STEPS`] in the water) and the
+    /// horizontal speed: footsteps.
     floor: Option<u8>,
     speed: f32,
     /// The speed the stick asks for (Tank's engine, [`engine`]).
@@ -2371,7 +2374,11 @@ fn hear(
             },
             scope: p.scope_yaw.is_some(),
             local: predicted,
-            floor: p.floor.map(|f| (f.surface & 0x1F) as u8),
+            floor: if p.water != NO_FLOOR && p.pos[1] <= p.water {
+                Some(WATER_STEPS)
+            } else {
+                p.floor.map(|f| (f.surface & 0x1F) as u8)
+            },
             speed: p.xz_speed,
             target: p.target_speed,
             // Tank's bomb carrier is no canister carrier (no radio).

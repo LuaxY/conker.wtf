@@ -89,6 +89,21 @@ const BOLT_BODY: [i16; 3] = [5, 5, 0];
 const PULL: u32 = 28;
 const THROW: u32 = 28;
 const RELEASE: u32 = 14;
+/// The pull's and the throw's frames, item 0x3A's or 0x26's.
+fn pull_frames(f: &Fighter) -> u32 {
+    if f.lobs() {
+        projectile::LOB_PULL_FRAMES
+    } else {
+        PULL
+    }
+}
+fn throw_frames(f: &Fighter) -> u32 {
+    if f.lobs() {
+        projectile::LOB_THROW_FRAMES
+    } else {
+        THROW
+    }
+}
 /// The hand during the hold, in the thrower's frame (V combat4_dead2: the blast 22.3 behind, 12.2
 /// to the side, 60.3 up).
 const HOLD_HAND: [f32; 3] = [-22.3, -12.2, 60.3];
@@ -124,6 +139,8 @@ pub struct Arena {
     pub respawn: Option<u16>,
     /// Race: the route's lap ([`race::Track`]; empty elsewhere).
     pub track: race::Track,
+    /// C-down pulls item 0x3A, lobbed ([`projectile::LOB`]): scenes 0x1A and 0x3F.
+    pub lob: bool,
 }
 
 impl Arena {
@@ -546,15 +563,27 @@ impl Fighter {
         self.gun.is_some_and(|m| m.state != gun::LAUNCH)
     }
 
+    /// Its grenade action is item 0x3A's (told by its clips).
+    pub fn lobs(&self) -> bool {
+        use projectile::{LOB_HOLD, LOB_PULL, LOB_THROW};
+        matches!(self.anim, LOB_PULL | LOB_HOLD | LOB_THROW)
+    }
+
     /// s126+0x75: 0x80 | the current item (0x26, the grenade, from the pull to 15 frames into the
     /// throw; the canister carried, the mask worn), 0 with nothing; `tick` is the next frame to run
-    /// (the trace row).
+    /// (the trace row). Item 0x3A shows until the throw's first frame (V c3a, c3f).
     pub fn item(&self, tick: u32) -> u8 {
         match self.action {
             _ if self.flag.is_some() => 0,
             _ if self.carrying => 0x80 | gas::CANISTER,
+            Action::GrenadePull { .. } | Action::GrenadeHold { .. } if self.lobs() => {
+                0x80 | projectile::LOB
+            }
+            Action::GrenadeThrow { .. } if self.lobs() && tick <= self.since + 1 => {
+                0x80 | projectile::LOB
+            }
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0xA6,
-            Action::GrenadeThrow { .. } if tick <= self.since + RELEASE + 1 => 0xA6,
+            Action::GrenadeThrow { .. } if !self.lobs() && tick <= self.since + RELEASE + 1 => 0xA6,
             _ if self.dropped.is_some_and(|d| tick <= d + 1) => 0xA6,
             _ if self.masked => 0x80 | gas::MASK,
             _ => self.weapon.map_or(0, |w| 0x80 | w),
@@ -577,6 +606,9 @@ impl Fighter {
             _ if self.seated() => conker_camera::GUN,
             // The canister is the item the camera reads (s126+0x78 = 0x25, V t2 1046).
             _ if self.carrying => gas::CANISTER,
+            Action::GrenadePull { .. } | Action::GrenadeHold { .. } if self.lobs() => {
+                projectile::LOB
+            }
             Action::GrenadePull { .. } | Action::GrenadeHold { .. } => 0x26,
             Action::Holster | Action::GrenadeThrow { .. } => 0,
             Action::Draw => self.weapon.unwrap_or(0),
@@ -589,6 +621,7 @@ impl Fighter {
     /// a scoped weapon's scope may open). It attaches this many frames into the draw or the pull
     /// (V: the combat_ctlw probes, ctl_cd; the camera agent's camera4 traces) and leaves with the
     /// holster's or throw's first frame. `tick` is the next frame to run, as in [`Self::item`].
+    /// Item 0x3A never gets there (s126+0x11A 1 from the pull to the throw, V c3a, c3f).
     pub fn in_hand(&self, tick: u32) -> bool {
         let attach = |id: u8| match id {
             0x39 | 0x38 | 0x23 | 0x37 => 7, // 0x38: V e4 combat7_e_w38 761→768
@@ -603,7 +636,7 @@ impl Fighter {
             _ => 10, // 0x09, 0x16
         };
         match self.camera_weapon() {
-            0 => false,
+            0 | projectile::LOB => false,
             id if matches!(
                 self.action,
                 Action::Draw | Action::GrenadePull { .. } | Action::GrenadeHold { .. }
@@ -1079,7 +1112,7 @@ impl Match {
         self.player(i, input, arena, world, seen, &mut late, &mut ev);
         self.fire_gun(i, world, seen, &mut ev);
         self.burn_player(i, &mut ev);
-        self.fly_grenades(world, &mut ev);
+        self.fly_grenades(arena.lob, world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
         if self.players[i].out == 0 && !self.settings.tank && !self.settings.race {
             animate(&mut self.players[i], world);
@@ -1195,7 +1228,7 @@ impl Match {
             self.fly_missiles(arena, &mut ev);
             self.race_end();
         }
-        self.fly_grenades(world, &mut ev);
+        self.fly_grenades(arena.lob, world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
         // The renderer measures every player's root once the frame's updates are done (conker-sim's
         // `animate`; V: 0x14's shot kills in its own update after the victim's, and the victim's
@@ -2055,7 +2088,21 @@ impl Match {
             );
             return;
         }
-        let held = |b: u16| input.buttons & b != 0;
+        // In the water the weapon handler runs without buttons and puts a drawn weapon away at once
+        // (`func_1505F298`'s swim branch → `func_1506045C`, C; V swim1 330-345: B and Z do nothing).
+        let swim_mask = if f.body.swimming {
+            f.drawn = false;
+            if !matches!(
+                f.action,
+                Action::Free | Action::Mask { .. } | Action::Pose(_)
+            ) {
+                f.set(Action::Free, u16::from(f.body.state), t);
+            }
+            !(BUTTON_B | BUTTON_Z)
+        } else {
+            !0
+        };
+        let held = |b: u16| input.buttons & swim_mask & b != 0;
         // A mounted gun's gunner: the jump onto it (0x32 for 19 frames, then 0x38) until it comes
         // down on the seat (V m2 61 → 83, e1 41 → 66), then the seat, which turns with the scope and
         // where Z, B and A are all the buttons do (`crate::gun`).
@@ -2137,7 +2184,7 @@ impl Match {
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
             }
-            (Action::GrenadeThrow { .. }, _) if n >= THROW => {
+            (Action::GrenadeThrow { .. }, _) if n >= throw_frames(f) => {
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
             }
@@ -2208,7 +2255,11 @@ impl Match {
                 && armed.is_none()
                 && f.weapon != Some(beach::ITEM)
             {
-                f.set(Action::GrenadePull { pull: t }, anim::GRENADE_PULL, t);
+                let pull = match arena.lob {
+                    true => projectile::LOB_PULL,
+                    false => anim::GRENADE_PULL,
+                };
+                f.set(Action::GrenadePull { pull: t }, pull, t);
                 f.cook = projectile::COOK;
                 f.shots = f.shots.saturating_add(1);
             } else if let Some(w) = w.filter(|_| pressed(BUTTON_B)) {
@@ -2266,6 +2317,7 @@ impl Match {
             }
         }
         let n = t - f.since;
+        let lob = f.lobs();
         let tommy = matches!(f.action, Action::Fire { .. }) && w.is_some_and(|w| w.id == 0x38);
         f.climb.step(tommy && held(BUTTON_Z));
         if tommy {
@@ -2457,28 +2509,47 @@ impl Match {
                 // Cooked too long: it goes off in the hand, in the thrower's frame (V
                 // combat4_dead2 881; the item shows it a frame more, as after a throw).
                 (f.cook, f.grenades) = (0, f.grenades - 1);
-                let pos = local_to_world(f.body.pos, f.body.facing, HOLD_HAND);
+                let hand = if lob {
+                    projectile::lob_hand(f.class)
+                } else {
+                    HOLD_HAND
+                };
+                let pos = local_to_world(f.body.pos, f.body.facing, hand);
                 strikes.push(Strike::Blast(pos));
                 let anim = f.idle_anim();
                 f.set(Action::Free, anim, t);
             }
-            (Action::GrenadePull { pull }, _) if n >= PULL => {
-                if late_held(C_DOWN) {
+            // Item 0x3A's timer runs every frame (obj+0x2E6, V c3a), its pull is shorter.
+            (Action::GrenadePull { pull }, _) if n >= pull_frames(f) => {
+                if late_held(C_DOWN) || lob {
                     f.cook -= 2;
                 }
-                f.set(Action::GrenadeHold { pull }, anim::GRENADE_HOLD, t)
+                let hold = if lob {
+                    projectile::LOB_HOLD
+                } else {
+                    anim::GRENADE_HOLD
+                };
+                f.set(Action::GrenadeHold { pull }, hold, t)
             }
-            (Action::GrenadePull { .. }, _) if n > 0 && late_held(C_DOWN) => f.cook -= 2,
+            (Action::GrenadePull { .. }, _) if n > 0 && (late_held(C_DOWN) || lob) => f.cook -= 2,
             (Action::GrenadeHold { .. }, _) if n > 0 && late_held(C_DOWN) => f.cook -= 2,
             (Action::GrenadeHold { pull }, _) if n > 0 && !late_held(C_DOWN) => {
                 f.grenades -= 1;
-                f.set(
-                    Action::GrenadeThrow { pull, hold: n },
-                    anim::GRENADE_THROW,
-                    t,
-                );
+                let throw = if lob {
+                    projectile::LOB_THROW
+                } else {
+                    anim::GRENADE_THROW
+                };
+                f.set(Action::GrenadeThrow { pull, hold: n }, throw, t);
+                // Item 0x3A leaves the hand at once (V c3a 132, c3f 132).
+                if lob {
+                    let (pos, facing) = (f.body.pos, f.body.facing);
+                    let hand = projectile::lob_hand(f.class);
+                    let g = Grenade::lob(i, pos, facing, hand, f.cook, t, world);
+                    strikes.push(Strike::Grenade(g));
+                }
             }
-            (Action::GrenadeThrow { .. }, _) if n == RELEASE => {
+            (Action::GrenadeThrow { .. }, _) if n == RELEASE && !lob => {
                 strikes.push(Strike::Grenade(Grenade::release(
                     i,
                     f.body.pos,
@@ -2565,13 +2636,15 @@ impl Match {
         f.body.holding = f.flag.is_some();
         f.body.heavy = matches!(f.flag, Some(heist::CASH | raptor::EGG));
         // Beach's item 0x3E drives a villager, but for the crouch's 40 % (V spd: 14; I: its handler
-        // skipped in the crouch states, the boost kept).
+        // skipped in the crouch states, the boost kept) and the swim's (C: not called in the water; V
+        // sea, swim1: obj+0xAA 40, the hold 0).
         use movement::state::{CROUCH, CROUCH_WALK};
         let crouched = matches!(f.body.state, CROUCH | CROUCH_WALK);
         if self.settings.beach
             && f.team == beach::VILLAGERS
             && f.weapon == Some(beach::ITEM)
             && !crouched
+            && !f.body.swimming
         {
             f.body.speed_percent = beach::drive(&mut f.body.timer, &mut f.boost);
         }
@@ -3678,14 +3751,16 @@ impl Match {
         }
     }
 
-    fn fly_grenades(&mut self, world: &CollisionWorld, ev: &mut Vec<Event>) {
+    fn fly_grenades(&mut self, lob: bool, world: &CollisionWorld, ev: &mut Vec<Event>) {
         let t = self.tick;
         for (born, mut g) in std::mem::take(&mut self.grenades) {
             if t >= g.fuse {
                 self.explode(&g, world, ev);
                 continue;
             }
-            if born < t {
+            if born < t && lob {
+                g.step_lob(world);
+            } else if born < t {
                 g.step(world);
             }
             self.grenades.push((born, g));
@@ -4209,6 +4284,69 @@ mod tests {
         }
     }
 
+    /// In the water (C `func_1505F298`'s swim branch; V swim1 330-345): a drawn weapon is put away,
+    /// B and Z do nothing, and Beach's item 0x3E leaves the swim's 40 % (14 at a full stick) and a
+    /// bottle's boost alone.
+    #[test]
+    fn swimmers_neither_draw_nor_fire() {
+        use conker_sim::collision::Layer;
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x09);
+        run(&mut m, &arena, &w, 1, |_| BUTTON_B);
+        run(&mut m, &arena, &w, 40, |_| 0);
+        assert!(m.players[0].drawn);
+        // A sea: its surface at 0 over a seabed at −300.
+        let big = 20_000.0;
+        let quad = |y: f32, surface, layer| {
+            let [a, b, c, d] = [
+                [-big, y, -big],
+                [-big, y, big],
+                [big, y, big],
+                [big, y, -big],
+            ];
+            [([a, b, c], surface, layer), ([a, c, d], surface, layer)]
+        };
+        let sea = CollisionWorld::layered(
+            [
+                quad(-300.0, 5, Layer::Terrain),
+                quad(0.0, 0, Layer::Water(1)),
+            ]
+            .concat(),
+        );
+        let b = &mut m.players[0].body;
+        (b.pos, b.airborne, b.floor) = ([0.0, -100.0, 0.0], true, None);
+        run(&mut m, &arena, &sea, 2, |_| 0);
+        let f = m.players[0];
+        assert!(f.body.swimming && !f.drawn);
+        run(&mut m, &arena, &sea, 60, |t| match t % 4 {
+            0 => BUTTON_B,
+            2 => BUTTON_Z,
+            _ => 0,
+        });
+        let f = m.players[0];
+        assert_eq!((f.drawn, f.shots, f.action), (false, 0, Action::Free));
+        // A villager with item 0x3E swims at the swim's 40 %.
+        let mut m = m.with(Settings {
+            beach: true,
+            ..Settings::default()
+        });
+        (m.players[0].weapon, m.players[0].boost) = (Some(beach::ITEM), beach::BOOST);
+        let stick = Input {
+            stick_y: 80,
+            ..Input::default()
+        };
+        for _ in 0..30 {
+            m.step(&arena, &[stick, Input::default()], &sea);
+        }
+        let b = m.players[0].body;
+        assert!(
+            b.swimming && (b.xz_speed - 14.0).abs() < 0.01,
+            "{}",
+            b.xz_speed
+        );
+        assert_eq!(m.players[0].boost, beach::BOOST);
+    }
+
     /// The sniper: R aims a frame late, Z in aim fires 3 frames later (type 0x20 kills at 146.5),
     /// and aim or shot end 8 frames after R stops (V e_w24 1161, ctlw_k10 251).
     #[test]
@@ -4314,6 +4452,52 @@ mod tests {
         // The pull counts the shot; the own blast is no hit.
         assert_eq!((p.shots, p.hits), (1, 1));
         assert_eq!((p.item(132), p.item(133)), (0xA6, 0));
+    }
+
+    /// Item 0x3A on 0x1A and 0x3F (V c3a: C-down held 30 frames from read 100): pulled a frame
+    /// after C-down (0x1F9), held 22 frames on (0x1FA), thrown (0x1FC, 19 frames) when let go and
+    /// out of the hand at once, a step along; shown as 0xBA (0x3A to the camera, never in the hand)
+    /// to the throw's first frame; the blast 120 frames after the pull.
+    #[test]
+    fn item_3a_is_lobbed() {
+        let (mut arena, mut m, w) = duel();
+        arena.lob = true;
+        let mut rows = Vec::new();
+        let mut ev = Vec::new();
+        for _ in 0..140 {
+            let t = m.tick;
+            ev.extend(run(&mut m, &arena, &w, 1, |t| {
+                if (10..40).contains(&t) { C_DOWN } else { 0 }
+            }));
+            let p = &m.players[0];
+            rows.push((
+                t,
+                p.anim,
+                p.item(t + 1),
+                p.camera_weapon(),
+                p.in_hand(t + 1),
+            ));
+        }
+        let at = |t: u32| rows[t as usize];
+        assert_eq!(at(11).1, projectile::LOB_PULL);
+        assert_eq!(
+            (at(32).1, at(33).1),
+            (projectile::LOB_PULL, projectile::LOB_HOLD)
+        );
+        assert_eq!(
+            (at(40).1, at(41).1),
+            (projectile::LOB_HOLD, projectile::LOB_THROW)
+        );
+        assert_eq!(
+            (at(59).1, at(60).1 == projectile::LOB_THROW),
+            (projectile::LOB_THROW, false)
+        );
+        assert_eq!((at(10).2, at(11).2, at(41).2, at(42).2), (0, 0xBA, 0xBA, 0));
+        assert_eq!((at(20).3, at(41).3), (projectile::LOB, 0));
+        assert!(rows.iter().all(|r| !r.4));
+        let boom = ev.iter().find(|e| matches!(e.1, Event::Explosion { .. }));
+        assert_eq!(boom.map(|e| e.0), Some(11 + 120));
+        assert_eq!(m.players[0].grenades, 2);
     }
 
     /// Instant rays and aimed shots: the head at +64.6, the body lower; a level ray at +64.6 passes

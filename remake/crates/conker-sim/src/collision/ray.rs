@@ -9,7 +9,8 @@
 //!   point is within `len` (XZ distance) of the origin. The secondary layer is not searched.
 //! - Placements (layer 2, [`super::Layer::Placement`]): every triangle, after the terrain; a hit must be
 //!   closer than the terrain's. The game first culls placements by a bounding sphere; scene 0x2D's never
-//!   get culled by a ray that could hit them (I; V on the captured rays).
+//!   get culled by a ray that could hit them (I; V on the captured rays). The water's
+//!   ([`super::Layer::Water`]) too: a ray stops at the surface (C, `func_150ACBD8`).
 //! - Triangle (`0x150AD364`): the plane hit at `t ≥ 0`, inside the triangle's integer bounds widened by 1,
 //!   closer than the best so far, and inside the triangle by the signs of the three edge cross products on
 //!   the normal's largest axis.
@@ -79,12 +80,17 @@ impl CollisionWorld {
             }
             leaf = find(tree, px, pz, Some(id));
         }
-        for range in &self.objects {
-            for i in range.clone() {
-                let t = &self.tris[i as usize];
-                if line.crosses(t) {
-                    q.test(t, i);
-                }
+        // The water after the placements (the game keeps it among them, in placement order: the same
+        // nearest hit but for an exact tie).
+        for i in self
+            .objects
+            .iter()
+            .flat_map(|r| r.clone())
+            .chain(self.water.iter().copied())
+        {
+            let t = &self.tris[i as usize];
+            if line.crosses(t) {
+                q.test(t, i);
             }
         }
         q.hit

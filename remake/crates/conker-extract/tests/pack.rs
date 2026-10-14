@@ -401,6 +401,15 @@ fn pack_reads_back_as_the_rom_path() {
             assert_eq!(p.points.map(bits), s.points.map(bits));
             assert_eq!(p.surface, s.surface);
         }
+        // War: Beach's sea: placement 1 a water surface, with its current.
+        let water = (map.collision.iter())
+            .filter(|t| matches!(t.layer, PackLayer::Water(_)))
+            .count();
+        let current = map.current.iter().map(|p| p[3]).collect::<Vec<_>>();
+        match scene {
+            0x2B => assert_eq!((water, &current[..]), (10, &[64, 75, 40, 10][..])),
+            _ => assert_eq!((water, &current[..]), (0, &[][..])),
+        }
         let spawns = extract_scene::scene_spawns(&rom, scene).unwrap();
         assert_eq!(spawns.len(), records);
         for (p, s) in map.spawns.iter().zip(&spawns) {
@@ -1124,6 +1133,23 @@ fn pack_audio_reads_back() {
             );
         }
     }
+    // War: Beach's sea (V `beach-sea-scratch` swim1: the stroke's 0x8F/0x90/0x614/0x615, the wade's
+    // water steps 0x2AB-0x2AE and 0x24C-0x24F, a landing in it 0x252, the swim's 0x6C-0x6E).
+    let sea = |clip: u16| {
+        let events = audio.events.characters["117"].iter();
+        events.filter(move |e| e.clip == clip).map(|e| &e.action)
+    };
+    assert!(
+        matches!(sea(0x22).next(), Some(ClipAction::Play(p)) if p.sounds == [0x8F, 0x90, 0x614, 0x615])
+    );
+    let wade: Vec<_> = sea(0x8B).collect();
+    assert_eq!(wade, [&ClipAction::Footstep(4), &ClipAction::Footstep(1)]);
+    assert!(sea(0xCC).any(|a| matches!(a, ClipAction::Play(p) if p.sounds == [0x6C, 0x6D, 0x6E])));
+    let water = &audio.events.footsteps.surfaces[&conker_assets::audio::WATER_STEPS];
+    assert_eq!(
+        (water[1][0], water[3][0], water[4][0]),
+        (0x24C, 0x252, 0x2AB)
+    );
     // War: Raptor's (`raptor.md`): the raptor's, the baby's (the raptor's clips, so its events)
     // and the body's events, every one on a clip of its glTF.
     for name in ["83", "165", "22"] {

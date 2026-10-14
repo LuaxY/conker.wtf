@@ -1573,6 +1573,7 @@ fn play(
             Default::default()
         },
         respawn: vault.then_some(weapon::VAULT_RESPAWN),
+        lob: matches!(scene, 0x1A | 0x3F),
         ..Default::default()
     };
     let rng = Rng { state: seed };
@@ -2388,4 +2389,68 @@ fn race_bots_finish() {
             );
         }
     }
+}
+
+/// War: Heist's takes with 3 bots and 1 idle human, as the oracle's (V hb3/hb 30 takes, hb2 20,
+/// hb_0BADF00D 17, hb_00C0FFEE 18 in 9000 frames: the game's RNG poked at read 22 makes each a new
+/// match). hb3's 30 is the high end of the original's own spread, not the port's rate.
+#[test]
+fn heist_takes_as_the_oracles() {
+    let Some(rom) = rom() else { return };
+    let heist = conker_rules::Settings {
+        heist: true,
+        score: conker_rules::heist::SCORE,
+        ..Default::default()
+    };
+    let takes: Vec<u32> = (1..=4)
+        .map(|seed| {
+            let (mut takes, mut carrier) = (0, None);
+            play(&rom, 0x1A, 3, seed, 9000, Some(heist), |m, _| {
+                let c = m.heist.cash.carrier;
+                takes += u32::from(c.is_some() && carrier.is_none());
+                carrier = c;
+            });
+            takes
+        })
+        .collect();
+    let mean = takes.iter().sum::<u32>() as f32 / takes.len() as f32;
+    eprintln!("heist takes by seed {takes:?}, mean {mean} (oracle 30 20 17 18, mean 21.25)");
+    assert!(
+        (16.0..=30.0).contains(&mean) && takes.iter().all(|&t| t >= 10),
+        "{takes:?}"
+    );
+}
+
+/// The thrown bag against the vault's ring wall (V bt1200: P1 throws from (-1200, 16, -152) facing
+/// 0x8500; the bag flies into the wall at 404 and is held at x -1324.9; bt1100, from -1100: it lands
+/// short and slides into it, held at -1324.6), through the rules' sweep body.
+#[test]
+fn heist_bag_stops_at_the_vault_wall() {
+    use conker_sim::collision::Sweep;
+    let Some(rom) = rom() else { return };
+    let w = world(&rom, 0x1A);
+    let body = &conker_rules::heist::SWEPT;
+    let fly = w.sweep(
+        [-1320.3, 120.4, -135.5],
+        [-1329.2, 113.9, -134.4],
+        body,
+        &Sweep::default(),
+        -8.0,
+    );
+    let slide = w.sweep(
+        [-1323.4, 19.0, -122.8],
+        [-1325.9, 19.0, -122.5],
+        body,
+        &Sweep::default(),
+        0.0,
+    );
+    assert!((fly.pos[0] + 1324.9).abs() < 0.1, "{:?}", fly.pos);
+    assert!((slide.pos[0] + 1324.6).abs() < 0.1, "{:?}", slide.pos);
+    // Along the wall the move goes on (V: z -135.5 -> -135.2 flying, -122.8 -> -122.7 sliding).
+    assert!(
+        fly.pos[2] > -135.5 && slide.pos[2] > -122.8,
+        "{:?} {:?}",
+        fly.pos,
+        slide.pos
+    );
 }

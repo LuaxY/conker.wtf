@@ -1,5 +1,133 @@
 # Status after wave 6 (2026-10-10)
 
+## Beach: the sea (2026-10-14)
+**Batch E7b. War: Beach's sea is water now, not a floor. A player who falls in swims 41.67 under the surface, drifts
+shoreward on the current, strokes with the stick at 40 %, wades out at the shore, and can jump out with A. The replays of
+two oracle runs match to 0.00033 over 557 and 648 frames, the camera too where it follows. In the water a drawn weapon
+is put away and B and Z do nothing, as in the original. The client predicts the swim, plays its clips at the original's
+rates and its sounds (the stroke's splash, water footsteps, the swim's 0x6C-0x6E). Bots stay out of the sea, as the
+original's do. Left: the swim's ripples and bubbles, the sea's camera hints, a swimmer's own death clip.**
+Research: `../lab/research/mp-original/beach-environment.md` §8 and `beach-sea-scratch/` (`run.sh`, `dbg.sh`, `m2c.sh`
+on the private `ConkerRecomp.e7b`). The runs, kept in `../lab/oracle/map2b/sea/`:
+- sea: P1 dropped into the sea at read 100 and again at 200 (`sea.poke`), no input: the float, the current, the carry to
+  the shore, standing up.
+- swim1: P1 dropped in at 100 (`sw.poke`), `swim1.txt`: strokes south to the shore, the wade, back in, the jump out, a
+  landing on the sea floor that goes back into the water, B and Z, a second swim out and the walk up the beach.
+- `dbg_*` (lldb on swim1): the wade's end, the wall box, the floor query, the camera's water, the sounds.
+
+`PROTOCOL_ID` 33 → 34: `PlayerState` gains the swim's fields, and the pack has a water layer with the current. The bump
+also covers L1's client-side item 0x3A, which changed the prediction without one.
+
+| Part | What |
+|---|---|
+| extract-scene, conker-extract, conker-assets | **Placement 1 is water** (`deathmatch_water(0x2B)`): out of the floors and walls, a `{"water": 1}` run in `maps/2b/collision.json` (10 triangles at y −539) with the current's path (4 points: x, y, z, speed). `Layer::Water`, `Run::current`. Audio: the swim's clips (0x22, 0x8B, 0xCC) join `MATCH_CLIPS`, op 40 (the stroke's splash) is decoded, and the footstep table gains surface kind 8 (`WATER_STEPS`) |
+| conker-sim `collision.rs`, `ray.rs` | `CollisionWorld::water(x, z)` (the water triangle over the point by the floor's integer routine), `current`, `holds`. The line query stops at the water (C: no 0x40 split in `func_150ACBD8`) |
+| conker-sim `swim.rs` (new), `movement.rs` | **The swim** (obj+0xAD): in at a frame's end more than 60 under the surface while falling slower than 5; the float to water − 41.67; the current's drift (obj+0x16C/0x170), faded 0.15 a frame on land; strokes (40 %, the turn 4 steps of 256, states 34/204/206/209); out under 10 over the floor (speed 15, gravity 4, the wade 139 or a hard landing); A within 90 of the surface jumps out (y velocity 46, the slow brake). **What the replays needed besides:** the wade's clip end (`swim::wade`: idle at clock 23, the move angle onto the facing); obj+0x7F (`aloft`: a landing under speed 9 snaps the move angle to the facing; a soft landing clears the lock); a swimmer's wall box 90 across, not 60; the floor query at the height after the fall; the swimmer held on the sea floor |
+| conker-camera, conker-sim `follow.rs` | `PlayerView::swim` (the water's height) and `CameraWorld::water_below`. A swimmer's look-at is y + lift (×0.25 when deep, \|y − water\| ≥ 100); the water under the eye counts as the floor when it lies between the floor and the eye; a swimmer's base is water + 50; no 600 freeze in the water; a deep swimmer can't aim |
+| conker-rules `game.rs` | In the water: a drawn weapon is put away at once, B and Z are masked (the swim's weapon handler, C), any action but Free/Mask/Pose ends, and item 0x3E's drive is skipped (obj+0xAA stays the swim's 40) |
+| conker-anim | `id::WADE`, `SWIM`, `SWIM_DEEP`, `STROKE`, `STROKE_DEEP`, `SWIM_HOLD` and their rates (0.9, 1.2, e/18 + 0.2; blends 10, 9, 7, 4) |
+| conker-client `audio.rs`, `lib.rs` | A footstep with the feet under the water plays surface kind 8's sounds. `ANIM_IDS` gains the six swim states, so the local swimmer shows its predicted clip |
+| conker-server `main.rs`, `bots.sh` | Logs `slot N swims` / `leaves the water`; `MODE=beach` reports the swims |
+| `../lab/screens/sea/shots.sh` | swimmer.png (a stroke at the surface, own view), exit.png (wading up the shore), sea.png (free camera) |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| sim (ROM) `tests/sea.rs` | `sea` rows 101-659: 557 frames, max error 0.00018, the eye's 0.00073 over 400-659. `swim1` rows 101-749: 648 frames, max 0.00033, the eye's 0.00286 over 300-449 and 600-749 (450-599: hint 0x27). The tolerance is 0.01 |
+| rules `swimmers_neither_draw_nor_fire` | Twin guns drawn, then dropped into a synthetic sea: holstered at once, 60 frames of B and Z fire nothing. A villager with item 0x3E strokes at speed 14 and keeps its boost |
+| extract (ROM) `pack_audio_reads_back` | The stroke's splash (0x8F, 0x90, 0x614, 0x615), the wade's steps (kinds 4, 1), the swim's 0x6C-0x6E, surface kind 8's 0x24C, 0x252, 0x2AB |
+| Pack | `bun run pack --force`, then `lab/tools/verify-pack.sh`: pack equal (2077 files) |
+| Smoke (`bots.sh`, `MODE=beach MAP=2b BOTS=7`, port 5970, 180 s) | No bot swims. Every bot moves and is seen moving, the villagers die and respawn, the Tediz fight; escapes, a detonation, a strike, 15 villager points. No fault, unknown native or panic |
+| Screens (`../lab/screens/sea/shots.sh`, port 5980, debug binaries) | The current carries both villagers to the shore (in at read 30; out at 85 and 173), as in the oracle's `sea`. swimmer.png, exit.png, sea.png. The swimmers' clients predicted the swims and exits without a rollback (each client's one rollback at tick 930 is the match start's, the same on the Tedi's client, which never swims; the later ones came on land: a wall push, a fall into an escape tunnel) |
+| `bun run test`, `bun run check`, wasm clippy | Pass: 546 tests, 1 ignored (with `CONKER_ROM`). `swim.rs` allows `neg_cmp_op_on_partial_ord` as `walls.rs` and `ray.rs` do (the MIPS compares' NaN) |
+
+**Findings.**
+- **The wade ends on its clip** (C, V swim1 236, 418, 514, 528). State 139's clock gains (0.4·speed + 0.6·drive)/18 +
+  0.2 a frame; at 23 the player idles, and Beach's item handler, run after the drive, leaves the next frame at 100 %.
+  The rules call `beach::drive` before the step, so the port's frame after a wade's end drives at 75 % (+1 speed for a
+  frame). The replay feeds obj+0xAA from the run.
+- **The sounds** (V `dbg_snd`, C the op handlers): the stroke's op 40 at tick 15 of 0x22; op 9 footsteps use surface
+  kind 8 when the feet are under the water (the wade's 0x2AB-0x2AE and 0x24C-0x24F, a landing's 0x252); the swim's op 82
+  at 25 and 26 of 0xCC. No splash on entry in multiplayer (`func_15083568`, C).
+- **The camera hints** of kind 5 at records 0x26/0x27 (the sea's sides) take the original's camera out of follow (swim1
+  450-599). Not ported: the port keeps following there.
+
+**Left.**
+- The swim's effects, all untraced on screen: op 12 (`func_1507E7E4`, kinds 6 and 7 on clip 0xCC; the landing's 0x21),
+  op 102's bubbles (0x29/0x2C on 0xCB, 0xCE, 0xD1), and the likeliest ripple and foot-splash spawners: op 90 on the
+  stroke (0x23/0x24 → `func_151AABC4(obj, 0|1)`) and on the wade (0x29/0x2A → `func_151AB920(obj, 0|1)`), op 97 on the
+  wade's steps (`func_15141A7C`, by the floor's kind). The client has no clip particle effects yet.
+- Camera hints of kind 5 (records 0x26/0x27).
+- A swimmer's death (C, untraced in time): `func_1505E874` picks cause 4 when obj+0xAD is set, and `func_1507CD64(obj,
+  4)` plays clip 0x24, not the land deaths' 0x58/0x13. The port hits a swimmer as on land (C: the hit runs) and plays
+  the land death.
+- SWIM_HOLD 203's rate (I: 1); SWIM_DEEP's first frames at 2 (V, not modelled). The eye's water is queried every tick,
+  not only with the original's full query.
+
+## Heist and rules leftovers (2026-10-14)
+**Batch L1. Heist's bots were never short of takes. Over four oracle matches the original gets 17-30 takes in 9000
+frames, and hb3's 30 is the top of that range. The port gets 13-24 on the ROM path and 17-21 on the server. A thrown bag
+now stops at walls and slides along them, as in the original. On 0x1A and 0x3F, C-down pulls item 0x3A: a lobbed
+grenade with its own clips, flight and bounces. The dead pose's 0x18A is a random twitch, 1 in 8 on the first death.
+Race takes at most 2 humans. Left: item 0x3A's client side (handoff below), porting the twitch, and the bots' retreats
+near the carrier.** Research: `../lab/research/mp-original/heist-leftovers-scratch/`. The tools are `run.sh` and
+`runobj.sh`, run on the private `ConkerRecomp.l1`. The runs, each with its `.out` summary:
+- hb, hb2, hb_0BADF00D, hb_00C0FFEE: Heist, 1 idle human and 3 bots, 9000 frames, `heist-scratch/idle.txt`. hb has no
+  poke and reproduces hb3. The others poke the RNG at read 22 (`22:800885B4=`12345678, 0BADF00D, 00C0FFEE).
+- bt1100, bt1200: a bag thrown at the vault's ring wall.
+- c3a, c3f, g26: C-down on 0x1A, 0x3F and 0x2D, with `scripts/c3a.txt`.
+- `twitch.out`: s126+0x1A9 in five combat traces and in hb.
+
+No wire change: `PROTOCOL_ID` stays 33.
+
+| Part | What |
+|---|---|
+| conker-rules `heist.rs` | **The thrown bag's walls.** Its flight and slide now go through the wall routine (`CollisionWorld::sweep`) with a 24-unit box (`heist::SWEPT`). V bt1200: the bag hits the vault's ring wall in the air. It is held at x −1324.9 and goes on along the wall in z, then lands and slides along it. V bt1100: the bag lands short, slides into the wall and stops at −1324.6. The 24 is fitted on the ROM's walls: 24 gives −1324.92 and −1324.56, while 25 and 29 stop 1 and 5 units short |
+| conker-rules `projectile.rs`, `game.rs` | **Item 0x3A** (`projectile::LOB`), on with `Arena::lob` on 0x1A and 0x3F. The pull is 0x1F9 (22 frames, then 0x1FA held). Letting C-down go plays the throw, 0x1FC (19 frames); the pull and the throw start on the same frames as 0x26's (V g26). The grenade leaves the hand on the throw's first frame, already a step along (`Grenade::lob`): speed s = ((240 − cook)·0.875 + 40)/2 at 30° (xz s·cos 30°, y s/2). The hand is at (9.0, 27.4, 62.4) (forward, side, up), a Tedi's at (4.6, 27.4, 41.9). The timer runs every frame from the pull, so the blast comes 120 frames after the pull, in the hand or not (V c3a 102→222, 502→622, 762→882; c3f 102→222). **The flight** (`Grenade::step_lob`) has no drag. Each landing halves the speed and bounces at 0.5·\|y_vel\| + 2. A bounce under 8 settles it (I: V 9.67 bounced, 6.16 settled). Once settled, the speed halves every frame. A wall takes 70% of the speed off and reflects the move (V c3a 590: 77.19 → 23.16; I: the sweep's push is used as the normal). `Fighter::lobs` tells item 0x3A by its clips. `item` shows 0xBA up to the throw's first frame, `camera_weapon` 0x3A, and `in_hand` is never true (s126+0x11A stays 1). The blast is 0x26's (V c3a: 2 hp lost at 460, a kill at 230) |
+| conker-bots `lib.rs` | The wind-up noise ends at item 0x3A's throw. The bots throw it through their C-down (command 0x61 #4) |
+| conker-server `main.rs` | Race refuses a third human (`RACE_HUMANS`: "Race allows at most 2 humans", `menus-and-flow.md`, C). `arena.lob` is set on 0x1A and 0x3F |
+| conker-client `lib.rs` (one line, outside this lane) | `MatchArena` sets `lob` on 0x1A and 0x3F, so the client predicts item 0x3A the way the server flies it. A protocol-33 client built before this flies item 0x3A with 0x26's physics |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| Heist takes (1 idle human, 3 bots, 9000 frames) | Oracle: hb 30 (hb3's 30 carrier hits), hb2 20 (18), hb_0BADF00D 17 (13), hb_00C0FFEE 18 (15); mean 21.25. Port, ROM path, seeds 1-12 before item 0x3A: 24 23 18 23 22 24 15 19 13 16 18 21 (mean 19.7). Seeds 1-4 with it: 24 17 18 23. Server seeds 3-5, before L1's fixes: 19 18 21 |
+| Unit and ROM tests | bots (ROM) `heist_takes_as_the_oracles`: 4 seeds, mean 16-30, each seed at least 10. bots (ROM) `heist_bag_stops_at_the_vault_wall` (bt1200, bt1100). rules `a_throw_stops_at_a_wall`, `a_lob_flies_bounces_and_rests` (c3a's first throw: the release step, landings 15, 26 and 32 frames on, at rest 436.56 on), `item_3a_is_lobbed` (clips, item bytes, blast 120 frames after the pull). server `race_flags_grid_and_classes` (a third human is refused) |
+| Smoke (`bots.sh`, ports 5980-5988, 120-150 s) | Heist `BOTS=3`, seeds 1-3: takes 8, 9 and 11, one delivery. DM 1a, DM 2d and Raptor `BOTS=3`, Colors `BOTS=7`, Race. Every client connects and sees every bot move, and every bot moves. No fault, unknown native or panic. The FAIL lines are the known ones (a bot that never died). Race is decided |
+| `bun run test`, `bun run check`, wasm clippy | All three stop in the sea lane's in-progress files. `conker-sim/tests/sea.rs` doesn't compile (E0284), and clippy fails on `swim.rs`'s `neg_cmp_op_on_partial_ord`. Without them: the same packages' tests pass, 541 with 1 ignored (all but `sea.rs`; rom.rs's 26 ROM tests take 70 s in debug). Clippy on all 10 packages and wasm clippy pass with that one lint allowed. `cargo fmt --check`'s only diff is `swim.rs` |
+
+**Findings.**
+- **Heist's takes** (V). The server and ROM paths don't differ beyond noise. The oracle's matches spread from 17 to 30,
+  so hb3's 30 is the original's high end. It is not the port's rate. Comparing frame by frame on the first missed take
+  can't be done: the bots' first choices draw the RNG from read 24 on, and the matches part there.
+- **The bots near the carrier** (V, not fixed). Within 500 of the enemy carrier, the original's bots attack (state 8) in
+  75-84% of frames, in all four samples. Before L1's fixes, the port's attacked in 61% and retreated in 36% (state 3,
+  COOL > 0): more of its bots sit at hp ≤ 2 with COOL 600. The original's state 6 (fetch a pickup) lasts 1-2 frames; the port's lasts longer.
+- **The dead pose's 0x18A** (V, C; not ported). 63 frames into clip 0x59, `func_15072A7C` runs (C). It adds 1 to
+  s126+0x1A9 and plays 0x18A (rate 1, blend 4) if `(random_u32() & 7) < s126+0x1A9`. The count is 0 again at the
+  respawn, so a first death twitches 1 time in 8. I: the call is a clip event at 0x59's end (64 ticks long).
+  V `twitch.out`: the count goes 0 → 1 63 frames into 0x59 in e_w38, e_w39, e_w21, sg_e2, e40 and e40c. 0x18A plays in
+  e_w38, e_w21 and sg_e2 only. sgpb's kill lies in 0x59 only 51 frames, so no call. In hb, 0x18A plays in 1 of 6 bot
+  deaths, and the count is 0 at every spawn.
+  - Why it isn't ported: the replays feed the game's RNG only on frames with a logged pick, and none lands on the
+    twitch's frame (e_w38: reads 22 and 1020). A port would turn sg_e2's and e_w21's matches into misses.
+  - The port spec: one draw 63 frames into an 81-frame 0x59; 0x18A for the last 18 frames when `& 7 == 0`. Then drop
+    the fixed 63 + 18 rows of `damage::sequence` for 0x33 and `AREA_STAGGER`.
+
+**Left.**
+- **Item 0x3A on the client** (handoff, C/V as above). These need work:
+  - The models: objects 137 (0x89, scene 0x1A) and 186 (0xBA, scene 0x3F), created by actions 0x86/0x9F. The pack
+    lacks them, and thrown grenades are still placeholder spheres. Draw the model in the hand from the pull's first
+    frame to the throw's first (`Fighter::lobs`, anim 0x1F9/0x1FA), at the hand point above. `held.rs`'s grenade
+    entries are keyed on 0x176/0x175 and 0x16B/0x16C, so nothing shows for item 0x3A today.
+  - The sounds: `audio.rs`'s grenade cues are keyed on item 0x26 (`GRENADE`). Item 0x3A's cues were not traced.
+  - The HUD's grenade icon on 0x1A and 0x3F: not checked.
+  - The clips 0x1F9, 0x1FA and 0x1FC are already in every character of the pack (7, 9 and 6 keys), and the client plays
+    them from `anim`. `characters::clip` keeps them (V: classes 1 and 3 both use them).
+- Item 0x3A's blast in the hand goes off at its hold hand, and the item byte after it shows 0xA6 (I: not traced).
+- The settle threshold 8 and the wall's reflection are inferred (I). At c3a 590 the speed cut matches (77.19 →
+  23.16), but the direction doesn't. The original turned 22 units before the port's wall and rose 16, probably off an
+  object, and went on (−8.83, 7.49) a frame; the port goes on (−11.56, −0.67).
+- The bots' retreats near the carrier and the long state 6 (above).
+
 ## Held weapons: the leftovers (2026-10-14)
 **Batch E4, the held-weapons lane. Every gap was checked on an oracle run, and all but one are fixed. With a weapon
 drawn, C-down strafes back and pulls no grenade. A hip bolt pushes its shooter while it sits at the muzzle, and bolts
@@ -37,7 +165,7 @@ dth, cbp2, cbgate, cd09, cd15, sgpb, sge2a, sqgren, club1, k530, with their `.ou
   pose. The string's clips are model 110's own animations, which the pack doesn't have.
 - **Item 0x3A on 0x1A and 0x3F.** There (and for model 0x3B) C-down sets s126+0x19B = 5, and the manager gives item
   0x3A instead of 0x26: hold 0x1F9, throw 0x1FC, actions 0x86/0x9F, and the thrown object is 0xBA on 0x3F, 0x89
-  elsewhere (C). Not done.
+  elsewhere (C). Not done (L1: ported in the rules, above).
 - **Beach.** The C-down grenade check runs only on scenes 0x2D, 0x30, 0x34, 0x1A and 0x3F (C), so 0x2B has no grenade
   at all. The remake keeps its villager rule (item 0x3E, V beach-gunner gren).
 - **The bolt's push isn't predicted.** Bolts aren't in `Fighting`, so the server's correction moves the shooter. The
@@ -46,7 +174,7 @@ dth, cbp2, cbgate, cd09, cd15, sgpb, sge2a, sqgren, club1, k530, with their `.ou
 - **The bolt's wall impact** still plays the knife's sound (I: not traced).
 - **The tommy gun's kill** ends the dead pose with 0x18A, 63 frames in. V: e_w38 1003-1021; also sg_e2 1194-1212. The
   pistol's (e_w39) lies all 81 frames. It isn't a hit on the body: `func_1505B9C4` ran only at 820, 850 and 869. The
-  trigger was not found; e_w38 keeps 3 known events.
+  trigger was not found; e_w38 keeps 3 known events (L1: found, above).
 - **The pistol head test** stays deferred: it needs the model's head part 0xA.
 - `conker-server/src/token.rs`'s doc still says `"protocol":32` (E11's file).
 

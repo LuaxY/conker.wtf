@@ -115,8 +115,13 @@ pub struct ClipSound {
     pub action: ClipAction,
 }
 
-/// Footsteps (`func_10011EB8`): the floor triangle's surface kind (bits 0-4 of its word) and the
-/// event's step kind pick the candidates; volume `volume` × (0.5 + 0.5 × min(speed, 30) / 30).
+/// Footsteps (`func_10011EB8`): the floor triangle's surface kind (bits 0-4 of its word), or
+/// [`WATER_STEPS`] with the feet under the water, and the event's step kind pick the candidates;
+/// volume `volume` × (0.5 + 0.5 × min(speed, 30) / 30).
+/// The surface kind of a step with the feet under the water (`func_1506BF5C`: obj+0x18 ≤ obj+0x118, C;
+/// V swim1: the wade's 0x24C-0x24F and 0x2AB-0x2AE, a landing's 0x252).
+pub const WATER_STEPS: u8 = 8;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Footsteps {
     pub play: Play,

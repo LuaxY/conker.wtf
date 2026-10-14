@@ -917,7 +917,8 @@ fn noises(m: &Match) -> Vec<([f32; 3], f32)> {
     let throwers = m.players.iter().filter_map(|f| {
         let pull = match f.action {
             Action::GrenadePull { pull } | Action::GrenadeHold { pull } => pull,
-            Action::GrenadeThrow { pull, .. } if t < f.since + RELEASE => pull,
+            // Item 0x3A leaves the hand on the throw's first frame (I: its noise as 0x26's).
+            Action::GrenadeThrow { pull, .. } if t < f.since + RELEASE && !f.lobs() => pull,
             _ => return None,
         };
         (t >= pull + 18).then_some((f.body.pos, 900.0))

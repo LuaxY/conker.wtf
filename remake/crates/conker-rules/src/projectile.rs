@@ -434,6 +434,33 @@ pub const GRENADE_GRAVITY: f32 = 4.0;
 /// The hand at the release, in the thrower's frame (forward, side, up).
 pub const HAND: [f32; 3] = [-0.982, -31.624, 55.794];
 
+/// Item 0x3A, the grenade C-down pulls on scenes 0x1A and 0x3F instead of 0x26 (`func_1504CB98`
+/// sets s126+0x19B = 5 there, C; V c3a, c3f): its pull (22 frames), hold and throw (19) clips; in
+/// the hand from the pull (models 137 on 0x1A, 186 on 0x3F), it leaves it on the throw's first
+/// frame, lobbed ([`Grenade::lob`]), its timer running on from the pull: it goes off 120 frames
+/// after the pull wherever it is (V c3a 102 → 222, 502 → 622, 762 → 882).
+pub const LOB: u8 = 0x3A;
+pub const LOB_PULL: u16 = 0x1F9;
+pub const LOB_HOLD: u16 = 0x1FA;
+pub const LOB_THROW: u16 = 0x1FC;
+pub const LOB_PULL_FRAMES: u32 = 22;
+pub const LOB_THROW_FRAMES: u32 = 19;
+/// Its hand at the release (forward, side, up): a squirrel's (class 1, V c3a's three throws) and
+/// a Tedi's (class 3, V c3f); I: the other classes as the squirrel.
+pub const LOB_HAND: [f32; 3] = [9.0, 27.4, 62.4];
+pub const LOB_HAND_TEDI: [f32; 3] = [4.6, 27.4, 41.9];
+
+/// Item 0x3A's hand for a thrower of `class`.
+pub fn lob_hand(class: u8) -> [f32; 3] {
+    match crate::characters::model(class) {
+        Some(117 | 177) => LOB_HAND_TEDI,
+        _ => LOB_HAND,
+    }
+}
+/// A landing that would bounce less than this settles it (I: V bounces of 9.67 and up, rests
+/// from 6.16 down).
+const LOB_SETTLE: f32 = 8.0;
+
 /// A thrown grenade (class 0x7E, `func_15103E40`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
@@ -474,6 +501,85 @@ impl Grenade {
             floor: None,
             owner,
             fuse,
+        }
+    }
+
+    /// Item 0x3A leaving the `hand` of a player at `pos` facing `facing` in frame `t` with the
+    /// timer `cook` of the frame before (V c3a, c3f): at 30° with speed `((240 − cook)·0.875 +
+    /// 40)/2` (45.375 after 30 frames' hold, 89.125 after 80), already a frame along; the timer
+    /// runs out `cook / 2 − 1` frames on.
+    pub fn lob(
+        owner: usize,
+        pos: [f32; 3],
+        facing: u16,
+        hand: [f32; 3],
+        cook: u16,
+        t: u32,
+        world: &CollisionWorld,
+    ) -> Self {
+        let s = (f32::from(COOK - cook.min(COOK)) * 0.875 + 40.0) / 2.0;
+        let mut g = Self {
+            pos: local_to_world(pos, facing, hand),
+            y_vel: 0.5 * s,
+            speed: s * 3f32.sqrt() / 2.0,
+            angle: facing,
+            state: 0,
+            floor: None,
+            owner,
+            fuse: (t + u32::from(cook / 2)).saturating_sub(1),
+        };
+        g.step_lob(world);
+        g
+    }
+
+    /// One frame of item 0x3A's grenade (V c3a, c3f): as [`Self::step`]'s fall, landings and
+    /// floor planes, but no drag: the speed halves on each landing, and a landing that would
+    /// bounce under [`LOB_SETTLE`] settles it; settled, the speed halves each frame (it moves
+    /// while 1 or more). A wall takes 0.7 of the speed and turns it back about the wall (V c3a
+    /// 590: 77.19 → 23.16; I: the sweep's push as the wall's normal).
+    pub fn step_lob(&mut self, world: &CollisionWorld) {
+        let old = self.pos;
+        let (c, s) = cos_sin(self.angle);
+        let rise =
+            (self.floor.take()).map_or(0.0, |t| rise_along(world.tris[t as usize].normal, c, s));
+        let d = match self.speed >= 1.0 {
+            true => 0.5 * self.speed / (1.0 + rise * rise).sqrt(),
+            false => 0.0,
+        };
+        let y = old[1] + d * rise + 0.5 * self.y_vel - 0.275 * GRENADE_GRAVITY;
+        let new = [old[0] + d * c, y, old[2] - d * s];
+        let body = Body {
+            half_width: 8,
+            radius: 8,
+            height: 16.0,
+            center_y: 8.0,
+        };
+        let opts = Sweep {
+            dd3: true,
+            ..Sweep::default()
+        };
+        self.pos = world.sweep(old, new, &body, &opts, self.y_vel).pos;
+        let (px, pz) = (self.pos[0] - new[0], self.pos[2] - new[2]);
+        let push = (px * px + pz * pz).sqrt();
+        let into = (c * px - s * pz) / push.max(f32::EPSILON);
+        if push > 0.01 && into < 0.0 {
+            let (nx, nz) = (px / push, pz / push);
+            self.angle = atan2_u16(-(-s - 2.0 * into * nz), c - 2.0 * into * nx);
+            self.speed *= 0.3;
+        }
+        match world.floor(self.pos[0], self.pos[2], self.pos[1], old[1], None) {
+            Some(f) if self.pos[1] < f.y => {
+                self.pos[1] = f.y;
+                self.floor = Some(f.tri);
+                self.speed *= 0.5;
+                let bounce = 0.5 * self.y_vel.abs() + 2.0;
+                if self.state == 2 || bounce < LOB_SETTLE {
+                    (self.state, self.y_vel) = (2, -4.0);
+                } else {
+                    (self.state, self.y_vel) = (1, bounce);
+                }
+            }
+            _ => self.y_vel -= GRENADE_GRAVITY,
         }
     }
 
@@ -735,5 +841,38 @@ mod tests {
         };
         g.step(&w);
         assert_eq!((g.y_vel, g.state), (8.25, 2));
+    }
+
+    /// Item 0x3A's lob against c3a's first throw (30 frames' hold: timer 182, the player 2 above
+    /// the floor facing along x): a frame along at the release (19.648, 10.243 up), speed 39.296
+    /// and y velocity 18.69 after it; landings 15, 26 and 32 frames on (the last settles it), the
+    /// speed halving at each, at rest 436.56 ahead; the blast 90 frames after the release.
+    #[test]
+    fn a_lob_flies_bounces_and_rests() {
+        let big = 10_000.0;
+        let w = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 5),
+        ]);
+        let hand = local_to_world([0.0, 2.0, 0.0], 0, LOB_HAND);
+        let mut g = Grenade::lob(1, [0.0, 2.0, 0.0], 0, LOB_HAND, 182, 131, &w);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(near(g.pos[0] - hand[0], 19.648) && near(g.pos[1] - hand[1], 10.244));
+        assert!(near(g.speed, 39.296) && near(g.y_vel, 18.688), "{g:?}");
+        assert_eq!((g.fuse, g.owner), (221, 1));
+        let start = g.pos[0];
+        let mut landings = Vec::new();
+        for k in 1..60 {
+            let v = g.speed;
+            g.step_lob(&w);
+            if g.speed < v && g.state != 2 || g.state == 2 && landings.len() < 3 {
+                landings.push((k, g.state));
+            }
+        }
+        assert_eq!(landings, [(15, 1), (26, 1), (32, 2)]);
+        assert!(
+            (g.pos[0] - start - 436.56).abs() < 0.1 && g.pos[1] == 0.0,
+            "{g:?}"
+        );
     }
 }

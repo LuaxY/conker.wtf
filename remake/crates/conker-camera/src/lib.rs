@@ -152,6 +152,9 @@ pub struct PlayerView {
     /// On a mounted gun (weapon 0x1B, with [`attached`](Self::attached)): its origin (gun+0x2C). The
     /// scope's eye is then the gun's ([`gun_eye`]), turned with the player's facing (the gun's yaw).
     pub gun: Option<[f32; 3]>,
+    /// Swimming (`obj+0xAD` = 1), with the water's height over the player (`obj+0x118`): the look-at
+    /// and the eye go by the water, not the sea floor ([`CameraWorld::water_below`]).
+    pub swim: Option<f32>,
 }
 
 impl PlayerView {
@@ -176,17 +179,26 @@ impl PlayerView {
             busy: false,
             attached: false,
             gun: None,
+            swim: None,
         }
+    }
+
+    /// `func_15125490` (C): swimming 100 or more off the surface (a dive; the multiplayer float stays
+    /// within 50 of it).
+    fn deep(&self) -> bool {
+        self.swim
+            .is_some_and(|w| (self.pos[1] - w).abs() as i32 >= 100)
     }
 
     /// `func_1512317C`'s test (C): R may not start the aim camera (and an aim on is released) while
     /// holding `weapon`. Not ported, because they are clear in every multiplayer trace (V camera4):
     /// the camera's own flags (`cam+0x2C & 0x80`, `cam+0x84 & 0x1000000`, `cam+0x5F0`), the
-    /// airborne exceptions `obj+0xAD` and `struct126+0x9C`, and `func_15125490` (`obj+0xAD` = 1 with
-    /// the player 100 to 300 off `obj+0x118`).
+    /// airborne exception `struct126+0x9C`. A swimmer is not airborne, but a [`deep`](Self::deep) one
+    /// is refused (`obj+0xAD`, `func_15125490`).
     pub fn refuses_aim(&self, weapon: u8) -> bool {
-        let airborne = self.pos[1] != self.floor_y;
+        let airborne = self.pos[1] != self.floor_y && self.swim.is_none();
         self.aim_blocked
+            || self.deep()
             || self.dead
             || self.busy
             || self.attached
@@ -285,6 +297,12 @@ pub trait CameraWorld {
     /// [`volume::CameraLevel`], which also gives the zones where the sweep skips the placements). Inside,
     /// the wall ray and the sweep are off.
     fn in_volume(&mut self, eye: [f32; 3]) -> bool;
+    /// The water surface over a point (the floor query's `obj+0x118` output, here `cam+0x360` under
+    /// the eye), None where there is none. Defaults to none.
+    fn water_below(&mut self, at: [f32; 3]) -> Option<f32> {
+        let _ = at;
+        None
+    }
 }
 
 /// [`CameraState::step`]'s world: a floor query only, the camera always inside a volume (no wall ray, no
@@ -1036,6 +1054,10 @@ impl CameraState {
         if self.aim.on && (aims_with_body(w) || w == 0xC || w == 0x12) {
             lift += 30.0;
         }
+        if p.swim.is_some() {
+            // Off the swimmer's own height, a quarter of the lift when deep (C; V sea 150-325: 67.5).
+            return p.pos[1] + if p.deep() { lift * 0.25 } else { lift };
+        }
         let air = p.pos[1] - p.floor_y;
         let k = (air * f32::from_bits(0x3B5A_740E)).clamp(0.0, 1.0); // 1/300
         p.floor_y + air * k + lift
@@ -1079,12 +1101,23 @@ impl CameraState {
         // The game's query takes last tick's floor as the height, not the eye (`func_1510E8BC`).
         let at = [self.eye[0], self.floor, self.eye[2]];
         self.floor = world.floor_below(at, start_y).unwrap_or(p.floor_y);
+        // The query's water under the eye (`cam+0x360`): a surface between that floor and the eye is
+        // the floor (C; V sea 375-650: the eye 100 over the sea, −439, the player on the beach).
+        let water = world.water_below(at);
+        if let Some(w) = water.filter(|&w| self.floor < w && w < self.eye[1]) {
+            self.floor = w;
+        }
         let base = if self.floor < p.pos[1] {
             p.pos[1]
         } else {
             self.floor
         };
         self.base = self.floor + (base - self.floor);
+        if let Some(w) = water.filter(|_| p.swim.is_some() && !p.deep()) {
+            // A swimmer's eye keeps 100 over 50 above the surface (C; V sea 150-325: −389 over −539).
+            // I: `cam+0x84` bit 0x4000 taken as set (a deep swimmer keeps the plain base).
+            self.base = w + 50.0;
+        }
         if self.eye[1] < self.floor + 40.0 {
             self.eye[1] = self.floor + 40.0;
         }
@@ -1157,9 +1190,9 @@ impl CameraState {
     }
 
     /// `func_1512E140`: the eye's height above the base springs to its target (100; 0 while aiming,
-    /// stiffer); frozen while the player is more than 600 above its floor.
+    /// stiffer); frozen while the player is more than 600 above its floor, unless swimming.
     fn spring_height(&mut self, p: &PlayerView) {
-        if p.pos[1] - p.floor_y > 600.0 {
+        if p.pos[1] - p.floor_y > 600.0 && p.swim.is_none() {
             return;
         }
         let mut h = self.eye[1] - self.base;

@@ -537,7 +537,7 @@ pub struct Anim(pub AnimPlayer, pub u8);
 
 /// Every animation id the movement produces (its state byte is the id, V: conker-anim). The local
 /// player shows its predicted state for these, the rules' animation for anything else.
-pub const ANIM_IDS: [u8; 14] = [
+pub const ANIM_IDS: [u8; 20] = [
     state::CREEP,
     state::WALK,
     state::RUN,
@@ -552,6 +552,12 @@ pub const ANIM_IDS: [u8; 14] = [
     state::FALL,
     state::PUSH_WALL,
     state::HIGH_JUMP,
+    state::WADE,
+    state::SWIM,
+    state::SWIM_DEEP,
+    state::STROKE,
+    state::STROKE_DEEP,
+    state::SWIM_HOLD,
 ];
 
 /// The first clip that plays logical animation `logical`.
@@ -835,6 +841,7 @@ impl MatchArena {
         let arena = Arena {
             spawns,
             pickups: Vec::new(),
+            lob: matches!(scene, 0x1A | 0x3F),
             ..Default::default()
         };
         let lifts = conker_rules::lift::parse(triggers, scene as u8);

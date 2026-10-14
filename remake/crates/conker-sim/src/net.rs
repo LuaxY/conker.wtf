@@ -87,7 +87,10 @@ use serde::{Deserialize, Serialize};
 /// BALANCE ([`Teams::Balance`]) mid-match; [`MatchView`]'s `teams` and `balance` (the server's
 /// `/info` also names its pack, `pack_hash`, and its humans and bots).
 /// 33: the scared run (movement state 43, predicted): `PlayerState::scared`.
-pub const PROTOCOL_ID: u64 = 33;
+/// 34: War: Beach's sea (swimming, predicted): `PlayerState`'s `swimming`, `water`, `drift`, `rise`,
+/// `jump_out`, `water_jump`, `aloft` and `wade`; the pack's water layer and current. Item 0x3A's lob
+/// (0x1A, 0x3F) flies as the server's in the client's prediction.
+pub const PROTOCOL_ID: u64 = 34;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -514,6 +517,7 @@ pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
             conker_assets::Layer::Terrain => Layer::Terrain,
             conker_assets::Layer::Secondary => Layer::Secondary,
             conker_assets::Layer::Placement(i) => Layer::Placement(i as u16),
+            conker_assets::Layer::Water(i) => Layer::Water(i as u16),
         };
         (t.points, t.surface.unwrap_or(0), layer)
     }));
@@ -530,6 +534,7 @@ pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
         })
         .collect();
     world.sink = Some(pack.sink);
+    world.current.clone_from(&pack.current);
     world
 }
 

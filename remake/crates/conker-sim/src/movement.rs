@@ -52,6 +52,15 @@ pub mod state {
     pub const SCARED_RUN: u8 = 43;
     /// A with Z held ([`super::HIGH_JUMP_Y_VEL`]).
     pub const HIGH_JUMP: u8 = 235;
+    /// Walking in water shallower than the player (obj+0x118 above it, `func_1504C0E8`: speed 75 %).
+    pub const WADE: u8 = 139;
+    /// In the water ([`super::PlayerState::swimming`], [`crate::swim`]): floating at the surface,
+    /// deeper (on the way in), the stroke at the surface and deeper, holding an object.
+    pub const SWIM: u8 = 204;
+    pub const SWIM_DEEP: u8 = 209;
+    pub const STROKE: u8 = 34;
+    pub const STROKE_DEEP: u8 = 206;
+    pub const SWIM_HOLD: u8 = 203;
 }
 
 /// Top running speed and the target speed per game stick unit (V).
@@ -250,6 +259,25 @@ pub struct PlayerState {
     /// the gun's pitch in degrees (−20..80, up positive); 0 on foot ([`crate::tank`]).
     pub turret: f32,
     pub pitch: f32,
+    /// obj+0xAD: in the water ([`crate::swim`]); the frame is the swim's, `airborne` stays false.
+    pub swimming: bool,
+    /// obj+0x118: the water's height over the player at the last full floor query
+    /// ([`CollisionWorld::water`]), [`crate::collision::NO_FLOOR`] for none.
+    pub water: f32,
+    /// obj+0x16C, obj+0x170: the current's drift, added to every step (x, z).
+    pub drift: [f32; 2],
+    /// s126+0x1C: the float's rise.
+    pub rise: f32,
+    /// obj+0xAE: frames left of a jump out of the water's slow brake.
+    pub jump_out: u8,
+    /// obj+0x81 = 2: the jump was out of the water (gravity 3.3 while A is held; the air brakes
+    /// with the stick released).
+    pub water_jump: bool,
+    /// obj+0x7F is 0: no frame on the floor since a frame ended more than 20 over it. A landing under
+    /// speed 9 then puts the move angle on the facing (`func_1505A9AC`, C; V swim1 208).
+    pub aloft: bool,
+    /// The wade's clip clock (obj+0xB4 in state 139, [`crate::swim::wade`]).
+    pub wade: f32,
 }
 
 /// Per surface kind (bits 0-4 of the floor's word), the game's table at `0x80099140` (C, `func_1504BA38`;
@@ -346,6 +374,14 @@ impl PlayerState {
             walled: false,
             turret: 0.0,
             pitch: 0.0,
+            swimming: false,
+            water: crate::collision::NO_FLOOR,
+            drift: [0.0; 2],
+            rise: 0.0,
+            jump_out: 0,
+            water_jump: false,
+            aloft: false,
+            wade: 0.0,
         }
     }
 }
@@ -451,7 +487,7 @@ fn turn_steps(speed: f32, air: bool, y_vel: f32) -> i32 {
 /// Turns the move angle toward `target` by whole 256-steps of the difference,
 /// `((target − angle) as i16 >> 8) << 8`, at most `cap`: it keeps its low byte, and an exact reversal
 /// turns clockwise (C, V: anim_jump_stand row 364).
-fn turn_move(angle: u16, target: u16, cap: i32) -> u16 {
+pub(crate) fn turn_move(angle: u16, target: u16, cap: i32) -> u16 {
     let d = ((target.wrapping_sub(angle) as i16) >> 8) as i32 * 256;
     angle.wrapping_add(d.clamp(-cap, cap) as u16)
 }
@@ -491,7 +527,7 @@ fn turn_toward(
 /// turn stops one unit short, also for exactly −3072 (V: e.g. 16896 → 16641 for 16640, 46082 → 46337 for
 /// 46337, camera_aim 522, move_turnrun 261). The camera swings back to this facing, so a unit off flips
 /// its 256-step (tests/oracle.rs camera_loop).
-fn turn_facing(facing: u16, to: u16) -> u16 {
+pub(crate) fn turn_facing(facing: u16, to: u16) -> u16 {
     let d = angle_diff(to, facing);
     let step = if d < 0 {
         (-d - 1).min(3072)
@@ -511,10 +547,15 @@ fn facing_gap(facing: u16, to: u16) -> u8 {
 /// Speed after one frame of stick: +`accel` (1, or 0.75 holding an object) while that stays at or under
 /// the target, then +`accel` · 0.01 up to it (V).
 fn accelerate(speed: f32, target: f32, accel: f32) -> f32 {
+    accelerate_by(speed, target, accel, BRAKE)
+}
+
+/// [`accelerate`] with its brake (in the water 2 and 1, [`crate::swim`]).
+pub(crate) fn accelerate_by(speed: f32, target: f32, accel: f32, brake: f32) -> f32 {
     // func_1505A3A8 (C): above the target brake 2.5 down to it, else +accel, or +accel · 0.01
     // (0x800994D0) within 1 of it.
     if target < speed {
-        let s = speed - BRAKE;
+        let s = speed - brake;
         if s < target { target } else { s }
     } else {
         let s = speed
@@ -648,7 +689,7 @@ fn relax_twist(p: &mut PlayerState) {
 
 /// What this frame's step goes by (func_15059C84): the root's advance along the facing once (`true`),
 /// or the speed along the move angle.
-fn root_or_speed(p: &mut PlayerState) -> (bool, f32, u16) {
+pub(crate) fn root_or_speed(p: &mut PlayerState) -> (bool, f32, u16) {
     if std::mem::take(&mut p.root.moves) {
         (true, p.root.advance, p.facing)
     } else {
@@ -800,6 +841,7 @@ pub fn step_among(
     let a_pressed = a_held && p.prev_buttons & BUTTON_A == 0;
     p.prev_buttons = input.buttons;
     p.walled = false;
+    p.jump_out = p.jump_out.saturating_sub(1);
     let old = p.pos;
 
     // Z held makes A the high jump, from a crouch too (C: the jump branch tests no state; V q2za from
@@ -814,6 +856,7 @@ pub fn step_among(
         // frame's speed (in `air`).
         p.state = state::RUN_JUMP;
         (p.airborne, p.jumped, p.air_frames, p.jump_held) = (true, true, 0, true);
+        p.water_jump = false;
         (p.lock, p.timer, p.hard_landing) = (0, 0, false);
         p.y_vel = JUMP_Y_VEL;
     }
@@ -823,16 +866,21 @@ pub fn step_among(
     // handler's calls of `func_15063A38` with R; V from the press frame on, camera4_w09 500; I: the
     // grenade in hand, and Z's share of the 0x2010 mask).
     let twist_x = (!p.airborne
+        && !p.swimming
         && input.buttons & conker_camera::R != 0
         && conker_camera::aims_with_body(p.armed))
     .then(|| deadzone(input.stick_x));
     let waiting = p.state == state::HIGH_JUMP && !p.airborne;
-    let choice = if p.airborne {
+    let choice = if p.swimming {
+        crate::swim::swim(p, stick, a_pressed, a_held, world, old, me, others)
+    } else if p.airborne {
         air(p, stick, a_held, world, old, me, others)
     } else {
         ground(p, input, stick, world, old, me, others, twist_x)
     };
-    if high && !p.airborne {
+    // Into the water at the frame's end: the state choice is the swim's.
+    let entered = crate::swim::enter(p);
+    if high && !p.airborne && !entered {
         // The press frame went as the old state's (V q2s5w 112: the speed and the slide unbraked).
         (p.state, p.timer, p.lock) = (state::HIGH_JUMP, HIGH_JUMP_HOLD, HIGH_JUMP_LOCK);
     } else if waiting && p.airborne {
@@ -855,18 +903,23 @@ pub fn step_among(
         p.timer = 10;
     }
     end_frame(p);
-    if p.timer == 0 && !p.airborne {
+    if p.timer == 0 && (!p.airborne || matches!(choice, Choice::Out)) && !entered {
         choice.apply(p);
     }
+    let drive = match choice {
+        Choice::Gait { drive, .. } => drive,
+        _ => 0.0,
+    };
+    crate::swim::wade(p, drive);
 }
 
 /// The frame's stick after the deadzone, and the move angle it asks for.
 #[derive(Clone, Copy)]
-struct Stick {
+pub(crate) struct Stick {
     x: i8,
     y: i8,
-    on: bool,
-    target: u16,
+    pub(crate) on: bool,
+    pub(crate) target: u16,
     /// The speed the stick aims at: the target speed, scaled by the floor's percentage.
     speed: f32,
 }
@@ -968,7 +1021,11 @@ fn ground(
     // ([`animate`]), else by the speed along the move angle, and below speed 1 not at all (V: 0.77 does
     // not move, 1.0 does).
     let (root, dist, angle) = root_or_speed(p);
-    if root || dist >= 1.0 {
+    if p.drift != [0.0; 2] {
+        // The current's drift adds to the step, even standing (V sea 351-356).
+        let normal = p.floor.map(|f| world.tris[f.tri as usize].normal);
+        crate::swim::drift_step(p, dist, angle, normal);
+    } else if root || dist >= 1.0 {
         // The step follows the floor's plane: same length along the surface (V: 1e-6 on 12 sloped
         // triangles), the vertical part only shows when the floor ends (ledge row 409).
         let (c, s) = cos_sin(angle);
@@ -1007,9 +1064,11 @@ fn ground(
 
 /// What the frame's end chooses the next state from (`func_1504C0E8`), once the hold has counted down.
 #[derive(Clone, Copy)]
-enum Choice {
+pub(crate) enum Choice {
     /// Nothing (in the air, or a landing that holds).
     None,
+    /// Just out of the water and still in the air: the gait (the wade) all the same, without drive.
+    Out,
     /// The gait from the drive left this frame, or a wall push.
     Gait { drive: f32, wall: bool },
     /// Z held: a crouch or crouch-walk (a wall push first), `was` the state at the frame's start.
@@ -1020,6 +1079,7 @@ impl Choice {
     fn apply(self, p: &mut PlayerState) {
         match self {
             Choice::None => {}
+            Choice::Out => choose(p, 0.0, false),
             Choice::Gait { drive, wall } => choose(p, drive, wall),
             Choice::Crouch { wall: true, .. } => p.state = state::PUSH_WALL,
             Choice::Crouch { was, .. } => {
@@ -1054,7 +1114,7 @@ fn crouch_state(p: &mut PlayerState) {
 
 /// The target speed scaled by the speed percentage (obj+0xAA: the floor's, a strafe's 65, a crouch-walk's
 /// 40), the drive `func_1504CB98` hands on (C, 0x1504E358).
-fn scaled(p: &PlayerState) -> f32 {
+pub(crate) fn scaled(p: &PlayerState) -> f32 {
     let drive = if p.speed_percent == 0 {
         p.target_speed
     } else {
@@ -1084,7 +1144,7 @@ fn end_frame(p: &mut PlayerState) {
 /// while braking above speed 1, creep above 1, else idle), and a skid when a stop from above speed 18 has no drive left (17 frames, the
 /// first 8 locked). Most drawn weapons ([`armed_walk`]) walk while the stick asks for 1 or more, else
 /// stand, and never skid. Idle snaps the move angle to the facing (`func_1507F640`).
-fn choose(p: &mut PlayerState, drive: f32, wall: bool) {
+pub(crate) fn choose(p: &mut PlayerState, drive: f32, wall: bool) {
     if p.xz_speed > 4.0 {
         p.crouch_ok = false;
     }
@@ -1096,6 +1156,10 @@ fn choose(p: &mut PlayerState, drive: f32, wall: bool) {
         state::IDLE
     } else if p.scared > 0 && p.armed == 0 && e >= 5.0 {
         state::SCARED_RUN
+    } else if p.water != crate::collision::NO_FLOOR && p.pos[1] < p.water && p.xz_speed >= 1.0 {
+        // Wading (V swim1 220-245: the speed 75 % of the stick's, 26.25 at a full stick).
+        p.speed_percent = 75;
+        state::WADE
     } else if e > 14.0 {
         state::RUN
     } else if e > 6.0 || (drive < 1.0 && p.xz_speed > 1.0) {
@@ -1266,7 +1330,11 @@ pub(crate) fn sweep_walls(
     if world.camera.as_ref().is_some_and(|c| c.in_volume(old)) {
         return y_vel;
     }
-    let body = Body::player(old[1], p.pos[1]);
+    let mut body = Body::player(old[1], p.pos[1]);
+    if p.swimming {
+        // A swimmer's box is 90 across, not 60 (`func_1507C3E0` with obj+0xAD, C; V swim1 476).
+        (body.half_width, body.radius) = (45, 45);
+    }
     let swept = world.sweep(old, p.pos, &body, &Sweep::default(), y_vel);
     p.pos = swept.pos;
     swept.y_vel
@@ -1312,10 +1380,10 @@ pub(crate) fn follow_floor(
     } else {
         world.last_floor(old, p.floor_y, p.floor)
     };
-    let floor = world.floor(p.pos[0], p.pos[2], stepped_y, old[1], prev);
-    p.floor = floor;
-    p.floor_y = floor.map_or(crate::collision::NO_FLOOR, |f| f.y);
-    match floor {
+    // The query takes the height after the frame's fall (obj+0x18; V swim1 540: up a slope onto the
+    // shelf over it, which the stepped height misses).
+    crate::swim::query(p, world, p.pos[1], old[1], prev);
+    match p.floor {
         Some(f) if f.y > stepped_y - SNAP_DOWN => p.pos[1] = f.y,
         _ => {
             // Walked off an edge: fall (state 56, gravity 5) from the step already taken (V: ledge row
@@ -1335,7 +1403,7 @@ pub(crate) fn integrate_y(p: &mut PlayerState) {
     p.y_vel -= p.gravity;
 }
 
-fn air(
+pub(crate) fn air(
     p: &mut PlayerState,
     stick: Stick,
     a_held: bool,
@@ -1347,7 +1415,9 @@ fn air(
     p.prev_strafe = false;
     p.jump_held &= a_held;
     if matches!(p.state, state::JUMP | state::RUN_JUMP) || p.jump_held {
-        p.gravity = if p.jump_held {
+        p.gravity = if p.jump_held && p.water_jump {
+            f32::from_bits(0x4053_3333) // 3.3, out of the water (func_1505F298)
+        } else if p.jump_held {
             GRAVITY_HELD
         } else {
             GRAVITY_JUMP
@@ -1394,9 +1464,10 @@ fn air(
         drive = 0.0;
     }
     // A released stick keeps a jump's speed, unless a lock zeroes the drive (`func_1504CB98`: obj+0x89
-    // set, C; V m2 1602-1614, the jump off a mounted gun brakes 0.875 a frame).
-    if stick.on || !jumped || locked {
-        p.xz_speed = accelerate_air(p.xz_speed, drive, jumped, behind);
+    // set, C; V m2 1602-1614, the jump off a mounted gun brakes 0.875 a frame) or the jump was out of
+    // the water (V swim1 271-287: 0.175 a frame while obj+0xAE counts down, then 0.875).
+    if stick.on || !jumped || locked || p.water_jump {
+        p.xz_speed = accelerate_air(p.xz_speed, drive, jumped, behind, p.jump_out != 0);
     }
     if takeoff {
         // A standing jump below speed 9 after this frame's drive (func_1505F298, C).
@@ -1407,10 +1478,14 @@ fn air(
         };
     }
     let (_, dist, angle) = root_or_speed(p);
-    let (c, s) = cos_sin(angle);
-    let d = 0.5 * dist;
-    p.pos[0] += d * c;
-    p.pos[2] -= d * s;
+    if p.drift != [0.0; 2] {
+        crate::swim::drift_step(p, dist, angle, None);
+    } else {
+        let (c, s) = cos_sin(angle);
+        let d = 0.5 * dist;
+        p.pos[0] += d * c;
+        p.pos[2] -= d * s;
+    }
     integrate_y(p);
     push_apart(&mut p.pos, me, others);
     p.heading = heading_from_facing(p.facing);
@@ -1438,22 +1513,27 @@ fn air(
     } else {
         world.last_floor(old, p.floor_y, p.floor)
     };
-    let floor = world.floor(p.pos[0], p.pos[2], p.pos[1], old[1], prev);
-    p.floor_y = floor.map_or(crate::collision::NO_FLOOR, |f| f.y);
-    p.floor = floor;
-    let Some(f) = floor.filter(|f| p.pos[1] <= f.y) else {
+    crate::swim::query(p, world, p.pos[1], old[1], prev);
+    let Some(f) = p.floor.filter(|f| p.pos[1] <= f.y) else {
         // A walk off an edge more than 60 above the floor is a fall (obj+0x100 bit 0x10, set with state
         // 56 by func_1504C0E8): its landing is the hard one (C).
         p.hard_landing |= !p.jumped && p.pos[1] - p.floor_y > 60.0;
+        p.aloft |= p.pos[1] - p.floor_y > 20.0;
         return Choice::None;
     };
     p.pos[1] = f.y;
+    if std::mem::take(&mut p.aloft) && p.xz_speed < 9.0 {
+        p.move_angle = p.facing;
+    }
     p.airborne = false;
     p.turning = true;
     p.y_vel = GROUND_Y_VEL;
     p.gravity = GRAVITY_FALL;
     p.jump_held = false;
     p.jumped = false;
+    p.water_jump = false;
+    // A landing sets obj+0x89: the hard one's 5 below, else none (C; V swim1 498: the exit's 6 ends).
+    p.lock = 0;
     // func_1505A9AC (C; V: ledge 425-437, anim_jump_stand 74-88, camera_jump 263): a fall lands hard
     // (13-frame hold, the first 5 locked), a jump with the stick released lands soft (16), and with the
     // stick held the gait goes on (a wall in front pushes straight back into state 122, V: wall_jump 271,
@@ -1471,16 +1551,21 @@ fn air(
 }
 
 /// [`accelerate`] in the air after a jump (func_1505A3A8 with obj+0x81 set, C): the brake is 0.35 of the
-/// ground's, a facing 0x2E steps or more from where it heads halves the acceleration, 0x5B or more the
-/// target.
-fn accelerate_air(speed: f32, target: f32, jumped: bool, behind: u8) -> f32 {
+/// ground's (and 0.2 of that while `slow`), a facing 0x2E steps or more from where it heads halves the
+/// acceleration, 0x5B or more the target.
+fn accelerate_air(speed: f32, target: f32, jumped: bool, behind: u8, slow: bool) -> f32 {
     if !jumped {
         return accelerate(speed, target, 1.0);
     }
     let accel = if behind >= 0x2E { 0.5 } else { 1.0 };
     let target = if behind >= 0x5B { target * 0.5 } else { target };
     if target < speed {
-        let s = speed - BRAKE * f32::from_bits(0x3EB3_3333); // 0.35
+        let mut brake = BRAKE * f32::from_bits(0x3EB3_3333); // 0.35
+        if slow {
+            // obj+0xAE, a jump out of the water's first 12 frames (0x800994CC).
+            brake *= f32::from_bits(0x3E4C_CCCD); // 0.2
+        }
+        let s = speed - brake;
         if s < target { target } else { s }
     } else {
         let s = speed

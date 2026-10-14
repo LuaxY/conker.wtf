@@ -354,9 +354,9 @@ pub struct SceneCollision {
 /// The placements whose models collide in a Deathmatch on `scene` (V in the oracle's RAM and under lldb,
 /// `lab/oracle/walls_README.md`): the game's layer 2, the props with `(+0x4F & 0x60) != 0x20` and `+0x6E`
 /// clear (`func_150A6568` and the line query's copy of it), which the floor query, the wall routine and the
-/// line query all search. Fewer than [`Placement::has_collision`]: the match sets `+0x4F |= 0x20` on its
-/// pickups and hides the other modes' props. 0x2B: War: Beach's (scenario 8, the RAM's `+0x4F`/`+0x6E`;
-/// 1's `+0x4F` is 0x51, the first 0x40 prop seen: I, the same set). 0x1A: its placement 0 (V dm3, dm15,
+/// line query all search, but for the water among them ([`deathmatch_water`]). Fewer than
+/// [`Placement::has_collision`]: the match sets `+0x4F |= 0x20` on its pickups and hides the other modes'
+/// props. 0x2B: War: Beach's (scenario 8, the RAM's `+0x4F`/`+0x6E`; 1's `+0x4F` is 0x51, the sea). 0x1A: its placement 0 (V dm3, dm15,
 /// hs7 and lldb; the match sets 0x20 on every other placement, 13 too, which is drawn). 0x24: Tank's
 /// (scenario 1) eight bunker doors 0-7 (V b1: `+0x4F` 0x01, `+0x6E` 0; the power-ups' 0x21/0x23, the
 /// wrecks hidden until the match shows one). 0x33: Race's four barriers 0-3 (V L1, L2: `+0x4F` 0x01, the
@@ -371,6 +371,36 @@ pub fn deathmatch_solid(scene: usize) -> &'static [usize] {
         0x1A => &[0],
         _ => &[],
     }
+}
+
+/// Among [`deathmatch_solid`], the water surfaces (`+0x4F & 0x40`, the props the game files in its
+/// water list `0x800D3830`): the water height (`func_1510E8BC`'s, obj+0x118) and the line query read
+/// them, the floor query and the walls do not (C; V sea, swim1: the player floats on 0x2B's 1 and
+/// stands on the sand below it). 0x2B: its sea (placement 1, `+0x4F` 0x51).
+pub fn deathmatch_water(scene: usize) -> &'static [usize] {
+    match scene {
+        0x2B => &[1],
+        _ => &[],
+    }
+}
+
+/// Path `k` of `scene`'s path asset `[0x10, scene]`: its points (x, y, z, speed). The asset is a
+/// table of (offset, count) words ending with (0, 0), each path `count` 8-byte points (s16 x, y, z,
+/// u16 speed). The game's `func_150611E8` steers by one (C): on 0x2B the sea's current
+/// (`func_15059444`'s object 0x12, path 1: I, path `k` is object `0x11 + k`).
+pub fn scene_path(rom: &Rom, scene: usize, k: usize) -> Result<Vec<[i16; 4]>> {
+    let data = rom.asset(&[0x10, scene])?;
+    let (at, count) = (
+        word(&data, 8 * k)? as usize,
+        word(&data, 8 * k + 4)? as usize,
+    );
+    if at == 0 && count == 0 {
+        return Err(Error::NoEntry { index: k, count: k });
+    }
+    let points = region(&data, at, 8 * count)?;
+    Ok((points.as_chunks::<8>().0.iter())
+        .map(|p| [0, 2, 4, 6].map(|o| i16::from_be_bytes([p[o], p[o + 1]])))
+        .collect())
 }
 
 /// Builds `scene`'s collision: terrain, secondary layer, then every placement (from

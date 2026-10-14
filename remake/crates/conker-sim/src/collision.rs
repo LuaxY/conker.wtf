@@ -40,6 +40,9 @@ pub enum Layer {
     /// The model of placement `n` (wall layer 2). Give only the placements the game collides with: the
     /// map's (the pack's collision holds no others; `extract_scene::deathmatch_solid` from the ROM).
     Placement(u16),
+    /// The model of placement `n`, a water surface (`extract_scene::deathmatch_water`): only the water
+    /// height ([`CollisionWorld::water`]) and the line query read it.
+    Water(u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,6 +80,11 @@ pub struct CollisionWorld {
     objects: Vec<std::ops::Range<u32>>,
     /// Each of `objects`' placement number and how far up it is moved ([`CollisionWorld::shift`]).
     placed: Vec<(u16, i32)>,
+    /// The water surfaces' triangles ([`Layer::Water`]), out of the floor grid and the walls.
+    water: Vec<u32>,
+    /// The water's current ([`CollisionWorld::current`]): its path's points (x, y, z, speed), the pack's
+    /// `Slice::current`; empty: none.
+    pub current: Vec<[i16; 4]>,
     /// The terrain's surface words: the flag table the wall routine reads for every static layer.
     terrain_words: Vec<u32>,
     /// The game's acos table, from the ROM's `.game` data ([`AcosTable::from_game_data`]): the push angle
@@ -136,7 +144,12 @@ impl CollisionWorld {
                         world.placed.push((n, 0));
                     }
                 },
+                Layer::Water(_) => world.water.push(i as u32),
             }
+        }
+        let water = world.water.clone();
+        for cell in &mut world.cells {
+            cell.retain(|i| !water.contains(i));
         }
         for k in 0..2 {
             let refs: Vec<&Triangle> = world.layer_tris[k]
@@ -266,6 +279,66 @@ impl CollisionWorld {
             tri: i,
             surface: self.tris[i as usize].surface,
         })
+    }
+
+    /// The water height at `(x, z)` (obj+0x118, which the floor query `func_1510E8BC` fills): the highest
+    /// water triangle over the truncated position by the floor's integer routine, else [`NO_FLOOR`] (C; V
+    /// sea: −539 over 0x2B's sea).
+    pub fn water(&self, x: f32, z: f32) -> f32 {
+        let (xi, zi) = (x as i32, z as i32);
+        (self.water.iter())
+            .filter_map(|&i| height(&self.tris[i as usize].v, xi, zi))
+            .max()
+            .map_or(NO_FLOOR, |h| h as f32 / 256.0)
+    }
+
+    /// The water's current at `(x, z)` (`func_150611E8` on [`Self::current`]'s path, C; V sea): the
+    /// segment from the point nearest the truncated position (integer distances, the first of equals;
+    /// from 0x6D61 squared on, the point before it when that is nearer than the one after), as its
+    /// direction and the speed of its end (0 reads 8). None on a path's first or last point, or on a path
+    /// of fewer than 3.
+    pub fn current(&self, x: f32, z: f32) -> Option<(u16, f32)> {
+        let path = &self.current;
+        if path.len() < 3 {
+            return None;
+        }
+        let (x, z) = (x as i32 as i16 as i32, z as i32 as i16 as i32);
+        let d2 = |p: &[i16; 4]| {
+            let (dx, dz) = (x - i32::from(p[0]), z - i32::from(p[2]));
+            dx.wrapping_mul(dx).wrapping_add(dz.wrapping_mul(dz))
+        };
+        let mut best = (i32::MAX, 0);
+        for (k, p) in path.iter().enumerate() {
+            if d2(p) < best.0 {
+                best = (d2(p), k);
+            }
+        }
+        let (dist, mut i) = best;
+        if i == 0 || i + 1 == path.len() {
+            return None;
+        }
+        if dist >= 0x6D61 && d2(&path[i - 1]) < d2(&path[i + 1]) {
+            i -= 1;
+        }
+        let (a, b) = (path[i], path[i + 1]);
+        let gap = |p: i16, q: i16| (i32::from(p) - i32::from(q)) as f32;
+        let (dx, mdz) = (gap(b[0], a[0]), gap(a[2], b[2]));
+        let angle = match &self.acos {
+            Some(t) => t.angle(dx, mdz),
+            None => crate::movement::atan2_u16(mdz, dx),
+        };
+        let speed = if b[3] == 0 {
+            8.0
+        } else {
+            f32::from(b[3] as u16)
+        };
+        Some((angle, speed))
+    }
+
+    /// Whether last frame's floor triangle `tri` still holds `(x, z)`: the floor query's fast path
+    /// (`func_150A3FC4`, the rounded position).
+    pub fn holds(&self, tri: u32, x: f32, z: f32) -> bool {
+        height(&self.tris[tri as usize].v, round_even(x), round_even(z)).is_some()
     }
 
     fn hit(&self, tri: u32, h: i32) -> Floor {

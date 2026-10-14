@@ -7,7 +7,7 @@
 #   [CHARACTER=0-21] [CHEATS=code,...|all] [TEAM=0-3] crates/conker-server/bots.sh [seconds=150]. SIDE, CHARACTER and TEAM: what
 #   client 1 asks for. The bots are the slots the server's last ROSTER line before the clients left names (humans sit first).
 # All processes exit by themselves (--seconds). MODE=colors (MAP=30) also counts the flags' takes, drops and captures;
-# MODE=beach (MAP=2b) the escapes, detonations, strikes and scores, and its villager bots (no attack) need only move;
+# MODE=beach (MAP=2b) the escapes, detonations, strikes, scores and swims, and its villager bots (no attack) need only move;
 # MODE=heist (MAP=1a) the bags made, the takes, drops, deliveries, voices and the bags per team;
 # MODE=tank (MAP=24) the bombs taken and planted, the deaths by blast and by shell, the power-ups taken.
 # MODE=raptor (MAP=3f) the eggs made, thrown and cooked, the nest drops, the raptor bots and the team scores.
@@ -100,6 +100,7 @@ if [[ ${MODE:-} == beach ]]; then
   echo "  zone gives: $(grep -oE 'BEACH t=[0-9]+ Give\([0-9]+, (22|36)\)' $logs/server.log | wc -l | tr -d ' '), ejections: $(grep -c 'BEACH t=[0-9]* Place' $logs/server.log)," \
     "gun mounts: $(grep -oE 'GUN t=[0-9]+ gun 0 state 0x1 -> 0x2 slot Some\([0-9]+\)' $logs/server.log | grep -oE 'Some\([0-9]+' | tr -d 'Some(' | tr '\n' ' ')"
   echo "  $(grep -E 'match ends|villager down' $logs/server.log | tail -1)"
+  echo "  swims (the bots keep out of the sea, V): $(grep -oE 'slot [0-9]+ swims' $logs/server.log | sort | uniq -c | tr '\n' ' ')"
 fi
 if [[ ${MODE:-} == heist ]]; then
   at() { grep -oE "HEIST t=[0-9]+ $1" $logs/server.log | grep -oE 't=[0-9]+' | tr '\n' ' ' }

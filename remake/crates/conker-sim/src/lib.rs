@@ -12,6 +12,7 @@ pub mod movement;
 pub mod net;
 pub mod raptor;
 pub mod root;
+pub mod swim;
 pub mod tank;
 pub mod trig;
 

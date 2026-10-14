@@ -29,6 +29,7 @@ pub fn view(p: &PlayerState) -> PlayerView {
         heading: p.heading,
         sink: p.sink,
         speed: p.xz_speed,
+        swim: p.swimming.then_some(p.water),
         ..PlayerView::new(p.pos, p.floor_y, p.facing)
     }
 }
@@ -92,6 +93,12 @@ impl CameraWorld for Level<'_> {
             .world
             .sweep(from, to, &Body::camera(size[0], size[1]), &opts, 0.0);
         (swept.hits > 0).then_some(swept.pos)
+    }
+
+    /// The water under the eye (C: `func_1512A390`'s query fills `cam+0x360`).
+    fn water_below(&mut self, at: [f32; 3]) -> Option<f32> {
+        let w = self.world.water(at[0], at[2]);
+        (w != crate::collision::NO_FLOOR).then_some(w)
     }
 
     fn in_volume(&mut self, eye: [f32; 3]) -> bool {

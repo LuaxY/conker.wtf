@@ -8,7 +8,7 @@
 //! four team scores (`gas::Effect`'s Heist variants, `Match::apply`). Research and runs h1-h5,
 //! bots1, unt1: `../lab/research/mp-original/heist.md`, `heist-presentation.md`.
 
-use conker_sim::collision::CollisionWorld;
+use conker_sim::collision::{Body, CollisionWorld, Sweep};
 use conker_sim::movement::{self, Other, PlayerState};
 
 /// REDS, BLUES, GREENS, YELLOWS (team row 0, C).
@@ -49,6 +49,14 @@ const FLY: f32 = 9.0;
 const RISE: f32 = 18.4;
 const GRAVITY: f32 = 3.0;
 const SLIDE: f32 = 5.0;
+/// The thrown bag's box in the wall routine: held 24 off a wall, sliding along it (V bt1200: stops
+/// at x -1324.9 flying, bt1100: at -1324.6 sliding, the vault's ring wall at -1349; I the height).
+pub const SWEPT: Body = Body {
+    half_width: 24,
+    radius: 24,
+    height: 48.0,
+    center_y: 24.0,
+};
 /// Where the carrier holds it, ahead of and above its feet (I: the client draws it on the joint).
 const HELD: [f32; 2] = [10.0, 40.0];
 /// The walk home (class 0x57's script 5, `op 0x57` at speed 35): from 5 a frame, 2.5 more each, to
@@ -151,9 +159,8 @@ impl Cash {
         self.yaw = facing;
     }
 
-    /// One frame of its flight, fall or slide in frame `t`.
-    /// ponytail: no wall test in the air or the slide (the engine's object collision); a throw at
-    /// a wall goes through it.
+    /// One frame of its flight, fall or slide in frame `t`: the flight and the slide go through the
+    /// wall routine ([`SWEPT`]).
     pub(crate) fn step(&mut self, world: &CollisionWorld, t: u32) {
         if !self.shown || self.carrier.is_some() || self.since == t {
             return;
@@ -162,9 +169,11 @@ impl Cash {
         let [x, y, z] = self.pos;
         match self.state {
             State::Flight => {
-                let (x1, y1, z1) = (x + FLY * c, y + self.rise, z - FLY * s);
-                self.rise -= GRAVITY;
-                self.pos = [x1, y1, z1];
+                let new = [x + FLY * c, y + self.rise, z - FLY * s];
+                let swept = world.sweep(self.pos, new, &SWEPT, &Sweep::default(), self.rise);
+                self.rise = swept.y_vel - GRAVITY;
+                self.pos = swept.pos;
+                let [x1, y1, z1] = swept.pos;
                 if let Some(f) = world.floor(x1, z1, y, y, None)
                     && y1 <= f.y
                 {
@@ -179,8 +188,11 @@ impl Cash {
                     (self.state, self.since) = (State::Stand, t);
                     return;
                 }
-                let (x1, z1) = (x + v * c, z - v * s);
-                self.pos = [x1, y, z1];
+                let new = [x + v * c, y, z - v * s];
+                self.pos = world
+                    .sweep(self.pos, new, &SWEPT, &Sweep::default(), 0.0)
+                    .pos;
+                let [x1, _, z1] = self.pos;
                 if let Some(f) = world.floor(x1, z1, y, y, None) {
                     self.pos[1] = f.y;
                 }
@@ -270,5 +282,42 @@ mod tests {
         assert_eq!(c.state, State::Stand);
         assert!((c.pos[0] - 243.5).abs() < 1.0, "{:?}", c.pos);
         assert!(c.touchable(158) && c.walks(158));
+    }
+
+    /// A throw at a wall 150 ahead (V bt1200, bt1100: the bag is held 24 off the vault's wall and
+    /// slides along it, in the air and on the floor).
+    #[test]
+    fn a_throw_stops_at_a_wall() {
+        let big = 1000.0;
+        let world = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 0),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 0),
+            // facing back at the thrower
+            (
+                [
+                    [150.0, -100.0, -500.0],
+                    [150.0, 400.0, 500.0],
+                    [150.0, 400.0, -500.0],
+                ],
+                0,
+            ),
+            (
+                [
+                    [150.0, -100.0, -500.0],
+                    [150.0, -100.0, 500.0],
+                    [150.0, 400.0, 500.0],
+                ],
+                0,
+            ),
+        ]);
+        let mut c = Cash::new(0);
+        c.take(0, 10);
+        c.let_go([0.0; 3], 0xFB00, true, 100);
+        for t in 101..200 {
+            c.step(&world, t);
+            assert!(c.pos[0] < 127.0, "{t}: {:?}", c.pos);
+        }
+        assert_eq!(c.state, State::Stand);
+        assert!(c.pos[0] > 125.9 && c.pos[2] > 29.0, "{:?}", c.pos);
     }
 }

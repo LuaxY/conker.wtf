@@ -44,6 +44,14 @@ pub mod id {
     /// A with Z held: the high jump (conker-sim's `HIGH_JUMP_Y_VEL`), its clip shared with 404 and
     /// 741 (pair 21, 54 frames).
     pub const HIGH_JUMP: u16 = 235;
+    /// War: Beach's sea (conker-sim's `swim`): wading in the shallows, swimming at the surface (and
+    /// deep), a stroke (A) at the surface (and deep), and the hold (Z) under it.
+    pub const WADE: u16 = 139;
+    pub const SWIM: u16 = 204;
+    pub const SWIM_DEEP: u16 = 209;
+    pub const STROKE: u16 = 34;
+    pub const STROKE_DEEP: u16 = 206;
+    pub const SWIM_HOLD: u16 = 203;
 }
 
 /// Multiplayer combat ids (u16 obj+0x84) from the oracle's combat traces
@@ -291,6 +299,14 @@ pub fn request(id: u16, speed: f32, target: f32) -> Request {
         LAND => (1.0, 2.0, 0.0),      // func_1505A9AC
         // func_1505F298: `*0x80099660` (V q2za, q2s5w: 1.08000004 on every row of 235).
         HIGH_JUMP => (1.08, 2.0, 0.0),
+        // The sea (`func_1505F298`'s swim branch, its rates at 0x80099638..44, C; V sea, swim1
+        // obj+0x4C): the wade's e/18 + 0.2 (`func_1507BDB0`). SWIM_DEEP's first frames play at 2
+        // (V, not modelled); SWIM_HOLD's rate is untraced (I: 1).
+        WADE => (e / 18.0 + 0.2, 4.0, 0.0),
+        SWIM => (0.9, 10.0, 0.0),
+        SWIM_DEEP => (1.2, 10.0, 0.0),
+        STROKE | STROKE_DEEP => (1.2, 9.0, 0.0),
+        SWIM_HOLD => (1.0, 7.0, 0.0),
         // Combat (obj+0x4C on the combat traces; blend lengths untraced, I: 4).
         combat::TWIN_DRAW
         | combat::TWIN_HOLSTER

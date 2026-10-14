@@ -154,6 +154,9 @@ pub enum Layer {
     Secondary,
     /// The model of placement `n`, in world space.
     Placement(usize),
+    /// The model of placement `n`, a water surface (War: Beach's sea, 0x2B's placement 1): the
+    /// water height and the line query read it, the floor query and the walls do not.
+    Water(usize),
 }
 
 /// A world-space collision triangle (extract-scene's `Triangle`).
@@ -439,6 +442,10 @@ pub struct Tank {
 pub struct Slice {
     /// `maps/<map>/collision.json`: the collision in build order (terrain, secondary, placements).
     pub collision: Vec<Triangle>,
+    /// The water's current (on `2b`, the sea's; empty elsewhere): its path's points (x, y, z,
+    /// speed), the ROM's path asset `[0x10, scene]` path 1; kept on the first water run of
+    /// `collision.json`.
+    pub current: Vec<[i16; 4]>,
     /// `maps/<map>/spawns.json`.
     pub spawns: Vec<SpawnPoint>,
     /// `maps/<map>/pickups.json`.
@@ -506,6 +513,8 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
 #[derive(Serialize, Deserialize)]
 struct Run {
     layer: Layer,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    current: Vec<[i16; 4]>,
     triangles: Vec<Face>,
 }
 
@@ -749,6 +758,8 @@ impl Slice {
         }
         let lights: Lights = parse_json(lights, &bytes(lights)?)?;
         Ok(Self {
+            current: (runs.iter().find(|r| !r.current.is_empty()))
+                .map_or(vec![], |r| r.current.clone()),
             collision: (runs.into_iter())
                 .flat_map(|r| {
                     let layer = r.layer;
@@ -825,9 +836,13 @@ impl Slice {
                 Some(run) if run.layer == t.layer => run.triangles.push(face),
                 _ => runs.push(Run {
                     layer: t.layer,
+                    current: vec![],
                     triangles: vec![face],
                 }),
             }
+        }
+        if let Some(run) = runs.iter_mut().find(|r| matches!(r.layer, Layer::Water(_))) {
+            run.current.clone_from(&self.current);
         }
         let (chunks, rest) = self.triggers.as_chunks::<TRIGGER>();
         let records: Vec<Trigger> = chunks.iter().map(Trigger::parse).collect();
@@ -1076,7 +1091,13 @@ mod tests {
                     layer: Layer::Terrain,
                     surface: Some(5),
                 },
+                Triangle {
+                    points: [[-3345.0, -539.0, 8283.0], [0.0; 3], [2.0; 3]],
+                    layer: Layer::Water(1),
+                    surface: None,
+                },
             ],
+            current: vec![[584, -565, 13977, 64], [231, -565, 6011, 10]],
             spawns: vec![SpawnPoint {
                 position: [-2267, -521, 6016],
                 byte_06: 0xFF,
@@ -1452,7 +1473,14 @@ mod tests {
             collision.contains("[[0.1,113.399994,-7.5e-8],[10000000000.0,3,4],[5,6,7]],null]"),
             "{collision}"
         );
-        assert_eq!(collision.matches("\"layer\"").count(), 3);
+        assert_eq!(collision.matches("\"layer\"").count(), 4);
+        // The water's run keeps the current, before its triangles.
+        assert!(
+            collision
+                .contains("\"water\": 1\n    },\n    \"current\": [\n      [584,-565,13977,64],"),
+            "{collision}"
+        );
+        assert_eq!(collision.matches("\"current\"").count(), 1);
         // The graph's word and a node's byte 15 only when not zero.
         let nav = String::from_utf8(files["maps/2d/nav.json"].clone()).unwrap();
         assert!(

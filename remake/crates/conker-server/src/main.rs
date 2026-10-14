@@ -244,6 +244,8 @@ const RAPTOR_ROW: TeamRow = TeamRow {
 /// The bots screen's most players with 1-4 humans (`D_800AB74C`, C `func_151E1214`): Deathmatch's,
 /// then Tank's and Race's (sets 5 and 7 of `D_8008FEE4`).
 const FFA_MOST: [[usize; 4]; 2] = [[10, 8, 4, 4], [8, 4, 4, 4]];
+/// Race takes at most 2 humans (the menus' join, C: `menus-and-flow.md`).
+const RACE_HUMANS: usize = 2;
 /// A team's most players (the team screen's clamp).
 const TEAM_MOST: usize = 8;
 
@@ -660,6 +662,7 @@ fn main() {
         fail(format!("{}: {e}", dir.display()));
     }
     let mut arena = arena(&pack, pickups, total_war, setup.settings.tank);
+    arena.lob = matches!(scene, 0x1A | 0x3F);
     let mut world = scene_world(&pack, scene);
     // Race: the route's lap (`race.json`), its power-ups back 10 frames on, and the barriers it
     // hides out of the way (only the shown ones are solid).
@@ -916,7 +919,7 @@ fn arena(pack: &Slice, pickups: &[conker_assets::Pickup], total_war: bool, tank:
             spots: roams.map(|p| p.roams.clone()).next().unwrap_or_default(),
         },
         respawn,
-        track: race::Track::default(),
+        ..Default::default()
     }
 }
 
@@ -1098,6 +1101,11 @@ impl Game {
 
     fn humans(&self) -> usize {
         self.taken().filter(|&i| !self.m.players[i].bot).count()
+    }
+
+    /// Free for all, no room for another human: Race with [`RACE_HUMANS`] in.
+    fn no_human_room(&self) -> bool {
+        self.setup.settings.race && self.humans() >= RACE_HUMANS
     }
 
     fn bots(&self) -> usize {
@@ -1694,6 +1702,13 @@ fn join_player(
             (game.team_side(team), Some(team))
         }
         None => {
+            if game.no_human_room() {
+                warn!(
+                    "client {:?}: Race has its {RACE_HUMANS} humans, no player",
+                    remote.0
+                );
+                return;
+            }
             let side = (asked.side)
                 .filter(|_| !game.one_side())
                 .unwrap_or_else(|| game.smaller_side());
@@ -2381,6 +2396,15 @@ fn simulate(
             let what = if high(f) { "takes" } else { "ends" };
             let ([x, y, z], st) = (f.body.pos, f.body.state);
             info!("t={t} slot {p} {what} a high jump at ({x:.0}, {y:.0}, {z:.0}) state {st}");
+        }
+        if was.body.swimming != f.body.swimming {
+            let what = if f.body.swimming {
+                "swims"
+            } else {
+                "leaves the water"
+            };
+            let [x, y, z] = f.body.pos;
+            info!("t={t} slot {p} {what} at ({x:.0}, {y:.0}, {z:.0})");
         }
     }
     // Beach's villager deaths score in the step.
@@ -3330,6 +3354,7 @@ mod tests {
                 let t = g.human_team(&row, asked)?;
                 (g.team_side(t), Some(t))
             }
+            None if g.no_human_room() => return None,
             None => (g.smaller_side(), None),
         };
         g.trim(Some(team.unwrap_or(0)));
@@ -3574,6 +3599,26 @@ mod tests {
         }
         assert_eq!(race::bot_class(1), 0xD);
         assert_eq!(g.class(Side::Squirrels), race::HUMAN);
+        // Two humans at most: the third is refused.
+        let arena = Arena {
+            spawns: (0..16).map(|i| record([i * 100, 0, 0], 64)).collect(),
+            ..Default::default()
+        };
+        let mut g = Game::new(
+            arena,
+            Setup {
+                settings: r,
+                bots: 7,
+                ..Setup::default()
+            },
+        );
+        g.starts = starts(0x33).unwrap();
+        fill(&mut g);
+        assert_eq!(
+            (human(&mut g, None), human(&mut g, None)),
+            (Some(0), Some(1))
+        );
+        assert_eq!((human(&mut g, None), g.humans(), g.bots()), (None, 2, 2));
     }
 
     /// Character picks: `--cheats` (codes in any case, or `all`); the map's set in its Deathmatch and

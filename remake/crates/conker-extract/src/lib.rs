@@ -32,7 +32,8 @@ use extract_level::{
 };
 pub use extract_scene::{Layer, SpawnPoint, Triangle};
 use extract_scene::{
-    deathmatch_solid, floor_below, scene_collision, scene_placements, scene_spawns,
+    deathmatch_solid, deathmatch_water, floor_below, scene_collision, scene_path, scene_placements,
+    scene_spawns,
 };
 use serde_json::{Value, json};
 
@@ -2075,6 +2076,7 @@ fn pack_data(
     let table = |at: usize, n: usize| game_data.get(at..at + n).context(".game data too short");
     let sink = table(SINK_AT, 96)?;
     let solid = solid_placements(scene);
+    let water = deathmatch_water(scene);
     Ok(assets::Slice {
         collision: (scene_collision(rom, scene, &placements)?.triangles.iter())
             .filter(|t| !matches!(t.layer, Layer::Placement(i) if !solid.contains(&i)))
@@ -2083,11 +2085,17 @@ fn pack_data(
                 layer: match t.layer {
                     Layer::Terrain => assets::Layer::Terrain,
                     Layer::Secondary => assets::Layer::Secondary,
+                    Layer::Placement(i) if water.contains(&i) => assets::Layer::Water(i),
                     Layer::Placement(i) => assets::Layer::Placement(i),
                 },
                 surface: t.surface,
             })
             .collect(),
+        // The sea's current (War: Beach's, `func_15059444`'s path).
+        current: match water.is_empty() {
+            true => vec![],
+            false => scene_path(rom, scene, 1)?,
+        },
         spawns: (scene_spawns(rom, scene)?.iter())
             .map(|s| assets::SpawnPoint {
                 position: s.position,
