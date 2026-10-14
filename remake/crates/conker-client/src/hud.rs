@@ -40,8 +40,9 @@ use conker_rules::projectile::{LOB_HOLD, LOB_PULL};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
-use crate::bindings::{Bind, Bindings, KeyLabels};
+use crate::bindings::{Action, Bindings, KeyLabels};
 use crate::connection::NetStatus;
+use crate::settings_ui::Glyphs;
 use crate::{Anim, FollowCamera};
 
 /// The render layer of the HUD's quads and camera.
@@ -1698,7 +1699,9 @@ pub fn standing(c: &Combat) -> Standing {
     }
 }
 
-/// What the HUD shows of the local player (`own`), the others and the match.
+/// What the HUD shows of the local player (`own`), the others and the match; `view`: the modern
+/// controls' orbit camera drew the frame looking along it (the radar turns with it; its crosshair
+/// replaces the reticle).
 #[allow(clippy::type_complexity)]
 fn shown(
     hud: &Hud,
@@ -1707,6 +1710,7 @@ fn shown(
     m: &MatchView,
     vi: u32,
     race_map: Option<&str>,
+    view: Option<Vec3>,
 ) -> Shown {
     let (p, c, camera, anim) = own;
     let clock = &anim.0;
@@ -1717,7 +1721,8 @@ fn shown(
         || [GRENADE_PULL, GRENADE_HOLD].contains(&clock.id)
         || (clock.id == GRENADE_THROW && clock.time < THROW_IN_HAND);
     let (eye, at) = camera.drawn.view(&camera.follow);
-    let ahead = Vec2::new(at.x - eye.x, at.z - eye.z).normalize_or(Vec2::NEG_Y);
+    let look = view.unwrap_or(at - eye);
+    let ahead = Vec2::new(look.x, look.z).normalize_or(Vec2::NEG_Y);
     let right = Vec2::new(-ahead.y, ahead.x);
     let level = |y: f32| hud.radar.levels.iter().filter(|&&l| l <= y).count();
     // War colours a blip by its team (C `func_15093B58`: the name colours by obj+0x328); Heist's
@@ -1824,7 +1829,10 @@ fn shown(
         secs: (m.time > 0).then_some(m.timer.max(0) as u32 / 60),
         radar: m.radar && !m.beach && !m.race,
         blips,
-        reticle: p.aiming && hud.reticle.weapons.contains(&c.weapon) && gun.is_none(),
+        reticle: view.is_none()
+            && p.aiming
+            && hud.reticle.weapons.contains(&c.weapon)
+            && gun.is_none(),
         scope: (scope.on && gun.is_none()).then(|| {
             let weapon = if m.tank { scope.weapon } else { c.weapon };
             scope.zoom[0] / conker_camera::zoom_limit(weapon)
@@ -1959,38 +1967,55 @@ pub fn pickup_prompt(
         .then(|| format!("PRESS {key} TO PICK UP"))
 }
 
-/// Interact's binding as a prompt shows it, uppercase (the HUD font has no lowercase): the first
-/// key or mouse slot, else the pad's button; a key as the player's layout types it once pressed
-/// (C1's [`KeyLabels`]: on AZERTY KeyQ shows A), else its code's name.
-fn interact_label(bindings: &Bindings, labels: Option<&KeyLabels>) -> String {
-    use bevy::input::keyboard::Key;
-    let slots = bindings.get(crate::bindings::Action::Interact);
-    let Some(&bind) = slots.keys.iter().flatten().next() else {
-        return slots
-            .pad
-            .map_or("INTERACT".into(), |p| format!("{p:?}").to_uppercase());
+/// Decision 19's prompt: "PRESS <key> TO MOUNT" while `f` could get on a free mounted gun of `m`
+/// with Interact (conker-rules' `can_mount`, the server's gate).
+pub fn mount_prompt(m: &MatchView, f: &conker_rules::Fighter, key: &str) -> Option<String> {
+    let free =
+        |g: &&conker_sim::net::GunView| g.gunner.is_none() && g.state == conker_rules::gun::FREE;
+    (m.guns.iter().filter(free))
+        .any(|g| conker_rules::game::can_mount(f, g.pos, true))
+        .then(|| format!("PRESS {key} TO MOUNT"))
+}
+
+/// An action's binding as a prompt shows it, uppercase (the HUD font has no lowercase), as the
+/// settings screen names it (`settings_ui::bound_label`: a key as the player's layout types it once
+/// pressed, C1's [`KeyLabels`]): with `pad`'s glyphs its pad button first (the player is on the pad),
+/// else its first key or mouse slot first.
+pub fn key_label(
+    bindings: &Bindings,
+    a: Action,
+    labels: Option<&KeyLabels>,
+    pad: Option<Glyphs>,
+) -> String {
+    use crate::settings_ui::{Bound, bound_label};
+    let slots = bindings.get(a);
+    let key = slots.keys.iter().flatten().next().map(|&k| Bound::Key(k));
+    let button = slots.pad.map(Bound::Pad);
+    let first = match pad {
+        Some(_) => button.or(key),
+        None => key.or(button),
     };
-    match bind {
-        Bind::Key(k) => match labels.and_then(|l| l.0.get(&k)) {
-            Some(Key::Character(c)) => c.to_uppercase(),
-            _ => (format!("{k:?}").trim_start_matches("Key"))
-                .trim_start_matches("Digit")
-                .to_uppercase(),
-        },
-        Bind::Mouse(b) => format!("MOUSE {b:?}").to_uppercase(),
-        Bind::WheelUp => "WHEEL UP".into(),
-        Bind::WheelDown => "WHEEL DOWN".into(),
+    match first {
+        Some(v) => bound_label(Some(v), labels, pad.unwrap_or(Glyphs::Xbox)),
+        None => crate::settings_ui::action_label(a),
     }
 }
 
-/// The local player's [`Prompt`] ([`pickup_prompt`]).
+/// The local player's [`Prompt`] ([`pickup_prompt`], else [`mount_prompt`]), with the key of the
+/// device in use (the pad's glyphs: C3's vendor detection and Button prompts setting).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn prompt(
     own: Query<(&Player, &Fighting), With<FollowCamera>>,
     game: Query<&MatchView>,
     pickups: Res<Pickups>,
     nest: Option<Res<crate::raptor::Nest>>,
-    bindings: Res<Bindings>,
-    labels: Option<Res<KeyLabels>>,
+    (bindings, labels, using, settings): (
+        Res<Bindings>,
+        Option<Res<KeyLabels>>,
+        Option<Res<crate::bindings::UsingPad>>,
+        Res<crate::settings::Settings>,
+    ),
+    pads: Query<(&Gamepad, Option<&Name>)>,
     mut out: ResMut<Prompt>,
 ) {
     let line = match (own.single(), game.single()) {
@@ -1999,8 +2024,11 @@ fn prompt(
                 Some(n) => &n.data.pickups,
                 None => &pickups.0,
             };
-            let key = interact_label(&bindings, labels.as_deref());
-            pickup_prompt(list, m, &f.fighter(p.0), &key)
+            let glyphs = (using.is_some_and(|u| u.0))
+                .then(|| crate::settings_ui::pad_glyphs(settings.pad.prompts, pads.iter().next()));
+            let key = key_label(&bindings, Action::Interact, labels.as_deref(), glyphs);
+            let f = f.fighter(p.0);
+            pickup_prompt(list, m, &f, &key).or_else(|| mount_prompt(m, &f, &key))
         }
         _ => None,
     };
@@ -2031,12 +2059,13 @@ fn draw(
         Option<Res<crate::crosshair::Quads>>,
     ),
     timeline: Res<LocalTimeline>,
-    (mut fading, mut escaped, mut ended, prompt, esc_menu): (
+    (mut fading, mut escaped, mut ended, prompt, esc_menu, orbit): (
         Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
         Res<Prompt>,
         Option<Res<crate::menu::Quads>>,
+        Option<Res<crate::orbit::Orbit>>,
     ),
     (mut fired, mut zoomed, mut stats, mut skull, mut opened): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
@@ -2074,7 +2103,8 @@ fn draw(
             let map = (course.as_ref())
                 .and_then(|c| c.route(m.racing.route))
                 .map(|r| r.map.as_str());
-            let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick, map);
+            let looking = orbit.as_ref().and_then(|o| o.view).map(|v| v.1);
+            let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick, map, looking);
             shown.prompt = prompt.0.clone();
             // Weapon 0x16's R view: its tint from the frame the scope opened.
             let scope = own.2.follow.cam.scope;
@@ -4184,6 +4214,7 @@ mod tests {
         far.body.pos[2] = 2800.0;
         assert_eq!(pickup_prompt(&gun, &m, &far, "F"), None);
         let bindings = Bindings::default();
+        let interact_label = |b, l| key_label(b, Action::Interact, l, None);
         assert_eq!(interact_label(&bindings, None), "F");
         let mut labels = KeyLabels::default();
         labels.0.insert(
@@ -4191,5 +4222,43 @@ mod tests {
             bevy::input::keyboard::Key::Character("g".into()),
         );
         assert_eq!(interact_label(&bindings, Some(&labels)), "G");
+    }
+
+    /// Decision 19's prompt agrees with the server's gate (`can_mount`): by a free gun, not a manned
+    /// or leaving one, nor out of its reach. On the pad, prompts show its glyphs (C3's).
+    #[test]
+    fn the_mount_prompt_follows_the_gate_and_prompts_show_the_pads_glyphs() {
+        use conker_rules::gun::{FREE, LEAVING};
+        use conker_sim::net::GunView;
+        let place = conker_rules::Placement {
+            index: 0,
+            pos: [0.0, 0.0, 250.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let f = conker_rules::Fighter::new(&place, 0, 0);
+        let gun = |state, gunner| MatchView {
+            guns: vec![GunView {
+                pos: [0.0, 0.0, 300.0],
+                state,
+                gunner,
+                ..GunView::default()
+            }],
+            ..MatchView::default()
+        };
+        let line = Some("PRESS F TO MOUNT".to_string());
+        assert_eq!(mount_prompt(&gun(FREE, None), &f, "F"), line);
+        assert_eq!(mount_prompt(&gun(FREE, Some(1)), &f, "F"), None);
+        assert_eq!(mount_prompt(&gun(LEAVING, None), &f, "F"), None);
+        let mut far = f;
+        far.body.pos[2] = 0.0;
+        assert_eq!(mount_prompt(&gun(FREE, None), &far, "F"), None);
+        let b = Bindings::default();
+        let label = |g| key_label(&b, Action::Interact, None, g);
+        assert_eq!(label(None), "F");
+        assert_eq!(label(Some(Glyphs::Xbox)), "X");
+        assert_eq!(label(Some(Glyphs::PlayStation)), "SQUARE");
+        assert_eq!(key_label(&b, Action::Fire, None, None), "MOUSE 1");
+        assert_eq!(key_label(&b, Action::Mute, None, Some(Glyphs::Xbox)), "M");
     }
 }

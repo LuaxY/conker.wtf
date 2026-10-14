@@ -100,7 +100,9 @@ use serde::{Deserialize, Serialize};
 /// 39: the fixed cameras' points from the pack (`cameras.json`; the tunnel hints on 0x2B now have cameras).
 /// 40: `Input`'s `actions` (the modern controls, MODERN-gated) and `aim_pitch`.
 /// 41: `Fighter`'s `actions`, `late_actions`, `throw` and `redraw` (the modern weapon handling, MODERN-gated).
-pub const PROTOCOL_ID: u64 = 41;
+/// 42: the modern spread, the hip bolt on the aim, the aim ray pulled out of walls, the draw-end shot and the grenade
+/// latch (shared, MODERN-gated).
+pub const PROTOCOL_ID: u64 = 42;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

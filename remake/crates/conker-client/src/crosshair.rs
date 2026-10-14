@@ -107,13 +107,26 @@ pub fn marker(c: [f32; 2], size: f32, age: f32, head: bool) -> Vec<Sprite> {
     } else {
         [255, 255, 255, alpha]
     };
-    let half = 0.35 * size;
+    ticks(c, size, 0.35 * size, colour, Z)
+}
+
+/// The marker's black outline, under it ([`marker`]'s ticks, wider; they join): the white stays
+/// readable over held fire's muzzle flash.
+pub fn outline(c: [f32; 2], size: f32, age: f32) -> Vec<Sprite> {
+    let alpha = (255.0 * (1.0 - age / MARKED).clamp(0.0, 1.0)) as u8;
+    ticks(c, size, 0.6 * size, [0, 0, 0, alpha], Z - 0.05)
+}
+
+/// Four diagonal ticks of three squares of half size `half` round `c`.
+fn ticks(c: [f32; 2], size: f32, half: f32, colour: Rgba, z: f32) -> Vec<Sprite> {
     let corners = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)];
     (corners.iter())
         .flat_map(|&(sx, sy)| {
             [2.6f32, 3.4, 4.2].map(|d| {
                 let k = d * size * core::f32::consts::FRAC_1_SQRT_2;
-                dot([c[0] + sx * k, c[1] + sy * k], [half; 2], colour)
+                let mut q = dot([c[0] + sx * k, c[1] + sy * k], [half; 2], colour);
+                q.z = z;
+                q
             })
         })
         .collect()
@@ -167,7 +180,10 @@ pub fn update(
     let centre = frame_point(frame.0, window, window / 2.0);
     if let Some((at, head)) = marks.shown {
         match t - at < MARKED {
-            true => quads.0.extend(marker(centre, size, t - at, head)),
+            true => {
+                quads.0.extend(outline(centre, size, t - at));
+                quads.0.extend(marker(centre, size, t - at, head));
+            }
             false => marks.shown = None,
         }
     }
@@ -234,6 +250,22 @@ mod tests {
 
     /// The aim ray from the camera's line hits a far wall; a wall between the muzzle and that point
     /// (the muzzle below a ledge the line passes over) blocks the shot there.
+    /// The marker's outline: black, under it, each square wider round the same centre.
+    #[test]
+    fn the_marker_is_outlined_under_it() {
+        let (m, o) = (
+            marker([10.0, 20.0], 2.0, 0.0, false),
+            outline([10.0, 20.0], 2.0, 0.0),
+        );
+        assert_eq!(m.len(), o.len());
+        for (m, o) in m.iter().zip(&o) {
+            assert_eq!((o.colour, o.z < m.z), ([0, 0, 0, 255], true));
+            assert!(o.rect[2] > m.rect[2] && o.rect[3] > m.rect[3]);
+            let mid = |r: [f32; 4]| [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0];
+            assert_eq!(mid(o.rect), mid(m.rect));
+        }
+    }
+
     #[test]
     fn a_wall_between_the_muzzle_and_the_crosshairs_point_blocks_it() {
         let big = 5000.0;

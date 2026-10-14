@@ -45,6 +45,8 @@ pub const LANDING: &str = "index.html";
 pub const MAIN: [&str; 3] = ["RESUME", "SETTINGS", "LEAVE MATCH"];
 /// A conflict's choices.
 pub const CHOICES: [&str; 3] = ["SWAP", "REPLACE", "CANCEL"];
+/// The settings' buttons: APPLY saves, BACK drops what wasn't applied, DEFAULTS resets the tab.
+pub const BUTTONS: [&str; 3] = ["APPLY", "BACK", "DEFAULTS"];
 /// Rows a tab shows at once.
 pub const VISIBLE: usize = 18;
 /// Seconds a held direction waits before it repeats, then between repeats.
@@ -364,14 +366,14 @@ impl Sheet {
         }
     }
 
-    /// An item's columns: a Keyboard & Mouse binding's two slots, APPLY and BACK.
+    /// An item's columns: a Keyboard & Mouse binding's two slots, [`BUTTONS`].
     fn columns(&self, item: Item) -> usize {
         match item {
             Item::Row(r) if self.tab == Tab::Keys => match ui::rows(self.tab)[r] {
                 Row::Bind(_) => 2,
                 _ => 1,
             },
-            Item::Buttons => 2,
+            Item::Buttons => BUTTONS.len(),
             _ => 1,
         }
     }
@@ -436,6 +438,8 @@ impl Sheet {
                 Row::Bind(a) => self.capture = Some(Capture::new(a, self.slot(), now)),
                 Row::Group(_) => {}
             },
+            // DEFAULTS: this tab's (applied live, saved by APPLY).
+            (Nav::Confirm, Item::Buttons) if self.column == 2 => ui::reset(self.tab, s, b),
             // APPLY (BACK is the menu's).
             (Nav::Confirm, Item::Buttons) => {
                 (self.applied, self.saved) = ((s.clone(), b.clone()), Some(now));
@@ -627,6 +631,15 @@ pub fn layout(menu: &Menu, hud: &Hud, look: &Look) -> Quads {
     p.out
 }
 
+/// The settings sheet's controls line, the pad's buttons in its glyphs.
+pub fn hint(g: Glyphs) -> String {
+    use GamepadButton::{East, LeftTrigger, RightTrigger, South};
+    let b = |button| ui::pad_label(button, g);
+    let (a, back) = (b(South), b(East));
+    let tabs = format!("{} / {}", b(LeftTrigger), b(RightTrigger));
+    format!("ENTER / {a}: CHANGE   ESC / {back}: BACK   {tabs}: TABS")
+}
+
 fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
     let (s, b, g) = (look.settings, look.bindings, look.glyphs);
     let items = items(sh.tab);
@@ -714,8 +727,8 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
         p.fill(thumb, AMBER, Z_BAR);
     }
     let buttons = focused == Item::Buttons;
-    for (i, label) in ["APPLY", "BACK"].iter().enumerate() {
-        let rect = [91.0 + 60.0 * i as f32, 187.0, 50.0, 14.0];
+    for (i, label) in BUTTONS.iter().enumerate() {
+        let rect = [56.0 + 62.0 * i as f32, 187.0, 56.0, 14.0];
         let lit = buttons && sh.column == i;
         p.button(
             label,
@@ -726,18 +739,22 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
         );
     }
     if sh.saved.is_some_and(|t| look.now - t < SAVED_SECS) {
-        p.text("SAVED", [236.0, 190.0], true, SMALL, GREY, Z_TEXT);
+        p.text("SAVED", [262.0, 190.0], true, SMALL, GREY, Z_TEXT);
     }
-    let hint = "ENTER / A: CHANGE   ESC / B: BACK   LB / RB: TABS";
-    p.text(hint, [146.0, 205.0], true, 0.45, GREY, Z_TEXT);
+    p.text(&hint(g), [146.0, 205.0], true, 0.45, GREY, Z_TEXT);
     if let Some(c) = &sh.capture {
         p.fill([36.0, 72.0, 220.0, 64.0], [0, 0, 0, 255], Z_BOX);
         p.fill([36.0, 72.0, 220.0, 1.0], AMBER, Z_BOX_BAR);
         let title = format!("{} - {}", ui::action_label(c.action), c.slot.label());
         p.text(&title, [146.0, 78.0], true, SMALL, AMBER, Z_BOX_TEXT);
         let (press, keys) = ui::PROMPT.split_once(" - ").unwrap_or((ui::PROMPT, ""));
+        let menu = ui::pad_label(GamepadButton::Start, g);
+        let keys = match c.slot {
+            Slot::Pad => keys.replace("ESC", &format!("ESC / {menu}")),
+            Slot::Key(_) => keys.to_string(),
+        };
         p.text(press, [146.0, 92.0], true, 0.7, WHITE, Z_BOX_TEXT);
-        p.text(keys, [146.0, 106.0], true, SMALL, WHITE, Z_BOX_TEXT);
+        p.text(&keys, [146.0, 106.0], true, SMALL, WHITE, Z_BOX_TEXT);
         let left = c.left(look.now).to_string();
         p.text(&left, [146.0, 120.0], true, SMALL, GREY, Z_BOX_TEXT);
     }
@@ -1026,14 +1043,7 @@ fn run(
     bindings.set_if_neq(b);
     last.paused = menu.open();
     paused.set_if_neq(Paused(last.paused));
-    let glyphs = match pad {
-        Some((p, name)) => ui::glyphs(
-            settings.pad.prompts,
-            p.vendor_id(),
-            name.map_or("", |n| n.as_str()),
-        ),
-        None => ui::glyphs(settings.pad.prompts, None, ""),
-    };
+    let glyphs = ui::pad_glyphs(settings.pad.prompts, pad);
     let look = Look {
         settings: &settings,
         bindings: &bindings,
@@ -1219,6 +1229,58 @@ mod tests {
             m.nav(Nav::Confirm, 0.0, &mut s, &mut b),
             Some(Effect::Leave)
         );
+    }
+
+    /// The settings sheet's controls line in the pad's glyphs.
+    #[test]
+    fn the_hint_shows_the_pads_glyphs() {
+        let xbox = "ENTER / A: CHANGE   ESC / B: BACK   LB / RB: TABS";
+        assert_eq!(hint(Glyphs::Xbox), xbox);
+        let ps = "ENTER / CROSS: CHANGE   ESC / CIRCLE: BACK   L1 / R1: TABS";
+        assert_eq!(hint(Glyphs::PlayStation), ps);
+    }
+
+    /// DEFAULTS (the buttons' third) resets its tab only: the keyboard slots, the pad's slots and
+    /// settings, the look's, the gameplay's; live, without saving.
+    #[test]
+    fn defaults_reset_the_tab_only() {
+        let (mut s, mut b) = (Settings::default(), Bindings::default());
+        let mouse_jump = Bound::Key(Bind::Mouse(MouseButton::Forward));
+        ui::set(&mut b, Action::Jump, Slot::Key(0), Some(mouse_jump));
+        ui::set(
+            &mut b,
+            Action::Jump,
+            Slot::Pad,
+            Some(Bound::Pad(GamepadButton::North)),
+        );
+        s.bindings = b.overrides();
+        (s.mouse.sensitivity, s.pad.dead_zone, s.crosshair.size) = (3.0, [0.3; 2], 2.0);
+        let mut m = Menu::default();
+        let sh = settings_page(&mut m, &mut s, &mut b);
+        let defaults = |sh: &mut Sheet, s: &mut Settings, b: &mut Bindings| {
+            sh.focus(items(sh.tab).len() - 1, 2);
+            assert_eq!((sh.item(), sh.column), (Item::Buttons, 2));
+            assert_eq!(sh.nav(Nav::Confirm, 0.0, s, b), None, "not saved");
+        };
+        defaults(sh, &mut s, &mut b);
+        let jump = |b: &Bindings, slot| ui::get(b, Action::Jump, slot);
+        assert_eq!(
+            jump(&b, Slot::Key(0)),
+            Some(Bound::Key(Bind::Key(KeyCode::Space)))
+        );
+        assert_eq!(jump(&b, Slot::Pad), Some(Bound::Pad(GamepadButton::North)));
+        assert_eq!((s.mouse.sensitivity, s.pad.dead_zone), (3.0, [0.3; 2]));
+        sh.set_tab::<()>(Tab::Pad);
+        defaults(sh, &mut s, &mut b);
+        assert_eq!(jump(&b, Slot::Pad), Some(Bound::Pad(GamepadButton::South)));
+        assert_eq!((s.mouse.sensitivity, s.pad.dead_zone), (3.0, [0.1; 2]));
+        sh.set_tab::<()>(Tab::Look);
+        defaults(sh, &mut s, &mut b);
+        assert_eq!((s.mouse.sensitivity, s.crosshair.size), (1.5, 2.0));
+        sh.set_tab::<()>(Tab::Gameplay);
+        defaults(sh, &mut s, &mut b);
+        assert_eq!((&s, &b), (&Settings::default(), &Bindings::default()));
+        assert_eq!(sh.saved, None);
     }
 
     #[test]

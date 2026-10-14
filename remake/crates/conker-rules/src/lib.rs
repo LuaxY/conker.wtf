@@ -24,6 +24,7 @@ pub mod race;
 pub mod raptor;
 pub mod rng;
 pub mod spawn;
+pub mod spread;
 pub mod surface;
 pub mod tank;
 pub mod traps;

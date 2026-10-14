@@ -198,6 +198,9 @@ pub mod action {
 pub const AIM_PIVOT_HEIGHT: f32 = 67.5;
 pub const AIM_ARM: f32 = 160.0;
 pub const AIM_SHOULDER: f32 = 20.0;
+/// How far short of a wall at the shoulder the aim ray starts ([`aim_ray`]; the client's arm keeps its eye
+/// as far off a wall behind).
+pub const AIM_WALL_GAP: f32 = 8.0;
 /// The aim's pitch within ±80° (14563 units), the bots' scope's (`conker_camera::Scope::steer`).
 pub const AIM_PITCH_MAX: i16 = 14563;
 /// Modern speeds: R's aim moves at 0.75 of the stick's target, the scope at 0.5; hip-fire at full.
@@ -219,20 +222,29 @@ pub fn aim_pitch(input: &Input) -> i16 {
 /// between the camera and the player are never hit. The pivot stands in for the weapon (Lyra takes the
 /// pawn's location): with the camera at `pivot − AIM_ARM·dir + side·right` and `right` ⟂ `dir`, that
 /// point is `pivot + side·right`, whatever the arm's length. It may start inside the shooter's own body,
-/// which every hit test along it leaves out.
-pub fn aim_ray(pos: [f32; 3], input: &Input) -> ([f32; 3], [f32; 3]) {
+/// which every hit test along it leaves out. A wall between the pivot and that point (the shoulder against
+/// it) pulls the start back toward the pivot, [`AIM_WALL_GAP`] short of the wall, so the ray never starts
+/// past it; the client's camera takes the same start (`world`'s own line query, as its arm's).
+pub fn aim_ray(pos: [f32; 3], input: &Input, world: &CollisionWorld) -> ([f32; 3], [f32; 3]) {
     let (c, s) = cos_sin(aim_yaw(input));
     let (pc, ps) = cos_sin(aim_pitch(input) as u16);
-    let side = match input.actions & action::SHOULDER {
-        0 => AIM_SHOULDER,
-        _ => -AIM_SHOULDER,
+    let sign = match input.actions & action::SHOULDER {
+        0 => 1.0,
+        _ => -1.0,
     };
-    let start = [
-        pos[0] + side * s,
-        pos[1] + AIM_PIVOT_HEIGHT,
-        pos[2] + side * c,
-    ];
+    let pivot = [pos[0], pos[1] + AIM_PIVOT_HEIGHT, pos[2]];
+    let side = sign * aim_reach(pivot, [s, 0.0, c], sign, world);
+    let start = [pos[0] + side * s, pivot[1], pos[2] + side * c];
     (start, [c * pc, ps, -s * pc])
+}
+
+/// How far out from the `pivot` toward the shoulder `sign` (1: along `right`, −1: against it) the aim
+/// ray starts ([`aim_ray`]): [`AIM_SHOULDER`], or [`AIM_WALL_GAP`] short of a wall nearer.
+pub fn aim_reach(pivot: [f32; 3], right: [f32; 3], sign: f32, world: &CollisionWorld) -> f32 {
+    let out = [sign * right[0], 0.0, sign * right[2]];
+    (world.ray(pivot, out, AIM_SHOULDER + AIM_WALL_GAP)).map_or(AIM_SHOULDER, |h| {
+        (h.dist - AIM_WALL_GAP).clamp(0.0, AIM_SHOULDER)
+    })
 }
 
 /// Under [`action::MODERN`], the facing the aim holds this frame ([`aim_yaw`]), if it does: while R
@@ -2355,6 +2367,32 @@ mod tests {
         step(&mut p, &Input::default(), &w);
         assert_eq!((p.move_angle, p.facing), (30977, 30978));
         assert_eq!((p.target_speed, p.timer), (SCOPE_DRIVE, 9)); // 0x23's scope holds the state
+    }
+
+    /// A wall 10 to the right of the pivot (an aim along +x) pulls the aim ray's start back to 2
+    /// (`AIM_WALL_GAP` short); the left shoulder, clear, keeps its 20.
+    #[test]
+    fn a_wall_at_the_shoulder_pulls_the_aim_rays_start_in() {
+        let big = 5000.0;
+        let wall = CollisionWorld::new([
+            (
+                [[-big, -big, 10.0], [big, -big, 10.0], [-big, big, 10.0]],
+                5,
+            ),
+            ([[big, -big, 10.0], [big, big, 10.0], [-big, big, 10.0]], 5),
+        ]);
+        let aim = |actions| Input {
+            camera_yaw: 0xC000,
+            actions: action::MODERN | actions,
+            ..Input::default()
+        };
+        let (start, dir) = aim_ray([0.0; 3], &aim(0), &wall);
+        assert_eq!(dir, [1.0, 0.0, 0.0]);
+        assert!((start[2] - (10.0 - AIM_WALL_GAP)).abs() < 1e-4, "{start:?}");
+        assert_eq!(start[1], AIM_PIVOT_HEIGHT);
+        assert_eq!(aim_ray([0.0; 3], &aim(0), &flat()).0[2], AIM_SHOULDER);
+        let left = aim_ray([0.0; 3], &aim(action::SHOULDER), &wall).0;
+        assert_eq!(left[2], -AIM_SHOULDER);
     }
 
     #[test]

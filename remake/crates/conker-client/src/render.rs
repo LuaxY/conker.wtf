@@ -16,6 +16,7 @@
 //! them as is. Units are the game's: the map spans about 7,000 x 13,000 units.
 
 use crate::connection::NetStatus;
+use crate::upper::Layer;
 use crate::{Anim, Bodies, BodyClips, Config, FollowCamera, hud_text};
 use bevy::animation::{AnimatedBy, AnimationTargetId};
 use bevy::app::AnimationSystems;
@@ -33,6 +34,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use conker_anim::id;
 use conker_assets::{Slice, character_gltf, level_gltf, props_gltf};
 use conker_rules::gas;
+use conker_rules::net::Fighting;
 use conker_sim::net::{Combat, MatchView, Player};
 use core::f32::consts::{FRAC_PI_2, TAU};
 
@@ -133,6 +135,8 @@ struct Look {
     graph: Handle<AnimationGraph>,
     /// Animation id → graph node, for the ids in its [`crate::Clips`].
     nodes: Vec<(u16, AnimationNodeIndex)>,
+    /// The masked twins' nodes ([`crate::upper::layers`]).
+    layers: Vec<(u16, Layer, AnimationNodeIndex)>,
     binds: Vec<Vec3>,
     from: Option<usize>,
 }
@@ -140,6 +144,12 @@ struct Look {
 impl Look {
     fn node(&self, id: u16) -> Option<AnimationNodeIndex> {
         self.nodes.iter().find(|n| n.0 == id).map(|n| n.1)
+    }
+
+    fn layer(&self, id: u16, layer: Layer) -> Option<AnimationNodeIndex> {
+        (self.layers.iter())
+            .find(|n| n.0 == id && n.1 == layer)
+            .map(|n| n.2)
     }
 }
 
@@ -343,9 +353,10 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             .chain(),
     );
     app.add_systems(PostUpdate, rest_retargeted.before(AnimationSystems));
+    app.init_resource::<crate::upper::Bend>();
     app.add_systems(
         PostUpdate,
-        (retarget, pin_creep_root)
+        (retarget, pin_creep_root, crate::upper::bend_upper)
             .chain()
             .after(AnimationSystems)
             .before(TransformSystems::Propagate),
@@ -403,8 +414,8 @@ fn load_characters(
             .map(|n| n.transform.translation)
             .collect();
         let from = bodies.clips_from[*body];
-        let (graph, nodes) = match from.and_then(|f| looks[f].as_ref()) {
-            Some(f) => (f.graph.clone(), f.nodes.clone()),
+        let (graph, nodes, layers) = match from.and_then(|f| looks[f].as_ref()) {
+            Some(f) => (f.graph.clone(), f.nodes.clone(), f.layers.clone()),
             None => {
                 let mut ids = Vec::new();
                 let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
@@ -421,8 +432,21 @@ fn load_characters(
                     ids.push(*id);
                     handles.push(handle.clone());
                 }
-                let (graph, nodes) = AnimationGraph::from_clips(handles);
-                (graphs.add(graph), ids.into_iter().zip(nodes).collect())
+                let (mut graph, nodes) = AnimationGraph::from_clips(handles.clone());
+                crate::upper::mask_groups(&mut graph, gltf, &gltf_nodes);
+                let mut layers = Vec::new();
+                for (&id, clip) in ids.iter().zip(&handles) {
+                    for layer in crate::upper::layers(id) {
+                        let root = graph.root;
+                        let node = graph.add_clip_with_mask(clip.clone(), layer.mask(), 1.0, root);
+                        layers.push((id, layer, node));
+                    }
+                }
+                (
+                    graphs.add(graph),
+                    ids.into_iter().zip(nodes).collect(),
+                    layers,
+                )
             }
         };
         looks[*body] = Some(Look {
@@ -430,6 +454,7 @@ fn load_characters(
             scene: gltf.scenes[0].clone(),
             graph,
             nodes,
+            layers,
             binds,
             from,
         });
@@ -840,13 +865,25 @@ fn place_players(
 
 /// Shows each player's clock: its clip at its time, cross-faded with the previous clip; the
 /// Sergeant's and the Tediz Leader's own clips for the bazooka and the mounted gun
-/// (conker-rules' `characters::clip`).
+/// (conker-rules' `characters::clip`). The local modern player aiming or firing a gun on foot, or
+/// crouched with it drawn, plays its legs and upper body apart ([`crate::upper`]), its upper body
+/// bent to the aim's pitch.
+#[allow(clippy::type_complexity)]
 fn pose_players(
-    players: Query<(&Anim, &Rig, Option<&Combat>)>,
+    players: Query<(
+        &Anim,
+        &Rig,
+        Option<&Combat>,
+        Option<(&Player, &Fighting, &FollowCamera)>,
+    )>,
     mut animators: Query<&mut AnimationPlayer>,
     characters: Res<Characters>,
+    (orbit, clips, time): (Option<Res<crate::orbit::Orbit>>, Res<BodyClips>, Res<Time>),
+    mut bend: ResMut<crate::upper::Bend>,
+    mut legs_clock: Local<f32>,
 ) {
-    for (anim, rig, combat) in &players {
+    bend.0 = None;
+    for (anim, rig, combat, own) in &players {
         let (Ok(mut animator), Some(character)) =
             (animators.get_mut(rig.animator), characters.of(rig.body))
         else {
@@ -855,24 +892,58 @@ fn pose_players(
         let clip = |id| conker_rules::characters::clip(combat.map_or(0, |c| c.class), id);
         let a = &anim.0;
         let w = a.prev_weight();
-        let current = character.node(clip(a.id));
-        let prev = (character.node(clip(a.prev))).filter(|_| w > 0.0 && a.prev != a.id);
+        let o = orbit.as_deref().filter(|o| o.on);
+        let layered = own.zip(o).and_then(|((p, f, _), o)| {
+            use crate::upper::{aim_layers, aim_pose, gait};
+            let f = &f.state;
+            let w = (f.weapon.and_then(conker_rules::weapon::weapon))
+                .filter(|w| f.gun.is_none() && crate::crosshair::muzzle(w).is_some())?;
+            let legs = |id| character.layer(id, Layer::Legs).is_some();
+            let arms = |id| character.layer(id, Layer::Arms).is_some();
+            let cur = (clip(a.id), a.time);
+            // The legs under an action: the gait, else the body's own (a crouch, a jump), else the
+            // gun's stand.
+            let state = u16::from(p.state);
+            let under = gait(w, p.state, p.xz_speed, p.target_speed)
+                .or_else(|| (state != id::IDLE && legs(state)).then_some(state))
+                .unwrap_or(w.idle);
+            let ticks = f32::from(clips.of(rig.body).duration(under));
+            *legs_clock = match legs(cur.0) {
+                true => cur.1,
+                false => (*legs_clock + time.delta_secs() * conker_sim::TICK_HZ as f32) % ticks,
+            };
+            // Crouched unaimed, the gun's stand over the plain crouch (no armed crouch clip, §9).
+            let crouched = !o.aiming && [id::CROUCH, id::CROUCH_WALK].contains(&a.id);
+            let pose = if crouched { (w.idle, 0.0) } else { aim_pose(w) };
+            let aiming = (o.aiming || crouched) && f.drawn;
+            let pose = (clip(pose.0), pose.1);
+            let l = aim_layers(cur, pose, aiming, (under, *legs_clock), legs, arms)?;
+            bend.0 = (!crouched || l[1] != pose).then_some(o.pitch * TAU / 65536.0);
+            let at = |(id, t): (u16, f32), layer| Some((character.layer(id, layer)?, t, 1.0));
+            Some([at(l[0], Layer::Legs), at(l[1], Layer::Arms)])
+        });
+        let played = layered.unwrap_or_else(|| {
+            let current = character.node(clip(a.id));
+            let prev = (character.node(clip(a.prev))).filter(|_| w > 0.0 && a.prev != a.id);
+            [
+                current.map(|n| (n, a.time, 1.0 - w)),
+                prev.map(|n| (n, a.prev_time, w)),
+            ]
+        });
         let stale: Vec<AnimationNodeIndex> = animator
             .playing_animations()
             .map(|(node, _)| *node)
-            .filter(|node| Some(*node) != current && Some(*node) != prev)
+            .filter(|node| !played.iter().flatten().any(|p| p.0 == *node))
             .collect();
         for node in stale {
             animator.stop(node);
         }
-        for (node, time, weight) in [(current, a.time, 1.0 - w), (prev, a.prev_time, w)] {
-            if let Some(node) = node {
-                animator
-                    .play(node)
-                    .set_speed(0.0)
-                    .set_seek_time(time / conker_sim::TICK_HZ as f32)
-                    .set_weight(weight);
-            }
+        for (node, time, weight) in played.into_iter().flatten() {
+            animator
+                .play(node)
+                .set_speed(0.0)
+                .set_seek_time(time / conker_sim::TICK_HZ as f32)
+                .set_weight(weight);
         }
     }
 }
@@ -1204,6 +1275,7 @@ mod tests {
                 scene: default(),
                 graph: default(),
                 nodes: Vec::new(),
+                layers: Vec::new(),
                 binds: Vec::new(),
                 from: None,
             })

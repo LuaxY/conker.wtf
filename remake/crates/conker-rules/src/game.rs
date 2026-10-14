@@ -45,6 +45,7 @@ use crate::projectile::{
 use crate::race::{self, Race};
 use crate::raptor::{self, Raptor};
 use crate::spawn::{self, Placement, Spawn};
+use crate::spread;
 use crate::tank::{self, Tank};
 use crate::traps::{self, Traps};
 use crate::weapon::{self, Attack, Gives, Pickup, Weapon};
@@ -2053,13 +2054,13 @@ impl Match {
     /// and on foot, through the scope, the scope's look from the aim instead of the N64 scope
     /// camera's; seated, the mounted gun's turn too, its pitch within the N64 gun scope's −60..50
     /// (decision 19). Never cleared: without MODERN the slot is a bot's.
-    fn modern_aim(&mut self, i: usize, input: &Input) {
+    fn modern_aim(&mut self, i: usize, input: &Input, world: &CollisionWorld) {
         const DEGREES: f32 = 360.0 / 65536.0;
         if self.aims.len() < self.players.len() {
             self.aims.resize(self.players.len(), None);
         }
         let f = &mut self.players[i];
-        self.aims[i] = Some(movement::aim_ray(f.body.pos, input));
+        self.aims[i] = Some(movement::aim_ray(f.body.pos, input, world));
         let yaw = Some(f32::from(movement::aim_yaw(input)) * DEGREES);
         let pitch = -f32::from(movement::aim_pitch(input)) * DEGREES;
         if f.seated() {
@@ -2100,18 +2101,24 @@ impl Match {
         }
         // The modern controls: the actions as N64 bits ([`pad`], the identity without them), the
         // aim's ray and the scope's look ([`Self::modern_aim`]).
-        let input = &pad(&self.players[i], &self.settings, input);
+        let input = &pad(&self.players[i], &self.settings, input, t);
         if input.actions & movement::action::MODERN != 0 {
-            self.modern_aim(i, input);
+            self.modern_aim(i, input, world);
         }
         // Then the actions' latches ([`Fighter::throw`], [`Fighter::redraw`]), all 0 without them:
-        // a grenade pressed with a weapon drawn throws once holstered and draws it again; the
-        // pull, a hit or no grenade left ends the first, the draw, a hit or no weapon the second.
+        // a grenade pressed with a weapon drawn, or being drawn (it waits for the draw's end),
+        // throws once holstered and draws it again; the pull, a hit or no grenade left ends the
+        // first, the draw, a hit or no weapon the second.
         let f = &mut self.players[i];
         use movement::action::GRENADE;
-        if input.actions & GRENADE != 0 && f.actions & GRENADE == 0 && f.drawn && f.grenades > 0 {
-            (f.throw, f.redraw) = (true, true);
+        if input.actions & GRENADE != 0
+            && f.actions & GRENADE == 0
+            && (f.drawn || f.action == Action::Draw)
+            && f.grenades > 0
+        {
+            f.throw = true;
         }
+        f.redraw |= f.throw && f.drawn;
         let hurt = matches!(f.action, Action::Hurt { .. });
         if hurt || f.grenades == 0 || matches!(f.action, Action::GrenadePull { .. }) {
             f.throw = false;
@@ -2923,10 +2930,12 @@ impl Match {
                 // obj+0x1D1 (`func_15145740`, C), which follows a bot's aim pitch +0x170 (V o34p:
                 // 0x23 within 3.4°, in 1.1° steps; the steps and the lag are not ported). The
                 // pistol's (`func_150FED30`) takes `func_150FF2D4`'s, untraced: as 0x23's here (I).
-                // The modern aim sends them all to its hit point, as the crosshair shows.
+                // The modern aim sends them all to its hit point, as the crosshair shows, its ray
+                // turned within the spread's cone (a bot's as it is).
                 let ray = self.aims.get(i).copied().flatten();
                 let modern = self.players[i].actions & movement::action::MODERN != 0;
                 if let Some((eye, dir)) = ray {
+                    let dir = spread::turn(&self.players[i], dir, t, i);
                     let to: [f32; 3] = if b.kind == damage::TWIN_BULLET || modern {
                         let wall = raycast(world, eye, dir, RAY_RANGE);
                         let d = self
@@ -2988,6 +2997,7 @@ impl Match {
                 // 606 ahead past player 2's neck, w14's at its head 134.2 ahead).
                 let f = &self.players[i];
                 let (dir, [sx, sz]) = aim(f);
+                let dir = spread::turn(f, dir, t, i);
                 let eye = [me.pos[0], me.pos[1] + up, me.pos[2]];
                 let wall = raycast(world, eye, dir, RAY_RANGE);
                 let d = self
@@ -3002,9 +3012,21 @@ impl Match {
                 // Aimed at the player it locks onto from the muzzle (`func_1506C460` with the
                 // auto-aim flag 0x800BE616 set: `func_1505DADC(bolt, &angle, 0, 0xFF, 0x14)`),
                 // rising by the players' height difference over their distance (C; V combat5_cb_e2:
-                // 6 bolts' directions, e.g. 23381 for the facing 24066).
+                // 6 bolts' directions, e.g. 23381 for the facing 24066). The modern aim instead
+                // sends it toward what its ray meets, turned within the hip's cone, as the bullets.
                 let mut shot = Shot::fire(world, i, at, me.facing, kind);
-                if let Some((v, a)) = self.lock_on(i, at, me.facing, 3162.0, 0x14, world, seen) {
+                let f = &self.players[i];
+                let ray = (self.aims.get(i).copied().flatten())
+                    .filter(|_| f.actions & movement::action::MODERN != 0);
+                if let Some((eye, dir)) = ray {
+                    let dir = spread::turn(f, dir, t, i);
+                    let wall = raycast(world, eye, dir, RAY_RANGE);
+                    let d = (self.first_part(i, eye, dir, wall, seen)).map_or(wall, |h| h.1);
+                    let target = core::array::from_fn(|j| eye[j] + dir[j] * d);
+                    shot = Shot::toward(world, i, at, target, kind);
+                } else if let Some((v, a)) =
+                    self.lock_on(i, at, me.facing, 3162.0, 0x14, world, seen)
+                {
                     let p = self.seen_pos(seen, i, v);
                     let (dx, dz) = (p[0] - me.pos[0], p[2] - me.pos[2]);
                     let k = (p[1] - me.pos[1]) / (dx * dx + dz * dz).sqrt().max(1.0);
@@ -3118,8 +3140,9 @@ impl Match {
         let f = &self.players[i];
         let me = f.body;
         let from = local_to_world(me.pos, me.facing, origin);
-        // Along the scope's look (C; the camera agent's camera4 traces), else the facing.
-        let dir = aim(f).0;
+        // Along the scope's look (C; the camera agent's camera4 traces), else the facing; the
+        // modern spread's cone turns it.
+        let dir = spread::turn(f, aim(f).0, self.tick, i);
         let wall = raycast(world, from, dir, RAY_RANGE);
         if let Some((v, _, head)) = self.first_part(i, from, dir, wall, seen) {
             let kind = if head { damage::SNIPER_RAY } else { kind };
@@ -3862,24 +3885,7 @@ impl Match {
                     f.actions & MODERN == 0
                         || (f.actions & INTERACT != 0 && f.late_actions & INTERACT == 0)
                 };
-                let toucher = self.players.iter().position(|f| {
-                    f.health > 0
-                        && interact(f)
-                        && f.stun == 0
-                        && f.gun.is_none()
-                        && f.body.scope_yaw.is_none()
-                        && f.flag.is_none()
-                        && !f.carrying
-                        && f.body.lock == 0
-                        && matches!(
-                            f.action,
-                            Action::Free
-                                | Action::Fire { .. }
-                                | Action::Aim { .. }
-                                | Action::Reload { .. }
-                        )
-                        && gun::touches(at, &f.other())
-                });
+                let toucher = (self.players.iter()).position(|f| can_mount(f, at, interact(f)));
                 if let (Some(i), 0) = (toucher, g.leave) {
                     // The jump keeps the speed the player came with, along the gun's yaw, and homes
                     // on the seat as last drawn (joint 3's matrix, C `func_1505327C`; V t1 132-156).
@@ -3951,7 +3957,7 @@ impl Match {
                 gun::barrel_dir(yaw, pitch + kick[0] + kick[1], b, toe),
             )
         } else {
-            let (d, _) = aim(f);
+            let d = spread::turn(f, aim(f).0, self.tick, i);
             let eye = conker_camera::gun_eye_kicked(at, yaw, pitch, eye);
             let p = gun::sight(at, yaw, pitch, b, kick, eye, d);
             let wall = raycast(world, p, d, RAY_RANGE);
@@ -4144,18 +4150,22 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
 /// | GRENADE | B (holsters; no Z), free | C-down (held, or a tap's frame) | – |
 /// | B (Q) | | B, or the draw after a pickup or a throw ([`Fighter::redraw`]), free | A on the gun (off) |
 ///
+/// A draw's last frame (`t`) counts as drawn: the rules end a timed action before a new one starts
+/// (V ctlw_k5), so FIRE held through a draw fires in that frame (decision 22), as the N64's Z.
 /// No weapon both jumps and reloads, so JUMP and RELOAD never share A; the movement's jump and crouch
 /// are the actions themselves (the rules' frame). CROUCH stays off a draw: a Z held as it ends would
 /// fire. Free: no action under way, no flag or canister carried (B puts a flag down); B (draw,
 /// holster) only after a frame without it.
-pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
+pub fn pad(f: &Fighter, settings: &Settings, input: &Input, t: u32) -> Input {
     use movement::action::{CROUCH, FIRE, GRENADE, JUMP, RELOAD};
     if input.actions == 0 {
         return *input;
     }
+    let ends = |w: &Weapon| t.saturating_sub(f.since) >= u32::from(w.draw.1);
+    let drawn = f.drawn || (f.action == Action::Draw && f.weapon().is_some_and(ends));
     let ridden = settings.tank || settings.race || f.class == raptor::CLASS || f.gun.is_some();
     // Which actions mean something here: (fire, jump, crouch, reload).
-    let (fire, jump, crouch, reload) = match f.weapon().filter(|_| f.drawn) {
+    let (fire, jump, crouch, reload) = match f.weapon().filter(|_| drawn) {
         _ if ridden => (true, true, false, false),
         Some(w) => (true, w.jumps(), false, w.reload.is_some()),
         None => (false, true, f.action != Action::Draw, false),
@@ -4166,7 +4176,7 @@ pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
     let grenade = !ridden && f.grenades > 0 && (input.actions & GRENADE != 0 || f.throw);
     let free = f.action == Action::Free && f.flag.is_none() && !f.carrying;
     let mut buttons = input.buttons;
-    if (held(FIRE, fire) && !(grenade && f.drawn)) || held(CROUCH, crouch) {
+    if (held(FIRE, fire) && !(grenade && drawn)) || held(CROUCH, crouch) {
         buttons |= BUTTON_Z;
     }
     if held(JUMP, jump) || held(RELOAD, reload) {
@@ -4182,7 +4192,7 @@ pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
         let tapped = f.throw && free && f.buttons & C_DOWN == 0;
         let press = free && f.buttons & BUTTON_B == 0;
         match f.weapon {
-            Some(_) if f.drawn => {
+            Some(_) if drawn => {
                 if grenade && press {
                     buttons |= BUTTON_B;
                 }
@@ -4197,6 +4207,26 @@ pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
         }
     }
     Input { buttons, ..*input }
+}
+
+/// Whether player `f` gets on the free mounted gun at `at` this frame (`interact`: under the modern
+/// controls its Interact press, decision 19; true without): alive, unstunned, free to act, not in
+/// the scope, carrying nothing, touching it. The server's [`Match`] and the client's prompt ask it
+/// alike.
+pub fn can_mount(f: &Fighter, at: [f32; 3], interact: bool) -> bool {
+    f.health > 0
+        && interact
+        && f.stun == 0
+        && f.gun.is_none()
+        && f.body.scope_yaw.is_none()
+        && f.flag.is_none()
+        && !f.carrying
+        && f.body.lock == 0
+        && matches!(
+            f.action,
+            Action::Free | Action::Fire { .. } | Action::Aim { .. } | Action::Reload { .. }
+        )
+        && gun::touches(at, &f.other())
 }
 
 /// Whether player `f` (its touch reach `reach`) takes the pickup giving `gives` at `pos` this frame
@@ -5583,7 +5613,7 @@ mod tests {
             };
             for f in &fighters {
                 for s in &modes {
-                    assert_eq!(pad(f, s, &input), input);
+                    assert_eq!(pad(f, s, &input, 0), input);
                 }
             }
         }
@@ -5594,7 +5624,7 @@ mod tests {
                 actions: MODERN | a,
                 ..Input::default()
             };
-            pad(f, s, &input).buttons & !(BUTTON_R | C_BUTTONS | BUTTON_B)
+            pad(f, s, &input, 0).buttons & !(BUTTON_R | C_BUTTONS | BUTTON_B)
         };
         let with = |weapon, drawn, action| Fighter {
             weapon: Some(weapon),
@@ -5830,12 +5860,12 @@ mod tests {
             redraw: true,
             ..f
         };
-        let b = |late| pad(&Fighter { buttons: late, ..f }, &m.settings, &modern(0)).buttons;
+        let b = |late| pad(&Fighter { buttons: late, ..f }, &m.settings, &modern(0), 0).buttons;
         assert_eq!((b(0) & BUTTON_B, b(BUTTON_B) & BUTTON_B), (BUTTON_B, 0));
     }
 
     /// Decisions 10, 22 and 24: FIRE draws a holstered pistol (refilling it) and, still held, fires
-    /// once it is drawn, the frame after the draw ends.
+    /// once it is drawn, in the draw's last frame (a press there starts the next action, V ctlw_k5).
     #[test]
     fn modern_fire_draws_and_fires_once_ready() {
         use movement::action::FIRE;
@@ -5848,7 +5878,7 @@ mod tests {
             .filter(|e| matches!(e.1, Event::Shot { player: 0, .. }))
             .map(|e| e.0)
             .collect();
-        assert_eq!(shots, [u32::from(pistol.draw.1) + 1]);
+        assert_eq!(shots, [u32::from(pistol.draw.1)]);
         assert_eq!(m.players[0].rounds, pistol.rounds - 1);
     }
 
@@ -5940,6 +5970,75 @@ mod tests {
         assert_eq!((f.grenades, m.grenades.len()), (2, 1));
     }
 
+    /// A grenade tapped during a draw waits for its end (the latch keys on a weapon drawn or being
+    /// drawn), then holsters, throws and draws again.
+    #[test]
+    fn modern_grenade_tapped_during_a_draw_throws_after_it() {
+        use movement::action::GRENADE;
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+        m.give(0, 0x09);
+        let mut began = Vec::new();
+        use std::mem::discriminant as d;
+        for _ in 0..170 {
+            let t = m.tick;
+            let input = Input {
+                buttons: if t == 0 { BUTTON_B } else { 0 },
+                ..modern(if t == 5 { GRENADE } else { 0 })
+            };
+            run_with(&mut m, &arena, &w, 1, |_| [input, Input::default()]);
+            let f = m.players[0];
+            if f.since == t && began.last() != Some(&d(&f.action)) {
+                began.push(d(&f.action));
+            }
+        }
+        let want = [
+            d(&Action::Draw),
+            d(&Action::Free),
+            d(&Action::Holster),
+            d(&Action::Free),
+            d(&Action::GrenadePull { pull: 0 }),
+            d(&Action::GrenadeHold { pull: 0 }),
+            d(&Action::GrenadeThrow { pull: 0, hold: 0 }),
+            d(&Action::Free),
+            d(&Action::Draw),
+            d(&Action::Free),
+        ];
+        assert_eq!(began, want);
+        let f = m.players[0];
+        assert!(f.drawn && !f.throw && !f.redraw);
+        assert_eq!((f.grenades, m.grenades.len()), (2, 1));
+    }
+
+    /// Decision 22: a draw's last frame counts as drawn for the modern actions (a press there starts
+    /// the next action, V ctlw_k5): FIRE held through the twin guns' draw starts their fire in it;
+    /// JUMP pressed in it jumps, with no reload (the N64's A there would reload).
+    #[test]
+    fn modern_the_draws_last_frame_counts_as_drawn() {
+        use movement::action::{FIRE, JUMP};
+        let draw = u32::from(weapon::TWIN_GUNS.draw.1);
+        for (a, from) in [(FIRE, 0), (JUMP, draw)] {
+            let (arena, mut m, w) = duel();
+            m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+            m.give(0, 0x09);
+            run_with(&mut m, &arena, &w, draw + 1, |t| {
+                let input = Input {
+                    buttons: if t == 0 { BUTTON_B } else { 0 },
+                    ..modern(if t >= from { a } else { 0 })
+                };
+                [input, Input::default()]
+            });
+            let f = m.players[0];
+            assert!(f.drawn, "{a:#x}");
+            if a == FIRE {
+                assert!(matches!(f.action, Action::Fire { .. }) && f.since == draw);
+            } else {
+                assert_eq!(f.action, Action::Free);
+                assert!(f.body.y_vel > 0.0, "{:?}", f.body);
+            }
+        }
+    }
+
     /// Decision 21: the modern controls move through a draw; the N64's hold the player still.
     #[test]
     fn modern_moves_while_drawing() {
@@ -6002,7 +6101,8 @@ mod tests {
 
     /// The modern aim sends the pistol's, 0x23's and the tommy gun's bullets from the muzzle to the
     /// aim ray's hit point (a wall 3,000 ahead, 20 to the right of the facing: the shoulder), not
-    /// parallel to the ray.
+    /// parallel to the ray; the ray turned within the hip's spread cone ([`spread::scatter`] of
+    /// that frame and shot).
     #[test]
     fn modern_bullets_go_to_the_aims_hit_point() {
         use movement::action::FIRE;
@@ -6022,16 +6122,26 @@ mod tests {
             let mut first = None;
             for _ in 0..10 {
                 run_with(&mut m, &arena, &w, 1, |_| [modern(FIRE), Input::default()]);
-                first = first.or(m.bullets.first().map(|b| (b.1.pos, b.1.dir)));
+                let shot = (m.tick - 1, m.players[0].shots, m.aims[0].unwrap());
+                first = first.or(m.bullets.first().map(|b| (b.1.pos, b.1.dir, shot)));
             }
-            let (pos, dir) = first.expect("a bullet");
+            let (pos, dir, (t, shots, (eye, aim))) = first.expect("a bullet");
             let s = (x - pos[0]) / dir[0];
             let at: Vec<f32> = (0..3).map(|j| pos[j] + s * dir[j]).collect();
             let side = movement::AIM_SHOULDER;
-            assert!((at[2] - side).abs() < 0.5, "{weapon:#x} {at:?}");
+            assert_eq!((eye[2], aim), (side, [1.0, 0.0, 0.0]));
+            let turned = spread::scatter(aim, spread::cones(weapon).0, t, 0, shots);
+            let to: Vec<f32> = (0..3)
+                .map(|j| eye[j] + (x - eye[0]) / turned[0] * turned[j])
+                .collect();
+            assert!(
+                (to[2] - side).abs() + (to[1] - 67.5).abs() > 1.0,
+                "turned {to:?}"
+            );
+            assert!((at[2] - to[2]).abs() < 0.5, "{weapon:#x} {at:?} {to:?}");
             // The tommy gun's climb lifts it a little.
             let rise = if weapon == 0x38 { 20.0 } else { 0.5 };
-            assert!((at[1] - 67.5).abs() < rise, "{weapon:#x} {at:?}");
+            assert!((at[1] - to[1]).abs() < rise, "{weapon:#x} {at:?} {to:?}");
         }
     }
 

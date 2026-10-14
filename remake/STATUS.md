@@ -1,5 +1,215 @@
 # Status after wave 6 (2026-10-10)
 
+## Controls C4: the client's feel (2026-10-15)
+**Lane C4-client** of `../CONTROLS_RESEARCH.md` (§4, §8, §9, §10). Client only plus one helper pulled out in
+conker-rules (`game::can_mount`, `mounted_guns`' own gate, same behaviour). **No wire change**, no `PROTOCOL_ID` bump
+from this half; the shoulder bit was already sent (C2).
+
+**R2's leftovers:**
+- The N64 reticle hides while aiming under MODERN (`hud::shown`: only without an orbit view).
+- The radar's up and the audio listener follow the orbit camera's view (`Orbit::view`: eye and look of the frame it
+  drew; none when Tank, Race, a mounted gun or the debug camera draws).
+- The pad's X: a tap (< `HOLD` 0.25 s) is Reload, a hold Interact (`orbit::hold`, `shared_x`: only while Reload and
+  Interact share a pad button). Presses shorter than a 30 Hz tick (Jump, Fire, Reload, Interact, Grenade) are latched
+  in `Orbit::taps` and sent once, so a quick tap (the grenade's included: the rules' press latch throws it) is never
+  lost between ticks; a held Grenade stays held, as on the keys.
+- The hit marker gets a black outline under it (`crosshair::outline`): readable over held fire's muzzle flash.
+- "PRESS F TO MOUNT" next to a free mounted gun (`hud::mount_prompt` on `game::can_mount`, the server's own gate).
+- One key-label helper, `hud::key_label` (`interact_label` gone): the bound key, or the pad button in its glyphs.
+- Settings: a DEFAULTS button next to APPLY / BACK resets the shown tab (its bindings and values; live, not saved
+  until APPLY; `settings_ui::reset`).
+
+**Masked upper-body aim** (`upper.rs`, new; `render.rs`'s `load_characters` and `pose_players`):
+- Each character's graph gets two mask groups (`joint_01`'s tree; the rest) and masked twins of the gaits (plain and
+  armed) and of the guns' idle / fire / aim / reload / draw / holster clips (`add_clip_with_mask`).
+- The local modern player with a gun on foot, aiming (R, drawn) or in a gun action, plays the legs' clip (its gait,
+  else its crouch or jump, else the gun's stand) under the upper body's: the weapon's aim clip (sniper rifle,
+  crossbow), else its fire clip's first frame (arms out), or the action itself. Crouched unaimed it shows the gun's
+  stand over the plain crouch (§9's missing armed crouch).
+- `upper::bend_upper` (PostUpdate, after the clips) pitches the spine by 0.35 of the aim pitch and the shoulders
+  (`joint_02`, `joint_07`) by the rest, so the guns follow the aim ray below the crosshair instead of crossing it.
+- Other players are unchanged (their aim pitch is not on the wire). The server's hit spheres stay posed from the
+  rules' single clip: the bend moves the drawn head about 2.5 units at ±12° and 17 at the ±80° limit (`head_drift`),
+  inside the 20-unit head sphere; arms are no hit part. On top of that, whatever `joint_01` differs between the
+  upper body's clip (aim pose, fire's first frame) and the rules' whole-body clip: not measured.
+
+**Shoulder swap:** the camera eases across (`ease_side`: exponential, 0.05 s time constant, settled in ~0.2 s)
+while the aim ray, the crosshair's point and the server's ray switch at once (the SHOULDER bit; scripts set it from
+the actions column).
+
+**Pad feel** (`orbit.rs`):
+- Move stick radial: nothing inside the dead zone (0.10 default, C2b's setting), full past 0.95, linear between;
+  Southpaw swaps the sticks and their dead zones. The look stick keeps C2b's squared curve.
+- Acceleration: 0.3 s at the look stick's edge ramps the turn to 1.75× over 0.25 s (`ramp`).
+- Aim assist, pads only: the look turns at 0.4× while the server's look ray crosses a living enemy's body
+  (`over_body`, short of the first wall; teammates excluded in team modes). The mouse never.
+- Vibration (Settings: Vibration): a hit taken (strong 0.6, 0.18 s) and a shot fired (weak 0.3, 0.06 s) through
+  Bevy's `GamepadRumbleRequest`. gilrs has no force feedback in the browser or on macOS: native Windows / Linux only.
+
+**Glyphs:** the pickup and mount prompts name the pad's button (A / X / SQUARE…, C3's vendor detection and Button
+prompts setting) while the pad is the device last used (`bindings::UsingPad`), else the key; the settings sheet's
+controls line and the rebind box's cancel line use the same glyphs.
+
+**Tests** (10 new): the X tap / hold and short taps reaching a tick; the shoulder ease and the instant ray; the
+edge ramp, the assist's slowdown and the rumble levels; the mount prompt's gate and the glyph labels; DEFAULTS per
+tab; the sheet's hint in both glyph sets; the marker's outline; the masked twins, the layer choice, the bend's angles
+and the head drift. `bun run test`, `bun run check` and the wasm clippy pass.
+
+**Screens** (`../lab/screens/controls-c4/`, `shots.sh`, native offscreen on port 5974): `aim.png` (aimed at
+player 2, the guns below the crosshair), `aim-side.png` / `aim-up-side.png` / `aim-strafe-side.png` (the debug
+camera from the side: aimed at −12°, at +24°, and strafing with the run's legs under the aim), `crouch-side.png`
+(the armed crouch), `swap.png` (over the left shoulder, the crosshair centred), `mount.png` (0x30's gun A:
+PRESS F TO MOUNT).
+
+**Left / unverified:** real pads (the X tap / hold, the ramp and assist tuning, rumble on Windows / Linux) and the
+browser; offscreen runs keep default settings, so the PlayStation glyphs are only unit-tested. No cross-fade into or
+out of the layered pose (it switches in a frame). Other skeletons than the 28-joint bodies bend their spine only.
+
+## Controls C4: spread and the rules' leftovers (2026-10-15)
+**Lane C4-rules** of `../CONTROLS_RESEARCH.md` (§3 "Accuracy", §9, §10). Shared simulation (conker-rules,
+conker-sim) and one mirror in the client's `orbit.rs`. Everything is MODERN-gated (bots never set it): the full
+`bun run test` passes with no N64-path expected value edited. Two modern tests changed, each by the item that asked
+for the change (below).
+
+**Spread** (`conker-rules/src/spread.rs`, new): under MODERN a shot leaves along its aim, turned within a cone.
+- `cone(f)` gives the cone: the hip's, a tighter one aimed (R held), none through a still scope, and up to
+  `SCOPE_MOVING` in proportion to the scope's speed (full at 0.5 × 35). It is 0 without MODERN.
+- `scatter` turns the shot by an offset hashed from (tick, slot, `Fighter::shots`) with lowbias32: a uniform radius
+  and angle (CS's, denser at the centre), `cos_sin` and `sqrt` only.
+  - It never draws the match's RNG, so the server and the prediction agree bit for bit.
+  - With no cone it returns the direction itself, so bot shots don't change.
+  - A player fires at most one shot a frame (the twin guns' muzzles fire 2 frames apart), so the shot count tells
+    the shots apart.
+- Damage, rate of fire and ammo are untouched.
+- Where the cone applies:
+  - the bullets (twin guns, pistol, 0x23, tommy gun): the aim ray is turned before its hit point is found;
+  - the sniper's ray;
+  - aimed shots (the crossbow through the scope, 0x14);
+  - the hip bolt;
+  - a mounted gun's sight.
+
+  `Match::aims` keeps the true aim, so the crosshair, the muzzle check and the laser are unaffected.
+- **The hip bolt no longer locks on under MODERN.** The lock-on (`lock_on`, a ±28° cone) would leave a spread
+  cone meaningless, so the bolt goes from the muzzle toward what the turned aim ray meets, as the bullets do. Bots
+  keep the lock-on. This changes behaviour beyond spread.
+
+| Weapon | Hip | Aimed (R) | Scope |
+|---|---|---|---|
+| twin guns 0x09 | 4.5° | 1.6° | – |
+| pistol 0x39 | 3.5° | 1.0° | – |
+| tommy gun 0x38 | 5.0° | 2.0° | – |
+| 0x23 | 3.5° | – (R held starts nothing, as the original) | – |
+| crossbows 0x18, 0x41; bone knives 0x3F | 7.5° (the hip bolt) | – | 0° still, up to 10° moving |
+| sniper 0x24 | – | – | 0° still, up to 10° moving |
+| mounted gun (on the aim) | 1.0° | | |
+
+The other weapons have no cone (the shotgun's spheres, the flame, rockets, blades). The constants are `ponytail:`
+guesses, tuned on the harness below.
+
+**Headshot rate** (`spread_hits_and_headshots_per_100_shots`, `#[ignore]`d; run it with `cargo test --release -p
+conker-rules --lib spread -- --ignored --nocapture`, 0.4 s; it is slow in debug):
+- A scripted MODERN shooter with a perfect mouse aims at the centre of a posed Tedi's head (the pack's poses, as the
+  server's), 100 shots a cell.
+- The target is put back every frame: 2 health, so a head hit is a type-0x2E kill (a headshot); never immune or
+  stunned; one idle pose.
+- Strafing: the target goes ±200 at 35 a frame, and the shooter leads it by its script and the flight time.
+- "Scoped, A-D": the shooter strafes left and right every 20 frames while scoped.
+- The tommy gun fires 8-frame bursts. 0x23's and the tommy gun's bullets have no head by the rules (the cylinder).
+
+Each cell is hits / headshots per 100 shots, before → after (before: this tree without spread; the crossbow's hip
+bolt locked on):
+
+| Weapon, mode | 300 | 800 | 1,500 | 300 strafing | 800 strafing | 1,500 strafing |
+|---|---|---|---|---|---|---|
+| twin guns, hip | 100/100 → 91/89 | 100/100 → 48/28 | 100/100 → 24/11 | 41/17 → 35/21 | 52/5 → 30/7 | 42/3 → 21/5 |
+| twin guns, aimed (R) | 100/100 → 100/100 | 100/100 → 94/92 | 100/100 → 71/58 | 41/17 → 39/18 | 52/5 → 41/13 | 42/3 → 47/14 |
+| pistol, hip | 100/100 → 100/100 | 100/100 → 76/63 | 100/100 → 42/30 | 76/76 → 69/49 | 100/100 → 68/41 | 86/86 → 38/23 |
+| pistol, aimed (R) | 100/100 → 100/100 | 100/100 → 100/100 | 100/100 → 95/88 | 76/76 → 75/69 | 100/100 → 97/67 | 86/86 → 70/54 |
+| 0x23, hip | 100/0 → 92/0 | 100/0 → 61/0 | 100/0 → 35/0 | 94/0 → 88/0 | 100/0 → 68/0 | 100/0 → 46/0 |
+| tommy gun, hip | 100/0 → 78/0 | 34/0 → 28/0 | 34/0 → 8/0 | 70/0 → 65/0 | 100/0 → 46/0 | 48/0 → 10/0 |
+| tommy gun, aimed (R) | 100/0 → 87/0 | 34/0 → 50/0 | 34/0 → 26/0 | 70/0 → 68/0 | 100/0 → 83/0 | 48/0 → 32/0 |
+| sniper, scoped, still | 100/100 → 100/100 | 100/100 → 100/100 | 100/100 → 100/100 | 100/100 → 100/100 | 100/100 → 100/100 | 100/100 → 100/100 |
+| sniper, scoped, A-D | 100/100 → 57/48 | 100/100 → 50/41 | 100/100 → 36/32 | 100/100 → 80/73 | 100/100 → 56/45 | 100/100 → 39/35 |
+| crossbow, hip | 100/0 → 66/46 | 100/0 → 33/20 | 100/0 → 15/12 | 5/0 → 33/13 | 1/0 → 18/7 | 6/0 → 9/3 |
+| crossbow, scoped, still | 100/99 → 100/99 | 100/99 → 100/99 | 100/99 → 100/99 | 99/99 → 99/99 | 99/99 → 99/99 | 99/99 → 99/99 |
+| crossbow, scoped, A-D | 100/99 → 75/67 | 100/99 → 54/46 | 100/99 → 33/25 | 88/88 → 86/79 | 91/91 → 51/35 | 99/99 → 33/26 |
+
+What the measure shows:
+- Without spread, every modern bullet weapon put 100 of 100 on a standing head at any range. The N64's level twin-gun
+  bullets at 41 up hit the body only.
+- With spread, hip fire is reliable at 300 and falls off past 800, and aiming keeps the twin guns and the pistol
+  deadly to mid range.
+- A still scope stays exact (CS's AWP); A-D in the scope costs about half the hits.
+- The strafing columns are low even before: see "Left".
+
+**The shoulder ray against a wall:** `movement::aim_ray(pos, input, world)` starts the ray `aim_reach(…)` out from
+the pivot.
+- That is `AIM_SHOULDER`, or `AIM_WALL_GAP` (8) short of a wall nearer, found with `CollisionWorld::ray`, the line
+  query the client's arm already uses.
+- With no wall the start's bits are the same as before.
+- The client's `orbit::arm_at` calls the same `aim_reach` (for the eased shoulder too), so the eye's line stays the
+  ray's, and `crosshair.rs` gets it through `arm`.
+
+**A grenade tap during a draw** is latched: the press now counts with a weapon drawn or being drawn
+(`Action::Draw`), and `redraw` arms once the latched throw has a weapon drawn (`redraw |= throw && drawn`). The
+draw finishes, then the weapon holsters, the grenade is thrown, and the weapon is drawn again.
+
+**Fire in the draw's last frame:** `pad(f, settings, input, t)` counts a draw's last frame (`t − since ≥ draw`) as
+drawn.
+- The rules end a timed action before a new one starts (V ctlw_k5: B in a reload's last frame holsters), and the N64's
+  Z held through a draw fires in that frame. So FIRE held now fires there too, one frame earlier than before.
+- The same row also fixes JUMP there: it no longer gives A for a weapon that doesn't jump, which used to start a
+  reload. GRENADE still waits for the frame after.
+
+**Tests** (headless; 7 new, 1 ignored):
+- `a_wall_at_the_shoulder_pulls_the_aim_rays_start_in` (sim): a wall 10 out pulls the start to 2; the other shoulder
+  keeps its 20.
+- `a_wall_at_the_shoulder_pulls_the_arm_in_as_the_aim_ray` (client): the arm's start equals `aim_ray`'s, bit for bit.
+- `modern_grenade_tapped_during_a_draw_throws_after_it`: Draw, Free, Holster, Free, Pull, Hold, Throw, Free, Draw,
+  Free; 2 grenades left and one in flight. It fails on the old latch.
+- `modern_the_draws_last_frame_counts_as_drawn`: the twin guns' fire starts in the draw's last frame; JUMP there jumps
+  and doesn't reload. It fails without the change.
+- `the_cone_is_modern_only_and_tightens_aimed_and_scoped`: no cone without MODERN; hip, then aimed, then still scope,
+  half speed, mounted gun.
+- `the_scatter_fills_its_cone_from_tick_slot_and_shot`: within the cone, all 4 quarters reached, deterministic.
+- `spread_hits_and_headshots_per_100_shots` (ignored): the table above.
+
+Existing tests:
+- Expected values changed:
+  - `modern_fire_draws_and_fires_once_ready`: the shot comes on frame `draw` instead of `draw + 1` (item 4).
+  - `modern_bullets_go_to_the_aims_hit_point`: the line meets the wall where the turned ray does (`spread::scatter`
+    of that frame and shot), and the test checks that the turn moved it (item 1).
+- Call sites only: `pad`'s `t` (3 places, `0`) and `aim_ray`'s world (C2b's arm test). Every replay, rules and bot
+  test is otherwise unchanged.
+
+**Wire and shared simulation:**
+- No wire change: `Input` and `Fighter` keep their fields, and `PROTOCOL_ID` is untouched.
+- The shared simulation changes for MODERN players only:
+  - shot directions (spread);
+  - the hip bolt's aim;
+  - the aim ray's start by a wall;
+  - `pad`'s draw-end frame;
+  - the grenade latch.
+- A client and server of different trees would mispredict modern shots, so it is worth a protocol bump with the next
+  round.
+
+**Left:**
+- **A lead into empty space misses by the muzzle's offset.** The aim ray converges on what it meets, so a lead (or
+  any shot past a body's edge) converges on the far wall, and the bullets run parallel to the crosshair, offset by the
+  muzzle (±20 for the twin guns). That is why the twin guns' strafing column is ~40 even without spread. A fix would
+  converge at a set distance or the nearest body near the ray.
+- **The tommy gun's climb** (up to 30 steps × 200 units ≈ 33°) lifts its bullets off the crosshair, where the N64's
+  reticle climbed with them. Under MODERN it may want to become a camera kick (client) or be scaled.
+- The sniper's aimed ray doesn't count in `Fighter::shots` (the Aim branch starts the fire itself; a pre-existing
+  accuracy stat). Its spread hash varies by the tick.
+- Not built:
+  - a movement or jump cone outside the scope;
+  - bloom over sustained fire;
+  - a crouch bonus;
+  - the cone drawn on the crosshair (`spread::cone(f)` gives it, in degrees, for the client).
+- The pistol's head needs the server's posed parts: without the pack (the replays) and in the client's prediction it
+  has none, as before.
+
 ## Controls C3: the Esc menu, settings and rebinding (2026-10-15)
 **Lane C3** of `../CONTROLS_RESEARCH.md` (§5, §6, §7, §10). Client only, **no wire change** and no simulation change:
 the menu only holds the input `buffer_input` already sends while paused.

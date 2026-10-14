@@ -397,7 +397,8 @@ struct Seen {
 #[derive(Component, Clone, Copy)]
 struct Heard(Seen);
 
-/// The listener: the local player (its slot and position) and its follow camera's right (xz).
+/// The listener: the local player (its slot and position) and its view's right (xz): the follow
+/// camera's, or the modern controls' orbit camera's look (`view`) while it draws.
 #[derive(Clone, Copy)]
 struct Ear {
     slot: u16,
@@ -406,9 +407,9 @@ struct Ear {
 }
 
 impl Ear {
-    fn new(slot: u16, pos: [f32; 3], camera: &FollowCamera) -> Self {
+    fn new(slot: u16, pos: [f32; 3], camera: &FollowCamera, view: Option<Vec3>) -> Self {
         let (eye, at) = camera.drawn.view(&camera.follow);
-        let ahead = at - eye;
+        let ahead = view.unwrap_or(at - eye);
         let right = Vec2::new(-ahead.z, ahead.x).normalize_or_zero();
         Self {
             slot,
@@ -2609,12 +2610,13 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
-    (flickers, bag, nest, world, laser): (
+    (flickers, bag, nest, world, laser, orbit): (
         Option<Res<crate::lights::Flickers>>,
         Res<crate::heist::Bag>,
         Option<Res<crate::raptor::Nest>>,
         Option<Res<conker_sim::net::Collision>>,
         Res<crate::laser::Own>,
+        Option<Res<crate::orbit::Orbit>>,
     ),
     mut commands: Commands,
 ) {
@@ -2707,7 +2709,9 @@ fn hear(
         .start
         .filter(|&st| st != u32::MAX && tick >= st)
         .map_or(-1, |st| i64::from(m.first_read + (tick - st)));
-    // While an outro runs the listener is its camera.
+    // While an outro runs the listener is its camera; under the modern controls the orbit camera's
+    // view while it draws.
+    let view = orbit.and_then(|o| o.view);
     let running = playing.running(&outros);
     let ear = match running {
         Some((o, k)) => {
@@ -2720,7 +2724,7 @@ fn hear(
                 right: right.to_array(),
             }
         }
-        None => Ear::new(c.slot, p.pos, camera),
+        None => Ear::new(c.slot, p.pos, camera, view.map(|v| v.1)),
     };
     let cx = Cx {
         pack: &pack,
@@ -2735,7 +2739,7 @@ fn hear(
         s.player(&cx, was, is);
     }
     s.grenades(&cx, grenades);
-    let eye = camera.drawn.view(&camera.follow).0;
+    let eye = view.map_or(camera.drawn.view(&camera.follow).0, |v| v.0);
     s.fly_by(&cx, &m.bullets, eye.to_array(), &all);
     let flashed: Vec<[f32; 3]> = flickers.iter().flat_map(|f| f.flashed()).collect();
     s.match_sounds(&cx, m, &all, &flashed);

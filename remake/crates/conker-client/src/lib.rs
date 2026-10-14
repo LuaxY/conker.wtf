@@ -44,6 +44,7 @@ pub mod smooth;
 pub mod tank;
 pub mod teams;
 pub mod traps;
+pub mod upper;
 
 /// Browser fetches: the asset pack's data files and the connect token.
 #[cfg(target_family = "wasm")]
@@ -1228,6 +1229,7 @@ fn buffer_input(
             let line = read.and_then(|r| script_line(&script.0, r));
             if let Some((a, [x, y])) = line.and_then(|l| l.modern) {
                 actions = a;
+                orbit.left = a & conker_sim::movement::action::SHOULDER != 0;
                 let counts = Vec2::new(f32::from(x), f32::from(y));
                 orbit.turn(orbit::mouse_turn(counts, &settings.mouse, 1.0));
             }
@@ -1267,6 +1269,7 @@ fn buffer_input(
         }
     };
     orbit.aiming = modern && buttons & BUTTON_R != 0;
+    orbit.taps = 0; // sent (or dropped by a screen) with this tick
     action.0 = match modern {
         true => Input {
             stick_x,

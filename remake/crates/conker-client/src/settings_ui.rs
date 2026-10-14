@@ -243,6 +243,19 @@ impl Field {
         }
     }
 
+    /// Back to its default.
+    pub fn reset(self, s: &mut Settings) {
+        let mut d = Settings::default();
+        match (self.value(s), self.value(&mut d)) {
+            (Value::Number(v, _), Value::Number(w, _)) => *v = *w,
+            (Value::Toggle(v, _), Value::Toggle(w, _)) => *v = *w,
+            (Value::Mode(v), Value::Mode(w)) => *v = *w,
+            (Value::Prompts(v), Value::Prompts(w)) => *v = *w,
+            (Value::Colour(v), Value::Colour(w)) => *v = *w,
+            _ => {}
+        }
+    }
+
     /// The value as the row shows it.
     pub fn text(self, s: &Settings) -> String {
         let text = match self.value(&mut s.clone()) {
@@ -326,6 +339,27 @@ pub fn bind(b: &mut Bindings, a: Action, slot: Slot, v: Bound, how: Resolve) {
         set(b, x, s, if how == Resolve::Swap { old } else { None });
     }
     set(b, a, slot, Some(v));
+}
+
+/// DEFAULTS: tab `tab`'s rows back to their defaults (a binding tab: its slots of every action).
+pub fn reset(tab: Tab, s: &mut Settings, b: &mut Bindings) {
+    let d = Bindings::default();
+    for row in rows(tab) {
+        match row {
+            Row::Bind(a) => {
+                let slots = match tab {
+                    Tab::Pad => [Slot::Pad].as_slice(),
+                    _ => &[Slot::Key(0), Slot::Key(1)],
+                };
+                for &slot in slots {
+                    set(b, a, slot, get(&d, a, slot));
+                }
+            }
+            Row::Value(f) => f.reset(s),
+            Row::Group(_) => {}
+        }
+    }
+    s.bindings = b.overrides();
 }
 
 /// What the devices hold this frame: keys, mouse buttons, the wheel's turn, the pad's buttons
@@ -484,6 +518,14 @@ pub fn glyphs(setting: Prompts, vendor: Option<u16>, name: &str) -> Glyphs {
         (Prompts::Auto, Some(0x045E)) => Glyphs::Xbox,
         _ if sony.iter().any(|s| name.contains(s)) => Glyphs::PlayStation,
         _ => Glyphs::Xbox,
+    }
+}
+
+/// The first pad's glyphs ([`glyphs`] by its vendor and name), the setting's without one.
+pub fn pad_glyphs(setting: Prompts, pad: Option<(&Gamepad, Option<&Name>)>) -> Glyphs {
+    match pad {
+        Some((p, name)) => glyphs(setting, p.vendor_id(), name.map_or("", |n| n.as_str())),
+        None => glyphs(setting, None, ""),
     }
 }
 

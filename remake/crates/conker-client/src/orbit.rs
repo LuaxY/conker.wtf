@@ -12,17 +12,21 @@
 //! keep their own cameras and the N64 input, and a mounted gun its sight.
 
 use crate::bindings::{Action, Bindings, Controls, Devices};
+use crate::outro::team_mode;
 use crate::settings::{self, Mode, Settings};
 use crate::{BUTTON_B, BUTTON_R, C_DOWN, C_UP, FollowCamera, STICK_MAX, STICK_WALK};
 use bevy::camera_controller::free_camera::FreeCameraState;
+use bevy::input::gamepad::{GamepadRumbleIntensity, GamepadRumbleRequest};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use conker_rules::net::Fighting;
+use conker_rules::projectile::raycast;
 use conker_sim::collision::CollisionWorld;
+use conker_sim::movement::state::{CROUCH, CROUCH_WALK};
 use conker_sim::movement::{
-    AIM_ARM, AIM_PITCH_MAX, AIM_PIVOT_HEIGHT, AIM_SHOULDER, Input, action, cos_sin,
+    AIM_ARM, AIM_PITCH_MAX, AIM_PIVOT_HEIGHT, Input, action, aim_reach, cos_sin,
 };
-use conker_sim::net::{Collision, Player};
+use conker_sim::net::{Collision, Combat, MatchView, Player};
 
 /// Degrees a mouse count turns at sensitivity 1 (CS's `m_yaw`, `m_pitch`).
 pub const MOUSE_DEGREES: f32 = 0.022;
@@ -37,8 +41,31 @@ pub const CURVE: f32 = 2.0;
 pub const AIM_ZOOM: f32 = 1.5;
 /// The zoom's blend time constant, seconds.
 const ZOOM_TIME: f32 = 0.06;
+/// The shoulder swap's ease across, a time constant (seconds): the drawn eye only; the ray (the
+/// server's) swaps at once.
+pub const SWAP_TIME: f32 = 0.05;
 /// How far short of a wall the arm stops (the view's near plane is 4).
 const ARM_MARGIN: f32 = 8.0;
+/// The pad's shared Reload / Interact button (X, §7): let go sooner, a Reload; held this long
+/// (seconds), Interact while held (CoD's).
+pub const HOLD: f32 = 0.25;
+/// The look stick's acceleration ramp: held at its edge this long (seconds), its speed ramps over
+/// [`RAMP_TIME`] up to [`RAMP_GAIN`] times.
+pub const RAMP_DELAY: f32 = 0.3;
+pub const RAMP_TIME: f32 = 0.25;
+pub const RAMP_GAIN: f32 = 1.75;
+/// The pad's look over an enemy's body (aim assist: a slowdown only, never for the mouse), and
+/// how far it looks for one (the crosshair's wall range).
+pub const ASSIST: f32 = 0.4;
+const ASSIST_RANGE: f32 = 20_000.0;
+/// The actions a press shorter than a tick still sends once ([`Orbit::taps`]).
+const TAPPED: [(Action, u8); 5] = [
+    (Action::Jump, action::JUMP),
+    (Action::Fire, action::FIRE),
+    (Action::Reload, action::RELOAD),
+    (Action::Interact, action::INTERACT),
+    (Action::Grenade, action::GRENADE),
+];
 
 /// The modern controls' state.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
@@ -59,6 +86,19 @@ pub struct Orbit {
     pub zoom: f32,
     /// The respawn count ([`FollowCamera::lives`]) the camera last turned behind the player for.
     pub lives: Option<u16>,
+    /// The drawn shoulder (1 right, −1 left), easing toward [`Orbit::left`]'s ([`SWAP_TIME`]); none
+    /// until the camera first draws (it starts there).
+    pub side: Option<f32>,
+    /// The view this camera drew last (eye, look), for the radar and the listener; none when another
+    /// camera drew it (Tank, Race, a mounted gun, the debug camera).
+    pub view: Option<(Vec3, Vec3)>,
+    /// Actions pressed since the tick last read the input: a press shorter than a tick is sent
+    /// once ([`TAPPED`]); the pad's X tap ([`HOLD`]) as Reload.
+    pub taps: u8,
+    /// How long the pad's shared Reload / Interact button has been held (seconds).
+    pub x_held: Option<f32>,
+    /// How long the look stick has been held at its edge (seconds; [`ramp`]).
+    pub edge: f32,
 }
 
 impl Orbit {
@@ -105,13 +145,16 @@ impl Orbit {
 /// point of the look line nearest the pivot, where the aim ray starts) and the eye, `AIM_ARM` back
 /// along the look line, or short of the first wall on it.
 pub fn arm(orbit: &Orbit, feet: Vec3, world: &CollisionWorld) -> (Vec3, Vec3) {
+    arm_at(orbit, feet, world, if orbit.left { -1.0 } else { 1.0 })
+}
+
+/// [`arm`] over shoulder `side` (1 right, −1 left; between them while the swap eases across).
+pub fn arm_at(orbit: &Orbit, feet: Vec3, world: &CollisionWorld, side: f32) -> (Vec3, Vec3) {
     let (dir, right) = orbit.look();
-    let side = if orbit.left {
-        -AIM_SHOULDER
-    } else {
-        AIM_SHOULDER
-    };
-    let start = feet + Vec3::Y * AIM_PIVOT_HEIGHT + right * side;
+    // The aim ray's start (conker-sim's `aim_ray`): short of a wall at the shoulder.
+    let pivot = feet + Vec3::Y * AIM_PIVOT_HEIGHT;
+    let reach = aim_reach(pivot.to_array(), right.to_array(), side.signum(), world);
+    let start = pivot + right * (side * reach);
     let wall = world.ray(start.to_array(), (-dir).to_array(), AIM_ARM + ARM_MARGIN);
     let back = wall.map_or(AIM_ARM, |h| (h.dist - ARM_MARGIN).clamp(0.0, AIM_ARM));
     (start, start - dir * back)
@@ -143,6 +186,52 @@ pub fn stick_turn(v: Vec2, p: &settings::Pad, scale: f32, dt: f32) -> Vec2 {
     let up = if p.invert_y { -s.y } else { s.y };
     let k = p.sensitivity * scale * dt * UNITS;
     Vec2::new(-s.x * PAD_RATE[0] * k, up * PAD_RATE[1] * k)
+}
+
+/// The move stick: nothing within the radial dead zone `dead`, full past [`OUTER`], linear
+/// between (the stick's speed curve is the movement's own).
+pub fn move_share(v: Vec2, dead: f32) -> Vec2 {
+    let len = v.length();
+    if len <= dead {
+        return Vec2::ZERO;
+    }
+    v / len * ((len - dead) / (OUTER - dead).max(f32::EPSILON)).min(1.0)
+}
+
+/// The pad's move and look sticks (Southpaw swaps them), and the settings with their dead zones
+/// in that order (the setting's are the physical left and right sticks').
+pub fn sticks(pad: &Gamepad, p: &settings::Pad) -> ([Vec2; 2], settings::Pad) {
+    let [l, r] = [pad.left_stick(), pad.right_stick()];
+    match p.southpaw {
+        true => (
+            [r, l],
+            settings::Pad {
+                dead_zone: [p.dead_zone[1], p.dead_zone[0]],
+                ..*p
+            },
+        ),
+        false => ([l, r], *p),
+    }
+}
+
+/// The look stick's acceleration after `edge` seconds at its edge: 1, then from [`RAMP_DELAY`] up
+/// to [`RAMP_GAIN`] over [`RAMP_TIME`].
+pub fn ramp(edge: f32) -> f32 {
+    let t = ((edge - RAMP_DELAY) / RAMP_TIME).clamp(0.0, 1.0);
+    1.0 + (RAMP_GAIN - 1.0) * t
+}
+
+/// Aim assist: the look ray from `start` along `dir` meets one of the `bodies` (position, hit
+/// cylinder, crouched) within `len` (the first wall's distance).
+pub fn over_body(
+    start: Vec3,
+    dir: Vec3,
+    len: f32,
+    mut bodies: impl Iterator<Item = ([f32; 3], conker_rules::damage::Hitbox, bool)>,
+) -> bool {
+    use conker_rules::projectile::hits_body;
+    let (s, d) = (start.to_array(), dir.to_array());
+    bodies.any(|(at, h, crouched)| hits_body(s, d, len, at, h, crouched).is_some())
 }
 
 /// The view's vertical angle, degrees: the follow camera's, narrowed by `zoom` of [`AIM_ZOOM`].
@@ -212,13 +301,45 @@ pub fn press(b: &Bindings, d: &Devices, o: &mut Orbit, s: &Settings) {
     }
 }
 
+/// The pad button Reload and Interact share (X by default), told apart by how long it is held.
+pub fn shared_x(b: &Bindings) -> Option<GamepadButton> {
+    let pad = b.get(Action::Reload).pad;
+    pad.filter(|_| b.get(Action::Interact).pad == pad)
+}
+
+/// A frame's presses for the next tick (`dt` seconds): the [`TAPPED`] actions pressed, and the
+/// shared X: let go before [`HOLD`] a Reload, else Interact while held ([`input`]).
+pub fn hold(b: &Bindings, d: &Devices, o: &mut Orbit, dt: f32) {
+    let x = shared_x(b);
+    let [keys, pad] = split(d);
+    for (a, bit) in TAPPED {
+        let split = x.is_some() && matches!(a, Action::Reload | Action::Interact);
+        if b.just_pressed(a, if split { &keys } else { d }) {
+            o.taps |= bit;
+        }
+    }
+    let down = x.is_some_and(|x| pad.pad.is_some_and(|p| p.pressed(x)));
+    match (down, o.x_held) {
+        (true, t) => o.x_held = Some(t.unwrap_or(0.0) + dt),
+        (false, Some(t)) => {
+            if t < HOLD {
+                o.taps |= action::RELOAD;
+            }
+            o.x_held = None;
+        }
+        (false, None) => {}
+    }
+}
+
 /// The modern input from the devices (its `camera_yaw` and `aim_pitch` are the caller's):
-/// - The Move actions push the stick full, else the pad's left stick does; Walk halves it.
+/// - The Move actions push the stick full, else the pad's move stick does (its dead zone,
+///   [`move_share`]; Southpaw's right); Walk halves it.
 /// - Aim sends R (the N64 aim camera and scope still key on it), Holster B; through a scope
 ///   (`scoped`), the zoom actions C-up and C-down. The C buttons do nothing else: the right stick
 ///   looks, and the grenade is its action.
 /// - Jump, Crouch, Fire, Reload, Interact and Grenade send their actions, the left shoulder
-///   SHOULDER, and MODERN always (conker-rules' `pad()` turns them into the N64 bits).
+///   SHOULDER, and MODERN always (conker-rules' `pad()` turns them into the N64 bits); the pad's
+///   shared X Interact only once held ([`hold`]: a tap is a Reload), and [`Orbit::taps`] too.
 pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -> Input {
     use Action::*;
     let held = |a| b.pressed(a, d);
@@ -227,8 +348,18 @@ pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -
     if stick == Vec2::ZERO
         && let Some(pad) = d.pad
     {
-        stick = pad.left_stick();
+        let ([v, _], p) = sticks(pad, &s.pad);
+        stick = move_share(v, p.dead_zone[0]);
     }
+    // The pad's shared X sends Reload on a tap ([`hold`]'s), Interact once held.
+    let keys = split(d)[0];
+    let (reload, interact) = match shared_x(b) {
+        Some(_) => (
+            b.pressed(Reload, &keys),
+            b.pressed(Interact, &keys) || o.x_held.is_some_and(|t| t >= HOLD),
+        ),
+        None => (held(Reload), held(Interact)),
+    };
     let (aim, crouch, walk) = (on(b, d, o, s, 0), on(b, d, o, s, 1), on(b, d, o, s, 2));
     let scale = if walk { STICK_WALK } else { STICK_MAX };
     let q = |v: f32| (v.clamp(-1.0, 1.0) * scale).round() as i8;
@@ -242,8 +373,8 @@ pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -
         (held(Jump), action::JUMP),
         (crouch, action::CROUCH),
         (held(Fire), action::FIRE),
-        (held(Reload), action::RELOAD),
-        (held(Interact), action::INTERACT),
+        (reload, action::RELOAD),
+        (interact, action::INTERACT),
         (held(Grenade), action::GRENADE),
         (o.left, action::SHOULDER),
     ];
@@ -251,7 +382,7 @@ pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -
     let actions = acts
         .iter()
         .filter(|x| x.0)
-        .fold(action::MODERN, |a, x| a | x.1);
+        .fold(action::MODERN | o.taps, |a, x| a | x.1);
     Input {
         stick_x: q(stick.x),
         stick_y: q(stick.y),
@@ -261,10 +392,11 @@ pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -
     }
 }
 
-/// Every frame, before the tick reads it: the mouse's counts and the right stick turn the camera,
-/// the toggles and the shoulder swap take this frame's presses. Not while the debug camera flies,
-/// a screen or the lost pointer lock holds the input, nor in the modes with their own camera or on
-/// a mounted gun; natively only with the cursor grabbed (a click); scripts turn it themselves.
+/// Every frame, before the tick reads it: the mouse's counts and the look stick turn the camera
+/// (the stick ramped at its edge, [`ramp`], and slowed over an enemy's body, [`ASSIST`]), the
+/// toggles, the shoulder swap and the taps take this frame's presses. Not while the debug camera
+/// flies, a screen or the lost pointer lock holds the input, nor in the modes with their own camera
+/// or on a mounted gun; natively only with the cursor grabbed (a click); scripts turn it themselves.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn look(
     controls: Controls,
@@ -272,15 +404,20 @@ fn look(
     motion: Option<Res<AccumulatedMouseMotion>>,
     time: Res<Time<Real>>,
     mut orbit: ResMut<Orbit>,
-    own: Query<(&Player, &FollowCamera, Option<&Fighting>)>,
+    own: Query<(&Player, &Combat, &FollowCamera, Option<&Fighting>)>,
     (free, team, paused): (
         Query<&FreeCameraState>,
         Res<crate::teams::Screen>,
         Res<crate::pointer::Paused>,
     ),
     cursor: Query<&bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+    (others, game, world): (
+        Query<(&Player, &Combat), With<lightyear::prelude::Interpolated>>,
+        Query<&MatchView>,
+        Res<Collision>,
+    ),
 ) {
-    let Ok((p, cam, fighting)) = own.single() else {
+    let Ok((p, c, cam, fighting)) = own.single() else {
         return;
     };
     orbit.face(p.facing, cam.lives);
@@ -294,6 +431,7 @@ fn look(
     }
     let d = controls.devices(0.0, Vec2::ZERO);
     press(&controls.bindings, &d, &mut orbit, &settings);
+    hold(&controls.bindings, &d, &mut orbit, time.delta_secs());
     let scope = cam.follow.cam.scope;
     let scope = scope.on.then_some(&scope);
     let aiming = on(&controls.bindings, &d, &orbit, &settings, 0);
@@ -308,12 +446,36 @@ fn look(
         turn += mouse_turn(m.delta, &settings.mouse, scale);
     }
     if let Some(pad) = d.pad {
+        let ([_, v], ps) = sticks(pad, &settings.pad);
         let scale = if aiming {
-            aim_scale(fov, settings.pad.aim_multiplier)
+            aim_scale(fov, ps.aim_multiplier)
         } else {
             1.0
         };
-        turn += stick_turn(pad.right_stick(), &settings.pad, scale, time.delta_secs());
+        let dt = time.delta_secs();
+        let at_edge = stick_share(v, ps.dead_zone[1]).length() >= 1.0;
+        orbit.edge = if at_edge { orbit.edge + dt } else { 0.0 };
+        // Aim assist: the look ray (the server's) over a living enemy's body, short of a wall.
+        let m = game.iter().next();
+        let enemy = |o: &Combat| {
+            o.health > 0 && o.slot != c.slot && !m.is_some_and(|m| team_mode(m) && o.team == c.team)
+        };
+        let (start, dir) = (arm(&orbit, Vec3::from(p.pos), &world.0).0, orbit.look().0);
+        let len = raycast(&world.0, start.to_array(), dir.to_array(), ASSIST_RANGE);
+        let bodies = (others.iter().filter(|(_, o)| enemy(o))).map(|(o, oc)| {
+            let crouched = matches!(o.state, CROUCH | CROUCH_WALK);
+            (
+                o.pos,
+                conker_rules::characters::body(oc.class).hitbox,
+                crouched,
+            )
+        });
+        let assist = if over_body(start, dir, len, bodies) {
+            ASSIST
+        } else {
+            1.0
+        };
+        turn += stick_turn(v, &ps, scale, dt) * ramp(orbit.edge) * assist;
     }
     orbit.turn(turn);
 }
@@ -331,6 +493,7 @@ pub fn camera(
     camera: Single<(&mut Transform, &mut Projection, &FreeCameraState)>,
 ) {
     let (mut transform, mut projection, free) = camera.into_inner();
+    orbit.view = None;
     let Ok((p, cam, fighting)) = player.single() else {
         return;
     };
@@ -340,16 +503,70 @@ pub fn camera(
     }
     let k = 1.0 - (-time.delta_secs() / ZOOM_TIME).exp();
     orbit.zoom += (f32::from(u8::from(orbit.aiming)) - orbit.zoom) * k;
+    let side = ease_side(orbit.side, orbit.left, time.delta_secs());
+    orbit.side = Some(side);
     let f = fixed.overstep_fraction().clamp(0.0, 1.0);
     let drawn = cam.drawn.between(cam.drawn.frame(p, &cam.follow), f);
     let scope = cam.follow.cam.scope;
     let (eye, fov) = match scope.on {
         true => (drawn.eye, crate::render::fov(&scope)),
-        false => (arm(&orbit, drawn.body, &world.0).1, aim_fov(orbit.zoom)),
+        false => (
+            arm_at(&orbit, drawn.body, &world.0, side).1,
+            aim_fov(orbit.zoom),
+        ),
     };
-    *transform = Transform::from_translation(eye).looking_to(orbit.look().0, Vec3::Y);
+    let look = orbit.look().0;
+    *transform = Transform::from_translation(eye).looking_to(look, Vec3::Y);
+    orbit.view = Some((eye, look));
     if let Projection::Perspective(p) = &mut *projection {
         p.fov = fov.to_radians();
+    }
+}
+
+/// The drawn shoulder `dt` seconds on: from `side` (none: already there) toward the left's −1 or
+/// the right's 1 ([`SWAP_TIME`]).
+pub fn ease_side(side: Option<f32>, left: bool, dt: f32) -> f32 {
+    let to = if left { -1.0 } else { 1.0 };
+    let from = side.unwrap_or(to);
+    from + (to - from) * (1.0 - (-dt / SWAP_TIME).exp())
+}
+
+/// The pad's vibration for the local player's shots (`fired`: its shot count rose) and the hits it
+/// took (`hurt`: its health fell): (strong, weak) motors and how long, seconds.
+pub fn rumble(fired: bool, hurt: bool) -> Option<(GamepadRumbleIntensity, f32)> {
+    match (hurt, fired) {
+        (true, _) => Some((GamepadRumbleIntensity::strong_motor(0.6), 0.18)),
+        (false, true) => Some((GamepadRumbleIntensity::weak_motor(0.3), 0.06)),
+        _ => None,
+    }
+}
+
+/// The pad's vibration ([`rumble`]) when the Vibration setting is on: the first pad, as the
+/// controls read it. gilrs plays it natively where its platform has force feedback (not on macOS,
+/// nor in the browser: its web backend has none).
+fn vibrate(
+    settings: Res<Settings>,
+    own: Query<(&Combat, &Fighting), With<FollowCamera>>,
+    pads: Query<Entity, With<Gamepad>>,
+    mut last: Local<Option<(u16, u8)>>,
+    mut out: MessageWriter<GamepadRumbleRequest>,
+) {
+    let Ok((c, f)) = own.single() else {
+        return;
+    };
+    let now = (f.state.shots, c.health);
+    let was = last.replace(now);
+    let (Some((shots, health)), Some(gamepad)) = (was, pads.iter().next()) else {
+        return;
+    };
+    if let Some((intensity, secs)) =
+        rumble(now.0 > shots, now.1 < health).filter(|_| settings.pad.vibration)
+    {
+        out.write(GamepadRumbleRequest::Add {
+            duration: std::time::Duration::from_secs_f32(secs),
+            intensity,
+            gamepad,
+        });
     }
 }
 
@@ -362,13 +579,14 @@ pub fn build(app: &mut App, on: bool, windowed: bool) {
     });
     if on && windowed {
         app.add_systems(PreUpdate, look.after(bevy::input::InputSystems));
+        app.add_systems(Update, vibrate);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conker_sim::movement::aim_ray;
+    use conker_sim::movement::{AIM_SHOULDER, aim_ray};
 
     #[test]
     fn the_mouse_turns_right_and_looks_down_as_cs() {
@@ -429,7 +647,7 @@ mod tests {
             actions: action::MODERN | action::SHOULDER,
             ..Default::default()
         };
-        let (start, dir) = aim_ray(feet.to_array(), &input);
+        let (start, dir) = aim_ray(feet.to_array(), &input, &CollisionWorld::default());
         let (s, eye) = arm(&o, feet, &CollisionWorld::default());
         assert_eq!((s.to_array(), o.look().0.to_array()), (start, dir));
         assert!((s - eye - o.look().0 * AIM_ARM).length() < 1e-3);
@@ -453,6 +671,34 @@ mod tests {
         // The other shoulder: the start 40 across.
         o.left = false;
         assert!((arm(&o, feet, &wall).0 - s - Vec3::Z * 40.0).length() < 1e-3);
+    }
+
+    /// A wall at the right shoulder pulls the arm's start in where the server's aim ray starts (8
+    /// short of it, conker-sim's `aim_ray`), so the eye's line stays the ray's.
+    #[test]
+    fn a_wall_at_the_shoulder_pulls_the_arm_in_as_the_aim_ray() {
+        let o = Orbit::default();
+        let big = 5000.0;
+        let wall = CollisionWorld::new([
+            (
+                [[-big, -big, 10.0], [big, -big, 10.0], [-big, big, 10.0]],
+                5,
+            ),
+            ([[big, -big, 10.0], [big, big, 10.0], [-big, big, 10.0]], 5),
+        ]);
+        let input = Input {
+            camera_yaw: o.camera_yaw(),
+            aim_pitch: o.aim_pitch(),
+            actions: action::MODERN,
+            ..Default::default()
+        };
+        let (start, _) = aim_ray([0.0; 3], &input, &wall);
+        let (s, eye) = arm(&o, Vec3::ZERO, &wall);
+        assert_eq!(s.to_array(), start);
+        assert!(
+            (s.z - 2.0).abs() < 1e-3 && (eye.z - 2.0).abs() < 1e-3,
+            "{s} {eye}"
+        );
     }
 
     fn read(keys: &[KeyCode], mouse: &[MouseButton], wheel: f32, o: &Orbit, s: &Settings) -> Input {
@@ -533,5 +779,147 @@ mod tests {
             (o.latched, o.yaw, o.lives),
             (Default::default(), 1234.0, Some(1))
         );
+    }
+
+    /// §7: the pad's X reloads on a tap and interacts once held (CoD's); R and F stay immediate; a
+    /// press let go between two ticks (a grenade's LB tap) is still sent once.
+    #[test]
+    fn the_pads_x_taps_reload_and_holds_interact_and_short_taps_reach_a_tick() {
+        let (b, s) = (Bindings::default(), Settings::default());
+        let mut o = Orbit::default();
+        let mut pad = Gamepad::default();
+        let x = GamepadButton::West;
+        let both = action::RELOAD | action::INTERACT;
+        let frame = |pad: &Gamepad, o: &mut Orbit, dt| {
+            let d = Devices {
+                pad: Some(pad),
+                ..Devices::default()
+            };
+            hold(&b, &d, o, dt);
+            input(&b, &d, o, &s, false).actions
+        };
+        assert_eq!(shared_x(&b), Some(x));
+        pad.digital_mut().press(x);
+        assert_eq!(frame(&pad, &mut o, 0.1) & both, 0, "pressed: not yet");
+        pad.digital_mut().clear();
+        pad.digital_mut().release(x);
+        assert_eq!(frame(&pad, &mut o, 0.016) & both, action::RELOAD, "a tap");
+        o.taps = 0; // the tick sent it
+        pad.digital_mut().clear();
+        assert_eq!(frame(&pad, &mut o, 0.016) & both, 0, "once");
+        // Held past HOLD: Interact while held, no Reload when let go.
+        pad.digital_mut().press(x);
+        assert_eq!(frame(&pad, &mut o, 0.2) & both, 0);
+        pad.digital_mut().clear();
+        assert_eq!(frame(&pad, &mut o, 0.1) & both, action::INTERACT);
+        pad.digital_mut().release(x);
+        pad.digital_mut().clear();
+        assert_eq!(frame(&pad, &mut o, 0.016) & both, 0);
+        // LB's grenade pressed and let go before the tick read it: sent once.
+        let lb = GamepadButton::LeftTrigger;
+        pad.digital_mut().press(lb);
+        frame(&pad, &mut o, 0.016);
+        pad.digital_mut().release(lb);
+        pad.digital_mut().clear();
+        assert_ne!(frame(&pad, &mut o, 0.016) & action::GRENADE, 0);
+        // Bound apart, X is Reload alone, at once.
+        let mut apart = b.clone();
+        let mut interact = *apart.get(Action::Interact);
+        interact.pad = Some(GamepadButton::North);
+        apart.set(Action::Interact, interact);
+        assert_eq!(shared_x(&apart), None);
+        pad.digital_mut().press(x);
+        let d = Devices {
+            pad: Some(&pad),
+            ..Devices::default()
+        };
+        let a = input(&apart, &d, &Orbit::default(), &s, false).actions;
+        assert_eq!(a & both, action::RELOAD);
+    }
+
+    /// The shoulder swap: the ray (the server's) swaps at once, the drawn eye eases across, on the
+    /// same look (the crosshair stays centred on a parallel line).
+    #[test]
+    fn the_shoulder_swap_eases_the_eye_across_and_the_ray_swaps_at_once() {
+        let w = CollisionWorld::default();
+        let mut o = Orbit::default();
+        let (right, _) = arm(&o, Vec3::ZERO, &w);
+        o.left = true;
+        let (left, _) = arm(&o, Vec3::ZERO, &w);
+        assert!((right - left - Vec3::Z * 2.0 * AIM_SHOULDER).length() < 1e-4);
+        assert_eq!(
+            ease_side(None, true, 0.016),
+            -1.0,
+            "the first frame is there"
+        );
+        let mut side = 1.0;
+        side = ease_side(Some(side), true, 1.0 / 60.0);
+        assert!(side > 0.0 && side < 1.0, "{side}");
+        let (start, eye) = arm_at(&o, Vec3::ZERO, &w, side);
+        assert!(start.z < right.z && start.z > left.z);
+        assert!((start - eye).normalize().dot(o.look().0) > 0.9999);
+        for _ in 0..14 {
+            side = ease_side(Some(side), true, 1.0 / 60.0);
+        }
+        assert!(
+            (side + 1.0).abs() < 0.02,
+            "across in a quarter second: {side}"
+        );
+    }
+
+    /// §7's pad feel: the move stick's radial dead zone (linear), Southpaw, the look's ramp at its
+    /// edge, aim assist's slowdown over an enemy's body (not past a wall), the rumbles.
+    #[test]
+    fn the_pad_ramps_at_its_edge_slows_over_an_enemy_and_rumbles() {
+        assert_eq!(move_share(Vec2::new(0.06, 0.06), 0.1), Vec2::ZERO);
+        assert_eq!(move_share(Vec2::new(0.0, 0.96), 0.1), Vec2::Y);
+        assert!((move_share(Vec2::new(0.525, 0.0), 0.1).x - 0.5).abs() < 1e-5);
+        let mut pad = Gamepad::default();
+        pad.analog_mut().set(GamepadAxis::LeftStickX, 0.5);
+        pad.analog_mut().set(GamepadAxis::RightStickY, -0.7);
+        let p = settings::Pad {
+            dead_zone: [0.1, 0.2],
+            ..Default::default()
+        };
+        let ([mv, lk], q) = sticks(&pad, &p);
+        assert_eq!(
+            (mv, lk, q.dead_zone),
+            (Vec2::new(0.5, 0.0), Vec2::new(0.0, -0.7), [0.1, 0.2])
+        );
+        let south = settings::Pad {
+            southpaw: true,
+            ..p
+        };
+        let ([mv, lk], q) = sticks(&pad, &south);
+        assert_eq!(
+            (mv, lk, q.dead_zone),
+            (Vec2::new(0.0, -0.7), Vec2::new(0.5, 0.0), [0.2, 0.1])
+        );
+        // The ramp: none for 0.3 s at the edge, then up to 1.75× over 0.25 s.
+        assert_eq!((ramp(0.0), ramp(RAMP_DELAY)), (1.0, 1.0));
+        assert!((ramp(RAMP_DELAY + RAMP_TIME / 2.0) - 1.375).abs() < 1e-5);
+        assert_eq!(ramp(5.0), RAMP_GAIN);
+        // Aim assist: a Tedi 300 ahead on the look; 100 to the side, or behind a wall at 200, not.
+        let h = conker_rules::characters::body(0).hitbox;
+        let (start, dir) = (Vec3::new(0.0, 67.5, 0.0), Vec3::X);
+        let body = |z: f32| std::iter::once(([300.0, 0.0, z], h, false));
+        assert!(over_body(start, dir, 20_000.0, body(0.0)));
+        assert!(!over_body(start, dir, 20_000.0, body(100.0)));
+        assert!(!over_body(start, dir, 200.0, body(0.0)));
+        // Crouched, a look over its lowered top passes.
+        let low = Vec3::new(0.0, h.centre + h.half - 10.0, 0.0);
+        assert!(over_body(low, dir, 20_000.0, body(0.0)));
+        assert!(!over_body(
+            low,
+            dir,
+            20_000.0,
+            std::iter::once(([300.0, 0.0, 0.0], h, true))
+        ));
+        // Rumbles: a hit taken (strong), a shot (weak), else none.
+        assert!(rumble(true, true).is_some_and(|r| r.0.strong_motor > 0.0));
+        assert!(
+            rumble(true, false).is_some_and(|r| r.0.weak_motor > 0.0 && r.0.strong_motor == 0.0)
+        );
+        assert_eq!(rumble(false, false), None);
     }
 }

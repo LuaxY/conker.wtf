@@ -392,6 +392,29 @@ fn gather_wheel(scroll: Res<AccumulatedMouseScroll>, mut wheel: ResMut<Wheel>) {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct KeyLabels(pub HashMap<KeyCode, Key>);
 
+/// The player last pressed something on the pad (true) or the keyboard and mouse: the prompts show
+/// that device's input.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct UsingPad(pub bool);
+
+fn note_device(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    pads: Query<&Gamepad>,
+    mut using: ResMut<UsingPad>,
+) {
+    let pad = pads.iter().any(|p| {
+        p.digital().get_just_pressed().next().is_some()
+            || p.left_stick().length() > 0.5
+            || p.right_stick().length() > 0.5
+    });
+    let desk =
+        keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some();
+    if pad != desk {
+        using.set_if_neq(UsingPad(pad));
+    }
+}
+
 fn note_labels(mut keys: MessageReader<KeyboardInput>, mut labels: ResMut<KeyLabels>) {
     for k in keys.read() {
         if labels.0.get(&k.key_code) != Some(&k.logical_key) {
@@ -400,15 +423,17 @@ fn note_labels(mut keys: MessageReader<KeyboardInput>, mut labels: ResMut<KeyLab
     }
 }
 
-/// `bindings` (the settings'), and natively and in the browser the wheel latch and key labels.
+/// `bindings` (the settings'), and natively and in the browser the wheel latch, key labels and the
+/// device in use.
 pub fn build(app: &mut App, bindings: Bindings, windowed: bool) {
     app.insert_resource(bindings);
     app.init_resource::<Wheel>();
     if windowed {
         app.init_resource::<KeyLabels>();
+        app.init_resource::<UsingPad>();
         app.add_systems(
             PreUpdate,
-            (gather_wheel, note_labels).after(bevy::input::InputSystems),
+            (gather_wheel, note_labels, note_device).after(bevy::input::InputSystems),
         );
     }
 }
