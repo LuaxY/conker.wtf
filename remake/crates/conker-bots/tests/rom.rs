@@ -1267,7 +1267,7 @@ fn mounted_guns_m2_and_e1() {
     let (at, eye) = (gun::places(0x34)[0].pos, [2333.61426, 744.83844, 631.38562]);
     let ray = [-0.691665113, -0.207842022, 0.691665471];
     for b in [0, 1] {
-        let p = gun::sight(at, 0xA000, 12.0, b, eye, ray);
+        let p = gun::sight(at, 0xA000, 12.0, b, [0.0; 3], eye, ray);
         let hit = conker_rules::projectile::raycast(&world, p, ray, 20_000.0);
         let to: [f32; 3] = core::array::from_fn(|j| p[j] + ray[j] * hit);
         assert!(near(to, [2102.5, 675.39, 862.5], 0.1), "{b} {to:?}");

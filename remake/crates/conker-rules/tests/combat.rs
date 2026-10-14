@@ -308,6 +308,8 @@ struct Raw {
     camera: (u8, bool),
     /// obj+0xB4: ticks into the clip.
     time: f32,
+    /// obj+0x9C's head joint (bit 12): the head popped or the body halved.
+    headless: bool,
 }
 
 /// Match rows (mp 1) by (read, player).
@@ -335,6 +337,7 @@ fn trace(name: &str) -> Option<HashMap<(u32, usize), Row>> {
                 grenades: s[0x19A],
                 camera: (s[0x78], s[0x11A] == 2),
                 time: f32::from_be_bytes(o[0xB4..0xB8].try_into().unwrap()),
+                headless: o[0x9E] & 0x10 != 0,
                 scope: (s[0x197] == 2).then(|| {
                     [0x16C, 0x170].map(|k| f32::from_be_bytes(s[k..k + 4].try_into().unwrap()))
                 }),
@@ -442,6 +445,11 @@ fn oracle_events(name: &str, first: u32, last: u32) -> Option<BTreeSet<Ev>> {
             "weapon" => t[0].to_string(),
             "respawn" => format!("record {}", t[t.iter().position(|&w| w == "record")? + 1]),
             "teleport" => continue,
+            // The dead pose's twitch (0x18A) is the clients' draw: the rules lie in 0x59.
+            "state" => match v.replace("0x18a", "0x59") {
+                s if s == "0x59->0x59" => continue,
+                s => s,
+            },
             _ => v.to_string(),
         };
         if (first..=last).contains(&read) {
@@ -512,6 +520,7 @@ fn seen(m: &Match, p: usize) -> Seen {
             scope: None,
             camera: (0, false),
             time: 0.0,
+            headless: false,
         },
     }
 }
@@ -558,6 +567,10 @@ struct Report {
     /// Rows whose camera weapon or hand state (`Fighter::camera_weapon`, `in_hand`) differs.
     camera: usize,
     first_camera: Option<(u32, usize)>,
+    /// Rows whose head pop (`Fighter::popped`, or a halving kill) differs from obj+0x9C's, and the
+    /// first.
+    pops: usize,
+    first_pop: Option<(u32, usize)>,
 }
 
 /// The game's RNG word at the first call of each frame to a function whose draws the port
@@ -822,10 +835,9 @@ const CASES: [Case; 66] = [
         rng: Some("combat5_sg_e3_lldb"),
         ..encounter("combat5_sg_e3", 0x37)
     },
-    // e_w39's scripts with the tommy gun (0x38, map 0x1A's) on 0x2D: the dead pose ends in 0x18A
-    // 63 frames in, which e_w39's kill by the same type 0x35 does not (not traced: 3 events).
+    // e_w39's scripts with the tommy gun (0x38, map 0x1A's) on 0x2D: the dead pose twitches (0x18A,
+    // the clients' draw) 63 frames in, which e_w39's kill by the same type 0x35 does not.
     Case {
-        known: 3,
         script: Some("combat_e_w39"),
         rng: Some("combat7_e_w38_lldb"),
         ..encounter("combat7_e_w38", 0x38)
@@ -1080,6 +1092,18 @@ fn replay(c: &Case) -> Option<Report> {
             }
             report.pos_err[p] = report.pos_err[p].max(err);
             report.health += usize::from(f.health != want.health);
+            let halved = matches!(
+                f.action,
+                conker_rules::game::Action::Hurt {
+                    reaction: 0x2F,
+                    lethal: true,
+                    ..
+                }
+            );
+            if (f.popped || halved) != want.raw.headless {
+                report.pops += 1;
+                report.first_pop.get_or_insert((t + 1, p));
+            }
             report.anim +=
                 usize::from(conker_rules::characters::clip(f.class, f.anim) != want.raw.anim);
             let armed = (1..=40).any(|t| {
@@ -1173,7 +1197,7 @@ fn combat_traces() {
             continue;
         };
         eprintln!(
-            "{:18} rows {:4} pos {:8.4} {:8.4} (> 0.1 from {:?}) hp {} anim {} immune {} timer {} phase {} kills {}/{} | events {}/{} missing {} extra {} | grenade {} max {:.4} | bullets {}/{} max {:.5} | rng fed {} | facing {} from {:?} | camera {} from {:?} | armed rows {} rate {:.5}",
+            "{:18} rows {:4} pos {:8.4} {:8.4} (> 0.1 from {:?}) hp {} anim {} immune {} timer {} phase {} kills {}/{} | events {}/{} missing {} extra {} | grenade {} max {:.4} | bullets {}/{} max {:.5} | rng fed {} | facing {} from {:?} | camera {} from {:?} | armed rows {} rate {:.5} | pops {} from {:?}",
             c.name,
             r.rows,
             r.pos_err[0],
@@ -1201,7 +1225,9 @@ fn combat_traces() {
             r.camera,
             r.first_camera,
             r.armed_rows,
-            r.armed_rate
+            r.armed_rate,
+            r.pops,
+            r.first_pop
         );
         for e in r.missing.iter().take(10) {
             eprintln!("    missing {e:?}");
@@ -1233,6 +1259,15 @@ fn combat_traces() {
         assert_eq!(r.camera, 0, "{}: camera weapon or hand", c.name);
         assert_eq!(r.armed_rate, 0.0, "{}: armed locomotion rate", c.name);
         assert!(r.grenade_err < c.grenade_tol, "{}: grenade", c.name);
+        // The head pops (obj+0x9C's bit 12) row for row. The fitted volumes have no head on a
+        // falling corpse: e_w09's (1005) and e_w39's (971) pops need the posed parts.
+        let unposed = poses().is_none() && matches!(c.name, "combat_e_w09" | "combat_e_w39");
+        assert!(
+            r.pops == 0 || unposed,
+            "{}: head pops from {:?}",
+            c.name,
+            r.first_pop
+        );
         // e_w39: the pistol's shot 41 frames into the victim's fall passes the body in the game.
         let through_body = if c.name == "combat_e_w39" { 4 } else { 0 };
         assert!(

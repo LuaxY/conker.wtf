@@ -4,7 +4,7 @@
 //!   `Character::looks`, each glTF primitive's `extras.list`);
 //! - an escapee fades out, 16 alpha a frame, and stays hidden while frozen ([`escape_alpha`]);
 //! - the plunger (placements 0, 4, 5) at its y, and the water's scroll ([`WATER`]);
-//! - the detonation (`MatchView::cooldown` 0 → 900): a ring ([`ring`], the pack's `effects.gltf`)
+//! - the detonation (`MatchView::cooldown` 0 → 900): a ring ([`ring`], the pack's `effects.gltf`'s `ring`)
 //!   and debris at each of the three records, a villager's view cut to the level's camera 0x9002 for
 //!   60 frames ([`cut`]), every view shaken ([`DETONATION`]);
 //! - the strike (a villager's `Combat::deadline` reaching 0): its red light at the villager over the
@@ -561,7 +561,8 @@ fn watch(
         return;
     };
     let ring_model = (ring_model.get_or_insert_with(|| {
-        assets.load(format!("{}#Scene0", conker_assets::effects_gltf("2b")))
+        let gltf = conker_assets::effects_gltf(conker_assets::PACK_WEAPONS);
+        assets.load(format!("{gltf}#Scene0"))
     }))
     .clone();
     let b = &mut *blasts;

@@ -154,6 +154,8 @@ pub struct Mount {
     pub next: f32,
     pub barrel: u8,
     pub rng: u64,
+    /// The gun's fire clip as drawn: its barrels kick while it fires.
+    pub recoil: Recoil,
 }
 
 impl Mount {
@@ -171,6 +173,7 @@ impl Mount {
             next: 0.0,
             barrel: 0,
             rng: 1,
+            recoil: Recoil::default(),
         }
     }
 
@@ -230,6 +233,68 @@ impl Mount {
     }
 }
 
+/// The gun model (the pack's `characters/138`), whose fire clip ([`fire_clip`]) kicks the barrels.
+pub const FILES: [&str; 2] = [
+    "characters/138/character.gltf",
+    "characters/138/character.bin",
+];
+/// Its fire clip (logical clip 1, a 12-frame loop; clip 0, the rest pose, has no keys).
+const FIRE_CLIP: &str = "pair_0000_anim_0001";
+const FIRE_FRAMES: u16 = 12;
+
+/// The fire clip's pose each frame as the barrels and the scope's eye take it: `joint_00`'s and
+/// `joint_04`'s turns about x (degrees nose down) and `joint_04`'s slide ahead (model units) from
+/// the rest pose (the eye chain 0 → 4 and the barrels 0 → 4 → 5/7 move by these only, C).
+pub fn fire_clip(gltf: &[u8], bin: &[u8]) -> conker_assets::Result<Vec<[f32; 3]>> {
+    let sk = conker_assets::pose::Skeleton::parse(gltf, bin)?;
+    let pitch = |q: [f32; 4]| 2.0 * q[0].atan2(q[3]).to_degrees();
+    let frame = |f: u16| {
+        let p = sk.sample(FIRE_CLIP, f32::from(f));
+        [pitch(p[0].r), pitch(p[4].r), p[4].t[2] - sk.rest[4].t[2]]
+    };
+    Ok((0..FIRE_FRAMES).map(frame).collect())
+}
+
+/// The gun as drawn: every frame it asks for its fire clip while it fires (state 4), else its
+/// rest (clip 0), at rate 1 with a 2-frame cross-fade (`func_1505841C` → `func_1505E650(gun, id,
+/// 1.0, 2.0, …)`, V a1). The scope's eye takes the pose drawn the frame before, the barrels this
+/// frame's (V k2: the gun fires from read 101; the eye is at rest at 101 and 102, at the clip's
+/// frame 3 at 105; the shot at 107 has the eye at frame 5 and the muzzle at frame 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
+pub struct Recoil {
+    clock: conker_anim::AnimPlayer,
+    /// The kick drawn this frame, `[root, barrels, shift]` of [`fire_clip`].
+    pub drawn: [f32; 3],
+}
+
+impl Recoil {
+    /// One frame with the gun `firing` or not and its [`fire_clip`] (empty: no kick): the kick
+    /// drawn the frame before.
+    pub fn step(&mut self, firing: bool, clip: &[[f32; 3]]) -> [f32; 3] {
+        let eye = self.drawn;
+        let c = &mut self.clock;
+        c.advance();
+        let req = conker_anim::Request {
+            id: u16::from(firing),
+            rate: 1.0,
+            blend: 2.0,
+            start: 0.0,
+        };
+        c.play(req, FIRE_FRAMES);
+        // I: the game's pose mixer is unread (conker-anim's linear weight): V k2's eye is up to 0.85
+        // off on the fades' reads.
+        let pose = |id: u16, t: f32| match id {
+            1 => clip.get(t as usize).copied().unwrap_or_default(),
+            _ => [0.0; 3],
+        };
+        let w = c.prev_weight();
+        let (from, to) = (pose(c.prev, c.prev_time), pose(c.id, c.time));
+        self.drawn = core::array::from_fn(|i| from[i] * w + to[i] * (1.0 - w));
+        eye
+    }
+}
+
 pub use conker_camera::{gun_pitch10 as pitch10, gun_tilt as tilt};
 
 /// Where the gun at `at` turned `yaw`, its barrels at `pitch10` (+0x2E4), seats its gunner. The
@@ -253,28 +318,46 @@ fn pitched(pitch: f32, [f, s, u]: [f32; 3]) -> [f32; 3] {
     [PIVOT[0] + f * pc + u * ps, s, PIVOT[1] + u * pc - f * ps]
 }
 
-/// Barrel `b`'s muzzle: the gun tilted by [`tilt`], the barrels by the rest of `pitch`.
-pub fn muzzle(at: [f32; 3], yaw: u16, pitch: f32, b: u8) -> [f32; 3] {
-    barrel(at, yaw, pitch, b, MUZZLE)
+/// Barrel `b`'s muzzle: the gun tilted by [`tilt`], the barrels by the rest of `pitch`, the fire
+/// clip's `kick` on both ([`Recoil::drawn`]).
+pub fn muzzle(at: [f32; 3], yaw: u16, pitch: f32, b: u8, kick: [f32; 3]) -> [f32; 3] {
+    barrel(at, yaw, pitch, b, MUZZLE, kick)
 }
 
-/// A point (ahead, side, up) of barrel `b`'s frame from the pivot (barrel 0's side negated).
-fn barrel(at: [f32; 3], yaw: u16, pitch: f32, b: u8, [f, s, u]: [f32; 3]) -> [f32; 3] {
+/// A point (ahead, side, up) of barrel `b`'s frame from the pivot (barrel 0's side negated): the
+/// clip turns the root and the pivot and slides the pivot ahead (joints 5 and 7 have no keys).
+fn barrel(
+    at: [f32; 3],
+    yaw: u16,
+    pitch: f32,
+    b: u8,
+    [f, s, u]: [f32; 3],
+    [root, barrels, shift]: [f32; 3],
+) -> [f32; 3] {
     let s = if b == 0 { -s } else { s };
     let t = tilt(pitch10(pitch));
-    local_to_world(at, yaw, tilted(t, pitched(pitch - t, [f, s, u])))
+    let [f, s, u] = pitched(pitch - t + barrels, [f, s, u]);
+    local_to_world(at, yaw, tilted(t + root, [f + 0.5 * shift, s, u]))
 }
 
 /// Where a human's shot from barrel `b` starts its aim (`func_150FB8C0`, C): the scope's ray from
 /// `eye` along the unit `d` (s126+0x13C, +0x130) crossed with the plane through the muzzle and the
 /// joint's (±50, 0, 200) and (±13, 50, 220) (tables 0x800A1E04 and 0x800A1E1C, V k3), across the
-/// barrel and leaning 22° forward. The shot heads from the muzzle for what the ray meets from
-/// there on, else leaves from this point along `d` (`Match`'s fire; I: neither e1's hit nor its
-/// later shots tell this point apart from the eye's).
-pub fn sight(at: [f32; 3], yaw: u16, pitch: f32, b: u8, eye: [f32; 3], d: [f32; 3]) -> [f32; 3] {
-    let m = muzzle(at, yaw, pitch, b);
+/// barrel and leaning 22° forward, the barrel posed with `kick` (this frame's; the eye has the frame
+/// before's, [`Recoil`]). The shot heads from the muzzle for what the ray meets from there on, else
+/// leaves from this point along `d` (`Match`'s fire; V k2's shots to 2e-4 with the kick).
+pub fn sight(
+    at: [f32; 3],
+    yaw: u16,
+    pitch: f32,
+    b: u8,
+    kick: [f32; 3],
+    eye: [f32; 3],
+    d: [f32; 3],
+) -> [f32; 3] {
+    let m = muzzle(at, yaw, pitch, b, kick);
     let [f, s, u] = MUZZLE;
-    let q = barrel(at, yaw, pitch, b, [f + 50.0, s, u - 20.0]);
+    let q = barrel(at, yaw, pitch, b, [f + 50.0, s, u - 20.0], kick);
     let dot = |a: [f32; 3], c: [f32; 3]| a[0] * c[0] + a[1] * c[1] + a[2] * c[2];
     let n: [f32; 3] = core::array::from_fn(|j| q[j] - m[j]);
     let t = dot(n, core::array::from_fn(|j| m[j] - eye[j])) / dot(n, d);
@@ -384,7 +467,7 @@ mod tests {
             assert!(near(seat(a.pos, a.yaw, p10), at), "{p10}");
         }
         // Level, at yaw 0 (forward +x, side +z): both 186 ahead, 110.2 up, 22.2 to either side.
-        let m = [0, 1].map(|k| muzzle([0.0; 3], 0, 0.0, k));
+        let m = [0, 1].map(|k| muzzle([0.0; 3], 0, 0.0, k, [0.0; 3]));
         assert!(near(m[0], [186.04, 110.205, -22.175]) && near(m[1], [186.04, 110.205, 22.175]));
         let d = barrel_dir(0, 0.0, 1, 3.0);
         assert!(d[2] < 0.0 && d[1] == 0.0);

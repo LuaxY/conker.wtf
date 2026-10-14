@@ -114,8 +114,9 @@ fn slice_in_memory() {
 
     // The weapons and the grenades in the hand: 18 models (the twin guns are two; the Tediz' grenade
     // and everyone else's; map 0x1A's bat and tommy gun; War: Raptor's bone crossbow and knives),
-    // the gas mask in the hand and on the head, Race's kick and item 0x3A's two grenades (#137 on
-    // 0x1A, #186 on 0x3F: child objects, no events), one mesh each but the crossbows and the
+    // the gas mask in the hand and on the head, Race's kick, item 0x3A's two grenades (#137 on
+    // 0x1A, #186 on 0x3F: child objects, no events), the head stumps (#0x59, #0x58) and the racer
+    // classes' helmets (#0x5A, #0x5C, #0x5B; no events), one mesh each but the crossbows and the
     // grenades, child objects with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
@@ -124,7 +125,7 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 24);
+    assert_eq!(slice.held.len(), 29);
     // The grenades on the left hand from the pull's t19 to the throw's t15: the Tediz' #75 (0x176,
     // 0x16B), everyone else's #76 (0x175, 0x16C; ROM clip events, C `func_15065A5C`).
     let grenade = |entry| slice.held.iter().find(|h| h.entry == entry).unwrap();
@@ -161,14 +162,15 @@ fn slice_in_memory() {
         let bank = if h.object { 1 } else { 9 };
         assert_eq!(names[mesh], format!("{bank:02x}-{:02x}-00", h.entry));
     }
-    // Every held material is textured: the twin guns' last three images (3790, 3796, 3112) are
-    // sampled through the tile described for them, not G_TEXTURE's stale tile 1 (extract-gbi).
+    // Every held material is textured but 117's stump's (#0x59) shade-only draw (its asset's DL
+    // loads no texture for it): the twin guns' last three images (3790, 3796, 3112) are sampled
+    // through the tile described for them, not G_TEXTURE's stale tile 1 (extract-gbi).
     let materials = held["materials"].as_array().unwrap();
     let untextured: Vec<_> = (materials.iter())
         .filter(|m| m["pbrMetallicRoughness"]["baseColorTexture"].is_null())
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert!(untextured.is_empty(), "{untextured:?}");
+    assert_eq!(untextured, ["m72-untextured"]);
     let twin = names.iter().position(|&n| n == "09-1a-00").unwrap();
     let images: Vec<_> = (held["meshes"][twin]["primitives"]
         .as_array()
@@ -1413,9 +1415,11 @@ fn tank_model_and_map() {
     );
     // The props glTF: the hidden placements in place, `model@placement`.
     let (props, scenes) = conker_extract::props_level(&rom, conker_extract::TANK_MAP).unwrap();
-    assert_eq!(props.instances.len(), 22);
-    assert_eq!(scenes.as_array().unwrap().len(), 1);
-    let names: Vec<_> = (props.instances.iter())
+    // Scene 1: the carried gas bomb at the origin (bank 09 #0x3F, one part).
+    assert_eq!(props.instances.len(), 23);
+    assert_eq!(scenes[1]["nodes"], serde_json::json!([22]));
+    assert_eq!(props.meshes[props.instances[22].mesh].path, [9, 0x3F, 0]);
+    let names: Vec<_> = (props.instances[..22].iter())
         .map(|i| (props.meshes[i.mesh].path.clone(), i.placement.unwrap()))
         .collect();
     assert_eq!(

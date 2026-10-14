@@ -799,6 +799,13 @@ pub fn weapon_name(id: u8) -> String {
         0x21 => "katana".into(),
         0x22 => "chainsaw".into(),
         0x23 => "scoped revolver".into(),
+        0x18 => "crossbow".into(),
+        0x19 => "bat".into(),
+        0x37 => "shotgun".into(),
+        0x38 => "tommy gun".into(),
+        0x3F => "bone knives".into(),
+        0x40 => "club".into(),
+        0x41 => "bone crossbow".into(),
         _ => format!("weapon {id:#04x}"),
     }
 }
@@ -945,8 +952,11 @@ pub fn run(
 ) {
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
-    app.insert_resource(gun.unwrap_or_default());
+    let gun = gun.unwrap_or_default();
     let scene = map_scene(&cfg.map).expect("a known map");
+    let mut arena = MatchArena::new(&slice.spawns, scene, &slice.triggers);
+    arena.0.fire_clip = gun.0.clone();
+    app.insert_resource(gun);
     app.insert_resource(Collision(scene_world(&slice, scene)));
     let names = character_files(&cfg.map);
     let clips = BodyClips::new(&slice.characters, &names).0;
@@ -958,7 +968,7 @@ pub fn run(
     app.insert_resource(BodyClips(clips));
     app.insert_resource(Bodies::new(&slice.characters, characters(&cfg.map)));
     app.insert_resource(Spawns(slice.spawns.clone()));
-    app.insert_resource(MatchArena::new(&slice.spawns, scene, &slice.triggers));
+    app.insert_resource(arena);
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.insert_resource(Script(script));
@@ -1558,7 +1568,7 @@ fn predict(
             }
             let mut view = camera_view(f, m.tick);
             let firing = f.gun.is_some_and(|g| f.seated() && g.state == gun::FIRING);
-            view.gun_kick = cam.gun.step(firing, &clip);
+            view.gun_kick = cam.gun.step(firing, &clip.0);
             let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
             foot.step_view(view, &input.0, &world);
             f.take_camera(foot);
@@ -2295,6 +2305,12 @@ mod tests {
         c.lives_left = 2;
         let untimed = MatchView { time: 0, ..m };
         assert!(hud_text(&c, &untimed).starts_with("HP 0/6   lives 2   grenades 3   kills 2\n"));
+        // Every weapon the rules know has a name (0x1A's bat 0x19 and Heist's tommy gun 0x38 too).
+        let unnamed: Vec<u8> = (0..=255)
+            .filter(|&id| conker_rules::weapon::weapon(id).is_some())
+            .filter(|&id| weapon_name(id).starts_with("weapon "))
+            .collect();
+        assert!(unnamed.is_empty(), "{unnamed:x?}");
     }
 
     #[test]

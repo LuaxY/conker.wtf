@@ -30,11 +30,14 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use conker_assets::race::{Race, Route};
 use conker_assets::{PACK_WEAPONS, projectiles_gltf, props_gltf};
+use conker_camera::DT;
+use conker_camera::math::spring;
 use conker_rules::Fighter;
 use conker_rules::net::Fighting;
 use conker_rules::race::{DEAD, Track};
 use conker_sim::board::KICK;
 use conker_sim::follow::Follow;
+use conker_sim::movement::PlayerState;
 use conker_sim::net::{Collision, Combat, MatchView, Player};
 use lightyear::prelude::{LocalTimeline, Predicted};
 
@@ -133,13 +136,37 @@ pub const GRID: Behind = Behind {
 };
 
 /// One frame of a racer's view at frame `tick` ([`crate::tank::behind`] with [`GRID`] before its
-/// go, then [`CAM`]), through walls (C `func_15123A54`: a board's camera casts no wall ray). The
-/// board's stick steers itself (conker-sim's `board`: no camera yaw), so the stick needs no
-/// override.
+/// go, then [`CAM`] with its heights sprung, [`heights`]), through walls (C `func_15123A54`: a
+/// board's camera casts no wall ray). The board's stick steers itself (conker-sim's `board`: no
+/// camera yaw), so the stick needs no override.
 pub fn camera(follow: &mut Follow, cam: &mut Cam, f: &Fighter, tick: u32) {
     follow.cam.scope.on = false;
     let law = if tick < f.ride.go { &GRID } else { &CAM };
     crate::tank::behind(follow, cam, &f.body, law, None);
+    let c = &mut follow.cam;
+    match cam.1.as_mut() {
+        Some(s) if tick >= f.ride.go => [c.eye[1], c.at[1]] = heights(s, &f.body, c.eye[1]),
+        _ => cam.1 = Some([c.eye[1], 0.0, c.at[1], 0.0]),
+    }
+}
+
+/// The look-at's lift over the board's floor: mode 8's 0.75 of the head (130, fit) and the view's
+/// 123 (C `func_150D1530`'s look offset).
+const LOOK: f32 = 220.5;
+
+/// The board camera's heights after the go, `s` = [eye, its velocity, look-at, its velocity]: the
+/// eye springs (4, 8) toward `eye` ([`CAM`]'s height over the racer; I: a fit, V g5c r1 480-850 rms
+/// 12.9 against 42.4 unsprung); the look-at springs as mode 8's (4, 8, doubled going down) toward
+/// the floor + air · min(air / 300, 1) + [`LOOK`] (C `conker_camera`'s look-at height; V r1 rms 4.1
+/// against 21.3 at the racer + 195).
+fn heights(s: &mut [f32; 4], b: &PlayerState, eye: f32) -> [f32; 2] {
+    let [e, ev, at, av] = s;
+    spring(e, eye, ev, 4.0, 8.0, DT);
+    let air = b.pos[1] - b.floor_y;
+    let look = b.floor_y + air * (air / 300.0).clamp(0.0, 1.0) + LOOK;
+    let (k, damp) = if look < *at { (8.0, 16.0) } else { (4.0, 8.0) };
+    spring(at, look, av, k, damp, DT);
+    [*e, *at]
 }
 
 /// Race's warm-up: before its match starts the server steps nobody (conker-server's `warm_up`),
@@ -710,6 +737,67 @@ fn missiles(
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+
+    /// The board camera's heights through a jump (V g5c r1 reads 545-575, the human racing route 11:
+    /// its y, floor, speed, then the drawn eye's y (the CSV's + 123) and the look-at's): sprung, they
+    /// stay within 45 and 12 of the oracle's where [`CAM`] unsprung is 129 and 40 off.
+    #[test]
+    fn the_board_camera_springs_its_heights_as_the_oracle() {
+        let r1 = [
+            (716.2, 674.3, 79.0, 895.1, 884.4),
+            (718.6, 676.8, 80.0, 901.9, 887.2),
+            (719.1, 679.4, 81.0, 908.5, 890.1),
+            (717.6, 682.0, 82.0, 914.7, 892.9),
+            (714.3, 684.4, 83.0, 919.9, 895.6),
+            (709.0, 675.0, 84.0, 923.8, 897.8),
+            (701.9, 660.6, 85.0, 923.4, 896.9),
+            (692.8, 645.6, 86.0, 922.4, 892.3),
+            (681.9, 630.5, 87.0, 920.2, 884.4),
+            (669.0, 615.3, 88.0, 916.9, 873.7),
+            (654.3, 600.0, 89.0, 913.2, 861.1),
+            (637.6, 584.2, 90.0, 909.4, 846.8),
+            (619.1, 568.7, 91.0, 906.0, 831.4),
+            (598.7, 552.5, 92.0, 903.2, 815.1),
+            (576.3, 549.0, 93.0, 900.6, 799.9),
+            (552.1, 549.0, 94.0, 897.6, 787.3),
+            (549.1, 549.1, 95.0, 893.6, 778.3),
+            (549.2, 549.2, 96.0, 888.1, 772.6),
+            (549.7, 549.2, 97.0, 881.1, 769.7),
+            (551.1, 549.3, 98.0, 872.5, 769.7),
+            (554.3, 549.3, 99.0, 862.2, 769.7),
+            (559.3, 549.3, 100.0, 850.3, 769.8),
+            (566.0, 549.3, 101.0, 838.1, 769.8),
+            (574.5, 549.2, 102.0, 826.7, 769.9),
+            (582.7, 549.2, 103.0, 817.0, 770.2),
+            (589.0, 549.1, 104.0, 809.4, 770.6),
+            (593.4, 550.8, 105.0, 804.0, 771.2),
+            (595.9, 553.9, 106.0, 800.6, 772.0),
+            (596.5, 556.9, 107.0, 799.0, 773.1),
+            (595.2, 560.1, 108.0, 798.6, 774.4),
+            (592.0, 563.4, 109.0, 799.0, 775.9),
+        ];
+        let mut s = [r1[0].3, 0.0, r1[0].4, 0.0];
+        let (mut sprung, mut flat) = ([0f32; 2], [0f32; 2]);
+        for &(y, floor_y, speed, eye, at) in &r1[1..] {
+            let b = PlayerState {
+                pos: [0.0, y, 0.0],
+                floor_y,
+                ..PlayerState::spawn([0.0; 3], 0)
+            };
+            let up = y + CAM.rest[1] + (CAM.full[1] - CAM.rest[1]) * (speed / CAM.top).min(1.0);
+            let [e, a] = heights(&mut s, &b, up);
+            sprung = [
+                sprung[0].max((e - eye).abs()),
+                sprung[1].max((a - at).abs()),
+            ];
+            flat = [
+                flat[0].max((up - eye).abs()),
+                flat[1].max((y + CAM.rest[2] - at).abs()),
+            ];
+        }
+        assert!(sprung[0] < 45.0 && sprung[1] < 12.0, "{sprung:?}");
+        assert!(flat[0] > 125.0 && flat[1] > 40.0, "{flat:?}");
+    }
 
     /// The rules' animations show the pack's clips: 84 the kick's while it runs, else the knock's;
     /// 112 the death's; riding as is.

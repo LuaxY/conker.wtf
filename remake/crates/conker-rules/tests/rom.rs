@@ -524,3 +524,182 @@ fn the_gun_bullets_knock_slides_as_e1() {
     }
     assert!(!m.players[0].body.airborne);
 }
+
+/// V k2 (e1 under lldb; `cameras-clips-g4-scratch/gun/notes.txt` 1b): 0x34's gun at yaw 0xA000,
+/// pitched 12°, fires from read 101. Each shot's eye is the fire clip's pose drawn the read before,
+/// its muzzle and sight this read's ([`conker_rules::gun::Recoil`]): the shots at reads 107, 115,
+/// 120 and 137 (barrels 1, 0, 1, 0) head for the floor along V's directions to 2e-4 (from the gun
+/// at rest, 0.005 to 0.046 off).
+#[test]
+fn the_gun_recoils_as_k2() {
+    use conker_rules::gun;
+    let Some(rom) = rom() else { return };
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets/");
+    let read = |p: &str| std::fs::read(format!("{dir}{p}")).ok();
+    let (Some(gltf), Some(bin)) = (read(gun::FILES[0]), read(gun::FILES[1])) else {
+        return;
+    };
+    let clip = gun::fire_clip(&gltf, &bin).unwrap();
+    let world = world_34(&rom);
+    let at = gun::places(0x34)[0].pos;
+    let (_, mut m) = match_34(&rom, &[gun::seat(at, 0xA000, gun::pitch10(12.0))], 90);
+    let f = &mut m.players[0];
+    (f.body.facing, f.body.scope_yaw, f.scope_pitch) = (0xA000, Some(225.0), 12.0);
+    f.gun = Some(gun::Mount {
+        state: gun::IDLE,
+        ..gun::Mount::new(0, at)
+    });
+    let shots = [
+        (107, 1, [-0.628679097, -0.233918637, 0.741649985]),
+        (115, 0, [-0.748279154, -0.19693701, 0.633477926]),
+        (120, 1, [-0.63217926, -0.208410636, 0.746266901]),
+        (137, 0, [-0.741649568, -0.233918518, 0.628679633]),
+    ];
+    let here: conker_rules::game::Seen = &|_, _| None;
+    let mut worst: f32 = 0.0;
+    for t in 90..140u32 {
+        let shot = shots.iter().find(|s| s.0 == t);
+        let g = m.players[0].gun.as_mut().unwrap();
+        g.state = if t >= 101 { gun::FIRING } else { gun::IDLE };
+        // V's shots, barrels and nothing between (the fire process's timer is the mount's own).
+        (g.firing, g.next) = (true, if shot.is_some() { 0.0 } else { 100.0 });
+        if let Some(s) = shot {
+            g.barrel = s.1;
+        }
+        let fired = m.fire_gun(0, &clip, &world, here, &mut Vec::new());
+        assert_eq!(fired, shot.map(|s| s.1), "read {t}");
+        if let Some(&(_, _, v)) = shot {
+            let d = m.bullets.last().unwrap().1.dir;
+            let off = (0..3).map(|j| (d[j] - v[j]).abs()).fold(0.0, f32::max);
+            assert!(off < 2e-4, "read {t}: {d:?} vs {v:?}");
+            worst = worst.max(off);
+        }
+    }
+    eprintln!("k2: the shots' directions within {worst} of V's");
+}
+
+/// Scene 0x2B's collision with placement 1 as water and the current's path (conker-sim's
+/// `tests/sea.rs`).
+fn world_2b(rom: &Rom) -> conker_sim::collision::CollisionWorld {
+    use conker_sim::collision::{CollisionWorld, Layer};
+    let placements = extract_scene::scene_placements(rom, 0x2B).unwrap();
+    let collision = extract_scene::scene_collision(rom, 0x2B, &placements).unwrap();
+    let (solid, water) = (
+        extract_scene::deathmatch_solid(0x2B),
+        extract_scene::deathmatch_water(0x2B),
+    );
+    let triangles = (collision.triangles.iter())
+        .filter(|t| !matches!(t.layer, extract_scene::Layer::Placement(i) if !solid.contains(&i)));
+    let mut world = CollisionWorld::layered(triangles.map(|t| {
+        let layer = match t.layer {
+            extract_scene::Layer::Terrain => Layer::Terrain,
+            extract_scene::Layer::Secondary => Layer::Secondary,
+            extract_scene::Layer::Placement(i) if water.contains(&i) => Layer::Water(i as u16),
+            extract_scene::Layer::Placement(i) => Layer::Placement(i as u16),
+        };
+        (t.points, t.surface.unwrap_or(0), layer)
+    }));
+    world.acos = conker_sim::trig::AcosTable::from_game_data(&rom.game_data().unwrap());
+    world.current = extract_scene::scene_path(rom, 0x2B, 1).unwrap();
+    world
+}
+
+/// Player 1's rows of `lab/oracle/map2b/sea/<name>.csv` by read: each column by name.
+fn sea_rows(name: &str) -> Option<BTreeMap<u32, std::collections::HashMap<String, f32>>> {
+    let lab = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../lab/oracle/map2b/sea");
+    let text = std::fs::read_to_string(format!("{lab}/{name}.csv")).ok()?;
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next()?.split(',').collect();
+    let rows = lines.filter_map(|l| {
+        let row: std::collections::HashMap<String, f32> = (header.iter().zip(l.split(',')))
+            .filter_map(|(h, v)| {
+                let v = v.strip_prefix("0x").map_or_else(
+                    || v.parse().ok(),
+                    |x| u32::from_str_radix(x, 16).ok().map(|x| x as f32),
+                );
+                Some((h.to_string(), v?))
+            })
+            .collect();
+        (row.get("player") == Some(&0.0)).then(|| (row["read"] as u32, row))
+    });
+    Some(rows.collect())
+}
+
+/// V die1 (`lab/oracle/map2b/sea/die1.csv`, swim1's run to read 460): a villager stroking in the sea
+/// takes a lethal hit (type 0x20, angle 0) in frame 460. Its body plays clip 0x24, floats with no
+/// speed on the current, its facing kept, is stood up by the shallows at read 524 (15 along the
+/// hit's angle, the drift fading) and slides to rest at 0.6 a frame; it respawns at read 548.
+#[test]
+fn a_swimmer_drowns_as_die1() {
+    use conker_rules::game::{Arena, Fighter, Match};
+    use conker_rules::gas::Effect;
+    use conker_sim::movement::{Input, PlayerState};
+    let Some(rom) = rom() else { return };
+    let (Some(swim1), Some(fields), Some(die1)) = (
+        sea_rows("swim1"),
+        sea_rows("swim1_fields"),
+        sea_rows("die1"),
+    ) else {
+        return;
+    };
+    let world = world_2b(&rom);
+    let (r, g) = (&swim1[&460], &fields[&460]);
+    let mut s = PlayerState::spawn([r["x"], r["y"], r["z"]], r["facing"] as u16);
+    (s.y_vel, s.gravity, s.xz_speed) = (r["y_vel"], r["gravity"], r["xz_speed"]);
+    (s.target_speed, s.move_angle) = (r["target_speed"], r["move_angle"] as u16);
+    (s.state, s.floor_y) = (r["state"] as u8, r["floor_y"]);
+    (s.swimming, s.water, s.rise) = (g["ad"] == 1.0, g["water"], g["rise"]);
+    (s.drift, s.jump_out) = ([g["drift_x"], g["drift_z"]], g["ae"] as u8);
+    let spawns = (extract_scene::scene_spawns(&rom, 0x2B).unwrap().iter())
+        .map(|s| conker_rules::spawn::Spawn {
+            pos: s.position,
+            b6: s.byte_06,
+            yaw: s.yaw,
+            camera: s.camera,
+            b14: s.byte_14,
+            b15: s.byte_15,
+        })
+        .collect();
+    let arena = Arena {
+        spawns,
+        pickups: Vec::new(),
+        ..Default::default()
+    };
+    let place = conker_rules::Placement {
+        index: 0,
+        pos: s.pos,
+        facing: s.facing,
+        camera: [0.0; 3],
+    };
+    let mut f = Fighter::new(&place, 0, 460);
+    (f.body, f.immune) = (s, 0);
+    let mut m = Match::new(&arena, vec![f], conker_rules::Rng::default(), 460);
+    m.apply(&[Effect::Hit {
+        slot: 0,
+        kind: conker_rules::damage::SNIPER_RAY,
+        attacker: None,
+    }]);
+    let (mut afloat, mut ashore): (f32, f32) = (0.0, 0.0);
+    while m.tick < 548 {
+        m.step(&arena, &[Input::default()], &world);
+        let (f, v) = (&m.players[0], &die1[&m.tick]);
+        if m.tick == 548 {
+            assert_eq!(f.health, 6, "the respawn at 548");
+            break;
+        }
+        assert_eq!((f.health, f.anim), (0, 0x24), "read {}", m.tick);
+        let err = (0..3)
+            .map(|j| (f.body.pos[j] - v[["x", "y", "z"][j]]).abs())
+            .fold(0.0, f32::max);
+        match m.tick < 524 {
+            true => {
+                assert_eq!(f.body.facing, v["facing"] as u16, "read {}", m.tick);
+                afloat = afloat.max(err);
+            }
+            false => ashore = ashore.max(err),
+        }
+    }
+    // Ashore, 1.25 of it is the stand-up frame's (524): the swim's air step brakes 2.5 there (I).
+    eprintln!("die1: afloat (461-523) within {afloat}, ashore (524-547) within {ashore}");
+    assert!(afloat < 0.01 && ashore < 1.5);
+}

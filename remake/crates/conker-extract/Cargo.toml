@@ -24,3 +24,5 @@ symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 gltf-json.workspace = true
 # The pack test compares with what the runtime builds from the ROM.
 conker-sim = { path = "../conker-sim" }
+# The pack test reads its PNGs back.
+png.workspace = true

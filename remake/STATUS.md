@@ -1,5 +1,182 @@
 # Status after wave 6 (2026-10-10)
 
+## Rules and bots: G4's leftovers (2026-10-14)
+**Lane G5a-rules.** Notes: `lab/research/mp-original/rules-bots-g5.md` (+ `-scratch/`). Wire changed (`Combat::popped`;
+`Fighter::popped` and `gun::Mount::recoil` in `Fighting`); the shared simulation changed (the drown, the knock's drift,
+the dead pose's rows, the head pop, the gun's recoil, the parts' sink, the bots' pickup reach, Tank's barrel, Heist's
+take). `PROTOCOL_ID` untouched.
+- **A swimmer's death is the original's.** A lethal hit on a swimmer takes cause 4 whatever the damage type
+  (`func_1505E874`): clip 0x24 to the respawn 88 frames after the hit, not the land death's 163, the body afloat on the
+  current with no knock (`damage::DROWN`, `Match::hurt`/`hurt_frame`). `knock()` adds the current's drift (fading 0.15 a
+  frame, along the floor's plane on the ground), so a body drifting ashore slides as die1's; with no drift the old path is
+  kept bit for bit. Test `a_swimmer_drowns_as_die1` (V die1: hit 460, 0x24 on 461-547, the respawn at 548): afloat exact,
+  ashore within 1.26 (the exit frame's brake, I). New oracle rows `lab/oracle/map2b/sea/die1.csv`, `die2.csv`.
+- **The dead pose's twitch is the clients'.** The rules' fixed 0x18A rows are gone (`(DEAD, 81)` for the area stagger's
+  and 0x33's deaths). `tests/combat.rs` maps the oracle's 0x18A to 0x59: e_w38 31 of 31 events.
+- **A bullet on a corpse's head pops it.** `Fighter::popped` (`Match::pop`: a head hit taken, or any head hit on a
+  corpse; a bolt's too, not weapon 0x14's, V combat4_w14 833), cleared at the respawn; `parts.rs` hides joints 12-15
+  (0xF000). The wire's `Combat::popped` (server `combat()`), and conker-client `corpses.rs` hides the head on it (one
+  condition). `tests/combat.rs` compares it with obj+0x9C bit 12 on every row: posed (`COMBAT_POSES=last`) all 66 traces
+  match, e_w39's corpse pop at 971 and e_w09's at 1005 included; the fitted volumes miss those two (no head on a falling
+  corpse), which the test lets by there only.
+- **The mounted gun's muzzle recoils.** `gun::Recoil` (the fire clip's clock: clip 1 while firing, rate 1, blend 2; moved
+  from conker-client, which re-exports it) rides in `Mount::recoil`; `gun::fire_clip` reads `characters/138` into
+  `Arena::fire_clip` (server `main.rs`, client `run`, `bot_match`). `fire_gun` aims from the eye kicked by the pose drawn
+  the frame before and the muzzle and sight plane by this frame's (`gun::muzzle`/`sight` take the kick). Test
+  `the_gun_recoils_as_k2`: V k2's shots at reads 107, 115, 120 and 137 within 9.9e-5 (at rest: 0.005-0.046 off). A bot's
+  shot leaves the kicked muzzle along the kicked barrel (I). conker-anim's `AnimPlayer` has serde under `serde`.
+- **0x34's twin guns: the body parts sink with the floor, the bots aim through the acos table, and reach farther for
+  pickups.** The 302 against 107 shots compared patterned seeds on both sides (the oracle's low RNG word 0-7, the
+  remake's raw states 1-8); with independent draws (oracle p34r, both words at read 23; remake seeds 9-40) it was 217
+  against 119. Bursts, the fire cycle, sight and range already matched; the bots killed the idle human slower at range.
+  - `parts.rs` adds `body.sink` (obj+0xCC) to the posed spheres: lldb on n34s2 shows the 402 hit on the head (joint
+    12, part 0xA) at +45.47, the human on kind 0xA (sink −6) with its joints 6.0 lower than on kind 5. The broad sphere
+    does not sink (C). The posed combat replays are unchanged.
+  - conker-bots `attack()`: the yaw and pitch through `func_1505A630`'s table (C; V: 3,633 of 3,655 still frames carry
+    the table's pitch), the aim point rebuilt from them; the mounted gun's pitch target too.
+  - `Match::pickups`: a bot's reach is 1.4× in every mode but Race (`func_1511DF6C`, `0x800A3304`; V: 0x34's bots take
+    pickups 120-135 away), `tank::touches`. `bot_match` marks its bots as the server does.
+
+    | 0x34, 1 + 3, 4,403 reads | Oracle p34r (8) | Remake before (32) | Remake now (32) |
+    |---|---|---|---|
+    | Twin-gun shots / hits a run | 119.1 / 12.9 | 217.2 / 14.0 | 176.8 / 12.6 |
+    | Deaths / the human's / hp drops | 5.1 / 1.6 / 21.9 | 5.8 / 2.1 / 23.9 | 5.8 / 2.4 / 23.5 |
+    | hp a far burst on the human | 1.09 | 0.52 | 1.11 |
+
+    ("Before" has the reach fix.) Left: 177 shots against 119, hits per shot 0.071 against 0.108 (shots per drawn frame
+    0.165 against 0.117, untraced).
+  - The pit (left): no box-specific gate in the original (0xBB's attack pick is ai.bin data the remake runs; state 6's
+    gate at 0x2D24 is never reached on either side). Inside the box the remake's bots see an enemy wall-free 143.5
+    frames a run against 15.8 and switch to states 10 and 6 there (the oracle's stay in 4 and 5). 15 bots, seeds 1-6:
+    box frames 486 a run, standing 153, against G4's 348 / 28.7 and the oracle's 232 / 2.5. Seed 6's p4 stands 732
+    frames at (−342, −399, 3011) in state 4, goal 82, script 5 (the G3d r34b15s6 pattern); it comes with the 1.4 reach
+    (the same seed without it: 536 / 83). Without seed 6: 325 / 16.2.
+- **Tank's gun is solved from its pivot and fires from its barrel.** `func_150ED298` measures from joint 3 (C), and the
+  shell starts 101 along the pitched barrel from it (V: 969 shells, pivot 26.1 ahead and 113.9 up, residual 2.6). The
+  remake solved from the hull's centre and fired from 128 ahead, so its shells came down ~128 past the aim point.
+  `tank::PIVOT`, `BARREL` replace `MUZZLE`. The lead and the targets' motion were ruled out (V, C). 12 seeds: hits
+  30.3% → 29.4% (oracle 27.6%); `shells_hit_as_f1` checks c1's start within 1.5/0.5; `tank_bots_bomb_and_fight` 28.3%.
+  Left: the bots' hull turning (`func_15056B08`: the facing turns up to 0x400 a frame while the bot accelerates; the
+  oracle fires 30-46% of its 250-1,500 shots while turning, the remake 16-25%, and those shots rarely hit).
+- **Heist: no bag take mid-swing.** `func_150597FC` refuses a taker with obj+0x89 set, which a landed bat swing holds
+  11-39 frames (V hb, hb2: 21 of 21). The remake's take accepted `Action::Fire`: 1.9 steals a match within 5 frames of
+  the drop (oracle 0), each sending the robbed carrier into a 45-53-frame retreat near the new carrier. Seeds 1-12:
+  state 8 within 500 of the enemy carrier 69.4% → 76.1% (oracle 79.5%, 75.5-83.5), takes 20.2 a match (21.2). Left: the
+  stale health on rocket and tommy hits, the bag's fall, the carried bag's place, the tommy gun's hold. The Colors flags
+  keep `Fire` (same C function, unverified there). conker-bots' ROM `play` harness does not set `Fighter::bot`, so the
+  Heist share above and its Tank and Heist tests run without the bots' 1.4 reach the server applies.
+- Checks: `bun run test`, `bun run check`, the client's wasm clippy.
+
+## Client polish (2026-10-14)
+**Batch G5a-polish. Sounds can change pitch: Race's hums follow `func_150D5124`'s cents with the original's Doppler,
+and Tank's drive loop follows the hull's speed and pitch. Song 0x8A plays at the capture's level. Race's camera
+springs its heights. 0x1A's lamps go dark with the light they hang by. Heist's cs3 clears black at the sides, and the
+HUD names every weapon. No wire change, no shared-simulation change.** Research: scratch
+`../lab/research/mp-original/polish-g5-scratch/` (`run.sh`, `polish.py`, `song.py`; oracle `ConkerRecomp.g5c`, runs in
+`/tmp/g5c`: r1 Race, t2 Tank driven, c1 Colors, w1 Total War, v1 0x1A with 40 RAM dumps).
+
+| Item | Original (tag, run) | Change |
+|---|---|---|
+| Pitch in the mixer (`audio.rs`) | The records' cents (+0x20) → `alCents2Ratio`, × the Doppler, eased (+0x2C) each frame (C `func_10011624`) | `Control.pitch` (atomic, the ratio) read by `Playing` per output frame: a fractional step with linear interpolation, loops keeping the phase; bit-identical at 1.0. Native and WASM (the same rodio source). `Voice.bend` (`Bend::step`) per tick |
+| Doppler | v = trunc((d_prev − d) · 2/3) over the u16 distances to the listener; f = 367/(367 − v) in [0.5, 2], 2 from v ≥ 367; ratio += (2^(c/1200) · f − ratio) · 0.3; a new record starts at 2^(c/1200) (C; V r1 reads 140-143, within 2e-5) | `doppler`, `DOPPLER_EASE`; Race's hums only (Tank's loop has no Doppler, C) |
+| Race: the hums' pitch | Hum 0 (0x5B3): min(trunc(5 · height), 1000) in state 2, else 400; hum 1 (0x5B4): 400 in state 0, and in state 2 under 5 racers, else 0; hum 2: 0. Up +512, down −16 a frame toward it (C `func_150D5124`; V r1) | `hum_cents`, `cents_step`; `hum_target`'s hum 1 order fixed (state 0 first) |
+| Tank: the engine's pitch | 0x4A8 at trunc(\|speed\| · hull pitch° · 0.5) cents, read the frame before; 0x4A7 (idle) flat (C `func_151BB0E0`; V t2: 4 rows −250 to 469 cents) | `engine_cents`; `Seen.pitch` from conker-rules' `hull_pitch` |
+| Song 0x8A's level | The least-squares gain of the pack's WAV in Beach cs4's capture: 0.79 over 3 s, 0.75 over 9 s (V b4) | `SONG_LEVEL` 0.75 (was 1.0) |
+| The radio heard by all | A bot's line 0x64B at 32700 and its clicks, near/far 0x7FFF/0x7FFE, playing 4372-4602 from the listener (V c1 reads 2294-2374; w1 had no line in 120 s) | None (already `Src::radio`); the run added to the test's doc |
+| Race: the camera's springs | Mode 8's look-at height (`conker_camera`'s: floor + air · min(air/300, 1) + 0.75 · head, springs (4, 8), doubled going down) + the view's 123 fits with a 130 head (C; V r1 480-850 rms 4.1, was 21.3 at the racer + 195). The eye's height lags too: a (4, 8) spring toward `CAM`'s height fits (I; rms 12.9, was 42.4). M13's runs agree (`/tmp/m13/cam`, 7 runs: eye rms 7-38, was 19-78; look-at 3-11, was 17-32, but `c_a`'s fall from 490 up, 126 against 135) | `race::heights` after the go, its state in `tank::Cam`'s new second field; the grid's frames hand over from `GRID` |
+| 0x1A's lamp pairing | Segment 4 + k's byte (0x800BE500 + k) toggles with the light whose driver kind is 0x900 + 0x100 · k: lights 11, 10, 20, 12, 29 (V v1: 40/40 dumps each, no other light over 33/40). Each lamp follows the light it hangs by: the original isn't cross-wired, the kinds just aren't in the triggers' order (the trigger records hold no kind, C) | `lights::BY_KIND` orders `Flickers::switches`, so `segments.rs`' lamp k follows the right light |
+| Heist: the HUD names | — | `weapon_name` gains 0x18, 0x19, 0x37, 0x38, 0x3F, 0x40, 0x41; every `conker_rules::weapon` id has a name (the radar's team colours were already M4's `hud.heist.radar`) |
+| Heist: cs3's backdrop | The 740-unit backdrop fills the original's 4:3, not 16:9 (V `../lab/screens/heist/cs3-bubbles.png`: the sky at the sides) | `outro::backdrop`: the view clears black while 0x1A's cutscene 3 shows |
+
+| Test (conker-client) | Against |
+|---|---|
+| `audio` `records_bend_their_pitch_as_the_oracle` | r1's hum cents (174; 207 → 191; 159 → 174) and Doppler ratios (400 and 0 cents over distances 99 → 86, 82, 89); t2's four engine rows; the mixer reading 100 · k · ratio at 400 cents and back to step 1 |
+| `audio` `the_outro_song_plays_at_the_captures_level` | b4's 9 s excerpt (lab only, skipped without it): the fitted gain within 0.01 of 0.75 |
+| `race` `the_board_camera_springs_its_heights_as_the_oracle` | r1 reads 545-575 (a jump): within 45 (eye) and 12 (look-at) of the oracle, where unsprung is 129 and 40 off |
+| `lights` `the_vault_lamps_pair_with_their_lights` | v1 dumps 212, 230, 326, 338, 344: the lights off → the bytes set |
+| `outro` `heists_backdrop_outro_clears_black` | The pack's 0x1A outros: only the one with the 37 × 37.01 backdrop clears black |
+| `lib` `hud_reads_health_weapon_score_clock_and_respawn` | Every rules weapon has a name |
+
+Screens (`../lab/screens/polish-g5/`, copies of `heist/shots.sh` and `race/shots.sh` on ports 5986/5988):
+`cs3-early.png`, `cs3-bubbles.png` (`CONKER_OUTRO=3 PORT=5980 zsh heist.sh d`: black at the sides), `racing-11.png`
+(300), `kick.png` (214, the hand-over from the grid). No lamp screen: each client switches the lights at random,
+so a dark lamp can't be timed (the unit test carries the dumps). Unforced, `heist.sh d` now shows cs2 (`human_won`), where
+`heist/shots.sh` expects cs3. Not looked into: the rules lane's changes are in progress.
+
+**Left.**
+- **Race's finish cameras (V F1, `/tmp/m13/cam/F1`; I):** at the finish (232) the eye cuts to (−133, 1034, −6925),
+  about 95 ahead of and 390 over the racer, and the look-at is the racer itself. The eye holds until the racer is
+  about 950 away, then is dragged along at 950-993. At 321 (back 993) it cuts to about 954 ahead (3449, 977, −8462)
+  and trails again. It isn't a camera hint: the scene has no points (`[0x0C, 0x25 | 0x33, 8]` empty). The law
+  (the hold, the drag's height, the cut's trigger) isn't decoded. Not ported.
+- **Race:** the listener sits 80-117 behind the own racer (cam+0x2A4), so the original's own hums wobble about ±2 %
+  by Doppler. The remake's listener is on the racer (none; I). Also open: the FOV add, the boost's distance, the
+  yaw's hand-over and the death's look-down (M13's list).
+- **Race's lamp quads' drift (I):** with the camera still (cd 142-202), the quads hold their centres. From the go
+  they follow about half the camera's xz move (cd 200 → 235: the camera (+83, −55), the quads (+42, −28)) but not its
+  y. Not decoded; the remake draws them fixed.
+- **Unlit vertices dimming with the lamps:** pack-side. The extractor drops the vertices' lighting flag (bit 15), so
+  the client can't tell an unlit vertex. G5a-pack would need to export it.
+- **The blink and the bag's clock (justified):** both run on the client's tick, which lightyear keeps at the
+  server's plus the client's lead. Two clients differ only by their leads; the original's VI counter (0x800BE9AC) is
+  one machine's. The bag counts from when its state arrives, in the same snapshot as its place: counting from
+  `CashView::since` would run the clip ahead of where it's drawn. `heist.rs`' stale comment fixed.
+- **The 0.6 picks' lift and held size:** not checked against a frame. That needs an oracle run on a 0.6 pick (176,
+  177) with DL dumps of its held weapon's matrix.
+- **Helmets 0xD-0xF off 0x33:** the pack now has them (`held.json` 26-28, G5a-pack). Drawing them is G5b's.
+- **Flag 169's translucent frames:** client-side, not ported. c1a DL 430-466 and c1b DL 428-434 fall between the
+  capture's celebration and the flags' destruction (c1a: capture 382, respawn 472; c1b: outro load 438). That
+  suggests the destroyed flags fading out (I); the switch isn't traced.
+
+| Check (2026-10-14) | Result |
+|---|---|
+| `bun run test` | 647 pass, 1 ignored |
+| `bun run check` | Fails only on `cargo fmt --check` in other lanes' in-progress files (conker-bots `brain.rs`, conker-rules `tank.rs`, `tests/zz_g5_head.rs`). Its clippy step (`-D warnings`, every crate) and `web/app`'s check pass when run alone |
+| `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | Pass |
+
+Files: conker-client `audio.rs`, `race.rs`, `tank.rs` (`Cam`'s second field), `lights.rs`, `outro.rs`, `heist.rs`
+(a comment), `lib.rs` (`weapon_name` and its test).
+
+## The G5 exports in the pack (2026-10-14)
+**Batch G5a-pack. Every pack export G5 asked for is in `../assets` (2,160 files, was 2,103; `verify-pack.sh`: pack
+equal): the world effects' sprites, the scorch and the fuse's sparks in `hud/`; one shared `effects.gltf` (the ring
+moved off 0x2B) with the strike's chunks, the flak, the drops and Race's death blast; the maps' camera points; sounds
+1193 (the tank's rumble) and 1232 (the crossbow's laser) with their cues; the head stumps and the racers' helmets as
+held models; the tank's treads one material a side and its carried gas bomb. Nothing is drawn new in the client
+(G5b's); the moved files' consumers (`traps.rs`, `effects.rs`, `beach.rs`, `tank.rs`) follow them. No wire change,
+no shared-simulation change.** Research: `../lab/research/mp-original/g5-pack-scratch/` (`race/`, `laser/`,
+`tank/` NOTES.md, `probe/`; oracle `ConkerRecomp.g5p`). Every entry is documented in `pack-readme.md`.
+
+| Entry | Export | Pack test | G5b client follow-up |
+|---|---|---|---|
+| World sprites (`effects-g4.md`'s list) | `hud/` `gun_flash_3d` 0x3CF, `tracer` 0x11FE, `puff` 0xBA6 (moved from `maps/34/traps/`), `flame_tongue` 0xBA7, `smoke_grey` 0x721, `ripple_00`-`_09`, `flame_a0`-`_b4` 0x8FF-0x908, `dirt` 0x4BD; `bubble_particle` is now 0x4B3 RGBA32 32×32 (0xC01 was a selector word; comments fixed in `hud.rs`, conker-assets `outro.rs`). Kinds read from the table at 0x80090B60 + 12 · kind (C, V) | `pack_hud_reads_back`: each size, none blank, 10 distinct ripples | The recipes of `effects-g4.md` §1 (3D flash, tracers), §3 (tongues), §5 (flak flash), §6 (bunker tracers), §9 (ripples), §11 (burning flames, in place of `traps.rs`' puff stand-in), §14 (dirt, exhaust); `outro.rs`' bubbles now get the right 32×32 texture (their sizes are the recipe's, unchanged) |
+| Scorch (kind 0x4F) | `hud/scorch.png`: 0x4E5 I4 32×32, the table's id is the drawn one (V rkt DLs 126-160; also Tank's shell, V k1) | the same | A decal on the struck face at each rocket, grenade and tank-shell blast: black, alpha × 0xE8, random flips; size and life in the readme (half-width reading I) |
+| `effects.gltf` | `weapons/deathmatch/effects.gltf` (12 scenes, conker-assets `EFFECTS`, `effects_gltf`): `ring` #0x157 (was `maps/2b/effects.gltf`), `spark` #0x132, `flak` #0xE5, `drop` #0xBE, then Race's blast (V d1: every vertex of DL 380 found in these) `fire` #0x158, `board_6c`-`_6e` #0x16F-#0x171, `gib_7e`-`_81` #0x17D-#0x17F, #0x179 | `pack_audio_reads_back`: scene names, triangles, alpha modes, textures; no `maps/*/effects.gltf` | The ring at every map's blasts (§7); the chunks (§4), flak puffs (§5), splash drops (§9); Race's death: replace `race.rs`' `beach::burst` stand-in with the readme's recipe (3 board pieces, 6 racer pieces, the fire and smoke shells) |
+| Camera points | `maps/<map>/cameras.json` (`Slice::cameras`, `CameraPoint`): the ROM's `[0x0C, scene, 8]`, 0x18-byte records, `at` s16 and the rest as hex. 0x2B 6 points (the first two are `SEA_POINTS`), 0x1A 4, the others none | `pack_reads_back_as_the_rom_path`: Beach's 6, the vault's 4; the round trip (conker-assets) | conker-camera `volume.rs` reads its points from `Slice::cameras` instead of `SEA_POINTS`; 0x1A's hints 0x40-0x43 (kind 0, `action` 5, points 0-3, reach 181) then work too |
+| Sound 0x4A9 (1193) | `audio/characters/119/1193.wav`; cue `tank_rumble` (`On::TankRumble`, at 0x2EE0, near 200, far 800) | `tank_audio_reads_back`: the cue and the file | `audio.rs`: 150 frames after a tank's drive loop starts, the rumble ramps 8/256 a frame, holds 150 or 406 frames, falls; stop at idle; the drive loop fades from 450/706 frames (C `func_151BB0E0`; cs5's outro tanks too) |
+| Head stumps | `held.json` 24 (#0x59, `joint_00`, model 117) and 25 (#0x58, `joint_01`, 128), no events | `pack_reads_back_as_the_rom_path` (the held tail); `rom` `slice_in_memory` (29 held; #0x59's one shade-only draw) | Show the dead player's model's stump from a 0x2F kill (weapon 0x37 or 0x22) to the respawn, joints 1-15 at scale 0 (`corpses.rs` keys the pop already) |
+| Tank treads | `character.json` `tank.treads` `[13, 15]`: primitive 13 split by joint, material 15 the `joint_12` side (same texture) | `pack_reads_back_as_the_rom_path`: 48 indices a side, each single-joint | `tank.rs` scrolls both alike today; scroll side k by its own speed: clamp(v ± Δfacing / 70, ±45) × −7 a frame, the first side +, wrapping at 0x800 |
+| Tank's carried bomb | `maps/24/props.gltf` scene 1: action 0x18's one record, bank 09 #0x3F on matrix slot 2 = `tank.turret` (C; V k1 DL 45: drawn with joint 2's matrix), 48 triangles | `pack_reads_back_as_the_rom_path`, `rom` `tank_model_and_map` | Draw scene 1 in the carrier's `joint_02` frame at the tank's scale while it carries, in place of the guess (`tank.rs`: 190 up, 0.3 of the post's) |
+| Tank muzzle "smoke" | None exists (V k1 DLs 56-90): the shot makes the 3D flash (`gun_flash_3d` on `tank.muzzle`), a 2D flash (`race_exhaust_*`), a light and the shell's glow (`race_exhaust_*`, size rand × 800 + 1700); STATUS's 5-9 puffs were the flash's life | — | The tank shot's flashes and the shell's glow (recipes in `g5-pack-scratch/tank/NOTES.md`); the exhaust is `smoke_grey` (its recipe not read) |
+| Crossbow laser | Its textures were already packed: the dot 0xE20 = `strike_glow`, the beam 0xB97 = `strike_streak` (V las); sound 1232: `audio/common/1232.wav`, cue `laser` (`On::Laser`, 2000, the aimer only, free channel) | `pack_audio_reads_back`: the cue and the file | Draw the dot (both views) and the beam (other views only), red with the laser's alpha, while `Combat::laser`; play the loop for the aimer (alpha, growth and scroll laws open: values only) |
+| Fuse sparks | `hud/fuse_spark.png`: 0x1041 I8 32×16 (kind 0x42, V lob) | `pack_hud_reads_back` | Item 0x3A's spark bursts from the pull through the flight, each with a `shell.png` flash (readme) |
+| Racer helmets off 0x33 | `held.json` 26-28: #0x5A, #0x5C, #0x5B on `joint_12` (classes 0xD, 0xE, 0xF) | `pack_reads_back_as_the_rom_path` (the held tail) | Show a class 0xD-0xF player's helmet on any map (C attaches it in any mode) |
+| Flag 169 translucent | Not pack-side: the original switches the whole flag to its XLU table in some frames (V c1a, c1b); when is not traced | — | Client, if wanted: a per-entity `AlphaMode::Blend` copy |
+| 0x34's, 0x3F's loops | Not fixable in the pack: songs 36 and 84 never repeat sample for sample (V, 900 s runs); the cuts are near-silent periods | — | Client, if wanted: a short crossfade at the seam |
+| Song 0x8A's level | Not settled (I: gain 0.62-0.76 against cs4's `b4` capture, music and voice over it); the WAV is unchanged | — | Client-side: G5a-polish settles its level against cs4's capture (`the_outro_song_plays_at_the_captures_level`) |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| `bun run test` (ROM) | all pass (conker-extract `pack` 6, `rom` 23, `traps` 1; conker-bots' `rom` 26 in 2,113 s, run beside other lanes') |
+| `lab/tools/verify-pack.sh` | pack equal, 2,160 files (`maps/2b/effects.*`, its texture 3301 and `maps/34/traps/puff.png` gone) |
+| clippy `-D warnings` | conker-extract, conker-assets, conker-client native, conker-client wasm32 clean; `cargo fmt --check` clean on these crates (its diffs are in other lanes' files); `web/app` check clean |
+
+Files: conker-extract `lib.rs` (`effects_level`, `camera_points`, `split_treads`, `STUMP_ACTIONS`, `TANK_BOMB`,
+`attached`, the helmets in `held_level`), `hud.rs`, `traps.rs`, `audio.rs`, `pack-readme.md`, tests `pack.rs`, `rom.rs`,
+`traps.rs`, `Cargo.toml` (png dev-dependency); conker-assets `lib.rs` (`EFFECTS`, `effects_gltf`, `CameraPoint`,
+`Slice::cameras`, `Tank::treads` a pair), `audio.rs` (`On::Laser`, `On::TankRumble`), `outro.rs` (a comment);
+conker-client `traps.rs`, `effects.rs` (`hud/puff.png`), `beach.rs` (the shared ring), `tank.rs` (both tread materials).
+
 ## Cameras, clips and outros (2026-10-14)
 **Batch G4b. Beach's sea sides hold the original's fixed cameras (hints 0x26/0x27, mode 0x40), and a swimmer dies in
 clip 0x24. Map 0x34's corridor camera now matches the original's eye bit for bit through read 777. The scope opens at

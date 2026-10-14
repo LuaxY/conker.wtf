@@ -209,8 +209,8 @@ pub struct PlayerState {
     pub aiming: bool,
     /// Last frame was a strafe ([`STRAFE_TARGET`]; ground frames only).
     pub prev_strafe: bool,
-    /// +0xCC: how far the player has sunk into the floor ([`SURFACES`]); only the camera's look-at
-    /// shows it, the position stays on the floor.
+    /// +0xCC: how far the player has sunk into the floor ([`SURFACES`]); the camera's look-at and the
+    /// body's joints show it (conker-rules' `parts`), the position stays on the floor.
     pub sink: i16,
     /// +0xAA: the floor's speed percentage ([`SURFACES`]), 0 for none.
     pub speed_percent: u8,

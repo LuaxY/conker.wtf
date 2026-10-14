@@ -32,8 +32,9 @@ const GLYPHS: usize = 95;
 /// beach-presentation-scratch`'s det1 DL 318 and ev3 DL 1044 draw, byte for byte the blob's; the
 /// strike's red flash, 0x80202220, is `iris`); Heist's "$" pip (0xD14, `end.json`'s `lives`, again
 /// under its own name: V hud1 DL 200 draws its texels [14, 16, 7, 7]), and the bubbles its outro
-/// cs3 sends up (0xC01, C `func_150EA11C`'s sprite: CI4 64 × 64 with a 16-entry palette by its size,
-/// read RGBA16 as the atlases; I, no DL of it seen); Race's overview maps of its two routes (C
+/// cs3 sends up (0x4B3, RGBA32 32 × 32: sprite kind 0x2F's, V `/tmp/m4d/cs3` hw_455, `../lab/research/
+/// mp-original/effects-g4.md` §10; 0xC01 was the sprite's selector word, not a texture); Race's
+/// overview maps of its two routes (C
 /// `func_150918EC`: 0xCF2 when `0x8008FDBC & 0x40`; V k1 DL 250 and b2 DL 150, scenarios 11 and 12:
 /// the RAM's that the map's texrect draws, found by `texfind`); War: Raptor's strip heads and its
 /// carried body's icon (V: the RAM's at 0x80206BC0 that `../lab/research/mp-original/
@@ -42,8 +43,13 @@ const GLYPHS: usize = 95;
 /// blob's): the countdown lamps' flare (cd DLs 142-235 at 0x801C02B0), the canister's boost flare
 /// (w3b/w3c DLs 480-510 at 0x801B7770), the exhaust glow's four frames (w1, w3b, w3c, cd), and
 /// the missile's trail, drawn I8 128 wide and one high (w1 DLs 218-240 at 0x801AB800: its tile is
-/// 256 wide, but `G_TEXTURE`'s scale 0.5 keeps s within 0-127).
-const TEXTURES: [(&str, usize, Format, usize, usize, bool); 43] = [
+/// 256 wide, but `G_TEXTURE`'s scale 0.5 keeps s within 0-127). Then the world effects' sprites
+/// (`../lab/research/mp-original/effects-g4.md`, G5's pack list): each 2D/3D sprite kind's texture is
+/// its record in `.game` data's table at 0x80090B60 + 12 · kind (a pointer to its frames' ids, the
+/// frame count, then width, height, G_IM_FMT and G_IM_SIZ: C `func_15130A9C`), read for kinds 0x5F,
+/// 0x41, 0x28, 0x16, 0x38, 0x2F, 0x13, 0x14, 0x4F (the scorch) and 0x42 (the fuse's sparks); 0xBA7
+/// and 0x4BD as the DLs draw them (V effects-g4 flame DL 130, cs5).
+const TEXTURES: [(&str, usize, Format, usize, usize, bool); 71] = [
     ("atlas", 0xD16, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("atlas2", 0xD17, Format::Ci4(Tlut::Rgba16), 64, 64, false),
     ("radar", 0xCF3, Format::Ia8, 32, 32, true),
@@ -80,14 +86,7 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 43] = [
     ("strike_glow", 0xE20, Format::I8, 64, 64, true),
     ("strike_streak", 0xB97, Format::I8, 128, 32, true),
     ("pips", 0xD14, Format::Rgba32, 32, 32, false),
-    (
-        "bubble_particle",
-        0xC01,
-        Format::Ci4(Tlut::Rgba16),
-        64,
-        64,
-        true,
-    ),
+    ("bubble_particle", 0x4B3, Format::Rgba32, 32, 32, true),
     ("race_lamp", 0x235, Format::I8, 64, 64, true),
     ("race_boost", 0xE21, Format::I8, 64, 64, true),
     ("race_exhaust_0", 0x923, Format::Rgba32, 32, 32, true),
@@ -95,6 +94,40 @@ const TEXTURES: [(&str, usize, Format, usize, usize, bool); 43] = [
     ("race_exhaust_2", 0x925, Format::Rgba32, 32, 32, true),
     ("race_exhaust_3", 0x926, Format::Rgba32, 32, 32, true),
     ("race_trail", 0xB39, Format::I8, 128, 1, true),
+    // The world effects (effects-g4.md §1-§14): the guns' 3D flash (kind 0x5F) and the bullets'
+    // tracer (0x41), the flamethrower's puffs (0x28) and tongues, the grey smoke (0x16: the flak's
+    // flash, the cone's smoke, the tanks' exhaust), a swimmer's ripple (0x38: 20 frames, each of
+    // these held 2), the burning player's flames (0x13, 0x14), cs5's dirt and the rocket's scorch
+    // decal (0x4F).
+    ("gun_flash_3d", 0x3CF, Format::Rgba32, 32, 32, true),
+    ("tracer", 0x11FE, Format::Rgba32, 64, 16, true),
+    ("puff", 0xBA6, Format::Rgba32, 16, 16, true),
+    ("flame_tongue", 0xBA7, Format::Rgba32, 32, 32, true),
+    ("smoke_grey", 0x721, Format::Ia8, 32, 32, true),
+    ("ripple_00", 0xED9, Format::I8, 64, 64, true),
+    ("ripple_01", 0xEDF, Format::I8, 64, 64, true),
+    ("ripple_02", 0xEE0, Format::I8, 64, 64, true),
+    ("ripple_03", 0xEE1, Format::I8, 64, 64, true),
+    ("ripple_04", 0xEE2, Format::I8, 64, 64, true),
+    ("ripple_05", 0xEDA, Format::I8, 64, 64, true),
+    ("ripple_06", 0xEDB, Format::I8, 64, 64, true),
+    ("ripple_07", 0xEDC, Format::I8, 64, 64, true),
+    ("ripple_08", 0xEDD, Format::I8, 64, 64, true),
+    ("ripple_09", 0xEDE, Format::I8, 64, 64, true),
+    ("flame_a0", 0x8FF, Format::Rgba32, 16, 32, true),
+    ("flame_a1", 0x900, Format::Rgba32, 16, 32, true),
+    ("flame_a2", 0x901, Format::Rgba32, 16, 32, true),
+    ("flame_a3", 0x902, Format::Rgba32, 16, 32, true),
+    ("flame_a4", 0x903, Format::Rgba32, 16, 32, true),
+    ("flame_b0", 0x904, Format::Rgba32, 16, 32, true),
+    ("flame_b1", 0x905, Format::Rgba32, 16, 32, true),
+    ("flame_b2", 0x906, Format::Rgba32, 16, 32, true),
+    ("flame_b3", 0x907, Format::Rgba32, 16, 32, true),
+    ("flame_b4", 0x908, Format::Rgba32, 16, 32, true),
+    ("dirt", 0x4BD, Format::Rgba16, 16, 16, true),
+    ("scorch", 0x4E5, Format::I4, 32, 32, true),
+    // Item 0x3A's fuse sparks (kind 0x42: V `g5-pack-scratch/laser`, lob DLs from 107).
+    ("fuse_spark", 0x1041, Format::I8, 32, 16, true),
 ];
 
 /// The rank suffixes draw in the text's colour through their alpha (`G_CC` PRIM, PRIM_A × TEXEL0):

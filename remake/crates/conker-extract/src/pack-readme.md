@@ -19,7 +19,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `pack.json` | `format` (the pack format; a server reads only its own), `source_rom_sha1` (for reference), the folders under `maps/`, `characters/` and `weapons/`, `audio`: the folders under `audio/` that hold sound (absent in a pack without sound), and `hud`: whether the pack has `hud/` |
 | `maps/<map>/level.gltf`, `level.bin`, `textures/*.png` | A map as the client draws it: a node per model instance (the scene's own segments, then its placements, less those the map's Deathmatch hides and the quads it never draws, bank-03 #0x33). `<map>` is the scene in hex: `2d` (scene 0x2D, the Deathmatch map), `30` (scene 0x30, the original's Deathmatch scenario 5 and Colors' map), `34` (scene 0x34, the Bunker, Deathmatch scenario 4), `3f` (scene 0x3F, the Temple, Deathmatch scenario 7 and Raptor's map), `2b` (scene 0x2B, the Beach, War: Beach's map, scenario 8), `1a` (scene 0x1A, the Vault, Heist's map, scenario 0, and Deathmatch scenario 6), `24` (scene 0x24, Tank's map, scenario 1), `33` (scene 0x33, Race's map, scenarios 11 and 12: its four route barriers, `04-33-04@0` to `@3`, are drawn, two hidden by the route, `race.json`; its crowd panels draw one frame each, and `textures/` also holds their other frames, `race.json`'s `crowd`). Materials named `m<n>-seg<address>` read a texture the game binds at run time: the glTF draws their first frame (0x33's crowd, 0x1A's screens and lamps, `segments.json`) |
 | `maps/2d/props.gltf`, `props.bin` | War: Total War's props the Deathmatch hides: scene 0 the shelter's doors (placements 0, 1), the gas masks (21-26) and canisters (27, 28) in place, nodes named as the level's; scene 1 the canister at the origin (in a carrier's hands). Textures in `textures/` with the level's |
-| `maps/24/props.gltf`, `props.bin` | Tank's props the level leaves out, in place, nodes named as the level's: the gas bomb (`03-50@12`, shown on the centre post by the match; `@14` a second, never shown), the wrecks (`03-5f@17` to `@33`: 18 + slot shown where a tank died, 17 never), and the unused `03-48@9`, `@13`, `03-47@15` |
+| `maps/24/props.gltf`, `props.bin` | Tank's props the level leaves out, in place, nodes named as the level's: the gas bomb (`03-50@12`, shown on the centre post by the match; `@14` a second, never shown), the wrecks (`03-5f@17` to `@33`: 18 + slot shown where a tank died, 17 never), and the unused `03-48@9`, `@13`, `03-47@15`; scene 1 the gas bomb a tank carries (bank 09 #0x3F, one draw of 48 triangles), at the origin in the frame of the tank's turret joint (`character.json` `tank.turret`, `joint_02`), in character model units as `held.gltf`'s |
 | `maps/3f/props.gltf`, `props.bin` | War: Raptor's props the level leaves out, in place, nodes named as the level's: the cooked eggs (`04-3f-04@0` to `@3`, shown one at a time where an egg was delivered), `03-55@4` to `@6` (never shown) and the bone crossbows and bone knives on their pickup spots (`03-6b@15`, `@16`, `@19`, `@20`; `03-6a@17`, `@18`, `@21`, `@22`) |
 | `maps/3f/raptor.json` | What War: Raptor adds to the map: its hidden placements, its pickups, the teams' spawn records, its script's zones, the baby, the body and the eggs, and the raptor's rig and bites (below) |
 | `maps/33/props.gltf`, `props.bin` | Race's models hung on the racers, each at the origin in its joint's frame (character model units, as `held.gltf`'s): scene 0 the hoverboard (bank 09 #0x5D, on `joint_23`, a foot), scenes 1-3 the bots' helmets (#0x5A, #0x5C, #0x5B, on `joint_12`, the head); `race.json` says whose |
@@ -35,8 +35,8 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `maps/<map>/segments.json` | The level materials whose texture the game swaps at run time: 0x1A's two computer screens and its five switching lights' lamps (their frames in the map's `textures/`); empty (`{}`) on the others |
 | `maps/<map>/outros.json` | The victory outros: Total War's on 0x2D (the original's cutscenes 2 and 4), Colors' on 0x30 (cutscenes 1 and 5), Beach's on 0x2B (cutscenes 4 and 3), Heist's on 0x1A (cutscenes 2 and 3), Raptor's on 0x3F (cutscenes 2 and 4), none on the others |
 | `maps/<map>/outro.gltf`, `outro.bin` | The models the outros show (2d, 30, 2b, 1a): glTF scenes named `09-<entry>` (hex: a bank-09 attachment, in its joint's frame, character model units) and `prop-<placement>` (a placement the level leaves out, at the origin: the outro places it). Textures in `textures/` |
-| `maps/2b/effects.gltf`, `effects.bin` | War: Beach's effect models: scene `09-157`, the detonation's ring (bank 09 #0x157, a sphere of radius 100 at the origin, alpha-blended; the client scales it flat and fades it). Textures in `textures/` |
-| `maps/34/traps/*.png` | Scene 0x34's traps, the game's own textures: `flame.png` (a fire jet's flame, blob 0x916: a quad facing the camera, as wide as the jet and as tall, its texture's S running up the jet and scrolling), `puff.png` (the jets' particles, 0xBA6) and `arc.png` (the electric floor's arcs and bolts, 0x753: ribbons across its first row, tinted by the client) |
+| `maps/<map>/cameras.json` | The fixed cameras' points: what a camera hint's point index names (6 on 0x2B, 4 on 0x1A, `[]` on the others; below) |
+| `maps/34/traps/*.png` | Scene 0x34's traps, the game's own textures: `flame.png` (a fire jet's flame, blob 0x916: a quad facing the camera, as wide as the jet and as tall, its texture's S running up the jet and scrolling) and `arc.png` (the electric floor's arcs and bolts, 0x753: ribbons across its first row, tinted by the client); the jets' particles are `hud/puff.png` |
 | `characters/117/character.gltf`, `.bin`, `textures/*.png` | Character 117, the Tedi: the Tediz side's player (and every Deathmatch player in the original). Skinned mesh, 28 joints, 764 animations |
 | `characters/128/character.gltf`, `.bin`, `textures/*.png` | Character 128, the squirrel soldier (SHC): the squirrels side's player. The same 28-joint skeleton with its own proportions, and the same 764 animations |
 | `characters/136/character.gltf`, `.bin`, `textures/*.png` | Character 136, the caveman (class 0xB): the bots of scene 0x3F's Deathmatch. The same skeleton and animations |
@@ -46,17 +46,18 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/138/` `character.gltf`, `.bin`, `textures/*.png` | The mounted machine gun, packed with maps 30, 34 and 2b: 12 joints, drawn at half its model units like the players, turned to the gun's yaw. `joint_03` the seat (the gunner sits there); `joint_04` the barrels' and the camera's pivot, which takes the pitch (the gunner's eye is `joint_04` × (0, 116, 130)); `joint_05` and `joint_07` the barrels, their muzzles at (13, 0, 200) and (−13, 0, 200) from them; `joint_06`, `joint_08` the barrel tips; `joint_09`-`joint_11` a side part. One glTF animation, `pair_0000_anim_0001` (logical clip 1): the 12-frame fire loop, played while the gun fires. `textures/character-15.png` (material 15) is the ammunition belt, which scrolls along its S while the fire loop plays: −40 × the frame's VIs per frame on map 30, in the game's texture-scroll units (I: 1/32 texel); map 34's belt scroll is not exported. No `character.json` |
 | `characters/59/` `character.gltf`, `.bin`, `textures/*.png` | Character 59, the Wise Guy: every Heist player (class 1), packed with map 1a. The same skeleton and animations, with a `character.json` that has its `teams`: `textures/team-0.png` to `team-3.png` are the four teams' looks (REDS, BLUES, GREENS, YELLOWS) |
 | `characters/87/` `character.gltf`, `.bin`, `textures/*.png` | Character 87, Heist's money bag, packed with map 1a: 5 joints, 12 clips (glTF animation n is pair n; the game's logical clips 0, 9 and 10 play pair 0, 1 pair 1, 3 pair 2, 2 pair 3, 4 pair 4, 5 and 6 pair 6, 7 pair 7, 8 pair 8, 11 pair 9, 12 pair 10, 13 pair 11; pair 5 has none, `character.json` lists them); drawn at 0.4 of its model units |
-| `characters/119/` `character.gltf`, `.bin`, `textures/*.png` | Character 119, the tank: every Tank player (class 8), packed with map 24. Its own 14 joints and 8 clips; drawn as the match does (brake lights unlit, headlights lit, the red flag). Its `character.json` has its `teams` (`textures/team-0.png` to `team-3.png`: the antenna's red, blue, green and yellow flags) and its `tank` parts (`textures/brake-lit.png`: the brake lights while it brakes) |
+| `characters/119/` `character.gltf`, `.bin`, `textures/*.png` | Character 119, the tank: every Tank player (class 8), packed with map 24. Its own 14 joints and 8 clips; drawn as the match does (brake lights unlit, headlights lit, the red flag); its two treads are two materials, one a side (`material_13` on `joint_13`, `material_15` on `joint_12`: the same texture). Its `character.json` has its `teams` (`textures/team-0.png` to `team-3.png`: the antenna's red, blue, green and yellow flags) and its `tank` parts (`textures/brake-lit.png`: the brake lights while it brakes) |
 | `characters/83/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 83, the raptor: War: Raptor's raptor side (class 9), packed with map 3f. Its own 39 joints and 37 clips (3 with root motion), model lift 0, drawn at 0.7 of its model units (`raptor.json`): `joint_05` the skull, `joint_06` the lower jaw (a carried body hangs at its origin), `joint_07` the crest |
 | `characters/165/`, `characters/171/`, `characters/22/` `character.gltf`, `.bin`, `textures/*.png` | War: Raptor's baby raptor (165: the raptor's 39 joints and its 37 clips, as the game plays them), egg (171: one joint, no clip) and the body a raptor carries (22: 31 joints, 32 clips), packed with map 3f; no `character.json` |
 | `characters/144/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 144: Race's bots (classes 0xC-0xF), packed with map 33 (a human racer, class 0xB, is 136). The Tedi's skeleton and animations; its `looks` hide list 1 on class 0xF. Riding is clip 5 (also jumping and steering), the kick 0x354, knocked up 0x54, dead 0x170 |
 | `characters/0/`, `150/`, `152/`, `159/`, `160/`, `176/`, `177/`, `178/`, `180/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | The picks the cheats and map 1a add (Deathmatch and Race): Conker (0: model 0's pick, drawn as its model 1, 701 vertices), Neo Conker (150), the weasel guard (152), two zombies (159, 160), the Sergeant (176) and the Tediz Leader (177, both drawn at 0.6), Gregg (178, 180). The Tedi's skeleton, **no animations**: their `character.json` says `clips_from` 117 |
 | `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, a player model's hitbox and body, the clips' owner and the undrawn lists of the picks, the villagers' and Race's bots' looks, the Wise Guy's team looks, the tank's flags and parts, the eyes that blink (`faces`) and the body parts that shots test (`parts`) |
-| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), War: Total War's gas mask in the hand and on the head, Race's kick (bank 09 #0x34 in the hand, clip 0x354) and item 0x3A's grenade in the hand (bank 01 #137 on map 1a, #186 on 3f; the crossbows and these in their bind pose): glTF scene `i` is `held.json[i]` |
+| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), War: Total War's gas mask in the hand and on the head, Race's kick (bank 09 #0x34 in the hand, clip 0x354), item 0x3A's grenade in the hand (bank 01 #137 on map 1a, #186 on 3f; the crossbows and these in their bind pose) the head stumps a shotgun's or chainsaw's head kill leaves (bank 09 #0x59 and #0x58) and the racer classes 0xD-0xF's helmets (#0x5A, #0x5C, #0x5B, the last three, as `maps/33/props.gltf`'s): glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
 | `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5; Race's missile, drawn at 1.0), 5 War: Raptor's bone knife (bank 09 #0x7C; the bone crossbow's bolt is 3), 6 and 7 item 0x3A's thrown grenade on map 1a (bank 01 #137) and 3f (#186), in their rest pose (the game draws it as `lob.gltf`'s clip 0; a bullet has none) |
 | `weapons/deathmatch/crossbow.gltf`, `.bin`, `textures/crossbow-NN.png`; `lob.gltf`, `.bin`, `textures/lob-NN.png` | The child objects' rigs, each one skinned mesh with its own joints and clips (the game poses them from the holder's clip): `crossbow` the crossbow (bank 01 #110, `extras.list` 0) and War: Raptor's bone crossbow (#47, list 1) on 3 joints; `lob` item 0x3A's grenade on map 1a (#137, list 0) and 3f (#186, list 1) on 4 joints. Draw the one list; animations `pair_000N_anim_000N` are clips 0-3 (clip 0, one frame: the crossbow's bind pose, the thrown grenade's bent fuse; a clip keys some joints only, the others stay at rest) |
 | `weapons/deathmatch/flame.png` | The flamethrower's stream (blob 0x916, as `maps/34/traps/flame.png`): a ribbon through its flame points, its S along the stream |
+| `weapons/deathmatch/effects.gltf`, `.bin`, `textures/*.png` | The effects' models, on every map, each at the origin in its model units: glTF scene `i` named `09-<entry>` (below) |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
 | `game/class.bin` | The characters' behaviour scripts (game bytecode, raw) |
@@ -66,7 +67,7 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `audio/characters/<id>/*.wav` | Sounds only that character makes: its voice |
 | `audio/maps/<map>/*.wav` | The map's own sounds: `background.wav` (the background noise, a recording of the game's own output, stereo, looped whole) and, on 0x2D, its two lamps' buzz (0x2B's two lamps and 0x1A's lamps and switching lights play the same sounds, kept there; 0x1A's bases' hum, `1116.wav`, in `maps/1a`; on 0x24 `countdown.wav`, the bomb's countdown music, song 50, a recording, `--song`) and the outros' voice lines (`voice-b1.wav`, `voice-b3.wav`: the game's MP3s, bank 0x16 entries 0xB1 and 0xB3; on 0x30 `voice-d0.wav`, entry 0xD0; on 0x2B `voice-163.wav` and `voice-161.wav`, and `voice-1a8.wav`, War: Beach's escape radio, `song-8a.wav`, Beach cs4's song (a recording, `--song`), and `background_stem.wav`, the music's channels 13 and 14 (a recording, `--stem`, cut as `background.wav`); on 0x30 `jingle-1a4.wav` and `jingle-1a7.wav`, War: Colors' capture jingles, entries 0x1A4 and 0x1A7; on 0x34 `0566.wav`, sound 0x236, the electric floor's (its fire jets' 0x1AA is `common/0426.wav`, the flamethrower's); on 0x1A Heist's outros' `voice-b5.wav` and `voice-ce.wav` (entries 0xB5, 0xCE) and their sounds `0010.wav` and `0012.wav`; on 0x3F Raptor cs2's `voice-1c5.wav`, entry 0x1C5). A sound more than one folder's owner plays is in `common`: with map 24, the tank's sounds 12, 1191 and 1192 (0x2B's tunnels play 1191, Colors cs5's tanks 1192) |
 | `hud/hud.json` | What the client draws over the view: where each part of the HUD goes, its pictures, colours and rules |
-| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell); War: Beach's strike: `strike_glow.png` (its red floor glow) and `strike_streak.png` (its spinning streak), white with the intensity in alpha, tinted red by the client; Heist's `pips.png` (the strip's "$" pip, texels [14, 16, 7, 7]) and `bubble_particle.png` (the bubbles its outro cs3 sends up); Race's overview maps, `race_map_low.png` and `race_map_high.png` (scenarios 11 and 12; drawn 64 × 64 at half alpha, the racers as 2 × 2 dots: one's own green, the others red; not laid out in `hud.json` yet); Race's world effects, quads blended over the scene: `race_lamp.png` (the countdown lamps' flare, white with the intensity in alpha, tinted red then green), `race_boost.png` (a canister's boost flare, white), `race_exhaust_0.png` to `_3.png` (a board's exhaust glow, four frames in colour) and `race_trail.png` (128 × 1, a missile trail's cross-section, white) |
+| `hud/*.png` | The HUD's pictures, the game's own textures: `atlas.png` and `atlas2.png` (weapon icons, the chocolate health pieces), `grenade.png`, `radar.png`, `reticle.png`, `scope.png` and `scope_dot.png`, `iris.png` (the death circle; War: Beach's strike flash), `rank_st/nd/rd/th.png`, `teams.png` (War's team icons and Colors' flags), `beach_teams.png` (War: Beach's villager and Tedi heads), `haze.png` (its gassed screen), `bubble.png` and `tail.png` (the outros' speech bubble), and a mounted gun's gunner view: `gun_corner.png`, `gun_tick_side.png`, `gun_tick_end.png` (its sight, with `reticle.png`), `gun_tape_heading.png`, `gun_tape_elevation.png`, `gun_handle.png`, `gun_handle_lit.png` and `gun_flash.png`; the explosions' sprites, not drawn yet (`explosion.png`, `smoke.png`, `fire.png`, and `shell.png`, War: Beach's falling shell); War: Beach's strike: `strike_glow.png` (its red floor glow) and `strike_streak.png` (its spinning streak), white with the intensity in alpha, tinted red by the client (also the crossbows' aim laser: below); Heist's `pips.png` (the strip's "$" pip, texels [14, 16, 7, 7]) and `bubble_particle.png` (the bubbles its outro cs3 sends up, blob 0x4B3, 32 × 32); Race's overview maps, `race_map_low.png` and `race_map_high.png` (scenarios 11 and 12; drawn 64 × 64 at half alpha, the racers as 2 × 2 dots: one's own green, the others red; not laid out in `hud.json` yet); Race's world effects, quads blended over the scene: `race_lamp.png` (the countdown lamps' flare, white with the intensity in alpha, tinted red then green), `race_boost.png` (a canister's boost flare, white), `race_exhaust_0.png` to `_3.png` (a board's exhaust glow, four frames in colour) and `race_trail.png` (128 × 1, a missile trail's cross-section, white); and the world effects' sprites (below, "The world effects' sprites": `gun_flash_3d.png`, `tracer.png`, `puff.png`, `flame_tongue.png`, `smoke_grey.png`, `ripple_00.png` to `_09.png`, `flame_a0.png` to `_a4.png`, `flame_b0.png` to `_b4.png`, `dirt.png`, `scorch.png`, `fuse_spark.png`) |
 | `hud/font/NN.png` | The game's font, one PNG per character (`hud.json` `font` says which) |
 | `hud/end.json` | What the end of a match draws: the lives left (untimed matches), the skull over the view of a player out of lives, the results (STATS) and their RESTART / QUIT menu |
 | `hud/` `lives.png`, `skull.png`, `stats.png`, `restart.png`, `restart_lit.png`, `quit.png`, `quit_lit.png`, `stick.png`, `stat_icons.png`, `stat_deaths.png`, `players.png`, `squirrels.png`, `tediz.png`, `frenchys.png` (War: Beach's villagers), `reds.png`, `blues.png`, `greens.png`, `yellows.png` (Heist's teams), `you.png`, `win.png`, `lose.png`, `draw.png` | `end.json`'s pictures, the game's own textures |
@@ -222,6 +223,19 @@ of each); `{}` on the other maps:
   the light is on (as the glTF does), `off` while it is off. PNG paths are relative to the map's
   folder.
 
+### `maps/<map>/cameras.json`
+The fixed cameras' points (the ROM's `[0x0C, scene, 8]`, 0x18-byte records), in record order: a
+camera hint (`triggers.json` `kind` 0) with `action` 5 names one by its `arg` (the point's index),
+`word_1c` its reach (on 0x2B records 0x26 and 0x27: points 0 and 1, reaches 751 and 707; on 0x1A
+records 0x40-0x43: points 0-3, reach 181, command 5):
+- `at`: the point, integer x, y, z: while the player is in the hint, the eye springs toward
+  `player + unit(at − player) × max(|at − player| − reach, 0)`, its rise × 1.2 (mode 0x40; C
+  `func_15129934`, `../lab/research/mp-original/cameras-clips-g4.md` §1);
+- `rest`: the record's other 18 bytes (+6 to +0x17) in hex, kept as they are (for reference).
+
+6 on 0x2B (the sea's two, then four no hint names), 4 on 0x1A (Heist's trip wires'), `[]` on the
+others.
+
 ### `maps/<map>/outros.json`
 The victory outros, one per winning team (`winner`: 0 the squirrels (on 0x2B the villagers), 1
 the Tediz; a DRAW plays none; on 0x1A, Heist's, 0 when a team with a human player won, 1 when
@@ -368,8 +382,11 @@ What Race (scenarios 11 and 12) adds to map 33 (`lab/research/mp-original/race.m
 - `tank` (119 only): `turret` the joint the turret's yaw turns (about its parent's y), `gun` the
   joint the gun's pitch turns (about the turret's x), `muzzle` the joint at the gun's end; `brake`
   the brake lights' material and `brake_lit` its texture while the tank brakes; `treads` the treads'
-  material, its texture scrolling along each tread as that side moves: `tread_joints` the two
-  treads' joints, in the order of the game's two speeds.
+  two materials, `[m, n]`: `treads[k]` draws the tread on joint `tread_joints[k]` (13, then 12), the
+  game's k-th speed scrolling its texture along it (`func_150ED638`: slot k's S moves by clamp(v ±
+  Δfacing / 70, ±45) × −7 a frame, the first side +, wrapping at 0x800; the same texture). The
+  carried gas bomb (`maps/24/props.gltf` scene 1) hangs on `turret` (action 0x18's record: matrix
+  slot 2; on from `command(p, 0x4B, 0x18)`, off at 0x4C), drawn at the tank's scale.
 - `parts` (0, 59, 83, 117, 128, 136, 144, 150, 156, 157, 159, 160, 176-178, 180): the
   body parts a shot tests, the game's. `broad`: `[radius, height]`, the sphere around the whole body
   (centred `height` up, as `hitbox`'s centre) tested first: a shot missing it hits nothing. `spheres`: `[joint,
@@ -413,8 +430,64 @@ One entry per glTF scene of `held.gltf`, in order:
   first not yet due, so a tick here is never below an earlier event's of the same clip).
 - The gas mask (War: Total War): entry 67 in the hand while its put-on (animation 337) plays,
   entry 66 on the head while it is worn after that; neither while it comes off (animation 334).
-- Item 0x3A's grenades (entries 137 and 186, the last two) have no events: the game's code shows
-  one in the hand from the pull to the throw.
+- Item 0x3A's grenades (entries 137 and 186) have no events: the game's code shows one in the hand
+  from the pull to the throw.
+- The head stumps (entries 0x59, `joint_00`, and 0x58, `joint_01`; scenes 24 and 25) have no
+  events: the game shows the stump of the dead player's model (0x59 on 117, 0x58 on 128; other
+  models have none) from a shotgun or chainsaw kill (reaction 0x2F, weapon 0x37 or 0x22) to the
+  respawn, with joints 1-15 drawn at scale 0 (C `func_15194AB4`; V sg_e1, sg_e3, sgpb, e_w22).
+- The racer classes' helmets (entries 0x5A, 0x5C, 0x5B on `joint_12`; scenes 26-28, for classes
+  0xD, 0xE and 0xF in that order) have no events: the game puts a class's on in any mode (C
+  `func_15083384`; EATBOX lets the racers into Deathmatch, 0x3F's allows 0xD).
+
+### `weapons/deathmatch/effects.gltf`
+The bank-09 models the effects throw, on every map: glTF scene `i` is conker-assets `EFFECTS[i]`
+(name, entry), named `09-<entry>` (hex), one node at the origin in its model units (a recipe's
+scale multiplies them). Each material is its asset's: the texture its display list loads,
+`BLEND` where the asset draws translucent (z test, no z write), else `OPAQUE`. The object's alpha
+multiplies the texture's (combiner `fc1219ff ff17fe3f`: colour TEX0 × SHADE, alpha TEX0 × SHADE ×
+the object's); an opaque one is drawn blended, without z write, once its alpha falls below 255
+(render mode 0x0C1849D8). Random numbers below are in [0, 1) (`rand`) or a byte; lives in VIs (2
+a frame).
+
+| Scene | Name | Entry | Triangles | Look | Use |
+|---|---|---|---|---|---|
+| 0 | `ring` | 0x157 | 112 | `BLEND`, IA16 0xCE5 | model id 0x54, a sphere of radius 100: the blasts' ring (rockets, grenades, War: Beach's detonation) and Race's smoke shell |
+| 1 | `spark` | 0x132 | 12 | `OPAQUE`, CI8 0xE82 | model id 0x39: the explosive death's chunks (`effects-g4.md` §4) |
+| 2 | `flak` | 0xE5 | 20 | `OPAQUE`, CI4 0x14C | 0x1B: War: Beach's flak puffs, always drawn blended (§5) |
+| 3 | `drop` | 0xBE | 44 | `OPAQUE` | 0x35: a swimmer's splash drops (§9) |
+| 4 | `fire` | 0x158 | 112 | `BLEND`, CI8 0x8ED | 0x55: Race's fire shell |
+| 5-7 | `board_6c`, `board_6d`, `board_6e` | 0x16F, 0x170, 0x171 | 10, 14, 38 | `OPAQUE`, CI8 | 0x6C-0x6E: a dead racer's board, in pieces |
+| 8-11 | `gib_7e`, `gib_7f`, `gib_80`, `gib_81` | 0x17D, 0x17E, 0x17F, 0x179 | 32, 26, 16, 58 | `OPAQUE`, CI8 (`gib_81` has one untextured draw) | 0x7E-0x81: a dead racer's pieces |
+
+Race's death blast (effect type 0x19, C `func_150D5A6C`; V `../lab/research/mp-original/
+g5-pack-scratch/race` d1, three pieces matched to 1e-3), made where a racer dies, O = its position +
+(0, 50, 0), in this order:
+- **The pieces**: `board_6c`, `board_6d`, `board_6e`, then the racer's (every racer, 136 or 144, is
+  the game's character 4): `gib_81`, `gib_80`, `gib_7f` twice, `gib_7e` twice. Each starts at O
+  with random angles (rand × 360° on each axis), scale 0.5, alpha 255, and velocity (U·a + V·b +
+  1000·N)·f, (a, b) = R·(sin(θ − 64), sin θ) for a random byte θ (256 a turn). N is the normal of the
+  triangle the racer's last move (D = position − previous position) crossed within 397, turned
+  against D; else −D/|D| while it moved; else +y; U and V are its plane's axes (+x and +z for +y).
+  Each frame: x += vx, z += vz, y += vy + g/2, vy += g, angles += spin (x and z; y 0); no
+  collision; life −2, gone below 0; alpha min(alpha, 21 × life) below 12.
+
+  | | Board pieces | Racer's pieces |
+  |---|---|---|
+  | R | rand × 759 | rand × 723 |
+  | f | rand × 0.0132 + 0.0298 | rand × 0.02 + 0.0052 |
+  | g (a frame) | rand × 0.648 − 1.397 | rand × 0.626 − 1.089 |
+  | spin x, z (° a frame) | rand × 38.444 − 19.222 | rand × 40.45 − 20.225 |
+  | life (VIs) | 30 + byte % 21 | 40 + byte % 41 |
+
+- **The fire shell** (`fire`, C `func_150D6434`): L = 8 + 3 rand, S = 1.305 + 0.403 rand, A = 100 +
+  50 rand; at O with random angles, spin x and z rand × 26.296 − 13.148° a frame. Each frame, φ from
+  0 by π/L: scale S·sin φ (uniform), alpha ⌊⌊A⌋·sin φ⌋; gone after L frames.
+- **The smoke shell** (`ring`, C `func_150D6388`): L = 15 + 4 rand, a = 200 + byte % 56; at O with
+  random angles, spin x and z rand × 8.512 − 4.256° a frame. Frame t from 0: scale 1.37457·√t,
+  alpha ⌊a − (a/L²)·t²⌋; gone when t > L.
+- Not read: its sounds (0x434 or 0x4C8, then 0x2B6-0x2B7 and 0x2B1-0x2B4: `race_death`), shake,
+  camera and scorch.
 
 ### `game/acos.json`, `game/sink.json`
 - `acos.json`: acos(x) in units of π/65536, at 132 sample points (x = i·512, then 0x7800 + i·32,
@@ -464,7 +537,9 @@ Sections:
   an explosion, a pickup, a weapon in hand…) with its weapon id in decimal, `character` limits it to
   one character, `then` plays when a firing loop ends; `note` says where it comes from. Every cue
   whose `on` (and `character`) matches plays: a head shot plays two. `head` is a bullet popping a
-  head (a hit on it below 3 health kills); `bounce` plays one of its sounds at each bounce leaving the
+  head (a hit on it below 3 health kills); `laser` is the crossbows' (0x18, 0x41) aim laser, sound
+  1232 heard by the aimer only, centred, looping from the laser's making (`Combat::laser` on) to its
+  end; `bounce` plays one of its sounds at each bounce leaving the
   grenade faster than 5 upward, from a shuffle bag shared by all (each once before any again, the
   last not first); `lit` is item 0x3A's fuse, at the grenade from the pull until its next sound (a
   `bounce`) or its blast; `fly_by` is a bullet passing the listener's camera: a bullet of a weapon in
@@ -496,7 +571,11 @@ Sections:
   three, else false), `cash_delivery` (the carrier scoring), each at that player, and `cash_throw`
   (the throw letting the bag go), at the bag. Tank's (map 0x24), for character 119: `tank_engine`
   (a loop at the tank, `moving` false while it idles, true while it drives), `tank_gear` (the
-  engine changing state, `coast` true into coasting), `tank_blast` (a shell's blast, `ground` false
+  engine changing state, `coast` true into coasting), `tank_rumble` (sound 1193, a loop at a
+  driving tank from 150 frames after its drive loop starts: its level rises 8/256 a frame from
+  8/256 to full, holds 150 or 406 frames, falls 8/256 a frame to 0 and it stops; it stops at once
+  when the tank idles; from 450 or 706 frames after it starts the drive loop fades 8/256 a frame;
+  Colors cs5's outro tanks too), `tank_blast` (a shell's blast, `ground` false
   on a tank, true on the ground: two sounds), `tank_death` (a tank blowing up, `bomb` true by the
   gas bomb), `bomb_pickup` (the gas bomb taken) and the power-ups' `pickup`s; the shell's fire is
   its clip 1's event; the gas is War: Total War's `gas`. Race's (map 0x33), for anyone:
@@ -607,6 +686,28 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   `colours[t]`. While anyone carries, the `bag` (white) blinks with that pip. The radar: players'
   blips in `radar[t]`, the free bag's in `cash` (steady), the carrier's hidden while the bag icon
   shows.
+
+### The world effects' sprites (`hud/*.png`)
+Each is a texture of the original's sprite kinds (`.game` data's table at 0x80090B60 + 12 × kind;
+`../lab/research/mp-original/effects-g4.md` §0 has the shared rules and each recipe): a **2D
+sprite** is a camera-facing square of world width size × 0.1464, a **3D sprite** a camera-facing
+quad from a start to an end point, a **decal** a quad on the struck face. All unlit, alpha-blended,
+depth-tested without depth writes, colour from the PNG (an I format's grey is its intensity, in
+alpha too) times the recipe's tint.
+
+| File | Blob, format | Use |
+|---|---|---|
+| `gun_flash_3d.png` | 0x3CF RGBA32 32×32 | kind 0x5F: a gun's 3D flash on the firing joint (§1); Tank's on its muzzle joint (`tank.muzzle`), from (0, 12, 120) to (0, 27, 215) in its frame, half-width rand × 30 + 40, length scale rand × 2.512 + 3.59, life byte % 5 + 5, alpha byte % 56 + 200 |
+| `tracer.png` | 0x11FE RGBA32 64×16 | kind 0x41: bullets' tracers (§1) and War: Beach's bunker tracers (§6), a quad along the velocity, vertex alpha at the head > the tail |
+| `puff.png` | 0xBA6 RGBA32 16×16 | kind 0x28: the flamethrower's puffs on every map (§3; was `maps/34/traps/puff.png`) |
+| `flame_tongue.png` | 0xBA7 RGBA32 32×32 | the flame stream's tongues (§3) |
+| `smoke_grey.png` | 0x721 IA8 32×32 | kind 0x16/0x29: War: Beach's flak flash (§5), the fire cone's smoke (§11), the tanks' exhaust (§14; Tank's too) |
+| `ripple_00.png` to `ripple_09.png` | 0xED9, 0xEDF, 0xEE0-0xEE2, 0xEDA-0xEDE, I8 64×64 | kind 0x38: a swimmer's ripple, an 80 × 80 quad on the water, the ten frames in order, 2 frames each, alpha 150 (§9) |
+| `flame_a0.png` to `_a4.png`, `flame_b0.png` to `_b4.png` | 0x8FF-0x903, 0x904-0x908, RGBA32 16×32 | kinds 0x13 and 0x14: a burning player's flames, 5 frames each (§11) |
+| `dirt.png` | 0x4BD RGBA16 16×16 | Colors cs5's dirt clods (§14) |
+| `scorch.png` | 0x4E5 I4 32×32 | kind 0x4F: a blast's scorch decal on the struck face, black (colour 0) with the texture's alpha × 0xE8, size rand × 75 + 75 (I: the half-width, V a quad 271 wide), random S/T flips, life rand % 205 + 299 (+20) VIs (§7; Tank's shell too) |
+| `fuse_spark.png` | 0x1041 I8 32×16 | kind 0x42: item 0x3A's fuse sparks: bursts of 8-13 at the fuse (carry += 0.129 + rand × 0.117 a frame, a burst each time it passes 1), from the pull through the flight; each a camera-facing streak from a tail at alpha 0 to its head at alpha 255 (white), about one frame's travel long (11-15) and 5.5-9.5 wide, moving 11-15 a frame outward and dropping a little, life 15-25 VIs, alpha life × 31 below 8. Each burst also flashes `shell.png` (kind 0x2B: size rand × 60 + 80, life byte % 5 + 4) (V `g5-pack-scratch/laser` lob) |
+| `strike_glow.png`, `strike_streak.png` | 0xE20 I8 64×64, 0xB97 I8 128×32 | also the crossbows' aim laser (V `g5-pack-scratch/laser` las): the dot (`strike_glow`, clamped) where the aim meets a surface, in both views, and the beam (`strike_streak`, wrapped in S and T, its S scrolling) from the crossbow to the dot, in the other players' views only; both red (255, 0, 0) with the texture's alpha × the laser's (V 0xF5, 0xF2, 0xD9, 0xA5 over a hold); the dot grows from about 7 to 17 wide, the beam's width at the dot from 12 to 40 (V; the laws not read) |
 
 ### `hud/end.json`
 The same frame, anchors, rectangles, colours and pictures as `hud.json`, with its own `textures`.

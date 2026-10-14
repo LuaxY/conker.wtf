@@ -262,10 +262,17 @@ impl Poses {
         let scale = characters::scale(f.class);
         let (c, s) = cos_sin(f.body.facing);
         let pos = f.body.pos;
+        // The floor's sink (obj+0xCC) lowers the joints, after the scale (V n34s2: −6 on kind 0xA,
+        // the idle Tedi's head 6 lower than on kind 5, and a twin-gun bullet at +45.5 meets it).
+        let sink = f32::from(f.body.sink);
         // Model +z is the facing (cos a, −sin a), model +x is (−sin a, −cos a).
         let place = |[x, y, z]: [f32; 3]| {
             let (x, y, z) = (x * scale, (y + model.lift) * scale, z * scale);
-            [pos[0] - x * s + z * c, pos[1] + y, pos[2] - x * c - z * s]
+            [
+                pos[0] - x * s + z * c,
+                pos[1] + sink + y,
+                pos[2] - x * c - z * s,
+            ]
         };
         let spheres = (model.parts.spheres.iter())
             .filter_map(|&[j, part, r, x, y, z]| {
@@ -278,21 +285,25 @@ impl Poses {
                 })
             })
             .collect();
-        // The head pop hides the zombies' head joints (obj+0x9C = 0xF000 on 159 and 160, C); a
-        // lethal type-0x2E hit stands for the pop (I: a seated gunner's death is 0x2E too).
-        let popped = f.health == 0
-            && matches!(
-                f.action,
-                Action::Hurt {
-                    reaction: 0x2E,
-                    lethal: true,
-                    ..
-                }
-            );
-        let zombie = matches!(characters::model(f.class), Some(159 | 160));
+        // obj+0x9C: the head pop hides joints 12-15 on every model (`func_1507DE4C`, C; V e_w39
+        // 971), the shotgun's and the chainsaw's kill (0x2F) joints 1-15 (`func_15194AB4`, C; V
+        // sg_e1, e_w22).
+        let halved = matches!(
+            f.action,
+            Action::Hurt {
+                reaction: 0x2F,
+                lethal: true,
+                ..
+            }
+        );
+        let hidden = match () {
+            _ if halved => 0xFFFE,
+            _ if f.popped => 0xF000,
+            _ => 0,
+        };
         Some(BodyParts {
             broad: model.parts.broad.map(|v| f32::from(v) * scale),
-            hidden: if popped && zombie { 0xF000 } else { 0 },
+            hidden,
             spheres,
             origin: pos,
         })

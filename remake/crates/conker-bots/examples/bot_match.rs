@@ -129,6 +129,8 @@ fn main() {
             let mut f = Fighter::new(&spawn::place(&arena.spawns, at, &mut r), i as u8, LIVE);
             // As the server's cavemen: on 0x3F everyone holds the club (the script's MP+0x1170).
             f.start = (scene == 0x3F).then_some(weapon::CLUB.id);
+            // As the server's bots (s126+0x84: the pickups' longer reach, `tank::touches`).
+            f.bot = i > 0;
             f
         })
         .collect();
@@ -147,6 +149,13 @@ fn main() {
         })
         .unwrap_or_default(),
     };
+    // The mounted guns' recoil (the pack's model 138), as the server has it.
+    let read = |p: &str| std::fs::read(std::path::Path::new(&dir).join(p)).ok();
+    if let (false, [Some(gltf), Some(bin)]) =
+        (m.guns.is_empty(), conker_rules::gun::FILES.map(read))
+    {
+        arena.fire_clip = conker_rules::gun::fire_clip(&gltf, &bin).unwrap_or_default();
+    }
     let slots: Vec<usize> = (1..players).collect();
     let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, rng).expect("bot assets");
     let mut lifts = Lifts::new(assets.triggers, scene as u8);

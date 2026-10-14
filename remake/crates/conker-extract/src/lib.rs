@@ -62,8 +62,6 @@ pub const CAVEMAN: usize = 136;
 pub const MOUNTED_GUN: usize = 138;
 /// Scene 0x2B, the Beach (War: Beach, scenario 8).
 pub const BEACH: usize = 0x2B;
-/// War: Beach's detonation ring (model 0x54 → bank 09 #0x157, `beach-environment.md` §3.1).
-pub const RING: usize = 0x157;
 /// The Beach's villagers (its team 0): class 0x14 is model 156 (male), 0x1D and 0x1E 157 (female)
 /// (V oracle, `../lab/research/mp-original/modes-and-maps.md`); the Tedi's rig and clips.
 pub const VILLAGERS: [usize; 2] = [156, 157];
@@ -535,13 +533,22 @@ fn clips(character: &Character) -> (Vec<ClipInfo>, Vec<RootClip>) {
 /// entries have no events.
 pub const LOB_ACTIONS: [u32; 2] = [0x86, 0x9F];
 
-/// The held models ([`HELD_CLIPS`]', then [`LOB_ACTIONS`]'), their meshes as one pseudo-level (a
-/// mesh per part, at the origin; a child object's per display list, in its bind pose), and one glTF
-/// scene per model listing its parts' nodes.
+/// The head stumps a shotgun's or chainsaw's head kill (reaction 0x2F) leaves (C `func_15194AB4`;
+/// V sg_e1, sg_e3, sgpb, e_w22, `../lab/research/mp-original/cameras-clips-g4.md` §7): action 0x73
+/// (bank 09 #0x59 on joint 0) on model 117, 0x72 (#0x58 on joint 1) on model 128. The game's code
+/// makes them, no clip event: their held entries have no events.
+pub const STUMP_ACTIONS: [u32; 2] = [0x73, 0x72];
+
+/// The held models ([`HELD_CLIPS`]', then [`LOB_ACTIONS`]', [`STUMP_ACTIONS`]' and the racer
+/// classes' helmets, [`RACE_HEADS`]' in order: C `func_15083384` puts them on in any mode, and
+/// EATBOX lets the racers into every Deathmatch), their meshes as
+/// one pseudo-level (a mesh per part, at the origin; a child object's per display list, in its bind
+/// pose), and one glTF scene per model listing its parts' nodes.
 fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
     let mut held = held_models(rom, SLICE_CHARACTER, &HELD_CLIPS)?;
     let game_data = rom.game_data()?;
-    for action in LOB_ACTIONS {
+    let heads = RACE_HEADS.map(|h| h.1);
+    for action in LOB_ACTIONS.into_iter().chain(STUMP_ACTIONS).chain(heads) {
         for r in action_records(&game_data, action)? {
             held.push(Held {
                 entry: usize::from(r[0]),
@@ -671,6 +678,28 @@ pub fn projectiles_level(rom: &Rom) -> Result<(Level, Value)> {
     Ok((level, scenes.collect()))
 }
 
+/// [`assets::EFFECTS`] as one pseudo-level (a bank-09 effect model each, one display list:
+/// [`parse_effect`]) and their glTF scenes, named `09-<entry>`.
+pub fn effects_level(rom: &Rom) -> Result<(Level, Value)> {
+    let game_data = rom.game_data()?;
+    let mut level = Level::default();
+    let mut scenes = Vec::new();
+    for (i, (_, entry)) in assets::EFFECTS.into_iter().enumerate() {
+        let ir = parse_effect(&rom.asset(&[0x09, entry])?, &game_data)?;
+        level.instances.push(Instance {
+            mesh: i,
+            placement: None,
+            matrix: IDENTITY,
+        });
+        level.meshes.push(Mesh {
+            path: vec![0x09, entry],
+            ir,
+        });
+        scenes.push(json!({ "name": format!("09-{entry:02x}"), "nodes": [i] }));
+    }
+    Ok((level, scenes.into()))
+}
+
 /// The held models' glTF, one glTF scene per held model: Bevy's `#Scene<i>` is `held[i]`.
 fn held_gltf(models: &Level, scenes: Value, textures: &Textures, bin_uri: &str) -> Result<Gltf> {
     let mut gltf = to_gltf(models, textures, bin_uri)?;
@@ -783,16 +812,21 @@ fn segment_png(
 /// The glTF material of `character` drawing texture `id` (the glTF writer's materials, distinct, in
 /// first-use order).
 fn material_of(character: &Character, id: u32) -> Result<usize> {
+    let image = Some(extract_gbi::Image::Flat { index: id, mode: 0 });
+    (materials(character).iter())
+        .position(|m| m.texture.and_then(|t| t.image) == image)
+        .with_context(|| format!("{}: no material draws texture {id}", character.entry))
+}
+
+/// `character`'s distinct materials in first-use order: the glTF writer's.
+fn materials(character: &Character) -> Vec<Material> {
     let mut materials = Vec::new();
     for d in character.model.lists.iter().flat_map(|l| &l.draws) {
         if !materials.contains(&d.material) {
             materials.push(d.material);
         }
     }
-    let image = Some(extract_gbi::Image::Flat { index: id, mode: 0 });
-    (materials.iter())
-        .position(|m| m.texture.and_then(|t| t.image) == image)
-        .with_context(|| format!("{}: no material draws texture {id}", character.entry))
+    materials
 }
 
 /// `character.json`'s teams of a character bound to team 0's look: the glTF material drawing it.
@@ -822,6 +856,49 @@ const TANK_TREADS: usize = 4;
 const TANK_JOINTS: [usize; 5] = [2, 3, 4, 13, 12];
 /// The lit brake lights' PNG in the tank's folder.
 const BRAKE_LIT: &str = "textures/brake-lit.png";
+/// The `state_call` that tells the second tread's material from the first ([`split_treads`]): the
+/// glTF writer never emits it, so the two draw the same.
+const TREAD_SIDE: u32 = u32::MAX;
+
+/// `tank` with its treads (texture `id`) drawn as one material per side, as the game scrolls each
+/// side's vertices by its own speed (`func_150ED638`): the triangles on joint `TANK_JOINTS[4]` (12)
+/// move to a draw appended to their list, its material marked [`TREAD_SIDE`], so the glTF keeps
+/// the earlier materials' and primitives' indices and adds that side's last. Every tread triangle
+/// is on one joint (the game's scroll lists are each one side's vertices).
+fn split_treads(mut tank: Character, id: u32) -> Result<Character> {
+    let image = Some(extract_gbi::Image::Flat { index: id, mode: 0 });
+    let side = TANK_JOINTS[4];
+    for list in &mut tank.model.lists {
+        let (vertices, draws) = (&list.vertices, &mut list.draws);
+        let mut moved = None;
+        for d in draws.iter_mut() {
+            if d.material.texture.and_then(|t| t.image) != image {
+                continue;
+            }
+            let joints = |t: &[u32; 3]| t.map(|v| matrix_slot(vertices[v as usize].matrix));
+            anyhow::ensure!(
+                d.triangles
+                    .iter()
+                    .map(joints)
+                    .all(|j| j[0] == j[1] && j[1] == j[2]),
+                "a tread triangle on two joints"
+            );
+            let (on, off) = d.triangles.iter().partition(|t| joints(t)[0] == side);
+            d.triangles = off;
+            let material = Material {
+                state_call: Some(TREAD_SIDE),
+                ..d.material
+            };
+            let draw = moved.get_or_insert(extract_gbi::Draw {
+                material,
+                triangles: vec![],
+            });
+            draw.triangles.extend::<Vec<_>>(on);
+        }
+        draws.extend(moved);
+    }
+    Ok(tank)
+}
 
 /// The tank as the match draws it (brake lights unlit, headlights lit, flag 0) and its other
 /// looks' PNGs: the flags (`textures/team-<k>.png`) and the lit brake lights ([`BRAKE_LIT`]).
@@ -834,6 +911,7 @@ fn tank(rom: &Rom, textures: &Textures) -> Result<(Character, Images)> {
     images.push((BRAKE_LIT.into(), lit));
     let tank = bind_segment(tank, 6, id(TANK_BRAKE[0])?);
     let tank = bind_segment(tank, 7, id(TANK_HEADLIGHTS)?);
+    let tank = split_treads(tank, id(TANK_TREADS)?)?;
     Ok((bind_segment(tank, TEAM_SEGMENT, flags.ids[0]), images))
 }
 
@@ -847,7 +925,12 @@ fn tank_parts(rom: &Rom, tank: &Character) -> Result<assets::Tank> {
         muzzle,
         brake: material(TANK_BRAKE[0])?,
         brake_lit: BRAKE_LIT.into(),
-        treads: material(TANK_TREADS)?,
+        treads: [
+            material(TANK_TREADS)?,
+            (materials(tank).iter())
+                .position(|m| m.state_call == Some(TREAD_SIDE))
+                .context("the tank's second tread")?,
+        ],
         tread_joints: [list_0, list_1],
     })
 }
@@ -1115,25 +1198,6 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
             let json = parse(&g.json)?;
             gltfs.push((assets::outro_gltf(&name), json, g.bin, g.images));
         }
-        if map.scene == BEACH {
-            let ring = parse_effect(&rom.asset(&[0x09, RING])?, &rom.game_data()?)?;
-            let level = Level {
-                meshes: vec![Mesh {
-                    path: vec![0x09, RING],
-                    ir: ring,
-                }],
-                instances: vec![Instance {
-                    mesh: 0,
-                    placement: None,
-                    matrix: IDENTITY,
-                }],
-                ..Level::default()
-            };
-            let scenes = json!([{ "name": format!("09-{RING:02x}"), "nodes": [0] }]);
-            let g = held_gltf(&level, scenes, &textures, "effects.bin")?;
-            let json = parse(&g.json)?;
-            gltfs.push((assets::effects_gltf(&name), json, g.bin, g.images));
-        }
         if map.scene == TEMPLE {
             out.add(
                 assets::raptor::raptor_json(&name),
@@ -1197,6 +1261,10 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let (projectiles, scenes) = projectiles_level(rom)?;
     let g = held_gltf(&projectiles, scenes, &textures, "projectiles.bin")?;
     let path = assets::projectiles_gltf(PACK_WEAPONS);
+    gltfs.push((path, parse(&g.json)?, g.bin, g.images));
+    let (effects, scenes) = effects_level(rom)?;
+    let g = held_gltf(&effects, scenes, &textures, "effects.bin")?;
+    let path = assets::effects_gltf(PACK_WEAPONS);
     gltfs.push((path, parse(&g.json)?, g.bin, g.images));
     for (name, entries) in assets::RIGS {
         let g = rig(rom, entries)?.gltf(&textures, true)?;
@@ -1304,6 +1372,12 @@ pub fn hidden_placements(scene: usize) -> &'static [usize] {
     }
 }
 
+/// The tank's carried gas bomb: action 0x18 (`command(p, 0x4B, 0x18)` → `func_15083568`; 0x4C
+/// removes it, `func_150836CC`), one record: bank 09 #0x3F on matrix slot 2, the turret (C; V k1 DL
+/// 45: its 30 vertices drawn with the tank's joint-2 matrix, `../lab/research/mp-original/
+/// g5-pack-scratch/tank`).
+const TANK_BOMB: u32 = 0x18;
+
 /// Map 0x24's hidden placements (V b1: +0x6E set at the start; `../lab/research/mp-original/
 /// tank.md` §2): `[3, 72]` (9, 13), the gas bomb `[3, 80]` (12, shown on the centre post by the
 /// match; 14 a second one, never shown), a second canisters `[3, 71]` (15), and the wrecks
@@ -1328,7 +1402,8 @@ pub fn solid_placements(scene: usize) -> Vec<usize> {
 /// A map's props (`maps/<map>/props.gltf`): on 0x2D War: Total War's, glTF scene 0
 /// [`TOTAL_WAR_PROPS`] in place (named `model@placement` as the level's nodes), scene 1 the
 /// canister's model (3/85) at the origin, for a carrier's hands (a worn mask is a held model,
-/// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place; on 0x3F War: Raptor's, scene 0
+/// bank-09 #66); on 0x24 Tank's, scene 0 [`TANK_PROPS`] in place, scene 1 the carried gas bomb
+/// ([`TANK_BOMB`]'s bank-09 model) at the origin of the turret's joint; on 0x3F War: Raptor's, scene 0
 /// its [`hidden_placements`] in place (the cooked eggs 0-3, the never-shown 4-6, the bone weapons
 /// 15-22); on 0x33 Race's board and helmets ([`race_attached`]), a scene each at the origin.
 pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
@@ -1340,6 +1415,24 @@ pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
         _ => hidden_placements(scene_id),
     };
     let scene = scene_level(rom, scene_id)?;
+    // Scene 1's models at the origin: 0x2D's canister, 0x24's carried bomb.
+    let extra = match scene_id {
+        SLICE_SCENE => vec![
+            (scene.meshes.iter())
+                .find(|m| m.path == [0x03, 0x55])
+                .context("0x2D: no canister model")?
+                .clone(),
+        ],
+        TANK_MAP => {
+            let bomb = attached(&rom.game_data()?, TANK_BOMB)?;
+            anyhow::ensure!(
+                usize::from(bomb.joint) == TANK_JOINTS[0],
+                "the bomb is not on the turret"
+            );
+            attached_level(rom, &[bomb])?.0.meshes
+        }
+        _ => vec![],
+    };
     let mut level = Level::default();
     let mut add = |mesh: &Mesh, placement, matrix| {
         let mesh = match level.meshes.iter().position(|m| m.path == mesh.path) {
@@ -1360,17 +1453,16 @@ pub fn props_level(rom: &Rom, scene_id: usize) -> Result<(Level, Value)> {
     for i in placed {
         add(&scene.meshes[i.mesh], i.placement, i.matrix);
     }
-    if scene_id != SLICE_SCENE {
-        let n = level.instances.len();
-        return Ok((level, json!([{ "nodes": (0..n).collect::<Vec<_>>() }])));
+    for mesh in &extra {
+        add(mesh, None, IDENTITY);
     }
-    let canister = (scene.meshes.iter())
-        .find(|m| m.path == [0x03, 0x55])
-        .context("0x2D: no canister model")?;
-    add(canister, None, IDENTITY);
-    let n = level.instances.len() - 1;
-    let scenes = json!([{ "nodes": (0..n).collect::<Vec<_>>() }, { "nodes": [n] }]);
-    Ok((level, scenes))
+    let all = level.instances.len();
+    let n = all - extra.len();
+    let mut scenes = vec![json!({ "nodes": (0..n).collect::<Vec<_>>() })];
+    if !extra.is_empty() {
+        scenes.push(json!({ "nodes": (n..all).collect::<Vec<_>>() }));
+    }
+    Ok((level, scenes.into()))
 }
 
 /// A map's lights (`maps/<map>/lights.json`): on 0x2D War: Total War's, on 0x2B War: Beach's, on
@@ -1844,21 +1936,22 @@ const VAULT_STEP: u8 = 8;
 pub fn race_attached(rom: &Rom) -> Result<Vec<Held>> {
     let game_data = rom.game_data()?;
     let actions = std::iter::once(RACE_BOARD).chain(RACE_HEADS.map(|h| h.1));
-    actions
-        .map(|a| {
-            let records = action_records(&game_data, a)?;
-            let &[r] = records.as_slice() else {
-                anyhow::bail!("action {a:#x}: {} records", records.len())
-            };
-            Ok(Held {
-                entry: usize::from(r[0]),
-                object: r[3] == 0,
-                joint: r[1],
-                create: vec![],
-                remove: vec![],
-            })
-        })
-        .collect()
+    actions.map(|a| attached(&game_data, a)).collect()
+}
+
+/// Action `a`'s one attached model.
+fn attached(game_data: &[u8], a: u32) -> Result<Held> {
+    let records = action_records(game_data, a)?;
+    let &[r] = records.as_slice() else {
+        anyhow::bail!("action {a:#x}: {} records", records.len())
+    };
+    Ok(Held {
+        entry: usize::from(r[0]),
+        object: r[3] == 0,
+        joint: r[1],
+        create: vec![],
+        remove: vec![],
+    })
 }
 
 /// One lap of a route (`high`: scenario 12's) on navigation graph `nav`, node indices from the
@@ -2184,6 +2277,7 @@ fn pack_data(
         lights: map_lights(rom, scene)?,
         outros: outros.to_vec(),
         segments,
+        cameras: camera_points(rom, scene)?,
         ai: rom.asset(&[0x14, ai_script(scene)])?.into_owned(),
         class: rom.asset(&[0x0F, conker_bots::class(scene)])?.into_owned(),
         characters: (characters.iter().zip(faces))
@@ -2202,6 +2296,26 @@ fn pack_data(
             .collect(),
         sink: std::array::from_fn(|k| std::array::from_fn(|j| sink[3 * k + j] as i8)),
     })
+}
+
+/// The fixed cameras' points of `scene` (`[0x0C, scene, 8]`: 0x18-byte records, s16 x, y, z at +0;
+/// C `func_1512E8E0` reads `*0x800DC020` + the hint's point index · 0x18, V cam+0x288 in
+/// `../lab/research/mp-original/cameras-clips-g4.md` §1's swim1 and east runs): 6 on 0x2B, 4 on
+/// 0x1A, an empty asset elsewhere.
+pub fn camera_points(rom: &Rom, scene: usize) -> Result<Vec<assets::CameraPoint>> {
+    let bytes = rom.asset(&[0x0C, scene, 8])?;
+    let (records, rest) = bytes.as_chunks::<0x18>();
+    anyhow::ensure!(
+        rest.is_empty(),
+        "camera points: {} bytes left over",
+        rest.len()
+    );
+    Ok((records.iter())
+        .map(|r| assets::CameraPoint {
+            at: std::array::from_fn(|k| i16::from_be_bytes([r[2 * k], r[2 * k + 1]])),
+            rest: hex(&r[6..]),
+        })
+        .collect())
 }
 
 /// `characters/<entry>/character.json` of a packed character.

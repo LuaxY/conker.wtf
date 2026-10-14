@@ -167,9 +167,16 @@ pub struct Lamp {
 /// Per mille a frame that an on switching light goes off, and an off one comes on ([`Switch`]).
 pub const SWITCH_CHANCES: [u32; 2] = [35, 70];
 
-/// A switching light ([`Lights::switching`], 0x1A's five; light behaviour 255): its index in
-/// [`Lights::lights`], place and full size, whether it is on (it starts on, I), and whether it came
-/// back on this tick.
+/// 0x1A's switching lights by their drivers' kinds, 0x900 + 0x100 · k: segment 4 + k's lamp
+/// (`segments.rs`) follows the k-th (C `func_15100340`: byte 0x800BE500 + k toggles with kind
+/// 9 + k; V g5c v1, 40 dumps: each byte matches its light's +9 in 40/40, none other over 33). The
+/// kinds aren't in the trigger records' order (lights 10, 11, 12, 20, 29), so each lamp follows
+/// the light it hangs by.
+const BY_KIND: [usize; 5] = [11, 10, 20, 12, 29];
+
+/// A switching light ([`Lights::switching`], 0x1A's five in [`BY_KIND`]'s order; light behaviour
+/// 255): its index in [`Lights::lights`], place and full size, whether it is on (it starts on, I),
+/// and whether it came back on this tick.
 pub struct Switch {
     pub light: usize,
     pub at: [f32; 3],
@@ -211,7 +218,7 @@ impl Flickers {
                 flashed: false,
             })
             .collect();
-        let switches = (lights.switching.iter())
+        let mut switches: Vec<Switch> = (lights.switching.iter())
             .filter_map(|&light| {
                 let l = lights.lights.get(light)?;
                 Some(Switch {
@@ -223,6 +230,7 @@ impl Flickers {
                 })
             })
             .collect();
+        switches.sort_by_key(|s| BY_KIND.iter().position(|&l| l == s.light));
         Self {
             rng: Rng::new(seed.rotate_left(17) | 1),
             lamps,
@@ -924,6 +932,46 @@ mod tests {
         );
         let share = spans[1].iter().sum::<u32>() as f32 / 200_000.0;
         assert!((0.65..0.68).contains(&share), "{share}");
+    }
+
+    /// 0x1A's lamps (segment 4 + k follows `switches[k]`, `segments.rs`) go dark with the lights
+    /// they hang by: V g5c v1 dumps 212, 230, 326, 338, 344 (the lights off, the bytes at 0x800BE500
+    /// set).
+    #[test]
+    fn the_vault_lamps_pair_with_their_lights() {
+        let l = Light {
+            at: [0.0; 3],
+            rgb: [255; 3],
+            size: 50.0,
+            swing: 0.0,
+            step: 0.0,
+            when: When::Calm,
+            flicker: false,
+        };
+        let lights = Lights {
+            ambient: [94, 94, 96],
+            lights: vec![l; 34],
+            switching: vec![10, 11, 12, 20, 29],
+        };
+        let mut f = Flickers::new(&lights, 1);
+        let dumps: [(&[usize], [u8; 5]); 5] = [
+            (&[10], [0, 1, 0, 0, 0]),
+            (&[20], [0, 0, 1, 0, 0]),
+            (&[12], [0, 0, 0, 1, 0]),
+            (&[29], [0, 0, 0, 0, 1]),
+            (&[11, 12], [1, 0, 0, 1, 0]),
+        ];
+        for (off, bytes) in dumps {
+            for s in &mut f.switches {
+                s.on = !off.contains(&s.light);
+            }
+            let dark = f
+                .switches
+                .iter()
+                .map(|s| u8::from(!s.on))
+                .collect::<Vec<_>>();
+            assert_eq!(dark, bytes, "{off:?}");
+        }
     }
 
     /// A vertex of 0x1A takes the 10 lights nearest to it.

@@ -93,6 +93,35 @@ pub fn build(app: &mut App, outros: Vec<Outro>) {
         pose.after(AnimationSystems)
             .before(TransformSystems::Propagate),
     );
+    app.add_systems(Update, backdrop.run_if(resource_exists::<crate::Config>));
+}
+
+/// Whether the outro on `map` clears the view black: Heist's cs3 (0x1A's cutscene 3), whose
+/// 740-unit black backdrop (`heist-presentation.md` §4, obj6) fills the original's 4:3 view but
+/// not a 16:9 one (V `../lab/screens/heist/cs3-bubbles.png`: the sky at the sides).
+fn black(map: &str, o: &Outro) -> bool {
+    map == "1a" && o.cutscene == 3
+}
+
+/// The view clears black while such an outro shows ([`black`]), else as the level does.
+fn backdrop(
+    playing: Res<Playing>,
+    outros: Res<Outros>,
+    cfg: Res<crate::Config>,
+    mut cameras: Query<&mut Camera, With<bevy::camera_controller::free_camera::FreeCameraState>>,
+    mut was: Local<bool>,
+) {
+    let now = playing.of(&outros).is_some_and(|(o, _)| black(&cfg.map, o));
+    if now == *was {
+        return;
+    }
+    *was = now;
+    for mut camera in &mut cameras {
+        camera.clear_color = match now {
+            true => ClearColorConfig::Custom(Color::BLACK),
+            false => ClearColorConfig::Default,
+        };
+    }
 }
 
 /// Whether the match's end plays an outro.
@@ -713,6 +742,24 @@ mod tests {
     fn a_late_client_joins_the_outro_where_the_server_is() {
         let at = |left: u32| start(400, (left + RESULTS) as u16);
         assert_eq!((at(400), at(300), start(400, 30)), (0, 100, 400));
+    }
+
+    /// Heist's cs3, the one with the 37 × 37.01 backdrop (V), clears black; cs2 and other maps'
+    /// cutscene 3 don't.
+    #[test]
+    fn heists_backdrop_outro_clears_black() {
+        let o = |cutscene| Outro {
+            cutscene,
+            ..default()
+        };
+        assert!(black("1a", &o(3)) && !black("1a", &o(2)) && !black("2b", &o(3)));
+        let Some(outros) = pack_outros("1a") else {
+            return;
+        };
+        for o in &outros {
+            let backdrop = (o.props.iter()).any(|p| p.scale.is_some_and(|s| s[0] >= 37.0));
+            assert_eq!(black("1a", o), backdrop, "cs{}", o.cutscene);
+        }
     }
 
     /// Through the scope only the local player's own model hides (`func_1502E4C4`), and not while

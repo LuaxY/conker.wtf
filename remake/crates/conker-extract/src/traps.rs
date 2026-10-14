@@ -12,11 +12,10 @@ pub const SCENE: usize = 0x34;
 /// (file under `maps/34/traps/`, blob id, format, width, height): what the original's display lists
 /// draw them with, loaded by LOADBLOCK with dxt 0 (V: the RAM textures of oracle run fx34's DLs 170
 /// and 300, byte for byte the blob's, `lab/hud/texfind`): a fire jet's flame quad (`func_151A6350`)
-/// and its particles (`func_151A6600`'s texrects), the electric floor's arcs and bolts (ribbons
-/// tinted by the env colour).
-pub const TEXTURES: [(&str, usize, Format, usize, usize); 3] = [
+/// and the electric floor's arcs and bolts (ribbons tinted by the env colour). The jets' particles
+/// (`func_151A6600`'s texrects, 0xBA6) are `hud/puff.png`, shared with the flamethrower's.
+pub const TEXTURES: [(&str, usize, Format, usize, usize); 2] = [
     ("flame", 0x916, Format::Rgba32, 32, 32),
-    ("puff", 0xBA6, Format::Rgba32, 16, 16),
     ("arc", 0x753, Format::Ia16, 16, 16),
 ];
 

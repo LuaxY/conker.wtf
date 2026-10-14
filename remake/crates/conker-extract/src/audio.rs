@@ -1049,6 +1049,12 @@ fn code_cues() -> Vec<Cue> {
             play([1541], 26000, Some(26000), 299, 300, Channel::Free),
             "the scope coming up (C func_15126378, camera code; V e_w24, ctlw_k10)",
         ),
+        cue(
+            On::Laser,
+            play([1232], 2000, Some(2000), 0, 1, Channel::Free),
+            "the crossbows' aim laser: 0x4D0 at 2000, 2D, heard by the aimer, from the laser's making to its \
+             end (C func_151026BC; func_15101090 stops the handle; V held-client-scratch las2, lasd)",
+        ),
     ]);
     // Pickups (C func_1511DD98, by the pickup's class; V pick57 688, pick87 81, the bot's 1454; the
     // crossbow's class 0x3D and the shotgun's 0x5E, scene 0x34's placements: C).
@@ -1447,8 +1453,15 @@ fn tank_cues() -> Vec<Cue> {
             On::TankEngine { moving: true },
             record([1192], 0x2EE0, 200, 800),
             "driving (speeding up, or faster than 5 and coasting): 0x4A8, its volume scaled by a fade of 8/256 \
-             a frame; 900 or 1412 VIs on, 0x4A9 at 0x2EE0 (C func_151BB0E0; V s1 44, 351; 0x4A9 not heard: \
-             not packed)",
+             a frame, fading 8/256 a frame from 450 or 706 frames after the rumble (0x4A9) starts (C \
+             func_151BB0E0; V s1 44, 351)",
+        ),
+        tank(
+            On::TankRumble,
+            record([1193], 0x2EE0, 200, 800),
+            "the rumble: 0x4A9 at 0x2EE0, 150 frames into the drive loop, its level ramped 8/256 a frame up, \
+             held 150 or 406 frames, down; stopped when the tank idles (C func_151BB0E0; V Colors cs5b 589: \
+             t 302, 150 frames after 0x4A8)",
         ),
         tank(
             On::TankGear { coast: false },

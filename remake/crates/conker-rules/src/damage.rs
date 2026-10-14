@@ -111,14 +111,21 @@ pub const SHOTGUN_KILL: DamageType = ty(0x2F, 0x07, 0.0, 0.0, 4.0, 0, 0x80 | 30,
 pub const SHOTGUN_BLAST: DamageType = ty(0x2B, 0x03, 120.0, 15.0, 3.4, 1, 0x80 | 5, 0x2000);
 pub const SHOTGUN_EDGE: DamageType = ty(0x21, 0x01, 0.0, 0.0, 3.4, 1, 0x80 | 5, 0x2400);
 /// The port's reaction for an area hit of reaction 0x21 (the shotgun's): the stagger, and when it
-/// kills, lying dead 63 frames then 0x18A for 18, as melee 0x21's kill (V combat5_sg_e2 1060+;
-/// I: what the game reads to tell it from a bullet's kill).
+/// kills, the dead pose as melee 0x21's kill (V combat5_sg_e2 1060+; I: what the game reads to tell
+/// it from a bullet's kill).
 pub const AREA_STAGGER: u8 = 0x80 | 0x21;
 /// The port's reaction for a human taken by a kill gate (`func_1507CD64(p, 9)`, `crate::lift`):
 /// dead where it crossed, still, its clip kept, for [`GATE_FRAMES`], then the respawn (V fall6:
 /// hp 0 at read 91, the respawn at 99; a bot respawns at once, `Match::fall_kill`).
 pub const GATE: u8 = 0x80 | 9;
 pub const GATE_FRAMES: u16 = 8;
+/// The port's reaction for a lethal hit on a swimmer (obj+0xAD), whatever its type:
+/// `func_1505E874` picks cause 4, `func_1507CD64(obj, 4)` plays clip [`DROWN_CLIP`] (rate 1, blend
+/// 3) for [`DROWN_FRAMES`], then the respawn (C; V die1: the hit in frame 460, 0x24 on reads 461-547,
+/// the respawn at 548; die2 160, 161-247, 248), the body afloat on the current (`Match::hurt_frame`).
+pub const DROWN: u8 = 0x80 | 4;
+pub const DROWN_CLIP: u16 = 0x24;
+pub const DROWN_FRAMES: u16 = 87;
 pub const ROCKET_OUTER_R: f32 = 300.0;
 
 /// Total War's gas (`gas` module): the kill's type 0x1F and the doorways' 1 a frame, 0x3B (the
@@ -226,17 +233,13 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
             (anim::DEATH_FALL, 52),
             (anim::DEAD, 81),
         ],
-        (AREA_STAGGER, true) => &[
-            (anim::HIT, 18),
-            (anim::DEATH_FALL, 52),
-            (anim::DEAD, 63),
-            (anim::DEAD_MELEE_END, 18),
-        ],
+        // The dead pose's twitch (0x18A, 63 frames in, 1 time in 8) is the clients' draw
+        // (conker-client's `corpses`).
+        (AREA_STAGGER, true) => &[(anim::HIT, 18), (anim::DEATH_FALL, 52), (anim::DEAD, 81)],
         (0x33, true) => &[
             (anim::HIT_MELEE, 19),
             (anim::DEATH_FALL, 52),
-            (anim::DEAD, 63),
-            (anim::DEAD_MELEE_END, 18),
+            (anim::DEAD, 81),
         ],
         // The blow-up lasts until the frame after the first landing (`Match::hurt_frame`; 42 from a
         // grenade's blast, 10 from the shotgun's: V e_gren, combat5_sg_e2).
@@ -289,6 +292,7 @@ pub fn sequence(reaction: u8, lethal: bool) -> &'static [(u16, u16)] {
         (0x0E, true) => &[(anim::DOORWAY_HIT, 59), (anim::DOORWAY_DEAD, 87)],
         // The clip is the one it fell in (`Match::fall_kill` keeps it); this one is unused.
         (GATE, _) => &[(anim::DEAD, GATE_FRAMES)],
+        (DROWN, _) => &[(DROWN_CLIP, DROWN_FRAMES)],
         // A death started on a cone (`Match::hurt_frame` switches to it from the fall).
         (CONE_DEATH, _) => &[(CONE_DEATH_CLIP, CONE_DEATH_FRAMES), (anim::DEAD, 81)],
         // War: Raptor: the standing bite's victim lies in the jaws until its respawn, 87 frames

@@ -35,7 +35,7 @@ use crate::render::Model;
 pub const WIDTH: f32 = 0.1464;
 
 /// The textures: `hud/race_exhaust_0..3.png` (kinds 0x60-0x63: 0x923-0x926), `hud/explosion.png`
-/// (kind 0x27: 0x78A), `puff.png` (kind 0x28: 0xBA6, packed with 0x34's traps), `hud/fire.png`
+/// (kind 0x27: 0x78A), `hud/puff.png` (kind 0x28: 0xBA6), `hud/fire.png`
 /// (kind 0x6C: 0x71F), `hud/shell.png` (0x1042).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tex {
@@ -455,8 +455,7 @@ fn setup(mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetServer>, mut command
         quad: meshes.add(Rectangle::new(1.0, 1.0)),
         exhaust: std::array::from_fn(|k| assets.load(format!("hud/race_exhaust_{k}.png"))),
         explosion: assets.load("hud/explosion.png"),
-        // ponytail: 0x34's copy; G5 moves 0xBA6 to a shared folder.
-        puff: assets.load("maps/34/traps/puff.png"),
+        puff: assets.load("hud/puff.png"),
         fire: assets.load("hud/fire.png"),
         shell: assets.load("hud/shell.png"),
     });

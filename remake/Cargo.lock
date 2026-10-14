@@ -2472,6 +2472,7 @@ version = "0.1.0"
 dependencies = [
  "extract-character",
  "extract-core",
+ "serde",
  "serde_json",
 ]
 
@@ -2541,6 +2542,7 @@ dependencies = [
  "extract-level",
  "extract-scene",
  "gltf-json",
+ "png",
  "serde_json",
  "symphonia",
 ]

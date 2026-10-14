@@ -24,10 +24,14 @@ pub const REFIRE: u32 = 34;
 pub const BOT_REFIRE: u32 = 51;
 /// The shell (`func_1506C460`; V c1 61-72): 296.5 along the gun's yaw (half of it a frame), its
 /// pitch's share up; falling as a player does (`y += vy/2 − 0.275·5`, `vy −= 5`); gone at a wall
-/// or the ground. It starts 128 ahead and 113 up (V c1 61: 128.2, 112.6).
+/// or the ground. It starts on the barrel, [`BARREL`] along the gun's pitch from its pivot (joint 3,
+/// [`PIVOT`] ahead along the turret and up), from where the gun's pitch is solved (V c1 61: 128.2,
+/// 112.6 level; `rules-bots-g5-scratch/tank/muzzle_fit.py`, 969 shells of level hulls: the pivot
+/// 26.1 ahead and 113.9 up, the barrel 101.0, residual p50 2.6).
 pub const SHELL_SPEED: f32 = 296.5;
 pub const SHELL_GRAVITY: f32 = 5.0;
-pub const MUZZLE: [f32; 2] = [128.0, 113.0];
+pub const PIVOT: [f32; 2] = [26.0, 114.0];
+pub const BARREL: f32 = 101.0;
 /// The scope's shot (power-up 0x02, R held; `func_15070300` → `func_151C0698`): no shell, the
 /// bullet pool's, from the scope camera's eye, 27.3 ahead and 111.6 up, level along the turret (V
 /// sc5 69: the eye at (7127.7, −789.4, 670.7) over P1 at (7155, −901, 670) facing west, its look
@@ -139,9 +143,9 @@ pub struct Tank {
     pub bullets: Vec<(u32, Bullet)>,
 }
 
-/// A tank's touch of a power-up or the bomb (`func_1511DF6C`): a bot's (s126+0x84 set) reaches
-/// 1.4 times as far (`0x800A3304`, C; V h1: every tank's s126+0x1AF is 64, the bots' +0x84 1).
-/// ponytail: the original does so for every mode's bots; Race and Tank port it.
+/// A touch of a pickup, a power-up or the bomb (`func_1511DF6C`): a bot's (s126+0x84 set) reaches
+/// 1.4 times as far (`0x800A3304`, C; V h1: every tank's s126+0x1AF is 64, the bots' +0x84 1; V
+/// p34r: 0x34's bots take their pickups 120-135 away). Every mode's pickups but Race's (its own).
 pub fn touches(pickup: [f32; 3], f: &crate::Fighter, reach: u8) -> bool {
     let scale = if f.bot { crate::race::AUTO_REACH } else { 1.0 };
     crate::weapon::within(pickup, f.body.pos, 100.0 * f32::from(reach) / 64.0 * scale)
@@ -366,7 +370,8 @@ impl Match {
             f.body.turret = (f.body.turret + want * 0.125).rem_euclid(360.0);
         }
         // The gun's pitch (`func_150ED748`): + 0.001 a frame per unit its shell falls short of its
-        // target ([`range_error`], from the gun's pitch over the hull's), else back to level ×0.9.
+        // target ([`range_error`], from the gun's pitch over the hull's, the distance and height
+        // from the pivot: `func_150ED298` takes joint 3's place, C), else back to level ×0.9.
         // A human's is the best tank within the turret's cone, its aim 40 over the feet, at most 4°
         // a frame. A bot's is its script's target (s126+0x129), led as its turret's
         // ([`Tank::aims`]), its aim at the feet, unbounded, and its aim error aims 400 nearer (C;
@@ -378,17 +383,23 @@ impl Match {
         };
         let b = &f.body;
         let yaw = deg(b.facing) + b.turret;
-        let muzzle = b.pos[1] + MUZZLE[1];
+        let (yc, ys) = cos_sin(to_u16(yaw));
+        let pivot = [
+            b.pos[0] + PIVOT[0] * yc,
+            b.pos[1] + PIVOT[1],
+            b.pos[2] - PIVOT[0] * ys,
+        ];
         let flat = |p: &[f32; 3]| ((p[0] - b.pos[0]).powi(2) + (p[2] - b.pos[2]).powi(2)).sqrt();
+        let solve = |p: &[f32; 3]| ((p[0] - pivot[0]).powi(2) + (p[2] - pivot[2]).powi(2)).sqrt();
         let best = match f.bot {
-            true => (self.tank.aims.iter()).find_map(|&(j, p)| (j == i).then(|| (flat(&p), p[1]))),
+            true => (self.tank.aims.iter()).find_map(|&(j, p)| (j == i).then(|| (solve(&p), p[1]))),
             false => (targets.iter())
                 .filter_map(|p| {
                     let d = flat(p);
                     let off = wrap180(deg(atan2_u16(b.pos[2] - p[2], p[0] - b.pos[0])) - yaw);
                     let off = off.abs();
                     (off < AIM_CONE && d < AIM_RANGE)
-                        .then(|| ((AIM_CONE - off) / d.max(1.0), d, p[1]))
+                        .then(|| ((AIM_CONE - off) / d.max(1.0), solve(p), p[1]))
                 })
                 .max_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, d, y)| (d, y)),
@@ -396,10 +407,10 @@ impl Match {
         let hull_pitch = hull_pitch(b, world);
         let pitch = match best {
             Some((d, y)) if f.bot => {
-                b.pitch + 0.001 * range_error(d - short, y - muzzle, b.pitch + hull_pitch)
+                b.pitch + 0.001 * range_error(d - short, y - pivot[1], b.pitch + hull_pitch)
             }
             Some((d, y)) => {
-                let up = 0.001 * range_error(d, y + 40.0 - muzzle, b.pitch + hull_pitch);
+                let up = 0.001 * range_error(d, y + 40.0 - pivot[1], b.pitch + hull_pitch);
                 b.pitch + up.clamp(-PITCH_RATE, PITCH_RATE)
             }
             None => b.pitch * 0.9,
@@ -427,10 +438,11 @@ impl Match {
             if deadly {
                 f.boost -= 1;
             }
+            let ahead = PIVOT[0] + BARREL * pc;
             let pos = [
-                b.pos[0] + MUZZLE[0] * c,
-                b.pos[1] + MUZZLE[1],
-                b.pos[2] - MUZZLE[0] * s,
+                b.pos[0] + ahead * c,
+                b.pos[1] + PIVOT[1] + BARREL * ps,
+                b.pos[2] - ahead * s,
             ];
             self.tank.shells.push(Shell {
                 owner: i,
@@ -664,7 +676,11 @@ mod tests {
         assert_eq!(m.tank.shells.len(), 1);
         assert_eq!(m.players[0].body.state, CLIP_FIRE);
         let s = m.tank.shells[0];
-        assert_eq!((s.pos[0], s.pos[1]), (128.0, 113.0));
+        // V c1 61: 128.2 ahead, 112.6 up (the barrel's fit, 2.6 at p50).
+        assert!(
+            (s.pos[0] - 128.2).abs() < 1.5 && (s.pos[1] - 112.6).abs() < 0.5,
+            "{s:?}"
+        );
         for k in 1..=3 {
             assert_eq!(m.players[1].health, 6, "frame {k}");
             m.step(&arena, &[Input::default(); 2], &world);

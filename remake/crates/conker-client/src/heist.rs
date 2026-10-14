@@ -6,8 +6,10 @@
 //! Scale(0.4) · normalise(joint_09)`), but for the grab's first 9 frames, where it still lies.
 //! Hidden while a War outro plays. Its clip's sounds are [`crate::audio`]'s, from [`Bag`].
 //!
-//! The clip's clock is this client's: a state counts from the tick this client saw it change (the
-//! match's tick is not sent), the stand cycle from there too.
+//! The clip's clock is this client's: a state counts from the tick this client saw it change, the
+//! stand cycle from there too. `CashView::since` (the server's tick) is sent, but the bag is drawn
+//! where that same snapshot puts it: counting from `since` would run the clip ahead of its place by
+//! the client's lead and latency.
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;

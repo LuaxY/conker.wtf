@@ -144,6 +144,8 @@ pub struct Arena {
     pub track: race::Track,
     /// C-down pulls item 0x3A, lobbed ([`projectile::LOB`]): scenes 0x1A and 0x3F.
     pub lob: bool,
+    /// The mounted guns' fire clip ([`gun::fire_clip`], from the pack; empty: no recoil).
+    pub fire_clip: Vec<[f32; 3]>,
 }
 
 impl Arena {
@@ -438,6 +440,11 @@ pub struct Fighter {
     pub prey: bool,
     /// Race: the racer's board and race-table entry ([`race::Ride`]).
     pub ride: race::Ride,
+    /// The head pop (obj+0x9C |= 0xF000, `func_1507DE4C`): a bullet's head hit below 3 health, the
+    /// dead's too (`func_151D4DAC`), or a ray's or shot's head hit (`func_15081E78`), C; V combat4_w24
+    /// 1004, combat_e_w39 971, e_w09 1005. Its head joints no longer take hits ([`crate::parts`]);
+    /// gone at the respawn.
+    pub popped: bool,
 }
 
 impl Fighter {
@@ -498,6 +505,7 @@ impl Fighter {
             aim_error: 0,
             prey: false,
             ride: race::Ride::default(),
+            popped: false,
         }
     }
 
@@ -1138,7 +1146,7 @@ impl Match {
         if !self.settings.race {
             self.cones(i..i + 1, &mut ev);
         }
-        self.mounted_guns(world, seen, &mut ev);
+        self.mounted_guns(&arena.fire_clip, world, seen, &mut ev);
         if !self.traps.list.is_empty() {
             self.plates(world);
         }
@@ -1220,7 +1228,7 @@ impl Match {
         if !self.settings.race {
             self.cones(0..self.players.len(), &mut ev);
         }
-        self.mounted_guns(world, seen, &mut ev);
+        self.mounted_guns(&arena.fire_clip, world, seen, &mut ev);
         if self.settings.beach {
             let stood = (self.players.iter().enumerate()).position(|(i, f)| {
                 !self.free.contains(&i)
@@ -1613,8 +1621,7 @@ impl Match {
                     && may(f)
                     && match self.settings.race {
                         true => race::touches(pos, f),
-                        false if self.settings.tank => tank::touches(pos, f, reach(i)),
-                        false => weapon::touches(pos, f.body.pos, reach(i)),
+                        false => tank::touches(pos, f, reach(i)),
                     }
             });
             if let Some(i) = toucher {
@@ -1687,7 +1694,9 @@ impl Match {
             }
         }
         // Heist: the bag is touched as a flag is, by anyone (V h1 334: the grab 0x114 at once, the
-        // bat put away; the script hears of it next frame).
+        // bat put away; the script hears of it next frame), but not mid-attack: a swing holds
+        // obj+0x89, which `func_150597FC` refuses (C; V hb, hb2: the 21 landed bat swings hold it
+        // 11-39 frames, and the hitter 27-29 from the bag it knocked off does not take it).
         if self.settings.heist && self.heist.cash.touchable(t) {
             let cash = self.heist.cash;
             let toucher = self.players.iter().enumerate().position(|(i, f)| {
@@ -1698,10 +1707,7 @@ impl Match {
                     && f.body.lock == 0
                     && matches!(
                         f.action,
-                        Action::Free
-                            | Action::Fire { .. }
-                            | Action::Aim { .. }
-                            | Action::Reload { .. }
+                        Action::Free | Action::Aim { .. } | Action::Reload { .. }
                     )
                     && heist::touches(&cash, &f.body, f.other())
             });
@@ -3026,8 +3032,15 @@ impl Match {
             // `func_15081E78` skips an immune or stunned living victim (C). The angle: V 0x6300 for
             // the facing 25345 on e_w24; the game's varies by up to 21 for the same aim
             // (combat4_w24 0x6302, combat4_pitch24 0x6313 and 0x6315; I: the rifle's pose).
-            self.hurt(v, &kind, false, true, me.facing & !1, Some(i), ev);
+            let took = self.hurt(v, &kind, false, true, me.facing & !1, Some(i), ev);
+            self.pop(v, head, took);
         }
+    }
+
+    /// Player `v`'s head pops on a head hit it took, or on its corpse ([`Fighter::popped`]).
+    fn pop(&mut self, v: usize, head: bool, took: bool) {
+        let f = &mut self.players[v];
+        f.popped |= head && (took || f.health == 0);
     }
 
     /// Player `v` as shooter `s` saw it ([`Seen`]), else where it is.
@@ -3351,7 +3364,11 @@ impl Match {
                 // The knock-back angle is the shot's direction (V combat4_w14: 0x6B13 for
                 // (−0.871, 0, −0.491)).
                 let a = dir_angle(world, s.dir);
-                if self.hurt(v, &kind, false, true, a, Some(s.owner), ev) {
+                let took = self.hurt(v, &kind, false, true, a, Some(s.owner), ev);
+                // A bolt's head hit pops it (V combat5_cb_e1 987), weapon 0x14's shot's does not
+                // (V combat4_w14 833, combat4_pitch14 883: obj+0x9C stays 0; I: the knives').
+                self.pop(v, head && s.step == BOLT_STEP, took);
+                if took {
                     let head = head && self.enemies(s.owner, v);
                     // Its victim's death spin is a frame shorter than the sniper's (V combat4_w14,
                     // combat5_cb_e1: 0x17E for 75 frames, the sniper's 76; I: the frame order); a
@@ -3399,7 +3416,9 @@ impl Match {
         // it up faster than 30 (`func_1505B9C4`, C; V e2); one jumping onto a gun comes off (I).
         let seated = f.seated();
         let stays = seated && !lethal && kind.y_vel <= 30.0;
+        let drown = lethal && f.body.swimming;
         let reaction = match () {
+            _ if drown => damage::DROWN,
             _ if seated && lethal => 0x2E,
             _ if area && kind.reaction == 0x21 => damage::AREA_STAGGER,
             _ => kind.reaction,
@@ -3421,6 +3440,13 @@ impl Match {
             }
         }
         f.knock_k = kind.k;
+        if drown {
+            // Afloat, nothing knocks it: the current carries it, and the shore's slide keeps 0.6 a
+            // frame (V die1 461: speed, y velocity and gravity 0, the move angle the hit's; 530-547).
+            let b = &mut f.body;
+            (b.xz_speed, b.y_vel, b.gravity, b.airborne) = (0.0, 0.0, 0.0, false);
+            f.knock_k = 0;
+        }
         f.fidget = Fidget::default();
         if let Some(n) = kind.immune_frames() {
             f.immune = n;
@@ -3575,6 +3601,17 @@ impl Match {
                 movement::sit(&mut f.body, seat, yaw);
                 f.gun = Some(m);
             }
+            // Drowned, the body floats and drifts as a swimmer with no stick, its facing kept (V die1
+            // 461-523, die2 161-247); once the shallows stand it up, the knock's (V die1 524).
+            None if reaction == damage::DROWN && f.body.swimming => {
+                let (facing, me) = (f.body.facing, f.other());
+                movement::step_among(&mut f.body, &Input::default(), world, me, others);
+                f.body.facing = facing;
+                if !f.body.swimming {
+                    // Stood up (`func_15052408`'s 15), the dead body's air frames don't brake it.
+                    f.body.xz_speed = 15.0;
+                }
+            }
             None => knock(f, reaction, step, world, others),
         }
     }
@@ -3708,7 +3745,13 @@ impl Match {
     /// The mounted guns, after the players (their objects' slots follow; `func_150BDB70`, C): a free
     /// gun launches the first player in slot order that touches it; a manned one turns with its
     /// gunner and fires ([`Self::fire_gun`]).
-    fn mounted_guns(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
+    fn mounted_guns(
+        &mut self,
+        clip: &[[f32; 3]],
+        world: &CollisionWorld,
+        seen: Seen,
+        ev: &mut Vec<Event>,
+    ) {
         let t = self.tick;
         for k in 0..self.guns.len() {
             let gunner = self.gunner(k);
@@ -3764,7 +3807,7 @@ impl Match {
                 continue;
             }
             (g.yaw, g.pitch10) = (f.body.facing, gun::pitch10(f.scope_pitch));
-            if let Some(b) = self.fire_gun(i, world, seen, ev) {
+            if let Some(b) = self.fire_gun(i, clip, world, seen, ev) {
                 let g = &mut self.guns[k];
                 (g.shots, g.last) = (g.shots.wrapping_add(1), b);
             }
@@ -3777,30 +3820,39 @@ impl Match {
     /// heads from the muzzle for the first body part or wall the scope's ray meets past
     /// [`gun::sight`], else leaves from there along the ray (`func_151C229C` → `func_151C4B0C`, the
     /// twin guns' aim cast; C). V e1: the first shot meets player 2's body 146 along the ray and
-    /// knocks it at 210.4°, the next ones the floor 334 along (from the eye as the fire clip lifts
-    /// it, 5 up: not modelled, I). A bot's goes along the barrel ([`gun::barrel_dir`]).
+    /// knocks it at 210.4°, the next ones the floor 334 along. The barrels and the eye as the fire
+    /// clip `clip` ([`gun::fire_clip`]) kicks them ([`gun::Recoil`], V k2). A bot's goes along the
+    /// barrel ([`gun::barrel_dir`]; I: kicked as the human's muzzle, the AI's aim point being the
+    /// barrel joint's).
     pub fn fire_gun(
         &mut self,
         i: usize,
+        clip: &[[f32; 3]],
         world: &CollisionWorld,
         seen: Seen,
         ev: &mut Vec<Event>,
     ) -> Option<u8> {
         let f = &mut self.players[i];
         let mut m = f.gun.filter(|_| f.seated())?;
+        let eye = m.recoil.step(m.state == gun::FIRING, clip);
+        let kick = m.recoil.drawn;
         let b = m.fire();
         f.gun = Some(m);
         let b = b?;
         let f = &self.players[i];
         let (at, yaw) = (m.at, f.body.facing);
         let pitch = (f.scope_pitch + 180.0).rem_euclid(360.0) - 180.0;
-        let muzzle = gun::muzzle(at, yaw, pitch, b);
+        let muzzle = gun::muzzle(at, yaw, pitch, b, kick);
         let (from, dir) = if f.bot {
             let toe = 1.0 + 6.0 * self.rng.next_f32();
-            (muzzle, gun::barrel_dir(yaw, pitch, b, toe))
+            (
+                muzzle,
+                gun::barrel_dir(yaw, pitch + kick[0] + kick[1], b, toe),
+            )
         } else {
             let (d, _) = aim(f);
-            let p = gun::sight(at, yaw, pitch, b, conker_camera::gun_eye(at, yaw, pitch), d);
+            let eye = conker_camera::gun_eye_kicked(at, yaw, pitch, eye);
+            let p = gun::sight(at, yaw, pitch, b, kick, eye, d);
             let wall = raycast(world, p, d, RAY_RANGE);
             let hit = (self.first_part(i, p, d, wall, seen)).map_or(wall, |h| h.1);
             let v: [f32; 3] = core::array::from_fn(|j| p[j] + d[j] * hit - muzzle[j]);
@@ -3849,10 +3901,13 @@ impl Match {
                         f.health -= 1;
                     } else {
                         let (o, k) = (b.owner, damage::SNIPER_RAY);
-                        self.hurt(v, &k, false, false, b.angle, Some(o), ev);
+                        let took = self.hurt(v, &k, false, false, b.angle, Some(o), ev);
+                        self.pop(v, true, took);
                         continue;
                     }
                 }
+                // A corpse's head pops (V e_w39 970); the hit does nothing else.
+                self.pop(v, head, false);
                 self.hurt(v, &b.kind, false, true, b.angle, Some(b.owner), ev);
             } else if b.advance() {
                 self.bullets.push((born, b));
@@ -4078,11 +4133,14 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             true => 0.5 * b.xz_speed / (1.0 + rise * rise).sqrt(),
             false => 0.0,
         };
+        // The current's drift adds to the step (`func_15059C84`), fading out of the water (a body
+        // drowned ashore, V die1 524-547; zero everywhere else).
         let mut new = [
-            old[0] + d * c,
+            old[0] + d * c + b.drift[0],
             old[1] + d * rise + 0.5 * b.y_vel - 0.275 * b.gravity,
-            old[2] - d * s,
+            old[2] - d * s + b.drift[1],
         ];
+        b.drift = b.drift.map(|v| v + (0.0 - v) * 0.15);
         movement::push_apart(&mut new, me, others);
         b.y_vel -= b.gravity;
         let swept = world.sweep(
@@ -4125,12 +4183,30 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
         }
     } else {
         let (d, next) = damage::knockback(b.xz_speed, f.knock_k);
+        // With a drift the step runs under speed 1 too (`func_15059C84`).
+        let (drift, d) = match b.drift {
+            [0.0, 0.0] => ([0.0; 2], d),
+            v => (v, 0.5 * (b.xz_speed - 0.1 * f32::from(k)).max(0.0)),
+        };
+        b.drift = drift.map(|v| v + (0.0 - v) * 0.15);
         b.xz_speed = next;
         b.gravity = movement::GRAVITY_FALL;
         // A clip with root motion (the shot death 0x17E) moves the body by its root along the facing
         // instead of by the speed (conker-sim's `root_motion`; V e_w22, e_w24).
         let rooted = movement::root_motion(b, world);
-        if !rooted && d > 0.0 {
+        if !rooted && drift != [0.0; 2] {
+            // Along the floor's plane, the horizontal length kept (conker-sim's `drift_step`).
+            let (dx, dz) = (d * c + drift[0], -(d * s) + drift[1]);
+            let n = b.floor.map(|fl| world.tris[fl.tri as usize].normal);
+            let rise = n
+                .filter(|n| n[1] != 0.0)
+                .map_or(0.0, |[nx, ny, nz]| (-nx * dx - nz * dz) / ny);
+            let h2 = dx * dx + dz * dz;
+            let k = h2.sqrt() / (h2 + rise * rise).sqrt();
+            if h2 > 0.0 {
+                b.pos = [old[0] + dx * k, old[1] + rise * k, old[2] + dz * k];
+            }
+        } else if !rooted && d > 0.0 {
             let rise = b.floor.map_or(0.0, |fl| {
                 rise_along(world.tris[fl.tri as usize].normal, c, s)
             });
@@ -4144,7 +4220,7 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
         let mut fell = b.pos;
         fell[1] += 0.5 * y_vel;
         let shoved = movement::push_apart(&mut fell, me, others);
-        if rooted || d > 0.0 || shoved {
+        if rooted || d > 0.0 || drift != [0.0; 2] || shoved {
             b.pos = fell;
             let pre = b.pos;
             b.pos = world

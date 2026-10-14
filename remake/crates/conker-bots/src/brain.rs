@@ -9,6 +9,7 @@
 use crate::nav::{Graph, NONE};
 use crate::npc::{AT_GOAL, Npc};
 use crate::script::{Globals, Host};
+use conker_camera::math::{cos, sin};
 use conker_camera::volume::CameraHint;
 use conker_rules::Rng;
 use conker_rules::beach::Plunger;
@@ -1967,7 +1968,16 @@ impl World<'_> {
             k /= d;
             (dx, dz) = (dx - dz * k, dz + dx * k);
         }
-        let to = conker_sim::movement::atan2_u16(-dz, dx);
+        // The aim's yaw and pitch go through the game's arctangent (`func_1505A630`, the acos table:
+        // near level the pitch moves in steps of 0.3-0.6°), which the AI sets the scope to
+        // (s126+0x16C, +0x170) and the shots take (C; V twin34: a still shooter's pitch is the
+        // table's on 3,633 of 3,655 frames, and from 2,000-4,000 away its ray passes 43-46 above
+        // the target's feet, not 40).
+        let atan = |x: f32, y: f32| match &self.world.acos {
+            Some(a) => a.angle(x, y),
+            None => conker_sim::movement::atan2_u16(y, x),
+        };
+        let to = atan(dx, -dz);
         let to_deg = wrap360(f32::from(to) * 0.005_493_164);
         let n = &mut self.npcs[p];
         if weapon == 0x1B {
@@ -1987,9 +1997,7 @@ impl World<'_> {
             let ay = ay + ((ty - jz as f32) - ay) * rate;
             g.set_f32(g::AIM_Y + o, ay);
             let rise = b.pos[1] + 67.5 - ay;
-            let target = wrap180(
-                f32::from(conker_sim::movement::atan2_u16(rise, d.max(1.0))) * 0.005_493_164,
-            );
+            let target = wrap180(f32::from(atan(d.max(1.0), rise)) * 0.005_493_164);
             let x = (off * 8.0).clamp(-90.0, 90.0);
             let y = (wrap180(wrap180(pitch) - target) * 8.0).clamp(-30.0, 30.0);
             n.stick = Some([x as i8, -y as i8]);
@@ -2012,8 +2020,15 @@ impl World<'_> {
         let far = !(-45.0..=45.0).contains(&off);
         n.aim_yaw = Some(to_deg);
         let ay = g.f32(g::AIM_Y + o);
-        g.set_f32(g::AIM_Y + o, ay + ((ty - jz as f32) - ay) * rate);
-        n.aim = Some([b.pos[0] + dx, g.f32(g::AIM_Y + o), b.pos[2] + dz]);
+        let ay = ay + ((ty - jz as f32) - ay) * rate;
+        g.set_f32(g::AIM_Y + o, ay);
+        // The point along that yaw and pitch from the eye, 67.5 up (`Bots::scopes` takes the ray).
+        let (r, eye) = (d.max(1.0), b.pos[1] + 67.5);
+        let pitch = f32::from(atan(r, eye - ay)) * 0.005_493_164;
+        let k = f32::from_bits(0x3C8E_FA35); // π/180
+        let (pc, ps) = (cos(pitch * k), sin(pitch * k));
+        let (yc, ys) = (cos(to_deg * k), sin(to_deg * k));
+        n.aim = Some([b.pos[0] + yc * pc * r, eye - ps * r, b.pos[2] - ys * pc * r]);
         if automatic != 0 {
             if g.get(g::FIRE, p) >= 0 {
                 n.held = 0x2000;

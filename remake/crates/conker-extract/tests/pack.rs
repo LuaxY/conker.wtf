@@ -17,13 +17,24 @@ use conker_rules::weapon::{self, Pickup};
 use conker_sim::trig::AcosTable;
 use extract_core::Rom;
 use gltf_json::validation::Validate;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("conker-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Whether an RGBA PNG (the pack writes them so) has a texel that is neither clear nor black.
+fn drawn(file: &[u8]) -> bool {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(file))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    (buf[..info.buffer_size()].as_chunks::<4>().0.iter()).any(|p| p[3] > 0 && p[..3] != [0, 0, 0])
 }
 
 /// The JSON and BIN chunks of a GLB.
@@ -208,6 +219,14 @@ fn pack_reads_back_as_the_rom_path() {
     let beach = conker_assets::Slice::load("2b", &names, PACK_WEAPONS, read).unwrap();
     let lifts: Vec<i16> = beach.characters.iter().map(|c| c.model_lift).collect();
     assert_eq!(lifts, [42, 43, 49, 41, 40]);
+    // The fixed cameras' points ([0x0C, scene, 8]): the sea's hints 0x26 and 0x27 look from points
+    // 0 and 1 (V cam+0x288 in `cameras-clips-g4.md` §1's swim1 and east runs); 0x1A's trip wires'
+    // four; none on the other maps.
+    let at: Vec<[i16; 3]> = beach.cameras.iter().map(|c| c.at).collect();
+    assert_eq!(at.len(), 6);
+    assert_eq!(at[..2], [[2024, 277, 9703], [-2290, 728, 10913]]);
+    assert!(beach.cameras.iter().all(|c| c.rest.len() == 36));
+    assert!(pack.cameras.is_empty());
     for villager in &beach.characters[3..] {
         assert_eq!(
             (&villager.clips, &villager.root_clips),
@@ -248,14 +267,18 @@ fn pack_reads_back_as_the_rom_path() {
         assert_eq!(events(&p.create), events(&s.create));
         assert_eq!(events(&p.remove), events(&s.remove));
     }
-    // The holster's op 41 (t14) removes the crossbow, a child object; item 0x3A's two grenades end
-    // the list, on the right hand, with no events (`held-leftovers.md` §1, `LOB_ACTIONS`).
+    // The holster's op 41 (t14) removes the crossbow, a child object; item 0x3A's two grenades, on
+    // the right hand, the head stumps (G5: 117's #0x59 on joint 0, 128's #0x58 on joint 1), then
+    // the racer classes 0xD-0xF's helmets (#0x5A, #0x5C, #0x5B on joint 12, as 0x33's props) end
+    // the list, with no events (`held-leftovers.md` §1, `LOB_ACTIONS`, `STUMP_ACTIONS`).
     let held = |entry| pack.held.iter().find(|h| h.entry == entry).unwrap();
     assert_eq!(held(0x6E).remove, [(0xC6, 14.0)]);
-    let lobs: Vec<_> = (pack.held[pack.held.len() - 2..].iter())
+    let last: Vec<_> = (pack.held[pack.held.len() - 7..].iter())
         .map(|h| (h.entry, h.joint, h.create.len() + h.remove.len()))
         .collect();
-    assert_eq!(lobs, [(137, 9, 0), (186, 9, 0)]);
+    let lobs = [(137, 9, 0), (186, 9, 0), (0x59, 0, 0), (0x58, 1, 0)];
+    assert_eq!(last[..4], lobs);
+    assert_eq!(last[4..], [(0x5A, 12, 0), (0x5C, 12, 0), (0x5B, 12, 0)]);
     // Body parts (`held-leftovers.md` §2): the Tedi's head sphere first; none for the weasel guard
     // and the tank, which the game tests as a cylinder.
     let parts = tedi.parts.as_ref().unwrap();
@@ -474,6 +497,8 @@ fn pack_reads_back_as_the_rom_path() {
     let mut names = PACK_CHARACTERS.to_vec();
     names.push("59");
     let vault = conker_assets::Slice::load("1a", &names, PACK_WEAPONS, read).unwrap();
+    assert_eq!(vault.cameras[0].at, [4169, 39, -207]);
+    assert_eq!(vault.cameras.len(), 4);
     assert_eq!(conker_extract::ai_script(0x1A), 0xB7);
     assert_eq!(conker_rules::lift::parse(&vault.triggers, 0x1A).len(), 4);
     assert!(conker_rules::lift::kill_gates(&vault.triggers).is_empty());
@@ -612,12 +637,37 @@ fn pack_reads_back_as_the_rom_path() {
         muzzle: 4,
         brake: 11,
         brake_lit: "textures/brake-lit.png".into(),
-        treads: 13,
+        treads: [13, 15],
         tread_joints: [13, 12],
     };
     assert_eq!(tank.tank.as_ref(), Some(&parts));
     let gltf: Value = serde_json::from_slice(files["characters/119/character.gltf"]).unwrap();
     assert_eq!(gltf["skins"][0]["joints"].as_array().unwrap().len(), 14);
+    // The treads, a material per side (G5): the second a copy of the first but for its name, its
+    // primitive the last, every vertex of each side on its joint (13 then 12), 16 triangles each.
+    let mut copy = gltf["materials"][15].clone();
+    copy["name"] = gltf["materials"][13]["name"].clone();
+    assert_eq!(copy, gltf["materials"][13]);
+    assert_eq!(gltf["materials"].as_array().unwrap().len(), 16);
+    let prims = gltf["meshes"][0]["primitives"].as_array().unwrap();
+    let accessor = |i: &Value| &gltf["accessors"][i.as_u64().unwrap() as usize];
+    let bin = files["characters/119/character.bin"];
+    for (k, joint) in parts.treads.into_iter().zip(parts.tread_joints) {
+        let prim = (prims.iter())
+            .find(|p| p["material"] == k)
+            .unwrap_or_else(|| panic!("material {k}"));
+        let joints = accessor(&prim["attributes"]["JOINTS_0"]);
+        let view = &gltf["bufferViews"][joints["bufferView"].as_u64().unwrap() as usize];
+        let start = view["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let count = joints["count"].as_u64().unwrap() as usize;
+        assert!(
+            (bin[start..start + 4 * count].as_chunks::<4>().0.iter())
+                .all(|j| j[0] as usize == joint),
+            "material {k}"
+        );
+        assert_eq!(accessor(&prim["indices"])["count"], 48, "material {k}");
+    }
+    assert_eq!(prims.last().unwrap()["material"], 15);
     let image = |m: usize| gltf["materials"][m]["extras"]["image"].clone();
     let teams = tank.teams.as_ref().unwrap();
     assert_eq!(
@@ -633,9 +683,20 @@ fn pack_reads_back_as_the_rom_path() {
         .map(|t| files[format!("characters/119/{t}").as_str()])
         .collect();
     assert!((1..5).all(|t| !pngs[..t].contains(&pngs[t])));
+    // Scene 1: the carried gas bomb (action 0x18: bank 09 #0x3F on the turret's joint 2, V
+    // `g5-pack-scratch/tank` k1 DL 45), one draw of 48 triangles at the origin.
     let props: Value = serde_json::from_slice(files["maps/24/props.gltf"]).unwrap();
-    assert_eq!(props["nodes"].as_array().unwrap().len(), 22);
+    assert_eq!(props["nodes"].as_array().unwrap().len(), 23);
     assert_eq!(props["nodes"][1]["name"], "03-50@12");
+    assert_eq!(props["scenes"][1]["nodes"], json!([22]));
+    let bomb = &props["meshes"][props["nodes"][22]["mesh"].as_u64().unwrap() as usize];
+    let prims = bomb["primitives"].as_array().unwrap();
+    let indices = prims[0]["indices"].as_u64().unwrap() as usize;
+    assert_eq!(
+        (prims.len(), &props["accessors"][indices]["count"]),
+        (1, &json!(144))
+    );
+    assert_eq!(parts.turret, 2);
 
     // Map 0x3F's War: Raptor (`lab/research/mp-original/raptor.md`): `raptor.json`; the raptor
     // (83) on its own rig, 39 joints (5 the skull, 6 the jaw and the carry point), 37 clips, model
@@ -1076,16 +1137,70 @@ fn pack_audio_reads_back() {
             serde_json::from_slice(files[format!("maps/{map}/outro.gltf").as_str()]).unwrap();
         assert!(gltf["scenes"][0]["name"] == "09-57", "{map}");
     }
-    // 0x2B's detonation ring (bank 09 #0x157): one draw of 112 triangles, alpha-blended.
-    let ring: Value = serde_json::from_slice(files["maps/2b/effects.gltf"]).unwrap();
-    assert_eq!(ring["scenes"][0]["name"], "09-157");
-    assert_eq!(ring["materials"][0]["alphaMode"], "BLEND");
-    let indices = &ring["meshes"][0]["primitives"][0]["indices"];
+    // The effects' models, shared by every map (`effects-g4.md` §4, §5, §7, §9): the blasts' ring
+    // (bank 09 #0x157) one draw of 112 triangles, alpha-blended; the explosive death's chunk
+    // (#0x132, 26 vertices: 12 triangles), the flak's puff (#0xE5, the icosahedron's 20) and the
+    // splash's drop (#0xBE, 44), opaque, each with its CI texture. Then Race's death blast
+    // (`g5-pack-scratch/race`, V: every G_VTX of d1's DL 380 found in these): the fire shell
+    // (#0x158, as the ring), the board's pieces (#0x16F-#0x171: 10, 14 and 38) and the racer's
+    // (#0x17D-#0x17F, #0x179: 32, 26, 16 and 58), opaque and CI8-textured.
+    let fx: Value = serde_json::from_slice(files["weapons/deathmatch/effects.gltf"]).unwrap();
+    let names: Vec<&str> = (fx["scenes"].as_array().unwrap().iter())
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        ring["accessors"][indices.as_u64().unwrap() as usize]["count"],
-        336
+        names,
+        [
+            "09-157", "09-132", "09-e5", "09-be", "09-158", "09-16f", "09-170", "09-171"
+        ]
+        .into_iter()
+        .chain(["09-17d", "09-17e", "09-17f", "09-179"])
+        .collect::<Vec<_>>()
     );
-    assert!(!files.contains_key("maps/2d/effects.gltf"));
+    let mut looks = vec![];
+    for scene in fx["scenes"].as_array().unwrap() {
+        let node = &fx["nodes"][scene["nodes"][0].as_u64().unwrap() as usize];
+        let prims = fx["meshes"][node["mesh"].as_u64().unwrap() as usize]["primitives"]
+            .as_array()
+            .unwrap();
+        let count = |p: &Value| {
+            fx["accessors"][p["indices"].as_u64().unwrap() as usize]["count"]
+                .as_u64()
+                .unwrap()
+        };
+        let material = |p: &Value| &fx["materials"][p["material"].as_u64().unwrap() as usize];
+        let textured = (prims.iter().map(material))
+            .all(|m| m["pbrMetallicRoughness"]["baseColorTexture"].is_object());
+        looks.push((
+            prims.iter().map(count).sum::<u64>() / 3,
+            material(&prims[0])["alphaMode"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            textured,
+        ));
+    }
+    let look = |t, a: &str| (t, a.to_string(), true);
+    let opaque = |t| look(t, "OPAQUE");
+    assert_eq!(
+        looks,
+        [
+            look(112, "BLEND"),
+            opaque(12),
+            opaque(20),
+            opaque(44),
+            look(112, "BLEND")
+        ]
+        .into_iter()
+        .chain([10, 14, 38, 32, 26, 16].map(opaque))
+        .chain([(58, "OPAQUE".to_string(), false)])
+        .collect::<Vec<_>>()
+    );
+    assert!(
+        !files
+            .keys()
+            .any(|p| p.starts_with("maps/") && p.ends_with("effects.gltf"))
+    );
     // Beach cs4's song 0x8A with 2b's recording; no other outro has one.
     assert_eq!(files["audio/maps/2b/song-8a.wav"], song.as_slice());
     let songs = |map: &str| {
@@ -1593,6 +1708,12 @@ fn pack_audio_reads_back() {
             .iter()
             .all(|id| audio.sounds.sounds.contains_key(id))
     );
+    // The crossbows' aim laser (G5): 1232 at 2000, heard by the aimer (`match-flow-g3.md`).
+    assert_eq!(
+        lob(On::Laser),
+        [(vec![1232], 2000, 0, 1, Channel::Free, [0, 0])]
+    );
+    assert_eq!(audio.sounds.sounds[&1232].file, "common/1232.wav");
     // War: Raptor's egg splat: both sounds at it, both in the pack (0x434 also Race's blow-up).
     let splat: Vec<_> = (audio.events.cues.iter())
         .filter(|c| c.on == On::RaptorSplat)
@@ -1756,7 +1877,32 @@ fn pack_hud_reads_back() {
         (heist.skull.rect, heist.bag.rect),
         ([48, 20, 16, 16], [142, 3, 12, 11])
     );
-    assert_eq!(size("bubble_particle"), [64, 64]);
+    // cs3's bubbles: blob 0x4B3, sprite kind 0x2F's (G5; `effects-g4.md` §10).
+    assert_eq!(size("bubble_particle"), [32, 32]);
+    // The world effects' sprites (G5, `effects-g4.md`'s pack list): each the size its sprite kind's
+    // record gives (`.game` data at 0x80090B60 + 12 · kind), none blank.
+    let effects = [
+        ("gun_flash_3d", [32, 32]),
+        ("tracer", [64, 16]),
+        ("puff", [16, 16]),
+        ("flame_tongue", [32, 32]),
+        ("smoke_grey", [32, 32]),
+        ("ripple_00", [64, 64]),
+        ("ripple_09", [64, 64]),
+        ("flame_a0", [16, 32]),
+        ("flame_b4", [16, 32]),
+        ("dirt", [16, 16]),
+        ("scorch", [32, 32]),
+        ("fuse_spark", [32, 16]),
+    ];
+    for (name, want) in effects {
+        assert_eq!(size(name), want, "{name}");
+        assert!(drawn(files[format!("hud/{name}.png").as_str()]), "{name}");
+    }
+    let ripples: BTreeSet<&[u8]> = (0..10)
+        .map(|k| files[format!("hud/ripple_{k:02}.png").as_str()])
+        .collect();
+    assert_eq!(ripples.len(), 10);
     assert_eq!(
         ["reds", "blues", "greens", "yellows"].map(|n| end.textures[n].size),
         [[64, 32], [64, 32], [96, 32], [96, 32]]
@@ -1968,6 +2114,8 @@ fn tank_audio_reads_back() {
         [(vec![735], 12000, 500, 1000)]
     );
     assert_eq!(cue(On::BombPickup), [(vec![11, 12], 26000, 100, 1000)]);
+    // The rumble 0x4A9 (G5, `cameras-clips-g4.md` §11).
+    assert_eq!(cue(On::TankRumble), [(vec![1193], 0x2EE0, 200, 800)]);
     let pickups: Vec<_> = [0x80, 1, 0x10, 2]
         .map(|bit| {
             cue(On::Pickup {
@@ -1977,7 +2125,7 @@ fn tank_audio_reads_back() {
         })
         .into();
     assert_eq!(pickups, [1296, 1187, 385, 752]);
-    for id in [1191, 1192, 742, 735, 750, 11, 12, 752] {
+    for id in [1191, 1192, 1193, 742, 735, 750, 11, 12, 752] {
         assert_eq!(
             audio.sounds.sounds[&id].file,
             format!("characters/119/{id:04}.wav")

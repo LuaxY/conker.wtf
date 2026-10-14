@@ -504,6 +504,7 @@ impl Ground {
 /// The animation clock of one character: `func_1505E0C4` (start) and `func_1507BDB0` (advance)
 /// at a constant 2 VIs per frame. Field names follow the game's state at obj+0x2D0.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnimPlayer {
     /// Current clip (obj+0x84).
     pub id: u16,

@@ -95,7 +95,9 @@ use serde::{Deserialize, Serialize};
 /// 36: `Combat::laser` (the crossbow's aim dot); `Fighting`'s `traps`, `sliding` and `bolts` (0x34's traps, the
 /// flags, the mounted guns and the bolt's push predicted); Tank's scope bullet and Race's floor reach and turn (shared).
 /// 37: e1's knock slide (every airborne knock) and the Race bots' start kick (shared).
-pub const PROTOCOL_ID: u64 = 37;
+/// 38: `Combat::popped`, `Fighter::popped` and `Mount::recoil`; the drown, the dead-pose rows, the parts' sink, the pickup
+/// reach, Tank's barrel and Heist's take (shared).
+pub const PROTOCOL_ID: u64 = 38;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -198,6 +200,9 @@ pub struct Combat {
     /// The crossbow's aim laser (conker-rules' `Match::laser`): where its dot is (the scope's line
     /// on a wall or a body part), `None` while it is off.
     pub laser: Option<[i16; 3]>,
+    /// The head popped (conker-rules' `Fighter::popped`: a head kill, or a bullet on a corpse's
+    /// head), to the respawn: the clients hide the head joints (conker-client's `corpses`).
+    pub popped: bool,
 }
 
 /// A bullet in flight (conker-rules' `Bullet`): where it is after this frame's step, its velocity

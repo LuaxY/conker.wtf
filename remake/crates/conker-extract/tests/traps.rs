@@ -7,7 +7,8 @@ use conker_assets::audio::Audio;
 use extract_core::Rom;
 
 /// With map 34 the electric floor's sound 0x236 is in its folder, the fire jets' 0x1AA stays in
-/// `common` (the flamethrower's too), and the traps' three textures are PNGs of their sizes.
+/// `common` (the flamethrower's too), and the traps' two textures are PNGs of their sizes (the jets'
+/// particles are `hud/puff.png`).
 #[test]
 fn pack_has_the_traps() {
     let Some(path) = std::env::var_os("CONKER_ROM") else {
@@ -41,7 +42,6 @@ fn pack_has_the_traps() {
         sizes,
         [
             ("maps/34/traps/flame.png", [32, 32]),
-            ("maps/34/traps/puff.png", [16, 16]),
             ("maps/34/traps/arc.png", [16, 16])
         ]
     );

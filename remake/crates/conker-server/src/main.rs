@@ -666,6 +666,13 @@ fn main() {
     }
     let mut arena = arena(&pack, pickups, total_war, setup.settings.tank);
     arena.lob = matches!(scene, 0x1A | 0x3F);
+    // The mounted guns' fire clip: their barrels' recoil (`gun::Recoil`).
+    if !gun::places(usize::from(scene)).is_empty() {
+        let read =
+            |p: &str| std::fs::read(dir.join(p)).unwrap_or_else(|e| fail(format!("{p}: {e}")));
+        arena.fire_clip = gun::fire_clip(&read(gun::FILES[0]), &read(gun::FILES[1]))
+            .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    }
     let mut world = scene_world(&pack, scene);
     // Race: the route's lap (`race.json`), its power-ups back 10 frames on, and the barriers it
     // hides out of the way (only the shown ones are solid).
@@ -2005,6 +2012,7 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         power: f.power,
         power_left: if f.power == 0 { 0 } else { f.boost },
         laser: None,
+        popped: f.popped,
     }
 }
 

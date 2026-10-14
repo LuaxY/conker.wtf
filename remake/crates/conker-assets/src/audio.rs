@@ -246,6 +246,11 @@ pub enum On {
     Pickup { gives: crate::Gives },
     /// The weapon's scope going on (R held), heard by its holder only.
     Scope { weapon: u8 },
+    /// The crossbows' (0x18, 0x41) aim laser, heard by its aimer only, unpositioned: a loop from the
+    /// laser's making (Z pressed while aiming: `Combat::laser` goes on) to its end (the release,
+    /// a hit, the holster, a death or a weapon change) (C `func_151026BC` plays it, `func_15101090`
+    /// stops it).
+    Laser,
     /// War: Total War's gas: a loop while it is out (`MatchView::gas`), at the listener.
     Gas,
     /// War: Total War: a player taking gas canister `canister` (its team's), at it; `bot`: a player
@@ -304,6 +309,13 @@ pub enum On {
     /// Tank: a tank's engine changing between idling, speeding up and coasting, at it; `coast`:
     /// into coasting (fast, not speeding up).
     TankGear { coast: bool },
+    /// Tank: a driving tank's rumble, a loop at it from 150 frames (300 VIs) after its drive loop
+    /// ([`On::TankEngine`] `moving`) starts: its level rises 8/256 a frame from 8/256 to full, holds
+    /// 150 or 406 frames ((rand & 0x200) + 300 VIs), then falls 8/256 a frame to 0 and it stops; it
+    /// stops at once when the tank idles. From 450 or 706 frames after it starts ((rand & 0x200) +
+    /// 900 VIs) the drive loop fades 8/256 a frame (C `func_151BB0E0`; V Colors cs5b 589). Colors
+    /// cs5's outro tanks play it too.
+    TankRumble,
     /// Tank: a shell's blast, at it: on a tank (`ground` false) or on the ground.
     TankBlast { ground: bool },
     /// Tank: a tank blowing up, at it, [`Cue::delay`] after its death: by a shell, or by the gas

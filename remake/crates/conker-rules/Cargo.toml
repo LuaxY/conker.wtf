@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 # The replicated fighter (`net::Fighting`) shared by conker-server and conker-client: serde on the
 # fighter's state and its lightyear registration. Off by default: the rules stay engine-free.
-net = ["conker-sim/net", "dep:serde", "dep:bevy", "dep:lightyear"]
+net = ["conker-sim/net", "conker-anim/serde", "dep:serde", "dep:bevy", "dep:lightyear"]
 
 [dependencies]
 serde = { workspace = true, optional = true }

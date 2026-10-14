@@ -3,6 +3,13 @@ name = "conker-anim"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# serde on the clock (conker-rules' mounted gun's `gun::Recoil` rides the wire).
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
 [dev-dependencies]
 extract-core.workspace = true
 extract-character = { path = "../extract-character" }

@@ -100,6 +100,11 @@ const LINES: [(u16, &str); 3] = [
 /// A War outro `n`'s song ([`conker_assets::outro::Outro::song`]) plays as id `SONG - n`: not an
 /// MP3 (it ducks nothing) nor the background (nothing ducks it).
 const SONG: u16 = ESCAPE - 0x100;
+/// An outro's song against its recording (`lab/audio/tools/song_record.sh`: the match's slot at its
+/// 0x4650, with the map's own volume calls missed): V b4 (`polish-g5-scratch`, a pinned Beach cs4
+/// capture, no lldb), song 0x8A found at the outro's frame 1, least-squares gain 0.79 over its first
+/// 3 s, 0.75 over 9 s (0.65-0.97 in half seconds; the match's music and the voice play over it).
+const SONG_LEVEL: f32 = 0.75;
 /// The background's stem ([`Follow`]): War: Beach's song 0x4D's channels 13 and 14.
 const STEM: u16 = SONG - 0x100;
 /// Tank's countdown song (the map's `countdown` line: song 50 over the map's, not an MP3: it ducks
@@ -302,7 +307,7 @@ enum Owner {
 
 /// Where a sound starts from and whose it is: `follows` a player's slot (it moves with it), `tag` the
 /// cue whose condition keeps it playing; `flat`: heard centred at its volume wherever it is (the
-/// radio, flag 0x100 with near/far 0x7FFE/0x7FFF).
+/// radio: near/far 0x7FFF/0x7FFE; V g5c c1, where attenuated records carry flag 0x100 too).
 #[derive(Clone, Copy)]
 struct Src {
     owner: Owner,
@@ -383,6 +388,8 @@ struct Seen {
     masked: bool,
     /// The height above its floor (Race's hum; none: 0).
     above: f32,
+    /// Tank: the hull's pitch in degrees (the engine's pitch; else 0).
+    pitch: f32,
 }
 
 /// A player as the last tick saw it.
@@ -436,6 +443,53 @@ struct Voice {
     started: u32,
     stopped: bool,
     control: Option<Arc<Control>>,
+    bend: Bend,
+}
+
+/// A positional record's pitch bend over its sound's own rate (C `func_10011624`, the records'
+/// per-frame update): its callback's cents (record+0x20: Race's hums, Tank's engine), the ratio on
+/// the mixer (+0x2C) and, for a record with the Doppler (flag 4: the hums), last tick's distance to
+/// the ear (+0x28).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bend {
+    cents: i32,
+    ratio: f32,
+    dist: Option<u16>,
+}
+
+impl Bend {
+    const FLAT: Self = Self {
+        cents: 0,
+        ratio: 1.0,
+        dist: None,
+    };
+
+    /// A tick at `cents` (`alCents2Ratio`): at once, or with the Doppler at the distance `d` to the
+    /// ear, eased [`DOPPLER_EASE`] of the way a tick (a new record starts at the cents alone).
+    fn step(&mut self, cents: i32, d: Option<u16>) {
+        let ratio = (cents as f32 / 1200.0).exp2();
+        self.ratio = match (self.dist, d) {
+            (Some(was), Some(is)) => {
+                self.ratio + (ratio * doppler(was, is) - self.ratio) * DOPPLER_EASE
+            }
+            _ => ratio,
+        };
+        (self.cents, self.dist) = (cents, d);
+    }
+}
+
+/// The Doppler's ease a frame (`0x8002C404`, V r1).
+const DOPPLER_EASE: f32 = 0.3;
+
+/// The Doppler factor of a record whose distance to the ear went from `was` to `is` in a frame
+/// (`func_10011624`, C; V r1): v = (was − is)·2 VIs / 3, truncated; 367/(367 − v) within 0.5..2
+/// (`0x8002C400`), 2 from v 367.
+pub fn doppler(was: u16, is: u16) -> f32 {
+    let v = (i32::from(was) - i32::from(is)) * 2 / 3;
+    match v {
+        367.. => 2.0,
+        v => (367.0 / (367 - v) as f32).clamp(0.5, 2.0),
+    }
 }
 
 impl Voice {
@@ -578,9 +632,8 @@ pub fn hum_target(hum: u8, s: u8, above: f32, racers: usize) -> (f32, bool) {
             }
         }
         1 => match s {
-            _ if racers >= 5 => (12000.0, false),
             0 => (16000.0, true),
-            1 => (12000.0, false),
+            _ if s == 1 || racers >= 5 => (12000.0, false),
             _ => (0.0, false),
         },
         _ => match s {
@@ -588,6 +641,34 @@ pub fn hum_target(hum: u8, s: u8, above: f32, racers: usize) -> (f32, bool) {
             _ => (400.0, false),
         },
     }
+}
+
+/// Race's hum `hum`'s pitch (cents) on a racer in state `s` `above` its floor among `racers`: the
+/// cents it moves to (C `func_150D5124`'s second value; V r1): hum 0 5 × the height (at most 1000)
+/// in state 2, else 400; hum 1 400 in state 0, and in state 2 under 5 racers; hum 2 none.
+pub fn hum_cents(hum: u8, s: u8, above: f32, racers: usize) -> i32 {
+    match (hum, s) {
+        (0, 2) => ((5.0 * above) as i32).min(1000),
+        (0, _) | (1, 0) => 400,
+        (1, 2) if racers < 5 => 400,
+        _ => 0,
+    }
+}
+
+/// A hum's cents a frame on toward `target`: up 2 VIs × 256, down 2 × 8 (`func_150D5124`; V r1:
+/// 159 → 174 → 192, 207 → 191 → 175).
+pub fn cents_step(cents: i32, target: i32) -> i32 {
+    match cents < target {
+        true => (cents + 512).min(target),
+        false => (cents - 16).max(target),
+    }
+}
+
+/// A tank's drive loop's cents (`func_151BB0E0`, C: trunc(|obj+0x3C| · obj+0xB8 · 0.5), the speed
+/// by the hull's pitch in degrees, [`conker_rules::tank::hull_pitch`]): flat ground keeps the
+/// sample's own pitch.
+pub fn engine_cents(speed: f32, pitch: f32) -> i32 {
+    (speed.abs() * pitch * 0.5) as i32
 }
 
 /// A racer's state for its hum by its speed (C `func_150D3A68`'s bot rule; the original reads a
@@ -793,6 +874,7 @@ impl Sounds {
                 started: cx.tick,
                 stopped: false,
                 control: None,
+                bend: Bend::FLAT,
             },
         );
     }
@@ -1533,6 +1615,7 @@ impl Sounds {
                 started: cx.tick,
                 stopped: false,
                 control: None,
+                bend: Bend::FLAT,
             };
             self.push(cx, v);
         }
@@ -1786,6 +1869,13 @@ impl Sounds {
             {
                 self.cues(cx, is, me, |on| *on == On::TankGear { coast: b == 2 });
             }
+            // The drive loop's pitch from its second frame (a new record starts at 0 cents).
+            let drive = |i: usize| cues[i].on == On::TankEngine { moving: true };
+            for v in (self.voices.iter_mut())
+                .filter(|v| v.owner == me.owner && v.started < cx.tick && v.tag.is_some_and(drive))
+            {
+                v.bend.step(engine_cents(is.speed, is.pitch), None);
+            }
             if was.health > 0 && is.health == 0 {
                 let bomb = is.reaction == u16::from(conker_rules::tank::CLIP_BOMB);
                 let on = On::TankDeath { bomb };
@@ -1841,6 +1931,7 @@ impl Sounds {
                         started: cx.tick,
                         stopped: false,
                         control: None,
+                        bend: Bend::FLAT,
                     },
                 );
             }
@@ -1848,7 +1939,7 @@ impl Sounds {
     }
 
     /// Race's sounds: each racer's hums (loops at it from its spawn to its death, their volumes by
-    /// [`hum_target`]; I: their pitch kept), the countdown's beeps for everyone, a canister used
+    /// [`hum_target`], their pitch by [`hum_cents`] with the Doppler), the countdown's beeps for everyone, a canister used
     /// (its boost going up), a missile fired (a new one: at the racer nearest it), each missile in
     /// flight from its 15th tick, a missile's hit (gone by a racer knocked up), a kick's (a racer
     /// knocked up with no missile gone near it: at the kicking racer nearest it), a wall's scrape
@@ -1970,9 +2061,12 @@ impl Sounds {
                 }
             }
             let s = hum_state(is.speed);
+            let d = dist2(is.pos, cx.ear.pos).sqrt() as u32 as u16;
             for x in self.voices.iter_mut().filter(|x| mine(x)) {
                 if let Some(h) = hum(x) {
                     x.volume = hum_step(x.volume, hum_target(h, s, is.above, n));
+                    let cents = cents_step(x.bend.cents, hum_cents(h, s, is.above, n));
+                    x.bend.step(cents, Some(d));
                 }
             }
             // A canister used.
@@ -2051,6 +2145,7 @@ impl Sounds {
             started: cx.tick,
             stopped: false,
             control: None,
+            bend: Bend::FLAT,
         };
         self.push(cx, v);
     }
@@ -2204,6 +2299,7 @@ impl Sounds {
                         started: cx.tick,
                         stopped: false,
                         control: None,
+                        bend: Bend::FLAT,
                     };
                     self.push(cx, v);
                 }
@@ -2296,6 +2392,7 @@ impl Sounds {
                         started: cx.tick,
                         stopped: false,
                         control: None,
+                        bend: Bend::FLAT,
                     };
                     self.push(cx, v);
                 }
@@ -2388,6 +2485,7 @@ impl Sounds {
                 for (a, e) in c.ears.iter().zip(ears) {
                     a.store(e.to_bits(), Relaxed);
                 }
+                c.pitch.store(v.bend.ratio.to_bits(), Relaxed);
             }
         }
         self.voices.retain(|v| {
@@ -2419,10 +2517,11 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
-    (flickers, bag, nest): (
+    (flickers, bag, nest, world): (
         Option<Res<crate::lights::Flickers>>,
         Res<crate::heist::Bag>,
         Option<Res<crate::raptor::Nest>>,
+        Option<Res<conker_sim::net::Collision>>,
     ),
     mut commands: Commands,
 ) {
@@ -2487,6 +2586,10 @@ fn hear(
             deadline: c.deadline,
             masked,
             above: p.floor.map_or(0.0, |f| p.pos[1] - f.y),
+            pitch: match &world {
+                Some(w) if tank => conker_rules::tank::hull_pitch(&p.0, &w.0),
+                _ => 0.0,
+            },
         };
         match heard {
             Some(mut h) => {
@@ -2600,16 +2703,17 @@ fn hear(
         started: tick,
         stopped: false,
         control: None,
+        bend: Bend::FLAT,
     };
     let outro = (playing.0).and_then(|(i, k)| Some((i, k, outros.0.get(i)?)));
     if let Some((i, ..)) = outro.filter(|&(_, k, o)| Some(k) == o.voice_frame()) {
         s.stop(|v| LINES[1..].iter().any(|l| l.0 == v.id));
         s.push(&cx, flat(VOICE - i as u16, MIX));
     }
-    // The song plays as recorded (the slot's 0x4650 is in the recording, as the background's).
+    // The song plays at [`SONG_LEVEL`] of its recording.
     let song = |&(_, k, o): &(usize, u32, &Outro)| o.song.as_ref().is_some_and(|s| k == frame(s.t));
     if let Some((i, ..)) = outro.filter(song) {
-        s.push(&cx, flat(SONG - i as u16, 1.0));
+        s.push(&cx, flat(SONG - i as u16, SONG_LEVEL));
     }
     let out = output.as_deref().zip(pcms.as_deref());
     s.upkeep(&cx, &all, out);
@@ -2631,6 +2735,7 @@ impl Output {
         for (a, e) in control.ears.iter().zip(ears) {
             a.store(e.to_bits(), Relaxed);
         }
+        control.pitch.store(v.bend.ratio.to_bits(), Relaxed);
         let playing = Playing::new(pcm, sound, v.looped, v.speed, control.clone());
         self.device.mixer().add(playing);
         control
@@ -2811,12 +2916,24 @@ fn wav(b: &[u8]) -> Option<Pcm> {
 }
 
 /// A playing sound's controls, shared with its [`Playing`] on the mixer's thread: each ear's volume
-/// (f32 bits), stop (fade out over the release), done (it ended).
-#[derive(Default)]
+/// and the pitch bend over its rate ([`Bend`]; f32 bits), stop (fade out over the release), done
+/// (it ended).
 struct Control {
     ears: [AtomicU32; 2],
+    pitch: AtomicU32,
     stop: AtomicBool,
     done: AtomicBool,
+}
+
+impl Default for Control {
+    fn default() -> Self {
+        Self {
+            ears: Default::default(),
+            pitch: AtomicU32::new(1f32.to_bits()),
+            stop: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }
+    }
 }
 
 /// An ADSR envelope in frames and levels out of 1 ([`conker_assets::audio::Envelope`]): linear ramps
@@ -2898,14 +3015,16 @@ impl Biquad {
 
 /// A sound on the mixer: its samples (a loop's stretch repeating until it is stopped), through its
 /// envelope, as two channels at its [`Control`]'s ear volumes (smoothed over about 20 ms), at its
-/// rate × the pitch's speed; an effect (a bank sound) through the muffle's low-pass while
-/// [`MUFFLED`] (the filter runs all along, so a switch finds it settled). ponytail: a loop's
-/// `count` is not kept (no sound of the pack has one).
+/// rate × the pitch's speed, stepping [`Control::pitch`] frames an output frame (between two frames:
+/// linear); an effect (a bank sound) through the muffle's low-pass while [`MUFFLED`] (the filter
+/// runs all along, so a switch finds it settled). ponytail: a loop's `count` is not kept (no sound
+/// of the pack has one).
 struct Playing {
     samples: Arc<[i16]>,
     channels: usize,
     rate: SampleRate,
     frame: usize,
+    frac: f32,
     end: usize,
     loop_start: Option<usize>,
     env: Env,
@@ -2944,6 +3063,7 @@ impl Playing {
             channels,
             rate: SampleRate::new(rate.round() as u32).unwrap_or(SampleRate::MIN),
             frame: 0,
+            frac: 0.0,
             end: looped.map_or(frames, |l| l.1),
             loop_start: looped.map(|l| l.0),
             env,
@@ -2995,16 +3115,28 @@ impl Iterator for Playing {
         }
         if self.frame >= self.end {
             match self.loop_start {
-                Some(start) => self.frame = start,
+                Some(start) => self.frame = start + (self.frame - self.end) % (self.end - start),
                 None => return self.done(),
             }
         }
-        let i = self.frame * self.channels;
-        let mut left = f32::from(self.samples[i]) / 32768.0;
-        let mut right = match self.channels {
-            1 => left,
-            _ => f32::from(self.samples[i + 1]) / 32768.0,
+        let at = |f: usize| {
+            let i = f * self.channels;
+            let left = f32::from(self.samples[i]) / 32768.0;
+            match self.channels {
+                1 => (left, left),
+                _ => (left, f32::from(self.samples[i + 1]) / 32768.0),
+            }
         };
+        let (mut left, mut right) = at(self.frame);
+        if self.frac > 0.0 {
+            let next = match self.frame + 1 {
+                n if n < self.end => n,
+                _ => self.loop_start.unwrap_or(self.frame),
+            };
+            let (l, r) = at(next);
+            left += (l - left) * self.frac;
+            right += (r - right) * self.frac;
+        }
         if let Some([l, r]) = &mut self.muffle {
             let muffled = (l.run(left), r.run(right));
             if MUFFLED.load(Relaxed) {
@@ -3014,7 +3146,9 @@ impl Iterator for Playing {
         for (ear, target) in self.ears.iter_mut().zip(&self.control.ears) {
             *ear += (f32::from_bits(target.load(Relaxed)) - *ear) * self.smooth;
         }
-        self.frame += 1;
+        let step = self.frac + f32::from_bits(self.control.pitch.load(Relaxed));
+        self.frame += step as usize;
+        self.frac = step.fract();
         self.age += 1;
         self.right = Some(right * level * self.ears[1]);
         Some(left * level * self.ears[0])
@@ -3188,6 +3322,7 @@ mod tests {
             deadline: 0,
             masked: false,
             above: 0.0,
+            pitch: 0.0,
         }
     }
 
@@ -3385,6 +3520,119 @@ mod tests {
         assert!(gain(5000.0) < 0.02, "{}", gain(5000.0));
     }
 
+    /// Song 0x8A's level (Beach cs4): the least-squares gain of the pack's recording in V b4's
+    /// capture over its first 9 s from the outro's frame 1 (`polish-g5-scratch/b4-song.wav`, cut at
+    /// the song's offset). Skipped without the lab's excerpt or the pack.
+    #[test]
+    fn the_outro_song_plays_at_the_captures_level() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../");
+        let read = |f: &str| {
+            std::fs::read(format!("{dir}{f}"))
+                .ok()
+                .and_then(|b| wav(&b))
+        };
+        let (Some(cap), Some(song)) = (
+            read("lab/research/mp-original/polish-g5-scratch/b4-song.wav"),
+            read("assets/audio/maps/2b/song-8a.wav"),
+        ) else {
+            return;
+        };
+        assert_eq!((cap.rate, cap.channels, song.channels), (song.rate, 2, 2));
+        let mono =
+            |p: &Pcm, i: usize| f64::from(p.samples[2 * i]) + f64::from(p.samples[2 * i + 1]);
+        let (xy, xx) = (0..9 * cap.rate as usize).fold((0.0, 0.0), |(xy, xx), i| {
+            let (x, y) = (mono(&song, i), mono(&cap, i));
+            (xy + x * y, xx + x * x)
+        });
+        assert!(
+            (xy / xx - f64::from(SONG_LEVEL)).abs() < 0.01,
+            "{}",
+            xy / xx
+        );
+    }
+
+    /// The records' pitch (C `func_10011624`, `alCents2Ratio`): Race's hums by `func_150D5124` with
+    /// the Doppler, V r1 (`polish-g5-scratch`: scenario 11, 3 bots, an idle human); Tank's drive loop
+    /// by `func_151BB0E0`, V t2 (the human driving about 0x24: all 2404 frames of 0x4A8 within
+    /// 2e-4); the mixer steps that ratio of frames an output frame.
+    #[test]
+    fn records_bend_their_pitch_as_the_oracle() {
+        // r1: bot 1's hum 0 at state 2 falls 16 a frame and rises at once to 5 × its height.
+        assert_eq!(hum_cents(0, 2, 34.86, 4), 174);
+        assert_eq!([cents_step(207, 70), cents_step(159, 174)], [191, 174]);
+        assert_eq!(hum_cents(0, 2, 400.0, 4), 1000);
+        assert_eq!(
+            [hum_cents(0, 1, 30.0, 4), hum_cents(0, 0, 0.0, 9)],
+            [400, 400]
+        );
+        assert_eq!([hum_cents(1, 1, 0.0, 4), hum_cents(1, 2, 0.0, 4)], [0, 400]);
+        assert_eq!([hum_cents(1, 2, 0.0, 5), hum_cents(1, 0, 0.0, 5)], [0, 400]);
+        assert_eq!(hum_cents(2, 0, 0.0, 4), 0);
+        // Hum 1 at state 0 jumps to 16000 whatever the count (the C tests state 0 first).
+        assert_eq!(hum_target(1, 0, 0.0, 6), (16000.0, true));
+        // r1 reads 140-143: the human's hum 0 (400 cents) and hum 1 (0) eased toward the Doppler
+        // of its distances 99, 86, 82, 89 to the ear.
+        for (cents, ratios) in [
+            (400, [1.32654, 1.31498, 1.30054, 1.28428]),
+            (0, [1.05287, 1.04369, 1.03223, 1.01933]),
+        ] {
+            let mut b = Bend {
+                cents,
+                ratio: ratios[0],
+                dist: Some(99),
+            };
+            for (d, want) in [86, 82, 89].into_iter().zip(&ratios[1..]) {
+                b.step(cents, Some(d));
+                assert!((b.ratio - want).abs() < 2e-5, "{} vs {want}", b.ratio);
+            }
+        }
+        assert_eq!(
+            [doppler(99, 86), doppler(0, 600), doppler(600, 0)],
+            [367.0 / 359.0, 0.5, 2.0]
+        );
+        let mut new = Bend::FLAT;
+        new.step(400, Some(500));
+        assert!(
+            (new.ratio - 1.259_921).abs() < 1e-5,
+            "a new record: the cents alone"
+        );
+        // t2: speed × the hull's pitch / 2, truncated (reads 90, 420, 1010, 1300).
+        for (speed, pitch, cents, ratio) in [
+            (43.52, -11.534791, -250, 0.865_539_1),
+            (43.52, 8.028975, 174, 1.105_735_4),
+            (39.68, 23.682598, 469, 1.311_165_7),
+            (-43.52, -10.804356, -235, 0.873_070_9),
+        ] {
+            assert_eq!(engine_cents(speed, pitch), cents);
+            let mut b = Bend::FLAT;
+            b.step(cents, None);
+            assert!((b.ratio - ratio).abs() < 2e-4, "{} vs {ratio}", b.ratio);
+        }
+        // The mixer: 400 cents steps 1.26 frames an output frame, between frames linearly.
+        let pcm = Pcm {
+            samples: (0..100).map(|i| i * 100).collect::<Vec<i16>>().into(),
+            channels: 1,
+            rate: 22050,
+        };
+        let control = Arc::new(Control::default());
+        control
+            .ears
+            .iter()
+            .for_each(|e| e.store(1f32.to_bits(), Relaxed));
+        control.pitch.store(new.ratio.to_bits(), Relaxed);
+        let mut p = Playing::new(&pcm, None, false, 1.0, control.clone());
+        let left: Vec<f32> = (0..20)
+            .map(|_| p.next().unwrap() * 32768.0)
+            .step_by(2)
+            .collect();
+        for (k, l) in left.iter().enumerate() {
+            let want = 100.0 * (k as f32 * new.ratio);
+            assert!((l - want).abs() < 0.1, "frame {k}: {l} vs {want}");
+        }
+        control.pitch.store(1f32.to_bits(), Relaxed);
+        assert_eq!(p.frame, 12, "back to a frame an output frame from 12.6");
+    }
+
     /// `func_15074664` (C): any player's put-on muffles; a take-off unmuffles only after that
     /// player's own put-on; a death (the mask dropped at 0 health) leaves it.
     #[test]
@@ -3572,7 +3820,9 @@ mod tests {
 
     /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);
     /// none again from that flag's slot within 300 frames; a bot's line is the odd id, clicked too,
-    /// and heard centred at its volume however far (V `beach-environment.md` §6).
+    /// and heard centred at its volume however far (V `beach-environment.md` §6; V g5c c1 reads
+    /// 2294-2374: a bot's 0x5B0, line 0x64B at 32700 and 0x5B1, near/far 0x7FFF/0x7FFE, playing
+    /// 4372-4602 from the listener).
     #[test]
     fn a_flag_taken_calls_on_the_radio() {
         let Some(pack) = colors_pack() else { return };

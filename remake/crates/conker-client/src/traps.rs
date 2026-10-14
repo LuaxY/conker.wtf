@@ -7,7 +7,7 @@
 //!   turned to the camera, the jet's radius each side of its centre and its height tall, the pack's
 //!   `maps/34/traps/flame.png` (blob 0x916) with its S up the jet, scrolling ([`FLAME`]), alpha the
 //!   texture's × [`flicker`] at the base fading to none at the top, blended (C, V DL 170). Its
-//!   particles (`func_151A6600`): `puff.png` (0xBA6) sprites rising from the base ([`PUFFS`]).
+//!   particles (`func_151A6600`): `hud/puff.png` (0xBA6) sprites rising from the base ([`PUFFS`]).
 //! - The electric floor on ([`electric`]): bolts (`func_15104C44`) from [`BOLT_TOP`] down to the
 //!   pit's floor, and arcs (`func_151050B0`) on each box's base ([`corners`]; I: between points of
 //!   two of its edges, where V's arcs are shorter, about 150 long, their ends inside the box):
@@ -252,7 +252,7 @@ pub fn build(app: &mut App, triggers: &[u8]) {
 }
 
 fn setup(mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetServer>, mut commands: Commands) {
-    let load = |name: &str, wrap: bool| -> Handle<Image> {
+    let load = |path: &str, wrap: bool| -> Handle<Image> {
         let mut sampler = ImageSamplerDescriptor::linear();
         if wrap {
             sampler.address_mode_u = ImageAddressMode::Repeat;
@@ -262,7 +262,7 @@ fn setup(mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetServer>, mut command
         assets
             .load_builder()
             .with_settings(move |s: &mut ImageLoaderSettings| s.sampler = sampler.clone())
-            .load(format!("maps/34/traps/{name}.png"))
+            .load(path.to_string())
     };
     // The flame quad: x ±1, y 0 (the base) to 1; U up the jet, V across; opaque at the base.
     let across = FLAME.across;
@@ -297,9 +297,9 @@ fn setup(mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetServer>, mut command
     commands.insert_resource(Look {
         quad: meshes.add(quad),
         sprite: meshes.add(Rectangle::new(1.0, 1.0)),
-        flame: load("flame", true),
-        puff: load("puff", false),
-        arc: load("arc", false),
+        flame: load("maps/34/traps/flame.png", true),
+        puff: load("hud/puff.png", false),
+        arc: load("maps/34/traps/arc.png", false),
     });
 }
 

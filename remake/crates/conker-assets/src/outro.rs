@@ -215,7 +215,8 @@ pub struct Light {
 /// Op 5 b=0x50 / 0x51 on actor `actor` (an index of [`Outro::actors`]): `func_150E9FE0` /
 /// `func_150EA500` start particle emitter 41 / 40 there (`emitter`: the op's b), from `t` to `until`
 /// (its c 1): Heist cs3's bubbles off the sinking Wise Guy. Each particle is a type-0x47 sprite of
-/// texture 0xC01 (`hud/bubble_particle.png`, C `func_150EA11C`), sizes 31-118 and lives 50-156
+/// sprite kind 0x2F, blob 0x4B3 (`hud/bubble_particle.png`, C `func_150EA11C`; its 0xC01 is the
+/// sprite's selector word, `effects-g4.md` §10), sizes 31-118 and lives 50-156
 /// frames (V, `heist-presentation.md` §4.2), rising (I).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Particles {

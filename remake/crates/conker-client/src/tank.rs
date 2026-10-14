@@ -128,9 +128,10 @@ pub fn turns(turret: f32, pitch: f32) -> (Quat, Quat) {
 }
 
 /// The tank's camera state: the heading (degrees) it looks along and the speed's share its
-/// distances follow; `None` cuts behind the hull (a spawn, out of the scope).
+/// distances follow; `None` cuts behind the hull (a spawn, out of the scope). Race: the board's
+/// height springs ([`crate::race::camera`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Cam(pub Option<(f32, f32)>);
+pub struct Cam(pub Option<(f32, f32)>, pub Option<[f32; 4]>);
 
 /// One frame of a tank's view into `follow`'s eye and look-at (in place of the on-foot camera's
 /// step: the rules read no camera for a human's tank): the scope's from the turret while power-up
@@ -207,13 +208,14 @@ pub fn behind(
 }
 
 /// A tank's parts, once its model is in: its turret and gun joints, its brake lights' part with its
-/// two materials (off, lit), and its treads' part with its own material and scroll (S units).
+/// two materials (off, lit), and its treads' parts (one a side) with their own materials and
+/// scroll (S units).
 #[derive(Component)]
 struct Parts {
     turret: Entity,
     gun: Entity,
     brake: Option<(Entity, [Handle<StandardMaterial>; 2])>,
-    treads: Option<(Entity, Handle<StandardMaterial>)>,
+    treads: Vec<(Entity, Handle<StandardMaterial>)>,
     scroll: f32,
 }
 
@@ -293,10 +295,13 @@ fn find_parts(
             };
             Some((e, [materials.add(off), materials.add(lit)]))
         });
-        let treads = part(tank.treads).and_then(|(e, m)| {
-            let own = materials.get(&m)?.clone();
-            Some((e, materials.add(own)))
-        });
+        let treads: Vec<_> = (tank.treads.iter())
+            .filter_map(|&k| {
+                let (e, m) = part(k)?;
+                let own = materials.get(&m)?.clone();
+                Some((e, materials.add(own)))
+            })
+            .collect();
         let own = (brake.iter().map(|b| (b.0, &b.1[0]))).chain(treads.iter().map(|t| (t.0, &t.1)));
         for (e, m) in own {
             commands.entity(e).insert(MeshMaterial3d(m.clone()));
@@ -362,18 +367,17 @@ fn lights(
             }
         }
         tank.scroll = scroll(tank.scroll, p.xz_speed, frames);
-        let Some((_, own)) = &tank.treads else {
-            continue;
-        };
-        let Some(mut m) = materials.get_mut(own) else {
-            continue;
-        };
-        let width = (m.base_color_texture.as_ref())
-            .and_then(|t| images.get(t))
-            .map_or(16.0, |i| i.width() as f32);
         // ponytail: both treads by the speed; the original's sides differ by the turn (±Δfacing/70).
-        m.uv_transform =
-            Affine2::from_translation(Vec2::new(tank.scroll / S_PER_TEXEL / width, 0.0));
+        for (_, own) in &tank.treads {
+            let Some(mut m) = materials.get_mut(own) else {
+                continue;
+            };
+            let width = (m.base_color_texture.as_ref())
+                .and_then(|t| images.get(t))
+                .map_or(16.0, |i| i.width() as f32);
+            m.uv_transform =
+                Affine2::from_translation(Vec2::new(tank.scroll / S_PER_TEXEL / width, 0.0));
+        }
     }
 }
 

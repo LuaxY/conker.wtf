@@ -6,13 +6,13 @@
 //! - `pack.json`: the [`Manifest`];
 //! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
 //!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
-//!   `outros.json` ([`outro::Outro`]), `segments.json` ([`Segments`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
-//!   on `3f`, `raptor.json` ([`raptor::Raptor`]); on `33`, `race.json` ([`race::Race`]); on `2b`,
-//!   `effects.gltf` (+ `effects.bin`);
+//!   `outros.json` ([`outro::Outro`]), `segments.json` ([`Segments`]), `cameras.json`
+//!   ([`CameraPoint`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
+//!   on `3f`, `raptor.json` ([`raptor::Raptor`]); on `33`, `race.json` ([`race::Race`]);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
 //! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`, `projectiles.gltf`, the child
-//!   objects' rigs ([`RIGS`], [`rig_gltf`]);
+//!   objects' rigs ([`RIGS`], [`rig_gltf`]), the effects' models (`effects.gltf`, [`EFFECTS`]);
 //! - `game/`: `acos.json`, `sink.json`, `class.bin` (map 24 has its own `class.bin`);
 //! - `audio/`: `sounds.json`, `events.json` and WAV files ([`audio::Audio`]);
 //! - `hud/`: `hud.json` and PNGs ([`hud::Hud`]).
@@ -123,10 +123,34 @@ pub fn outro_gltf(map: &str) -> String {
     format!("maps/{map}/outro.gltf")
 }
 
-/// War: Beach's effect models (`2b` only): glTF scene `09-157`, the detonation's ring at the origin.
-pub fn effects_gltf(map: &str) -> String {
-    format!("maps/{map}/effects.gltf")
+/// The effects' models, on every map ([`EFFECTS`]): glTF scene `i` is `EFFECTS[i]`, named
+/// `09-<entry>` (hex), at the origin in its model units.
+pub fn effects_gltf(weapons: &str) -> String {
+    format!("weapons/{weapons}/effects.gltf")
 }
+
+/// The effects' bank-09 models in [`effects_gltf`]'s scene order, as (name, entry)
+/// (`../lab/research/mp-original/effects-g4.md`): `ring` the blasts' ring (model id 0x54: War:
+/// Beach's detonation, the rocket's and the grenade's blasts; a sphere of radius 100, alpha-blended),
+/// `spark` the explosive death's chunks (model id 0x39, §4), `flak` the flak's puffs (0x1B, §5),
+/// `drop` a swimmer's splash drops (0x35, §9). Then Race's death blast (effect type 0x19,
+/// `../lab/research/mp-original/g5-pack-scratch/race/NOTES.md`): `fire` its fire shell (model id
+/// 0x55; its smoke shell is `ring`), `board_6c`..`board_6e` the board's three pieces (0x6C-0x6E)
+/// and `gib_7e`..`gib_81` the racer's (character 4's) pieces.
+pub const EFFECTS: [(&str, usize); 12] = [
+    ("ring", 0x157),
+    ("spark", 0x132),
+    ("flak", 0xE5),
+    ("drop", 0xBE),
+    ("fire", 0x158),
+    ("board_6c", 0x16F),
+    ("board_6d", 0x170),
+    ("board_6e", 0x171),
+    ("gib_7e", 0x17D),
+    ("gib_7f", 0x17E),
+    ("gib_80", 0x17F),
+    ("gib_81", 0x179),
+];
 
 pub fn character_gltf(character: &str) -> String {
     format!("characters/{character}/character.gltf")
@@ -302,6 +326,17 @@ pub struct Lights {
     pub switching: Vec<usize>,
 }
 
+/// A fixed camera's point (`cameras.json`): the ROM's `[0x0C, scene, 8]`, 0x18-byte records that
+/// a kind-5 camera hint's point index reads (C `func_1512E8E0`: `*0x800DC020` + index · 0x18;
+/// `../lab/research/mp-original/cameras-clips-g4.md` §1): 6 on 0x2B, 4 on 0x1A, none elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraPoint {
+    /// s16 x, y, z at +0: where the eye looks from (mode 0x40 springs it toward this).
+    pub at: [i16; 3],
+    /// The record's other 18 bytes (+6..+0x18) in hex, kept as they are (for reference: not read).
+    pub rest: String,
+}
+
 /// `level.gltf`'s materials whose texture the game binds at run time (CBFD's per-scene switch in
 /// `func_1510B9D0`: 0x1A's `func_15100464`; 0x33's crowd is in `race.json`, the other packed maps
 /// have none), `level.gltf` drawing each one's first frame; empty off 0x1A.
@@ -470,9 +505,10 @@ pub struct Tank {
     /// is its texture while the tank brakes.
     pub brake: usize,
     pub brake_lit: String,
-    /// The treads' material, whose texture scrolls as each side moves: the tread on joint
-    /// `tread_joints[0]` by the game's first speed, the one on `tread_joints[1]` by its second.
-    pub treads: usize,
+    /// The treads' materials, one per side, whose texture scrolls as that side moves: `treads[k]`
+    /// draws the tread on joint `tread_joints[k]`; the game scrolls `tread_joints[0]`'s by its first
+    /// speed, `tread_joints[1]`'s by its second.
+    pub treads: [usize; 2],
     pub tread_joints: [usize; 2],
 }
 
@@ -502,6 +538,8 @@ pub struct Slice {
     pub outros: Vec<outro::Outro>,
     /// `maps/<map>/segments.json`.
     pub segments: Segments,
+    /// `maps/<map>/cameras.json`: the fixed cameras' points, by the hints' point index.
+    pub cameras: Vec<CameraPoint>,
     /// The characters, in the order [`Slice::load`] was given their folders.
     pub characters: Vec<Character>,
     /// `weapons/<set>/held.json`: glTF scene `i` of the held glTF is `held[i]`.
@@ -519,7 +557,7 @@ pub struct Slice {
 
 /// The data files of a slice, relative to the pack root, in [`Slice::files`] order: the manifest,
 /// the map's five, the weapon set's, the game's two, the map's AI script, the game's class data,
-/// the map's lights, outros and segments, then one per character.
+/// the map's lights, outros, segments and camera points, then one per character.
 fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
     let mut files = vec![
         MANIFEST.into(),
@@ -541,6 +579,7 @@ fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
         format!("maps/{map}/lights.json"),
         format!("maps/{map}/outros.json"),
         format!("maps/{map}/segments.json"),
+        format!("maps/{map}/cameras.json"),
     ];
     files.extend(
         characters
@@ -743,9 +782,10 @@ impl Slice {
             lights,
             outros,
             segments,
-        ] = &files[..14]
+            cameras,
+        ] = &files[..15]
         else {
-            unreachable!("data_files lists 14 files before the characters")
+            unreachable!("data_files lists 15 files before the characters")
         };
         let mut bytes = |file: &str| {
             read(file).map_err(|e| Error::Read {
@@ -818,7 +858,7 @@ impl Slice {
             pickups: parse_json(pickups, &bytes(pickups)?)?,
             triggers: records.iter().flat_map(Trigger::bytes).collect(),
             nav: nav_bytes(word_2, nodes),
-            characters: (files[14..].iter())
+            characters: (files[15..].iter())
                 .map(|f| parse_json(f, &bytes(f)?))
                 .collect::<Result<_>>()?,
             outros: parse_json(outros, &bytes(outros)?)?,
@@ -828,6 +868,7 @@ impl Slice {
                 s
             },
             lights,
+            cameras: parse_json(cameras, &bytes(cameras)?)?,
             held: parse_json(held, &bytes(held)?)?,
             acos: acos_table,
             sink: parse_json(sink, &bytes(sink)?)?,
@@ -867,10 +908,11 @@ impl Slice {
             lights,
             outros,
             segments,
-        ] = files[..14]
+            cameras,
+        ] = files[..15]
             .to_vec()
             .try_into()
-            .expect("14 files before the characters");
+            .expect("15 files before the characters");
         let mut runs: Vec<Run> = Vec::new();
         for t in &self.collision {
             let face = Face(t.points, t.surface);
@@ -923,8 +965,9 @@ impl Slice {
             (lights, to_json(&self.lights, 2)),
             (outros, to_json(&self.outros, 3)),
             (segments, to_json(&self.segments, 3)),
+            (cameras, to_json(&self.cameras, 2)),
         ];
-        let character_files = files[14..].iter().cloned();
+        let character_files = files[15..].iter().cloned();
         out.extend(character_files.zip(self.characters.iter().map(|c| to_json(c, 2))));
         Ok(out)
     }
@@ -1205,6 +1248,10 @@ mod tests {
                     off: "textures/3197.png".into(),
                 }],
             },
+            cameras: vec![CameraPoint {
+                at: [2024, 277, 9703],
+                rest: "0000000002efc17c6662414b5ba100000000".into(),
+            }],
             characters: vec![
                 Character {
                     model_lift: 42,
@@ -1225,7 +1272,7 @@ mod tests {
                         muzzle: 4,
                         brake: 11,
                         brake_lit: "textures/brake-lit.png".into(),
-                        treads: 13,
+                        treads: [13, 15],
                         tread_joints: [13, 12],
                     }),
                     faces: vec![FaceSegment {

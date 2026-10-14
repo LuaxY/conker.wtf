@@ -65,7 +65,7 @@ impl Corpse {
     pub fn shown(&mut self, id: u16, c: &Combat) -> u16 {
         if c.health > 0 {
             self.popped = false;
-        } else if c.anim == DEATH_SHOT && !HALVED_BY.contains(&c.hit) {
+        } else if c.popped || (c.anim == DEATH_SHOT && !HALVED_BY.contains(&c.hit)) {
             self.popped = true;
         }
         if id != DEAD && id != DEAD_MELEE_END {
