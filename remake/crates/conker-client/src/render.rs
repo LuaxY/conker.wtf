@@ -806,17 +806,19 @@ fn retarget(rigs: Query<&Retarget>, mut joints: Query<&mut Transform>) {
 }
 
 /// Each player where its state is; the local player where and as its correction draws it
-/// ([`crate::smooth::Drawn`]).
-// ponytail: players move in 30 Hz steps; add lightyear frame interpolation for smooth rendering
-// above 30 fps.
+/// ([`crate::smooth::Drawn`]), between its last two ticks by the fixed clock's overstep.
+// ponytail: the others move in 30 Hz steps (their interpolation's whole ticks).
 fn place_players(
+    time: Res<Time<Fixed>>,
     mut players: Query<(&Player, Option<&FollowCamera>, &mut Transform), With<Model>>,
 ) {
+    let f = time.overstep_fraction().clamp(0.0, 1.0);
     for (p, camera, mut transform) in &mut players {
-        let (pos, facing) = camera.map_or((p.pos, p.facing), |c| {
-            (c.drawn.body(p.pos), c.drawn.facing(p.facing))
+        let (pos, facing) = camera.map_or((Vec3::from_array(p.pos), p.facing), |c| {
+            let d = c.drawn.between(c.drawn.frame(p, &c.follow), f);
+            (d.body, d.facing)
         });
-        transform.translation = Vec3::from_array(pos);
+        transform.translation = pos;
         transform.rotation = Quat::from_rotation_y(model_yaw(facing));
     }
 }
@@ -881,20 +883,24 @@ fn pin_creep_root(players: Query<(&Anim, &Rig, &Combat)>, mut joints: Query<&mut
 
 /// The view is the follow camera's: from its view eye to its view look-at point (y up, game units;
 /// the aim camera's lift included); after a correction, the drawn body's camera's
-/// ([`crate::smooth::Drawn::view`]). Through a scope its field of view narrows by the zoom
-/// ([`fov`]).
+/// ([`crate::smooth::Drawn::view`]), between the last two ticks as the body
+/// ([`place_players`]). Through a scope its field of view narrows by the zoom ([`fov`]).
 #[allow(clippy::type_complexity)]
 fn follow_camera(
-    player: Query<&FollowCamera>,
+    time: Res<Time<Fixed>>,
+    player: Query<(&Player, &FollowCamera)>,
     camera: Single<
         (&mut Transform, &mut Projection, &FreeCameraState),
         (Without<Model>, Without<crate::projectiles::Projectile>),
     >,
 ) {
     let (mut camera, mut projection, free) = camera.into_inner();
-    if let (false, Ok(follow)) = (free.enabled, player.single()) {
-        let (eye, at) = follow.drawn.view(&follow.follow);
-        *camera = Transform::from_translation(eye).looking_at(at, Vec3::Y);
+    if let (false, Ok((p, follow))) = (free.enabled, player.single()) {
+        let f = time.overstep_fraction().clamp(0.0, 1.0);
+        let v = follow
+            .drawn
+            .between(follow.drawn.frame(p, &follow.follow), f);
+        *camera = Transform::from_translation(v.eye).looking_at(v.at, Vec3::Y);
         if let Projection::Perspective(p) = &mut *projection {
             let fov = fov(&follow.follow.cam.scope).to_radians();
             if p.fov != fov {
@@ -938,10 +944,12 @@ fn add_props(
 /// so do War: Total War's props: a taken pickup's node shrinks away ([`shrink`]) and hides until it
 /// is back, a roaming one (0x1A's, [`MatchView::roaming`]) standing where it is now; in Total War,
 /// a prop the gas drives ([`gas::PROPS`]) shows while [`MatchView::props`] says so (a canister
-/// taken shrinks too, the doors and covers slide by [`MatchView::lifts`] and just go).
+/// taken shrinks too, the doors and covers slide as this client predicts them (`Fighting::sliding`,
+/// the collision's), else by [`MatchView::lifts`], and just go).
 #[allow(clippy::type_complexity)]
 fn show_pickups(
     game: Query<&MatchView>,
+    own: Query<&conker_rules::net::Fighting, With<lightyear::prelude::Predicted>>,
     timeline: Res<lightyear::prelude::LocalTimeline>,
     names: Query<(Entity, &Name), Added<Name>>,
     nest: Option<Res<crate::raptor::Nest>>,
@@ -956,6 +964,7 @@ fn show_pickups(
         return;
     };
     let tick = timeline.tick().0;
+    let sliding = own.iter().find_map(|f| f.sliding);
     for (placement, entity, base, at) in nodes.iter_mut() {
         // Tank's doors, bomb and wrecks are its own ([`crate::tank`]), Raptor's cooked eggs and
         // hidden ones its ([`crate::raptor`]), Race's barriers and power-ups its ([`crate::race`]).
@@ -976,7 +985,9 @@ fn show_pickups(
         let first = base.is_none();
         let (full, y) = *base.get_or_insert((t.scale, t.translation.y));
         let lift = match *placement {
-            n @ 0..8 if driven => f32::from(m.lifts[n as usize]),
+            n @ 0..8 if driven => {
+                f32::from(sliding.map_or(m.lifts[n as usize], |p| p[n as usize].lift))
+            }
             _ => 0.0,
         };
         // A roaming one stands where the match has it (a pickup position, as the node's own).

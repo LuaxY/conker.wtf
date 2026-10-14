@@ -95,6 +95,7 @@ pub fn parse(table: &[u8]) -> Vec<Trap> {
 
 /// A pressure plate's state (+0x73 & 3) and its y below rest (+0x12 − rest).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
 pub struct Plate {
     /// 0 up, 2 sinking, 3 down, 1 rising.
     pub state: u8,
@@ -132,6 +133,24 @@ impl Plate {
             self.state = 2;
         }
         bottom
+    }
+}
+
+/// What changes of a match's plates and traps, per plate: a plate's traps switch on together
+/// ([`Traps::step`]), so they share one clock and one owner. A client predicts it
+/// (`net::Fighting::traps`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
+pub struct State {
+    pub plates: [Plate; 4],
+    pub left: [u16; 4],
+    pub owner: [Option<usize>; 4],
+}
+
+impl State {
+    /// The plates' y below rest ([`seat`]).
+    pub fn offsets(&self) -> [i8; 4] {
+        self.plates.map(|p| p.dy as i8)
     }
 }
 
@@ -180,7 +199,25 @@ impl Traps {
 
     /// The plates' y below rest, for the clients (`MatchView::plates`) and [`seat`].
     pub fn offsets(&self) -> [i8; 4] {
-        self.plates.map(|p| p.dy as i8)
+        self.state().offsets()
+    }
+
+    /// The plates, and each plate's traps' clock and owner (its first trap's).
+    pub fn state(&self) -> State {
+        let first = |k| self.list.iter().position(|t| t.plate == k);
+        State {
+            plates: self.plates,
+            left: std::array::from_fn(|k| first(k).map_or(0, |j| self.left[j])),
+            owner: std::array::from_fn(|k| first(k).and_then(|j| self.owner[j])),
+        }
+    }
+
+    /// Puts `s` back: the plates, and every trap its plate's clock and owner.
+    pub fn set_state(&mut self, s: State) {
+        self.plates = s.plates;
+        for (j, t) in self.list.iter().enumerate() {
+            (self.left[j], self.owner[j]) = (s.left[t.plate], s.owner[t.plate]);
+        }
     }
 
     /// The frame's end: the traps' clocks run down, then each plate steps with `stood[k]`, the
@@ -295,5 +332,80 @@ mod tests {
                 (0, 0, false)
             ]
         );
+    }
+
+    /// A client's frame (`Match::step_player`) runs the traps as the whole match does: the plate
+    /// sinks under its player and carries it, its jets kill it, a cone burns it, and the plates'
+    /// state (`Traps::state`, what `Fighting` carries) is the match's, frame for frame.
+    #[test]
+    fn a_players_own_frame_rides_plates_and_takes_traps() {
+        use crate::spawn::Placement;
+        use crate::{Arena, Event, Fighter, Match, Rng};
+        use conker_sim::collision::{CollisionWorld, Layer};
+        use conker_sim::movement::Input;
+        let square = |x0: f32, x1: f32, z0: f32, z1: f32, y: f32| {
+            [
+                [[x0, y, z0], [x0, y, z1], [x1, y, z1]],
+                [[x0, y, z0], [x1, y, z1], [x1, y, z0]],
+            ]
+        };
+        // Ground tiles: a floor's triangle is kept while the body stays over it, so the plate and the
+        // cone are holes in the ground, as in the level.
+        let inside = |x, z, r: [i32; 4]| (r[0]..r[1]).contains(&x) && (r[2]..r[3]).contains(&z);
+        let (plate, cone) = ([-100, 100, -400, -200], [500, 700, -300, -200]);
+        let tile =
+            |[x0, x1, z0, z1]: [i32; 4], y| square(x0 as f32, x1 as f32, z0 as f32, z1 as f32, y);
+        let ground = (-3..9).flat_map(|i| (-40..4).map(move |k| (100 * i, 100 * k)));
+        let ground = ground.filter(|&(x, z)| !inside(x, z, plate) && !inside(x, z, cone));
+        let tiles = (ground.flat_map(|(x, z)| tile([x, x + 100, z, z + 100], 0.0)))
+            .map(|t| (t, 5, Layer::Terrain))
+            .chain(tile(cone, 5.0).map(|t| (t, 0xE, Layer::Terrain)))
+            .chain(tile(plate, 10.0).map(|t| (t, 5, Layer::Placement(6))));
+        let mut w = CollisionWorld::layered(tiles);
+        // A fire jet of plate 6 (id 0) at z −800: a cylinder of radius 68 from 2 below the floor.
+        let mut r = [0u8; 0x34];
+        for (k, v) in [0i16, -2, -800, 68, 300, 237].into_iter().enumerate() {
+            r[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        (r[0x15], r[0x16], r[0x17], r[0x1B]) = (12 << 2, 1, 9, 4);
+        let arena = Arena::default();
+        // Player 1 runs −z from `x` (camera yaw 0, facing and stick up), player 0 idles far away.
+        let run = |x: f32, w: &mut CollisionWorld| {
+            let at = |x: f32| Placement {
+                index: 0,
+                pos: [x, 0.0, 0.0],
+                facing: 0x4000,
+                camera: [0.0; 3],
+            };
+            let mut players = vec![Fighter::new(&at(-250.0), 0, 0), Fighter::new(&at(x), 1, 0)];
+            players.iter_mut().for_each(|p| p.immune = 0);
+            let mut m = Match::new(&arena, players, Rng::new(1), 0);
+            m.traps = Traps::new(SCENE, &r);
+            let input = Input {
+                stick_y: 80,
+                ..Input::default()
+            };
+            let (mut pressed, mut hits) = (false, 0);
+            for _ in 0..100 {
+                let t = m.tick;
+                seat(w, m.traps.offsets());
+                let mut solo = m.clone();
+                let events = m.step(&arena, &[Input::default(), input], w);
+                let predicted = solo.step_player(1, &arena, &input, w, &|_, _| None);
+                assert_eq!(solo.players[1], m.players[1], "frame {t}");
+                assert_eq!(solo.traps.state(), m.traps.state(), "frame {t}");
+                let hit =
+                    |ev: &[Event]| (ev.iter()).any(|e| matches!(e, Event::Hit { victim: 1, .. }));
+                assert_eq!(hit(&predicted), hit(&events), "frame {t}");
+                hits += usize::from(hit(&events));
+                pressed |=
+                    m.traps.plates[0].dy == -DEPTH && m.players[1].body.pos[1] == 10.0 - 10.0;
+            }
+            (pressed, hits, m.players[1])
+        };
+        let (pressed, hits, f) = run(0.0, &mut w);
+        assert!(pressed && hits == 1 && f.health == 0, "{f:?}");
+        let (_, hits, f) = run(600.0, &mut w);
+        assert!(hits >= 1 && f.burn.is_some() || hits >= 2, "{f:?}");
     }
 }

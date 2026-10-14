@@ -6,10 +6,11 @@
 //! sliding open while +0x80 is 0, shut while 1), the countdown and the gas, the detonation's hits.
 //! Research: `../lab/research/mp-original/tank.md` (V t1, f1-f3, p1, c1, b1).
 
-use crate::damage::Hitbox;
+use crate::damage::{Hitbox, MG_BULLET};
 use crate::game::{Action, Arena, Event, Match, Seen};
 use crate::gas::{Gas, Prop};
-use crate::projectile::{hits_sphere, raycast, rise_along};
+use crate::projectile::{Bullet, hits_sphere, raycast, rise_along};
+use crate::weapon::BULLET_SPEED;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{BUTTON_A, BUTTON_Z, Input, Other, atan2_u16, cos_sin};
 use conker_sim::tank::{self as hull, Drive, KNOCK, PITCH_MAX, PITCH_MIN};
@@ -27,6 +28,13 @@ pub const BOT_REFIRE: u32 = 51;
 pub const SHELL_SPEED: f32 = 296.5;
 pub const SHELL_GRAVITY: f32 = 5.0;
 pub const MUZZLE: [f32; 2] = [128.0, 113.0];
+/// The scope's shot (power-up 0x02, R held; `func_15070300` → `func_151C0698`): no shell, the
+/// bullet pool's, from the scope camera's eye, 27.3 ahead and 111.6 up, level along the turret (V
+/// sc5 69: the eye at (7127.7, −789.4, 670.7) over P1 at (7155, −901, 670) facing west, its look
+/// level; sc3: 150 off the line, 4 misses; sc4: a target 245 above, 4 misses). It flies as the
+/// pool's bullets, 300 a frame, from the frame after Z (V sc1, sc5: the target 600 ahead loses 1 hp
+/// two frames after the press, a shell's three).
+pub const SCOPE_EYE: [f32; 2] = [27.3, 111.6];
 /// A tank's body for the shells (model 119 has no body parts, so `func_15081690` takes
 /// `func_15081C20`): the ellipsoid of radius obj+0xD2 across and obj+0xD4 up, centred obj+0xD6
 /// over the feet (V f2, b1 RAM: 113, 90, 52). V f2: 98 off the line hits, 148 misses; b1 to read
@@ -124,6 +132,19 @@ pub struct Tank {
     /// This frame's bots whose class script set their mover's accel and brake ×10 (op 0x67,
     /// obj+0x247/+0x248; [`crate::gas::Effect::TankRates`]); the others' are 0x32 each.
     pub rates: Vec<(usize, [u8; 2])>,
+    /// This frame's bots with a target (s126+0x129, its script's enemy): where their gun aims, the
+    /// target's feet led by its speed ([`crate::gas::Effect::TankAim`]).
+    pub aims: Vec<(usize, [f32; 3])>,
+    /// The scope's shots in flight ([`SCOPE_EYE`]), with the frame each was fired.
+    pub bullets: Vec<(u32, Bullet)>,
+}
+
+/// A tank's touch of a power-up or the bomb (`func_1511DF6C`): a bot's (s126+0x84 set) reaches
+/// 1.4 times as far (`0x800A3304`, C; V h1: every tank's s126+0x1AF is 64, the bots' +0x84 1).
+/// ponytail: the original does so for every mode's bots; Race and Tank port it.
+pub fn touches(pickup: [f32; 3], f: &crate::Fighter, reach: u8) -> bool {
+    let scale = if f.bot { crate::race::AUTO_REACH } else { 1.0 };
+    crate::weapon::within(pickup, f.body.pos, 100.0 * f32::from(reach) / 64.0 * scale)
 }
 
 /// The doors' frame: toward open while +0x80 is 0 (from the match start), shut while 1. Their
@@ -344,11 +365,12 @@ impl Match {
             let want = wrap180(deg(input.camera_yaw) - deg(f.body.facing) - f.body.turret);
             f.body.turret = (f.body.turret + want * 0.125).rem_euclid(360.0);
         }
-        // The gun's pitch (`func_150ED748`): + 0.001 a frame per unit its shell falls short of the
-        // best target within the turret's cone ([`range_error`], from the gun's pitch over the
-        // hull's), else back to level ×0.9. A human's aims 40 over the target's feet, at most 4° a
-        // frame; a bot's at the feet, unbounded, and its aim error aims 400 nearer (C; V b1, h1,
-        // h2: the bots' shells come down at their target's feet, error or not).
+        // The gun's pitch (`func_150ED748`): + 0.001 a frame per unit its shell falls short of its
+        // target ([`range_error`], from the gun's pitch over the hull's), else back to level ×0.9.
+        // A human's is the best tank within the turret's cone, its aim 40 over the feet, at most 4°
+        // a frame. A bot's is its script's target (s126+0x129), led as its turret's
+        // ([`Tank::aims`]), its aim at the feet, unbounded, and its aim error aims 400 nearer (C;
+        // V b1, h1, h2: the bots' shells come down at their target's feet, error or not).
         let short = if f.bot {
             400.0 * f32::from(f.aim_error)
         } else {
@@ -357,20 +379,26 @@ impl Match {
         let b = &f.body;
         let yaw = deg(b.facing) + b.turret;
         let muzzle = b.pos[1] + MUZZLE[1];
-        let best = (targets.iter())
-            .filter_map(|p| {
-                let (dx, dz) = (p[0] - b.pos[0], p[2] - b.pos[2]);
-                let d = (dx * dx + dz * dz).sqrt();
-                let off = wrap180(deg(atan2_u16(-dz, dx)) - yaw).abs();
-                (off < AIM_CONE && d < AIM_RANGE).then(|| ((AIM_CONE - off) / d.max(1.0), d, p[1]))
-            })
-            .max_by(|a, b| a.0.total_cmp(&b.0));
+        let flat = |p: &[f32; 3]| ((p[0] - b.pos[0]).powi(2) + (p[2] - b.pos[2]).powi(2)).sqrt();
+        let best = match f.bot {
+            true => (self.tank.aims.iter()).find_map(|&(j, p)| (j == i).then(|| (flat(&p), p[1]))),
+            false => (targets.iter())
+                .filter_map(|p| {
+                    let d = flat(p);
+                    let off = wrap180(deg(atan2_u16(b.pos[2] - p[2], p[0] - b.pos[0])) - yaw);
+                    let off = off.abs();
+                    (off < AIM_CONE && d < AIM_RANGE)
+                        .then(|| ((AIM_CONE - off) / d.max(1.0), d, p[1]))
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, d, y)| (d, y)),
+        };
         let hull_pitch = hull_pitch(b, world);
         let pitch = match best {
-            Some((_, d, y)) if f.bot => {
+            Some((d, y)) if f.bot => {
                 b.pitch + 0.001 * range_error(d - short, y - muzzle, b.pitch + hull_pitch)
             }
-            Some((_, d, y)) => {
+            Some((d, y)) => {
                 let up = 0.001 * range_error(d, y + 40.0 - muzzle, b.pitch + hull_pitch);
                 b.pitch + up.clamp(-PITCH_RATE, PITCH_RATE)
             }
@@ -379,7 +407,18 @@ impl Match {
         f.body.pitch = pitch.clamp(PITCH_MIN, PITCH_MAX);
         let state = if clip { CLIP_FIRE } else { 0 };
         (f.body.state, f.anim) = (state, u16::from(state));
-        if fired {
+        if fired && scope {
+            let b = &f.body;
+            let (c, s) = cos_sin(to_u16(yaw));
+            let [ahead, up] = SCOPE_EYE;
+            let from = [b.pos[0] + ahead * c, b.pos[1] + up, b.pos[2] - ahead * s];
+            let shot = Bullet::aimed(world, i, from, [c, 0.0, -s], BULLET_SPEED, MG_BULLET);
+            self.tank.bullets.push((t, shot));
+            ev.push(Event::Shot {
+                player: i,
+                pos: from,
+            });
+        } else if fired {
             let b = &f.body;
             let angle = to_u16(yaw);
             let (c, s) = cos_sin(angle);
@@ -410,8 +449,9 @@ impl Match {
     /// first tank its frame's path passes (where its owner saw it), else a wall or the ground.
     pub(crate) fn fly_shells(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
         let t = self.tick;
-        // The bots' script rates were this frame's (the players stepped before).
+        // The bots' script rates and aims were this frame's (the players stepped before).
         self.tank.rates.clear();
+        self.tank.aims.clear();
         let mut shells = std::mem::take(&mut self.tank.shells);
         shells.retain_mut(|s| {
             if s.born == t {
@@ -438,6 +478,26 @@ impl Match {
         });
         shells.append(&mut self.tank.shells);
         self.tank.shells = shells;
+        // The scope's shots: the first tank on the frame's sweep, else on to the wall.
+        let mut bullets = std::mem::take(&mut self.tank.bullets);
+        bullets.retain_mut(|(born, b)| {
+            if *born == t {
+                return true;
+            }
+            let hit = (0..self.players.len())
+                .filter(|&v| v != b.owner && !self.free.contains(&v))
+                .filter_map(|v| {
+                    let at = seen(b.owner, v).unwrap_or(self.players[v].body.pos);
+                    hits_hull(b.pos, b.dir, b.reach(), at).map(|d| (d, v))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, v)) = hit {
+                self.tank_hit(v, Some(b.owner), b.angle, false, false, ev);
+                return false;
+            }
+            b.advance()
+        });
+        self.tank.bullets = bullets;
     }
 
     /// Tank: a hit on player `v` (`func_1505D024`): a shell's (1 damage, `deadly` all; not through
@@ -517,9 +577,7 @@ impl Match {
         }
         let reach = |i: usize| self.reach.get(i).copied().unwrap_or(crate::weapon::REACH);
         let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
-            !self.free.contains(&i)
-                && f.health > 0
-                && crate::weapon::touches(POST, f.body.pos, reach(i))
+            !self.free.contains(&i) && f.health > 0 && touches(POST, f, reach(i))
         });
         if let Some(i) = toucher {
             (self.tank.bomb.flag, self.tank.bomb.shown) = (i as i32 + 1, false);
@@ -668,6 +726,46 @@ mod tests {
             m.step(&arena, &[press(z), Input::default()], &world);
             assert_eq!(m.players[0].shots, 1 + u16::from(t == BOT_REFIRE), "{t}");
         }
+    }
+
+    /// V sc5: scoped (0x02, R held), Z fires no shell; the tank 600 ahead loses 1 hp two frames
+    /// after the press (a shell's three) with the hit clip and the knock. V sc3: 150 off the line,
+    /// a miss.
+    #[test]
+    fn the_scope_shot_as_sc5() {
+        let world = flat();
+        let scoped = press(crate::game::BUTTON_R);
+        for (side, hit) in [(0.0, true), (150.0, false)] {
+            let (mut m, arena) = duel(600.0, side);
+            (m.players[0].power, m.players[0].boost) = (SCOPE, power_timer(SCOPE));
+            let fire = press(BUTTON_Z | crate::game::BUTTON_R);
+            m.step(&arena, &[fire, Input::default()], &world);
+            assert!(m.tank.shells.is_empty());
+            assert_eq!(m.players[0].body.state, CLIP_FIRE);
+            m.step(&arena, &[scoped, Input::default()], &world);
+            assert_eq!(m.players[1].health, 6);
+            for _ in 0..3 {
+                m.step(&arena, &[scoped, Input::default()], &world);
+            }
+            let v = &m.players[1];
+            assert_eq!(v.health < 6, hit, "side {side}");
+            if hit {
+                assert_eq!((v.health, v.body.state), (5, CLIP_HIT));
+                assert_eq!(m.players[0].hits, 1);
+            }
+        }
+        // The hit lands on the second frame: the knock's first step comes on the third.
+        let (mut m, arena) = duel(600.0, 0.0);
+        (m.players[0].power, m.players[0].boost) = (SCOPE, power_timer(SCOPE));
+        m.step(
+            &arena,
+            &[press(BUTTON_Z | crate::game::BUTTON_R), Input::default()],
+            &world,
+        );
+        m.step(&arena, &[scoped, Input::default()], &world);
+        m.step(&arena, &[scoped, Input::default()], &world);
+        assert_eq!(m.players[1].health, 5);
+        assert!(m.tank.bullets.is_empty());
     }
 
     /// V f1 248 → 336: the kill (one-shot 0x10 here, V p1) leaves a wreck for 330 frames; the tank

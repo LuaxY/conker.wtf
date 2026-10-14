@@ -9,7 +9,7 @@
 //! prints a summary per participant; `out.csv` gets one row per frame and participant
 //! (`read,player,x,y,z,health,weapon,grenades,script,ai,goal,kills,sees,target,role,drawn,gdc,enemy,
 //! attacking,shots`: the role G+0x15C, the drawn item s126+0x78, the script's goal G+0xDC, G+0x11C,
-//! G+0x21C and the shot counter s126+0x1AB), the columns
+//! G+0x21C and the shot counter s126+0x1AB, the sniper's shots counted from its fire clip), the columns
 //! `lab/oracle/tools/bot_stats.py` reads for both sides.
 
 use conker_bots::brain::g;
@@ -150,6 +150,7 @@ fn main() {
         .unwrap();
     }
     let mut stats = vec![Stats::default(); players];
+    let mut snipes = vec![0u16; players];
     // 0x34: plate presses, deaths in a trap that is on, and the living's frames in one (at the
     // frame's start, where the traps hit).
     let (mut presses, mut trap_kills, mut in_trap, mut plates) = (0, [0; 2], [0; 2], [0u8; 4]);
@@ -245,7 +246,16 @@ fn main() {
             }
         }
         poses.place(&mut m);
+        let anims: Vec<u16> = m.players.iter().map(|f| f.anim).collect();
         let events = m.step(&arena, &inputs, &world);
+        // The sniper's shots, its fire clip's starts: the game's counter s126+0x1AB steps for them,
+        // the rules' `shots` leaves the ray out.
+        for (p, f) in m.players.iter().enumerate() {
+            if f.anim == weapon::SNIPER.fire.0 && anims[p] != f.anim {
+                snipes[p] += 1;
+                stats[p].shots += 1;
+            }
+        }
         poses.tick(&m, &events);
         ai.observe(&events, &m);
         for e in &events {
@@ -320,7 +330,7 @@ fn main() {
                     g.get(0xDC, p),
                     g.get(g::ENEMY, p),
                     g.get(g::ATTACKING, p),
-                    f.shots
+                    f.shots + snipes[p]
                 )
                 .unwrap();
             }

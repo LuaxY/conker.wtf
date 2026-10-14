@@ -6,7 +6,7 @@ What runs on the host:
 |---|---|---|
 | Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/token` and `/info` to the game server |
 | `conker-server` (systemd) | TCP + UDP 5888, and `127.0.0.1:5889` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
-| certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to both |
+| certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to both (the game server takes it without a restart) |
 
 How a player connects: the game page, `/play.html` (it connects to `DOMAIN:5888`; add `?transport=ws&side=...` as
 `web/README.md` lists). The landing (`/`) has no server list here: that comes from the local dev web server only
@@ -167,8 +167,9 @@ game port needs no password: nobody joins a match without a token from `/token`.
 
 Then the certificate. certbot answers Let's Encrypt's challenge itself on port 80 (`--standalone`), so
 Caddy stops for those few seconds (`--pre-hook`, `--post-hook`); the deploy hook copies the certificate
-to `/etc/conker/tls` and restarts Caddy and the game server. certbot saves the hooks and renews on its
-own (its systemd timer, twice a day; a renewal happens 30 days before expiry):
+to `/etc/conker/tls`, restarts Caddy and starts the game server (the first time; after that it is running
+already). certbot saves the hooks and renews on its own (its systemd timer, twice a day; a renewal happens 30
+days before expiry):
 
 ```sh
 sudo certbot certonly --standalone -d game.example.org -m you@example.org --agree-tos \
@@ -176,9 +177,10 @@ sudo certbot certonly --standalone -d game.example.org -m you@example.org --agre
   --deploy-hook /etc/conker/renew-hook.sh
 ```
 
-The server reads its certificate at start, so each renewal restarts it: matches in progress end and the
-pages say `Reload to reconnect`. To keep that out of busy hours, move certbot's timer
-(`sudo systemctl edit certbot.timer`).
+The game server is not restarted on a renewal: it looks at `/etc/conker/tls`'s two files every 10 s and gives
+the new pair to new connections, so matches in progress go on (`journalctl -u conker-server`: `certificate
+reloaded from ...: digest ...`). While the hook is between the two files, it keeps the one in use (`certificate
+not reloaded yet`) and tries again 10 s later.
 
 ## 9. Check
 
@@ -211,6 +213,7 @@ curl -s -D - -o /dev/null -H 'Accept-Encoding: br' https://game.example.org/asse
   | grep -iE '^(HTTP|content-encoding|cache-control|etag)'
 #   200, br, no-cache, an ETag (the pack is editable: pages revalidate it on each load)
 curl -s https://game.example.org/token | wc -c                                    # 4096 (hex)
+#   Each address may take 10 tokens per 10 s, then 429 (behind Caddy: the X-Forwarded-For address)
 #   With the password on: 401 without it; add -u player:PASSWORD to each curl
 nc -4 -vz game.example.org 5888 && nc -6 -vz game.example.org 5888                # TCP over IPv4 and IPv6
 ```
@@ -223,13 +226,16 @@ socket), load the page once from an IPv4-only network (many mobile hotspots).
 
 Renewal: `sudo certbot renew --dry-run` checks the challenge against Let's Encrypt's staging service
 (deploy hooks don't run in a dry run); `sudo RENEWED_LINEAGE=/etc/letsencrypt/live/game.example.org
-/etc/conker/renew-hook.sh` runs the hook by hand.
+/etc/conker/renew-hook.sh` runs the hook by hand: within 10 s `journalctl -u conker-server` logs `certificate
+reloaded`, and the players in a match stay in.
 
 ## Updating
 
 - Page: `deploy/build.sh`, then `rsync` (step 7). Open pages keep their client until reloaded.
 - Asset pack: edit `../assets`, `deploy/pack.sh` (step 6), restart the server.
-- Server: rebuild, `sudo install` the binary (step 5), `sudo systemctl restart conker-server`.
+- Server: rebuild, `sudo install` the binary (step 5), `sudo systemctl restart conker-server`. A stop or
+  restart (SIGTERM) first sends every player the disconnect, so pages show it at once rather than after the 3 s
+  timeout; matches in progress still end.
 
 ## Tested locally (no host, no domain)
 
@@ -238,7 +244,8 @@ any trust store, and the scripts that check this kit on one machine: the server 
 (SEC1 and PKCS#8 keys), the token key file, `--public` and the endpoint on loopback; native clients over
 WebTransport and `wss://` that check the certificate against the test CA (`conker-client --ca`, dev/test
 only); clients refused for another CA, plain `ws://`, zero-key, foreign-key, tampered, misaddressed and
-expired tokens; and this Caddyfile serving `deploy/build.sh`'s site and `pack.sh`'s pack with the test
-certificate, with and without the password. What only a
+expired tokens; a renewal while a client plays (`test-reload.sh`: half-written, then whole; the new CA's
+clients connect, the old one's are refused, the player stays); and this Caddyfile serving `deploy/build.sh`'s
+site and `pack.sh`'s pack with the test certificate, with and without the password. What only a
 real host can show: Chrome trusting the certificate (WebTransport without a digest, `wss://` from an https
 page), Let's Encrypt issuing and renewing, the systemd units, and IPv4 into `[::]` on Linux.

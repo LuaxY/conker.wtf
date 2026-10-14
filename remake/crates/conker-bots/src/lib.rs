@@ -33,7 +33,6 @@ use conker_camera::volume::{CameraHint, CameraVolume};
 use conker_rules::game::{Action, Arena, BUTTON_R, Event, Match};
 use conker_rules::gas::{self, Effect};
 use conker_rules::heist::{self, Cash};
-use conker_rules::tank;
 use conker_rules::traps::{self, Traps};
 use conker_rules::weapon::Gives;
 use conker_rules::{Rng, beach, colors};
@@ -618,7 +617,17 @@ impl Bots {
             if raptor {
                 n.script = brain::conker_behaviour(n.script);
             }
-            n.run(&self.scripts, &self.graph, &view, &mut self.rng);
+            // Tank: in its hit clip (7, 15 frames) a tank's class script stands still, its wait
+            // ended by the hit (`func_15056B08` is not called; V h1 1596-1610: script 0xA set by
+            // the retreat makes no step, so the retreat sees the arrival bit of the bunker's node
+            // still set and ends 2 frames on).
+            let reeling = m.settings.tank
+                && (m.players.get(slot))
+                    .is_some_and(|f| matches!(f.action, Action::Hurt { lethal: false, .. }));
+            match reeling {
+                true => n.wait = 0,
+                false => n.run(&self.scripts, &self.graph, &view, &mut self.rng),
+            }
             if raptor {
                 n.script = brain::raptor_behaviour(n.script);
             }
@@ -659,28 +668,27 @@ impl Bots {
             }
             let toward = aim.unwrap_or(steer.toward);
             if m.settings.tank {
-                // The turret's target (s126+0x129): the script's enemy (G+0x11C, set by the attack
-                // states 4 and 5) while alive, within 4000 (state 5's range) and in sight (I), led
-                // by its last step · distance / 100 (`func_150ED748`'s bot branch: its speed ·
-                // distance / 200 at half-speed steps, C).
+                // The turret's and the gun's target (s126+0x129): the script's enemy (G+0x11C)
+                // while alive, at any distance, seen or not (V h1: +0x129 is G+0x11C in every
+                // state, out to 9000), led by its last step · distance / 100 (`func_150ED748`'s
+                // bot branch: its speed · distance / 200 at half-speed steps, C).
                 let k = self.slots.iter().position(|&s| s == Some(slot));
-                let eye = |p: [f32; 3]| [p[0], p[1] + tank::MUZZLE[1], p[2]];
                 let lead = (k.and_then(|k| usize::try_from(self.g.get(g::ENEMY, k)).ok()))
                     .and_then(|e| bodies.get(e))
                     .filter(|t| t.health > 0)
-                    .and_then(|t| {
+                    .map(|t| {
                         let d =
                             ((t.pos[0] - b.pos[0]).powi(2) + (t.pos[2] - b.pos[2]).powi(2)).sqrt();
-                        let seen = brain::sight(world, &self.graph, eye(b.pos), eye(t.pos));
-                        (d < 4000.0 && seen.is_some()).then(|| {
-                            let k = d / 100.0;
-                            [
-                                t.pos[0] + (t.pos[0] - t.prev[0]) * k,
-                                t.pos[1],
-                                t.pos[2] + (t.pos[2] - t.prev[2]) * k,
-                            ]
-                        })
+                        let k = d / 100.0;
+                        [
+                            t.pos[0] + (t.pos[0] - t.prev[0]) * k,
+                            t.pos[1],
+                            t.pos[2] + (t.pos[2] - t.prev[2]) * k,
+                        ]
                     });
+                if let Some(at) = lead {
+                    effects.push(Effect::TankAim(slot, at));
+                }
                 let mut input = tank_drive(b, steer.toward, steer.speed, lead);
                 input.camera_yaw = input
                     .camera_yaw
@@ -776,7 +784,7 @@ impl Bots {
                     walled: f.body.walled,
                     out: (f.out > 0).then(|| m.tick.saturating_sub(f.out_at)),
                     lives: if counted {
-                        u8::try_from(m.lives_left(s)).unwrap_or(u8::MAX)
+                        u8::try_from(f.lives(st.lives())).unwrap_or(u8::MAX)
                     } else {
                         conker_rules::colors::LIVES
                     },

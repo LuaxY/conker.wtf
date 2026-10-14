@@ -657,7 +657,7 @@ const fn probe(name: &'static str, id: u8) -> Case {
 /// Positions are printed, not asserted: their gaps are conker-sim's (player-to-player pushes in
 /// e_w14b and e_w21, C-left/right strafing in buttons, ctl_cd_cr and k6/k10, a wall-push reversal
 /// in pick87) or root motion the port does not have (dead bodies in e_w22/e_w24, 0x16's Z in k7).
-const CASES: [Case; 65] = [
+const CASES: [Case; 66] = [
     case("combat_e_gren", 745, None),
     Case {
         rng: Some("combat4_e_w09_lldb"),
@@ -796,6 +796,9 @@ const CASES: [Case; 65] = [
     case("combat5_ctlw18", 30, Some((40, 0x18))),
     case("combat5_cb3", 30, Some((40, 0x18))),
     case("combat5_cb4", 30, Some((40, 0x18))),
+    // Z held into R's aim and through it (161 and 161 frames): each aimed shot on Z's release
+    // (0x10C at rows 302 and 472), whatever the hold (V g3a combat8_xbl).
+    case("combat8_xbl", 30, Some((40, 0x18))),
     encounter("combat5_cb_e1", 0x18),
     encounter("combat5_cb_e2", 0x18),
     Case {

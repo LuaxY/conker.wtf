@@ -33,6 +33,9 @@ bevy = { workspace = true, features = ["bevy_ui", "bevy_ui_render", "bevy_text",
 # `ca=` (dev/test): a WebTransport link checked against a CA; the exact versions lightyear 0.30.1 uses.
 aeronet_webtransport = "=0.21.0"
 lightyear_aeronet = "=0.30.1"
+# SIGTERM and SIGHUP leave as Ctrl-C does (the disconnect first): bevy_app's Ctrl-C handler already
+# brings ctrlc; this only adds the feature.
+ctrlc = { version = "3.4", features = ["termination"] }
 
 # On wasm, lightyear enables getrandom's `wasm_js` backend (0.2, 0.3 and 0.4) for the whole tree.
 [target.'cfg(target_family = "wasm")'.dependencies]

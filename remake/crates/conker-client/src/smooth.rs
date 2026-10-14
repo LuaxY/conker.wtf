@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use conker_rules::Fighter;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
-use conker_sim::movement::{Input, angle_diff};
+use conker_sim::movement::{Input, PlayerState, angle_diff};
 use conker_sim::net::Player;
 use lightyear::prelude::LocalTimeline;
 
@@ -40,6 +40,19 @@ pub struct Drawn {
     pub handoff: u32,
     /// The camera following the drawn body, until the hand-off ends.
     pub camera: Option<Follow>,
+    /// What was drawn when the last live tick started, for the frames between ticks
+    /// ([`between`](Self::between)); none across a cut.
+    pub prev: Option<Frame>,
+}
+
+/// What a frame draws of the local player: the body where and as it faces, and the view (eye,
+/// look-at).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub body: Vec3,
+    pub facing: u16,
+    pub eye: Vec3,
+    pub at: Vec3,
 }
 
 impl Drawn {
@@ -58,8 +71,10 @@ impl Drawn {
             self.offset -= jump;
             self.turn -= turn as f32;
             self.blend = BLEND.max((self.offset.length() / MAX_STEP).ceil() as u32);
-            self.handoff = HANDOFF;
-            self.camera.get_or_insert(*follow);
+            // During a hand-off the view keeps its weight (it climbs back over the blend).
+            if self.camera.is_none() {
+                (self.camera, self.handoff) = (Some(*follow), HANDOFF);
+            }
         }
         Some((jump, turn))
     }
@@ -90,6 +105,8 @@ impl Drawn {
             return;
         };
         own.step_view(view, input, world);
+        // The drawn body crosses a hint on another tick than the predicted one: cut with `follow`.
+        own.cam.hint_cut = follow.cam.hint_cut;
         let at = |f: &Follow| Vec3::from_array(f.cam.at);
         if at(own).distance(at(follow)) > SNAP {
             self.reset(f.body.pos, f.body.facing);
@@ -97,13 +114,15 @@ impl Drawn {
     }
 
     /// One live tick that left the predicted body at `pos` facing `facing`: this tick's share of
-    /// the offset and the turn goes, or of the camera's hand-off once they are gone.
+    /// the offset and the turn goes (and the camera's weight climbs back), or of the camera's
+    /// hand-off once they are gone.
     pub fn tick(&mut self, pos: [f32; 3], facing: u16) {
         self.last = Some((pos, facing));
         if self.blend > 0 {
             self.offset -= self.offset / self.blend as f32;
             self.turn -= self.turn / self.blend as f32;
             self.blend -= 1;
+            self.handoff = (self.handoff + 1).min(HANDOFF);
         } else if self.handoff > 0 {
             self.handoff -= 1;
             if self.handoff == 0 {
@@ -122,8 +141,37 @@ impl Drawn {
         facing.wrapping_add(self.turn.round() as i32 as u16)
     }
 
+    /// What to draw of a body predicted as `p`, with the follow camera `follow`.
+    pub fn frame(&self, p: &PlayerState, follow: &Follow) -> Frame {
+        let (eye, at) = self.view(follow);
+        let body = Vec3::from_array(self.body(p.pos));
+        let facing = self.facing(p.facing);
+        Frame {
+            body,
+            facing,
+            eye,
+            at,
+        }
+    }
+
+    /// The frame `f` of the way (the fixed clock's overstep) from [`prev`](Self::prev) to `now`:
+    /// 30 Hz ticks drawn smoothly on faster displays, the view with the body.
+    pub fn between(&self, now: Frame, f: f32) -> Frame {
+        let Some(p) = self.prev else {
+            return now;
+        };
+        let turn = angle_diff(now.facing, p.facing) as f32 * f;
+        Frame {
+            body: p.body.lerp(now.body, f),
+            facing: p.facing.wrapping_add(turn.round() as i32 as u16),
+            eye: p.eye.lerp(now.eye, f),
+            at: p.at.lerp(now.at, f),
+        }
+    }
+
     /// The view (eye, look-at) to draw with the follow camera `follow`: the drawn body's camera,
-    /// handed back to `follow` over [`HANDOFF`] ticks once the offset is gone.
+    /// handed back to `follow` over [`HANDOFF`] ticks once the offset is gone (its weight is
+    /// `handoff / HANDOFF`).
     pub fn view(&self, follow: &Follow) -> (Vec3, Vec3) {
         let view = |f: &Follow| {
             let c = &f.cam;
@@ -137,10 +185,7 @@ impl Drawn {
             return (eye, at);
         };
         let (own_eye, own_at) = view(own);
-        let w = match self.blend {
-            0 => self.handoff as f32 / HANDOFF as f32,
-            _ => 1.0,
-        };
+        let w = self.handoff as f32 / HANDOFF as f32;
         (eye.lerp(own_eye, w), at.lerp(own_at, w))
     }
 }
@@ -191,7 +236,6 @@ pub fn log_drawn(timeline: Res<LocalTimeline>, own: Query<(&Player, &FollowCamer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conker_sim::movement::PlayerState;
 
     fn follow() -> Follow {
         Follow::spawn([0.0, 100.0, 250.0], &PlayerState::spawn([0.0; 3], 0))
@@ -294,6 +338,86 @@ mod tests {
         );
         assert_eq!((d.offset, d.blend), (Vec3::ZERO, 0));
         assert!(d.camera.is_none());
+    }
+
+    #[test]
+    fn a_correction_during_the_hand_off_keeps_the_views_weight() {
+        let mut d = Drawn::default();
+        d.reset([0.0; 3], 0);
+        d.correct_at([0.0, 0.0, 40.0], &follow());
+        for _ in 0..BLEND + HANDOFF - 2 {
+            d.tick([0.0, 0.0, 40.0], 0);
+        }
+        assert_eq!((d.blend, d.handoff), (0, 2));
+        // The follow camera 60 units off the drawn body's: the view is a quarter of the way over.
+        let moved = Follow::spawn(
+            [60.0, 100.0, 250.0],
+            &PlayerState::spawn([60.0, 0.0, 0.0], 0),
+        );
+        let before = d.view(&moved);
+        d.correct_at([0.0, 0.0, 50.0], &moved);
+        assert_eq!(d.view(&moved), before);
+        // The weight climbs back over the blend, then the hand-off starts again.
+        d.tick([0.0, 0.0, 50.0], 0);
+        assert_eq!(d.handoff, 3);
+        for _ in 1..BLEND {
+            d.tick([0.0, 0.0, 50.0], 0);
+        }
+        assert_eq!((d.blend, d.handoff), (0, HANDOFF));
+    }
+
+    #[test]
+    fn the_drawn_bodys_camera_cuts_on_the_follow_cameras_tick() {
+        // A trip wire across z = 0 that cuts the camera (conker-sim's follow tests).
+        let mut world = CollisionWorld::new([(
+            [[-5000., 0., -5000.], [-5000., 0., 5000.], [5000., 0., 0.]],
+            5,
+        )]);
+        let mut hint = [0u8; 0x34];
+        hint[6..12].copy_from_slice(&[3, 232, 1, 244, 3, 232]);
+        (hint[0x15], hint[0x17], hint[0x23]) = (3, 4, 30);
+        world.camera = Some(conker_camera::volume::CameraLevel::new(0, &hint));
+        let place = conker_rules::spawn::Placement {
+            index: 0,
+            pos: [0.0, 0.0, -50.0],
+            facing: 0xC000,
+            camera: [0.0, 100.0, -297.0],
+        };
+        let mut f = Fighter::new(&place, 0, 0);
+        let mut follow = Follow::spawn(place.camera, &f.body);
+        let mut d = Drawn::default();
+        d.reset(f.body.pos, f.body.facing);
+        // A correction leaves the drawing 40 behind: it crosses the wire two ticks later.
+        f.body.pos[2] = -10.0;
+        d.correct(f.body.pos, f.body.facing, &follow);
+        let mut cuts = vec![];
+        for z in [-10.0, 10.0, 30.0, 50.0] {
+            f.body.pos[2] = z;
+            follow.step_view(crate::camera_view(&f, 0), &Input::default(), &world);
+            d.step(&f, 0, &follow, &Input::default(), &world);
+            let own = d.camera.expect("the drawn body's camera");
+            cuts.push((follow.cam.hint_cut, own.cam.hint_cut));
+        }
+        assert_eq!(cuts.iter().filter(|c| c.0).count(), 1);
+        assert!(cuts.iter().all(|c| c.0 == c.1), "{cuts:?}");
+    }
+
+    #[test]
+    fn frames_between_ticks_are_drawn_the_overstep_of_the_way() {
+        let mut d = Drawn::default();
+        let at = |z: f32, facing: u16| {
+            let p = PlayerState::spawn([0.0, 0.0, z], facing);
+            d.frame(&p, &Follow::spawn([0.0, 100.0, z + 250.0], &p))
+        };
+        let (prev, now) = (at(0.0, 65000), at(-35.0, 500));
+        assert_eq!(d.between(now, 0.5), now); // nothing before the first tick
+        d.prev = Some(prev);
+        assert_eq!(d.between(now, 0.0), prev);
+        let half = d.between(now, 0.5);
+        assert_eq!((half.body.z, half.eye.z), (-17.5, prev.eye.z - 17.5));
+        assert_eq!(half.facing, 65518); // the short way, towards 0
+        d.reset([0.0; 3], 0);
+        assert_eq!(d.prev, None);
     }
 
     #[test]

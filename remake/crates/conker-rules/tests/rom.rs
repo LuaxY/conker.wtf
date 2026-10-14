@@ -400,9 +400,13 @@ fn a_plate_sets_off_its_traps() {
         }
     }
     assert_eq!(hit, [None, Some((83, 0)), None, Some((84, 0))]);
+    // The presser's kill and its hit (`func_151E5FF4` names the trap's owner, I: §5.7).
     assert_eq!(
-        m.players.iter().map(|f| f.kills).collect::<Vec<_>>(),
-        [1, 0, 1, 0]
+        m.players
+            .iter()
+            .map(|f| (f.kills, f.hits))
+            .collect::<Vec<_>>(),
+        [(1, 1), (0, 0), (1, 1), (0, 0)]
     );
     assert_eq!(
         (on[0].first(), on[0].last(), on[0].len()),

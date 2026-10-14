@@ -79,6 +79,7 @@ use conker_rules::gun;
 use conker_rules::lift::Lift;
 use conker_rules::net::Fighting;
 use conker_rules::projectile::Grenade;
+use conker_rules::traps::Traps;
 use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Settings, Spawn};
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
@@ -820,10 +821,11 @@ pub struct Spawns(pub Vec<SpawnPoint>);
 
 /// The match's static data the local player's prediction needs: the spawn records (a predicted
 /// respawn picks one, among its fighter's `spawn_mask`), the scene's mounted guns at home (their
-/// bodies push it) and its lifts (conker-bots' `lift`, which the server rides); pickups are the
-/// server's.
+/// bodies push it; [`seat_view`] turns them as the server has them), its lifts (conker-bots'
+/// `lift`, which the server rides) and scene 0x34's traps (`Fighting::traps` has their state);
+/// pickups are the server's.
 #[derive(Resource, Clone, Debug)]
-pub struct MatchArena(pub Arena, pub Vec<gun::Gun>, pub Vec<Lift>);
+pub struct MatchArena(pub Arena, pub Vec<gun::Gun>, pub Vec<Lift>, pub Traps);
 
 impl MatchArena {
     pub fn new(spawns: &[SpawnPoint], scene: u16, triggers: &[u8]) -> Self {
@@ -845,7 +847,8 @@ impl MatchArena {
             ..Default::default()
         };
         let lifts = conker_rules::lift::parse(triggers, scene as u8);
-        Self(arena, gun::spawn(scene.into()), lifts)
+        let traps = Traps::new(scene, triggers);
+        Self(arena, gun::spawn(scene.into()), lifts, traps)
     }
 }
 
@@ -1323,10 +1326,12 @@ pub fn match_settings(m: &MatchView) -> Settings {
 pub struct Before(pub Option<[f32; 3]>);
 
 /// The local player's tick as the server runs it: conker-rules' frame for its slot among the others
-/// ([`known_match`], `Match::step_player`, its strikes aimed where `shown` has them), and its events.
-/// None once the match is over, nor before the local timeline is on the server's ticks (the
-/// fighter's frames count in them). `before`: the body before its last step ([`Before`]), then
-/// before this one.
+/// ([`known_match`], `Match::step_player`, its strikes aimed where `shown` has them), with scene
+/// 0x34's traps and Total War's doors and covers as predicted (`Fighting::traps`, `::sliding`)
+/// and what `view` (the server's last) has of the flags, the bag and the guns ([`seat_view`]),
+/// and its events. None once the match is over, nor before the local timeline is on the server's
+/// ticks (the fighter's frames count in them). `before`: the body before its last step
+/// ([`Before`]), then before this one.
 #[allow(clippy::too_many_arguments)]
 fn own_tick(
     tick: u32,
@@ -1339,15 +1344,30 @@ fn own_tick(
     shown: &[(usize, [f32; 3])],
     arena: &MatchArena,
     world: &CollisionWorld,
+    view: Option<&MatchView>,
     before: &mut Option<[f32; 3]>,
 ) -> (Match, usize, Vec<Event>) {
     let slot = usize::from(fighting.slot);
     let bodies = others.iter().map(|o| (o.0, o.1));
     let own = fighting.fighter(*body);
     let mut m = known_match(tick, slot, own, bodies, &fighting.grenades, &arena.0).with(settings);
-    // ponytail: the guns at home, free; a manned gun's state isn't replicated into the prediction,
-    // so walking into one mispredicts a mount until the server corrects it.
     m.guns = arena.1.clone();
+    if let Some(v) = view {
+        seat_view(&mut m, v);
+    }
+    if let Some(s) = fighting.traps {
+        m.traps = arena.3.clone();
+        m.traps.set_state(s);
+    }
+    if let Some(p) = fighting.sliding {
+        m.gas.set_sliding(p);
+    }
+    // The bolts' first move comes on the match's live parity (`Match::first_move`), as the server
+    // set it at the start.
+    if let Some((start, first)) = view.and_then(|v| v.start.zip(Some(v.first_read))) {
+        m.live = start.wrapping_add(FIRST_READ).wrapping_sub(first);
+    }
+    m.shots = fighting.shots();
     let mut events = Vec::new();
     if !over && fighting.state.since <= tick {
         // A lift before the step, as the server rides them, counted as a respawn (the camera cuts
@@ -1380,12 +1400,36 @@ fn own_tick(
     (m, slot, events)
 }
 
+/// What the server last sent of the match that pushes or mounts the local player (`v`): Colors'
+/// flags and Heist's bag where they lie (the push's `Other`s), and the mounted guns' turn and shots
+/// (the seat a touch homes on, the first barrel); a gun not free (manned, or in its dismount's
+/// wait) takes no touch.
+/// ponytail: the server's moves since `v` (a flag's fall, a free gun's pitch decay, a dismount's
+/// wait running out) come as corrections.
+fn seat_view(m: &mut Match, v: &MatchView) {
+    for (f, view) in m.colors.flags.iter_mut().zip(&v.flags) {
+        (f.shown, f.carrier, f.pos) = (view.shown, view.carrier.map(usize::from), view.pos);
+    }
+    let c = &mut m.heist.cash;
+    (c.shown, c.carrier, c.pos) = (v.cash.shown, v.cash.carrier.map(usize::from), v.cash.pos);
+    for (g, view) in m.guns.iter_mut().zip(&v.guns) {
+        (g.yaw, g.pitch10) = (view.yaw, (view.pitch * 10.0).round() as i32);
+        (g.shots, g.last, g.leave) = (view.shots, view.barrel, u8::from(view.state != gun::FREE));
+    }
+}
+
 /// War: Beach's plunger collision where the server last had the prop (`conker_rules::beach::seat`),
-/// scene 0x2D's doors and covers where its props stand (`conker_rules::gas::seat`), and scene 0x34's
-/// pressure plates (`conker_rules::traps::seat`).
-/// ponytail: a predicted presser stands on the server's y, a round trip behind its own; the server
-/// corrects it.
-fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Config>) {
+/// scene 0x2D's doors and covers where this frame's slide puts the predicted ones
+/// (`Fighting::sliding`, as the server seats them; else where the server's stand,
+/// `conker_rules::gas::seat`), and scene 0x34's pressure plates where the prediction has them
+/// (`Fighting::traps`; else the server's, `conker_rules::traps::seat`). Both roll back with the
+/// fighter.
+fn seat_props(
+    mut world: ResMut<Collision>,
+    game: Query<&MatchView>,
+    own: Query<&Fighting, With<Predicted>>,
+    cfg: Res<Config>,
+) {
     let Some(m) = game.iter().next() else {
         return;
     };
@@ -1393,10 +1437,23 @@ fn seat_props(mut world: ResMut<Collision>, game: Query<&MatchView>, cfg: Res<Co
         conker_rules::beach::seat(&mut world.0, m.plunger);
     }
     if map_scene(&cfg.map) == Some(0x2D) {
-        conker_rules::gas::seat(&mut world.0, m.total_war, m.props, m.lifts);
+        let (shown, lifts) = match own.iter().find_map(|f| f.sliding) {
+            Some(p) => {
+                let mut g = conker_rules::gas::Gas::default();
+                g.set_sliding(p);
+                let g = g.slid();
+                (g.shown(), g.lifts())
+            }
+            None => (m.props, m.lifts),
+        };
+        conker_rules::gas::seat(&mut world.0, m.total_war, shown, lifts);
     }
     if map_scene(&cfg.map) == Some(conker_rules::traps::SCENE) {
-        conker_rules::traps::seat(&mut world.0, m.plates);
+        let plates = own
+            .iter()
+            .find_map(|f| f.traps)
+            .map_or(m.plates, |s| s.offsets());
+        conker_rules::traps::seat(&mut world.0, plates);
     }
     if m.tank {
         conker_rules::tank::seat(&mut world.0, m.lifts);
@@ -1431,10 +1488,8 @@ fn predict(
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
         || !sync.is_none_or(|s| s.is_synced());
-    let settings = game
-        .iter()
-        .next()
-        .map_or_else(Settings::default, match_settings);
+    let view = game.iter().next();
+    let settings = view.map_or_else(Settings::default, match_settings);
     let slot = own.iter().next().map(|o| usize::from(o.1.slot));
     let others = known(&others, slot, tick);
     // Where this screen shows the others this tick: what the server rewinds this tick's strikes to.
@@ -1443,13 +1498,17 @@ fn predict(
         let mut old = before.as_deref().and_then(|b| b.0);
         let (mut m, i, events) = own_tick(
             tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
-            &mut old,
+            view, &mut old,
         );
         if let Some(mut b) = before {
             b.set_if_neq(Before(old));
         }
         let f = &mut m.players[i];
         if let Some(mut camera) = camera {
+            // What was drawn as this tick started, for the frames until the next (not across a cut).
+            let c = &camera.follow.cam;
+            let prev = (!c.cut && !c.hint_cut).then(|| camera.drawn.frame(&player, &camera.follow));
+            camera.drawn.prev = prev;
             if let Some(at) = events.iter().find_map(|e| match e {
                 Event::Respawn { player, at } if *player == i => Some(at),
                 _ => None,
@@ -1528,10 +1587,8 @@ fn predict_again(
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
         || !sync.is_none_or(|s| s.is_synced());
-    let settings = game
-        .iter()
-        .next()
-        .map_or_else(Settings::default, match_settings);
+    let view = game.iter().next();
+    let settings = view.map_or_else(Settings::default, match_settings);
     let slot = own.iter().next().map(|o| usize::from(o.1.slot));
     let others = known(&others, slot, tick);
     let shown = shows.0.iter().find(|s| s.0 == tick).map_or_else(
@@ -1542,7 +1599,7 @@ fn predict_again(
         let mut old = before.as_deref().and_then(|b| b.0);
         let (mut m, i, _) = own_tick(
             tick, over, settings, &player, &fighting, &input.0, &others, &shown, &arena, &world,
-            &mut old,
+            view, &mut old,
         );
         if let Some(mut b) = before {
             b.set_if_neq(Before(old));
@@ -1999,6 +2056,7 @@ mod tests {
                 &[],
                 &arena,
                 &world,
+                None,
                 &mut None,
             );
             let rode = events
@@ -2051,6 +2109,7 @@ mod tests {
                 &[],
                 &arena,
                 &world,
+                None,
                 before,
             );
             (events.iter()).any(|e| matches!(e, Event::Respawn { at, .. } if at.index == 1))
@@ -2067,6 +2126,60 @@ mod tests {
         assert!(lifts.ride(&mut m, &arena.0).is_empty());
         m.players[0].body.pos = past;
         assert_eq!(lifts.ride(&mut m, &arena.0).len(), 1);
+    }
+
+    /// A hip shot's bolt sits at the muzzle a frame or two and pushes its shooter (V e4 cbp2): the
+    /// prediction carries it from tick to tick (`Fighting::bolts`), so every frame of the shooter
+    /// is the server's, the push included.
+    #[test]
+    fn the_prediction_takes_its_bolts_push() {
+        let arena = MatchArena::new(&[], 0x2D, &[]);
+        let big = 5000.0;
+        let world = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 5),
+        ]);
+        let place = Placement {
+            index: 0,
+            pos: [0.0; 3],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let mut server = Match::new(&arena.0, vec![Fighter::new(&place, 0, 0)], Rng::new(1), 0);
+        server.give(0, 0x18);
+        let (mut body, mut fighting) = (server.players[0].body, Fighting::of(&server, 0));
+        let input = |t: u32| Input {
+            buttons: [(0, BUTTON_B), (70, BUTTON_Z)]
+                .into_iter()
+                .find_map(|(at, b)| (at == t).then_some(b))
+                .unwrap_or(0),
+            ..Input::default()
+        };
+        for t in 0..110 {
+            let tick = server.tick;
+            let (m, i, _) = own_tick(
+                tick,
+                false,
+                Settings::default(),
+                &body,
+                &fighting,
+                &input(t),
+                &Vec::new(),
+                &[],
+                &arena,
+                &world,
+                None,
+                &mut None,
+            );
+            server.step(&arena.0, &[input(t)], &world);
+            assert_eq!(m.players[i].body, server.players[0].body, "tick {tick}");
+            (body, fighting) = (m.players[i].body, Fighting::of(&m, i));
+        }
+        let moved = Vec2::new(body.pos[0], body.pos[2]).length();
+        assert!(
+            server.shots.len() == 1 && (2.0..10.0).contains(&moved),
+            "{moved}"
+        );
     }
 
     #[test]

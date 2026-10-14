@@ -1,5 +1,358 @@
 # Status after wave 6 (2026-10-10)
 
+## Bots in Heist, Tank and Race (2026-10-14)
+**Lane G3e, wave G3.**
+- **Tank.** The scope's Z fires a bullet now, as the original does: instant, 1 damage, 2 frames after the press. The
+  bots' shell deaths went from 7.5 a match to 12.4 (the oracle's 11.5). Four changes did it:
+  - the gun aims at the script's enemy;
+  - the bots reach pickups at the original's ×1.4;
+  - the class script is held through the hit clip;
+  - the health reads stale on the hit's frame.
+- **Race.** On route 12 the centre-line bot no longer dies at the chasm (it did in 5 seeds of 6; the original never
+  does). The cause was the floor query's reach: 150 on the Race map, against the remake's 50. Above that reach, ceilings
+  no longer count as floors. The bots turn up to 1792 a frame, as the original's do. The missile's reach checks out. The
+  bots' kicks are findings only.
+- **Heist.** The attack share near the carrier is 71% now, against the original's 75-84% (61% was before L1's fixes).
+  The Tank mechanisms don't move it. The takes match: the ROM path averages 20.7 and the oracle 21.25. Server: see below.
+
+Research: `../lab/research/mp-original/mode-bots-g3.md` and `mode-bots-g3-scratch/`. The oracle runs used the private copy
+`ConkerRecomp.g3e`, an idle P1 and the RNG poked. Traces are not kept:
+- Tank: h1-h5 and h7 (7 bots), sc3-sc5 (two humans, the scope).
+- Race: R12r1-r3 and R11r1-r3 (3 bots, P1 with 99 lives, 5 laps).
+- 12 s RAM reads of `D_800DBE64`.
+
+**The wire is unchanged** (no `net.rs` type; `PROTOCOL_ID` untouched). **The shared simulation changed:**
+- `Match::tank_player`, which the client predicts with: the scope shot, and a bot's gun pitch from `Tank::aims`.
+- conker-sim's board: the floor query `floor_up` (step 150, faces up only), and `AUTO_TURN` 1792.
+
+`Tank::bullets` and `Tank::aims` are not on the wire.
+
+| Part | What |
+|---|---|
+| conker-rules `tank.rs` | **The scope shot**: Z with the scope on pushes a `Bullet::aimed` (`MG_BULLET`, `BULLET_SPEED`) from `SCOPE_EYE` (27.3 ahead, 111.6 up), level along the turret, into `Tank::bullets`. `fly_shells` flies it from the next frame against the hulls (`hits_hull`) and takes 1 hp with `tank_hit` (V sc3-sc5). **`Tank::aims`**: each bot's gun target this frame. `tank_player` pitches a bot's gun by `range_error` toward it, and a human's as before. **`touches`**: the pickup radius 100 · reach/64, × `race::AUTO_REACH` for a bot (C `func_1511DF6C`), for the bomb and the power-ups |
+| conker-rules `weapon.rs` | `within(pickup, player, r)`: `touches`' test for any radius |
+| conker-rules `gas.rs`, `game.rs` (shared, two lines each) | `Effect::TankAim(slot, at)`, applied to `Tank::aims`. In Tank, pickups touch by `tank::touches` |
+| conker-bots `lib.rs` (shared) | Tank: the gun aims at G+0x11C (ENEMY) at any distance, without the sight test, led by the target's velocity × distance/100. It pushes `TankAim` (V h1: s126+0x129 = G+0x11C in every state). A tank bot in its hit clip (`Action::Hurt`, non-lethal) doesn't run its class script, and its wait is 0 (V h1 1596-1610) |
+| conker-bots `brain.rs` (shared) | Tank: on the HIT_BY-0x80 frame, a victim whose slot is after its shooter's reads its health before the hit (V h1, h4: 35 of 38; 6 of 49 the other way) |
+| conker-sim `collision.rs` (shared) | **`floor_up(x, z, y, ref, step)`**: the floor query with the step a parameter (`func_1510E950`'s `D_800DBE64` for an object, which `func_15002F40` sets: 150 on 0x32/0x33, else 85 in multiplayer; V RAM). It has no fast path and skips triangles facing down (V R12r1 1880-1885). `floor` is unchanged: it shares the loop (`query`) and keeps 50 |
+| conker-sim `board.rs` (shared) | `STEP_UP` 150 for the board's floor. **`AUTO_TURN` 1792** (0x700; V R11r1-r3 and R12r1-r3 at the start and on sharp bends; it was 833) |
+| conker-bots `tests/rom.rs` | `tank_bots_bomb_and_fight`: shell deaths asserted 9-14 (was 5-14). `race_run` also returns each bot death's track count. `race_bots_finish` asserts that no route-12 bot dies at the chasm (count % 33 = 22) and prints the deaths |
+
+| Check | Result |
+|---|---|
+| rules `the_scope_shot_as_sc5` (new) | Straight ahead, the target loses 1 hp with `CLIP_HIT` on the second frame after the press, not the first. 150 to the side, it misses. No shell flies |
+| sim `the_boards_query_reaches_its_step_and_skips_ceilings` (new) | A floor 120 and a ceiling 100 over the point: `floor` finds neither, `floor_up` 150 finds the floor, `floor_up` 110 nothing |
+| bots ROM `tank_bots_bomb_and_fight` (seeds 1-4) | Shots 329, hits 28.9%, shell deaths 11.5, blast deaths 13.2, plants 3.8. Longest carry 1199 (oracle 1197; 1634 before the stale health) |
+| bots ROM `race_bots_finish` | Route 11 (seed 2): laps 836-837, the human's deaths at 377, 597, 845 (L1 378, 599, 845). Route 12 (seeds 1, 2): steady laps 1065-1081, the leader out after 3 missile kills, no chasm death. 7 bots: the mean finishes within 5% |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`) | `bun run test` 577 passed, 0 failed, 1 ignored (with the ROM). `bun run check` and the wasm clippy pass |
+
+| Run (ROM path; oracle) | Before | After | Oracle |
+|---|---|---|---|
+| Tank, 7 bots, seeds 1-12: shell deaths, hits of 1, hit rate | 7.5, 88.5, — | 12.4 (10-15), 98 (86-115), 29.3% | h1-h5, h7: 11.5 (10-13), 91.5 (81-105); G1's ten: 10.5, 89.5, 25.6% |
+| Tank: hp ≤ 2 retreats a match, COOL 60 / 600 that run long | 0 / 8.8 | 6.1 / 6.0 | 7.5 / 5.2 |
+| Race route 12, 3 bots, seeds 1-6: chasm deaths, the leader out, steady laps | 5 of 6 (+1 later), 5 of 6, 941-1081 | 0, 6 of 6, 1064-1081 | R12r1-r3 + L2: 0, 4 of 4, 1063-1081 |
+| Race route 11, 3 bots, seeds 1-6: laps, finishes after the go | 836-837, 4164-4214 (G1) | 836-837, 4130-4213 | R11r1-r3: 836-837, 4131-4268 |
+| Heist, 3 bots, seeds 1-12: state 8 within 500 of the enemy carrier, takes | 71.3% (45.6-96.0), 20.7 (14-31) | unchanged | 75-84% (4 samples), 21.25 (17-30) |
+| Server smoke (`bots.sh`, ports 5986/5988) | | Heist, 3 bots, 5 min: seed 1 takes 9 to the end at 8160 (3 deliveries); seed 2 takes 17 to 6587 (4; its bot 2 hit no one and bot 3 never died, two FAIL lines). Tank, 3 bots, 5 min: all ok, every bot hits, dies and respawns; bombs 5 taken, 4 planted, deaths 2 by blast and 1 by shell, 2 power-ups. Race route 12, 3 bots: all ok; the idle human goes out at 1150, 3319 and 5502, which decides each race before a lap (5 missiles, 8 knocks). The bots' one death is bot 1 in race 2, 11 frames after slot 2's missile knocks it up, not at the chasm | |
+
+**Findings** (V the runs; C the code; details in `mode-bots-g3.md`).
+- **The floor query's reach** (C `func_15002F40`; V RAM). It is 150 on scenes 0x32 and 0x33, and 85 on every other
+  multiplayer map (Tank 0x24 seen). Only the board takes it now. Everything else keeps 50: on foot, the tanks, the
+  raptors, the swim, the follow camera.
+- **The missile** (V, 12 knocks). It hits on the frame after a frame-end distance of 108-198 and never after 225-296. The
+  remake's rule (within a step of 200) matches 11 of the 12. `MISSILE_HIT` 120 matters only under a step. C: the radius is
+  the victim's obj+0xD2 (46) plus 4 · scale · the attack record's +0xE.
+- **The bots' kicks** (V L1, R12r1, R12r2). A bot kicks for 12 frames of state 84 with no hop. The human's B kick is 29
+  frames with a hop. On the start kicks the target speed is 60 on the first and last frames, so the speed drops by up to
+  25 toward it (L1 bot 3: 73 → 60 at 276, 71 → 60 at 288). Other kicks lose 25 at their end (100 → 75).
+- **Heist.** Tank's two mechanisms, widened to Heist, left the carrier share at 71.4%, so they were not kept there. In the
+  remake, COOL 600 at hp ≤ 2 starts 5-9 times a match.
+
+**Left.**
+- **Tank** runs a little hot: hits +7%, a 29.3% hit rate against 25.6%. A victim before its shooter in slot order is
+  fresh, as the original is; it is not tuned further. The stale health in other modes isn't checked.
+- **Race's kicks.** The bots still kick with the human's 29-frame B kick. The port: class script 0x1F's 12 frames and
+  its speed steps (the script is unread).
+- **Heist.** The near-carrier share is 4-13 points under the oracle's samples, within the seeds' spread. The server's bots take the bag 16.6 times per 9000 frames (four runs: 9, 17, 17, 14 to frames 8160-9317), against the ROM path's 20.7 (14-31), so they are within its spread. The server's matches end at the score, and a delivered bag is off the map for about 230 frames. This is not traced further.
+- **85 on the other maps.** The floor query's reach for the simulation lane: `floor` stays 50 everywhere but the board.
+- **Handoff, client `tank.rs`.** The scope shot is a bullet (`Tank::bullets`, not on the wire). The client draws no shell
+  for it, which is right, and nothing else: the original's flash or tracer for it is not traced.
+
+## Deathmatch bots: the weapons and aim (2026-10-14)
+**Lane G3d, wave G3.** **No AI change.** The gaps in the task came from 5 oracle seeds. With 8 more (13), the
+original shows the same long holds and stands the remake does, and the twin guns, sniper and 0x23 fall within noise.
+The only code change is the harness: `bot_match` now counts the sniper's shots. Found out of lane: **0x34's start
+records depend on the player count**, so the remake's (s + 7) % 12 is wrong for 1 + 3 and 1 + 5 (below). Research:
+`../lab/research/mp-original/dm-bots-g3.md`, with `dm-bots-g3-scratch/` (`tools/run.sh` on a private
+`ConkerRecomp.g3d`). The remake runs used this tree with the other G3 lanes' edits in progress.
+
+**The wire did not change, and neither did the shared simulation.**
+
+| Part | What |
+|---|---|
+| conker-bots `examples/bot_match.rs` | The sniper's shots are counted at each start of its fire clip (`weapon::SNIPER.fire.0`), since `Match::ray` leaves the rules' `shots` alone (I: one clip start is one step of s126+0x1AB). They go into the `shots` column and the summary |
+
+| Measure (0x30, 1 idle human + 3 bots, 4,519 reads) | Oracle, 13 seeds | Remake, 8 seeds |
+|---|---|---|
+| sniper 0x24 spells: count, mean / median | 25, 1,236 / 1,071 | 12, 1,895 / 1,235 (Mann-Whitney p 0.26) |
+| 0x23 spells: count, mean / median | 33, 556 / 285 | 19, 883 / 396 (p 0.08) |
+| longest: sniper camps never killed; 0x23 | 3,913, 3,466; 4,371 (role 1), 2,226 (role 3) | 3,998, 3,974; 4,347, 2,708 (both role 3) |
+| twin guns: shots / hp drops a run, rate | 306 / 17.3, 0.056 | 406 / 13.0, 0.032 |
+| twin guns under 3,000 xz | 0.074 | 0.063 |
+| twin guns 3,000-5,000 xz: shots / hits a run | 100 / 2.4 | 207 / 0.6 |
+| sniper: shots / hits a run, rate | 6.5 / 1.9, 0.294 | 11.8 / 3.0, 0.255 |
+| 0x23: rate | 0.096 | 0.090 |
+
+**Findings** (V the runs; C the code; I inferred).
+- **No hold or switch rule** (V). A hold ends by death, a take, a kill-gate fall or the match's end. G+0x2378 is
+  always 0. Forced into role 3 at the start (3 runs), the original also keeps 0x23 drawn in state 9 for 1,716 and
+  2,312 frames, as the remake's role-3 starters do (r30s3, s5).
+- **The twin-gun gap is one stand, and the original makes it too** (V). In r30s1 and s2, p3 stands at
+  (−1671, −1402, −4962) and (−1727, −1402, −4840) and fires 747 and 738 shots, 0 hits, at the human on its respawn spot (150, −916, −7639).
+  Oracle n30s4: p2 at (−1667, −1402, −4942) does the same, 438 shots, 0 hits, 2,411 to the end. Forced there (aim3b),
+  it lands 1 hit in 109. The pitch byte obj+0x1D1 (`func_1504C9E4`'s ramp) feeds the pistol's and 0x23's bullets, not
+  the twin guns' (C). It is not ported, and porting it would not move this rate.
+- **0x34's start records** (V). With 1 + 3 every oracle seed starts slots 0-3 on records 0-3; with 1 + 5, records 3-8.
+  With 2 + 3 and 1 + 15 they start on 7 onwards, the remake's `DEATHMATCH_START_34`. The offset is probably drawn at
+  setup, per match (I). Every 1 + 3 comparison on 0x34 (the tables further down included) starts the two sides
+  differently. 0x30's table holds for 1 + 3.
+
+**Left.**
+- **The electric floor** (0x34, 15 bots, 1,737 reads; the start table is V for 16 players). The remake's bots spend 527
+  frames a run in its box against 151 (t34, 4 runs). They visit 7 times against 3.25, and stand still 62 frames
+  against 0. The long visits are state 4 (goal 82/72/74) or 11, the bot stopped to attack (script 5). Over all of 0x34
+  the share of drawn frames standing in state 4 matches (0.79 against 0.71), so the difference is local to the box.
+  Not traced. The harness's 140 frames a run alive on the live floor (oracle 15) may be `trap_hits` refusing immune
+  or stunned victims, not the bots (not checked).
+- **Remake 0x23 holders die more**: 6 of 19 spells end in death, against 1 of 33 (untraced; it shortens the holds).
+- **The crossbow's pitch** was not looked at. Its 0x34 hit rate is 0.221 against 0.226, but on mismatched starts.
+
+| Check | Result |
+|---|---|
+| Oracle runs (`run.sh`) | n30s0-s7 (0x30), n34s0-s7 (0x34), role3a-c (role 3 at read 25), aim3/aim3b (the stand), w112* (the 112 camp) |
+| `bot_match` (release) | r30s1-8 (0x30, 4,496 frames), r34s1-6 (0x34, 4,403), r34b15s1-6 (0x34, 15 bots, 1,760) |
+| `bun run test` | 576 pass, 7 ignored (with the other G3 lanes' work in the tree) |
+| `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | Both pass. Extra check: clippy `-p conker-bots --all-targets` fails only on `tests/rom.rs`:2236 `type_complexity` (G3e's `race_run`, in progress) |
+
+## Prediction: the leftovers (2026-10-14)
+**Lane G3c, wave G3.** The local player's frame now predicts what it touches:
+- 0x34's pressure plates, fire jets and cones;
+- the Colors flags' and the Heist bag's push;
+- the mounted guns' touch and mount;
+- 0x2D's sliding doors and covers, with the collision now on the right tick;
+- the crossbow bolt's push.
+
+The smoothing details are fixed too:
+- a correction during the camera hand-off;
+- the drawn camera's hint cut;
+- the local player and the view drawn between 30 Hz ticks.
+
+Every live number below compares the server's `STATE` lines with each client's. A "tick over" is a tick where the predicted position is more than 0.001 off. "Rollbacks" are lightyear's. The setup is 2 scripted headless clients over WebSocket on port 5978, `--bots 0`, with debug builds. "Before" is the tree before this lane.
+
+**The wire changed:** `Fighting` (conker-rules `net.rs`, sent to its owner only) gains three fields:
+- `traps: Option<traps::State>`: 0x34's plates, and each plate's trap countdown and owner;
+- `sliding: Option<[gas::Prop; 8]>`: Total War's doors and covers;
+- `bolts: Vec<(u32, [f32; 3])>`: the player's sitting bolts, with their birth ticks.
+
+`PROTOCOL_ID` is left to the wave's bump.
+
+**The shared simulation changed in two places:**
+- `Match::step_player`, the client's frame, now runs these for its one player, in `step_seen`'s order: the trap hits, the cones, every mounted gun (`mounted_guns`, which was only its own gun's `fire_gun`) and the plates. `trap_hits` and `cones` take a player range.
+- The server seats 0x2D's collision from the props after this tick's slide (`Gas::slid`). It was one tick late: the moves collided with the doors where they stood before the in-step `gas.step()`.
+
+`step_seen` is otherwise unchanged, and the rules tests and replays pass.
+
+| Part | What |
+|---|---|
+| conker-rules `traps.rs` | `traps::State` (the plates; per plate, its first trap's countdown and owner), with `offsets()`. `Traps::state` and `set_state`. `Plate` gets serde |
+| conker-rules `gas.rs` | `Gas::step` is public. New: `slid()` (a copy after the slide), `sliding()` and `set_sliding()` (props 0-7). `Prop` gets serde |
+| conker-rules `game.rs` | `step_player` as above. The bolt push's comment notes where a client's bolts come from |
+| conker-rules `net.rs` | `Fighting::traps`, `sliding` and `bolts`. `Fighting::shots()` rebuilds the bolts as `Shot`s |
+| conker-server `main.rs` | 0x2D's `gas::seat` from `game.m.gas.slid()` |
+| conker-client `lib.rs` | **`MatchArena`** keeps 0x34's `Traps`. **`own_tick`** seats into its `Match`: the `MatchView`'s flags, bag and guns (`seat_view`), the predicted traps, props and bolts, and `live`, from the view's start (the bolts' first move). **`seat_props`** seats 0x2D's and 0x34's collision from the predicted fighter: 0x2D's after the slide, as the server's. **`predict`** keeps what was drawn as the tick started |
+| conker-client `traps.rs`, `render.rs` (`show_pickups`) | Draw the plates' sink and the doors' and covers' lift from the prediction. Before, they came from the `MatchView`, a lead behind the collision |
+| conker-client `smooth.rs` | **Hand-off.** The view's weight is `handoff / HANDOFF` throughout. A correction keeps it, and it climbs back by 1/8 a tick over the blend. Before, the correction reset it to 1 at once. **Hint cut.** The drawn body's camera takes the follow camera's `hint_cut`. **`Frame` and `between`**: the frame `f` of the way from the frame drawn as the last tick started |
+| conker-client `render.rs` | `place_players` and `follow_camera` draw the local player and the view `between` the ticks, by `Time<Fixed>`'s overstep fraction. Nothing is interpolated across a follow camera cut, a respawn or a snap |
+
+| Run | Before | After |
+|---|---|---|
+| 0x34: client 1 steps on plate 6 and walks into its own fire jet (a suicide); client 2 runs into a cone | Client 1: 8 ticks over, max 100.7, 6 rollbacks. Client 2: 3 over, max 103.4, 2 rollbacks | Client 1: **0 over**, 3 rollbacks. Client 2: **0 over**, 4 rollbacks |
+| 0x34: slot 0 circles over plate 6 (on and off it), slot 1 idles | Circler: 30 over, max 10, 52 rollbacks. Observer: 2 rollbacks | Circler: **0 over**, 3 rollbacks. Observer: 18 rollbacks, none moving it (left, below) |
+| The same with the circler in slot 1 | Circler: 30 over, max 10, 18 rollbacks. Observer: 1 rollback | Circler: **0 over**, 3 rollbacks. Observer: 15 rollbacks |
+| Map 30: walk into mounted gun A and mount it | 5 over, max 61.5 at the mount, 8 state misses, 2 rollbacks | The mount is predicted. Only the start-up errors are left (max 12.4 at the match start), 1 rollback |
+| Colors: a Tedi runs into the red flag and pushes it | 29 over, max 31.2, 34 rollbacks | **0 over**, 1 rollback |
+| 0x34: crossbow given (`--give 0:60:0x18`), drawn, then 4 hip shots 60 reads apart, standing | Shooter: 15 ticks over, 5.02 at each shot for 3-4 ticks (the bolt's push), 4 corrections, 6 rollbacks. Idle client: 1 rollback | Shooter: **0 over**, 0 corrections, 2 rollbacks. Idle client: 0 over, 5 rollbacks that move nothing (both runs alongside the test suite) |
+| 0x2D: a canister delivered, then walk through cover 3 as it opens | The server let the player through at delivery + 3. The client was 4 ticks over (7.5, 15.5, 24, 25.5), 3 rollbacks | The server lets the player through a tick earlier, as the slide stands. The client is 3 ticks over (7.5, 15.5, 24): the delivery itself is the server's. 3 rollbacks |
+
+| Test | What |
+|---|---|
+| rules `a_players_own_frame_rides_plates_and_takes_traps` (new) | A world with a plate, a fire jet over it and a cone, set up as 0x34's records. Each tick, `step_player` must equal `Match::step` in the player, `traps.state()` and the hit events. The plate sinks, the jet kills (health 0, 1 hit), and the cone burns |
+| client `the_prediction_takes_its_bolts_push` (new) | A crossbow hip shot. Each tick `own_tick` runs on a round-tripped `Fighting` and must equal the server's body (pushed 2 to 10 units by the bolt). Without the bolts seeded it fails at tick 81 |
+| client `a_correction_during_the_hand_off_keeps_the_views_weight` (new) | The follow camera 60 units off, at weight 2/8: the view is equal before and after a correction (the old code jumped 45 units). The weight climbs back to 1 over the blend |
+| client `the_drawn_bodys_camera_cuts_on_the_follow_cameras_tick` (new) | A trip wire across z = 0 and a drawn body 40 behind the predicted one: both cameras cut on the same tick (the old code's drawn camera cut on another) |
+| client `frames_between_ticks_are_drawn_the_overstep_of_the_way` (new) | Halfway: the body and the eye at 17.5 of 35, the facing turning the short way. With no `prev`, or after a reset, it draws the tick |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | `test`: 576 pass, 7 ignored (with the other G3 lanes' work in the tree). Wasm clippy is clean. `check` passes in full (fmt, clippy on every package, the web app's check) |
+
+**Left:**
+- **Others' plates.** A remote player's step onto or off a 0x34 plate costs the other clients rollbacks that move nothing (an observer: 2 → 18 and 1 → 15 rollbacks): the plates are compared in `Fighting`. The upgrade is to predict the plates outside `Fighting`, from the `MatchView`'s confirmed state.
+- **The mount's RNG.** `Mount.rng` is drawn from the match's RNG. When the server's RNG moves in between, the mount costs one rollback, which doesn't show. It didn't happen in the run.
+- **What `seat_view` copies:** the flags, the bag and the guns.
+  - They come from the confirmed `MatchView`. Their moves since it (another player taking a flag, a free gun's pitch decay, its leave count) reach this client as corrections.
+  - A touch right after another player's leave can mispredict.
+- **Server decisions.** A Total War delivery's effects are the server's, so they stay as corrections (the 3 ticks above).
+- **Other players' bolts.** Another player's sitting bolt is not in this client's frame, so its push on the local player is not predicted. It only reaches a player standing on its shooter.
+- **Tank's doors.** They stay on the `MatchView` (`tank::seat`).
+- **What is still drawn per tick:**
+  - the other players (their interpolation's whole ticks);
+  - the radar's orientation and the audio's listener (`Drawn::view`; the HUD's screen points project through the drawn camera).
+
+## Match flow and the crossbow's release (2026-10-14)
+**Lane G3a, wave G3.** The crossbow's aimed shot was already fired on Z's release, as in the original (V: the new
+replay `combat8_xbl`). G2's "fires on the press" was wrong. What the remake lacked was **the aim laser's state**. It
+is now in the rules (`Match::laser`) and on the wire (`Combat::laser`), ready for G5 to draw. Hits and headshots are
+counted where the original's scorer counts them, with tests. A human out of lives now takes over a **dying**
+team-mate bot as the original does. A client refused by a full match is **disconnected with the reason** and sees
+it. **STATS rows past P4** get "P5", "P6"... in the HUD's font. The team screen's up/down (the extra team size) is
+already covered by `--bots`. A human joining mid-match with no vacant participant stays one of the script's bots
+(left; why below). Research: `../lab/research/mp-original/match-flow-g3.md`, with `match-flow-g3-scratch/`
+(`xb_run.sh`: the lldb run on a private `ConkerRecomp.g3a`; `m2c.sh`; `code/`).
+
+**The wire changed:** `Combat` gains `laser: Option<[i16; 3]>` (the dot; `None` while off). `PROTOCOL_ID` was left
+to the wave's bump. **The shared simulation's step did not change.** `Match::laser` is a query. The headshot count
+moved into `hurt` (same counts). `takes_over` lost its health test (the TakeOver effect, which the server applies).
+
+| Part | What |
+|---|---|
+| conker-rules `game.rs` | **`Match::laser(i, world)`**: on while the holder of 0x18/0x41 aims (`Action::Aim`, clip 0x10A) and all of these hold: the tick is past `since + LASER_BLEND` (5), Z is held, R is held (bots excepted), the scope is up. It points where the scope's line first meets a wall or a body part. **`Fighter::lives(start)`**: the original's lives byte, with a dying fighter's life still in (moved from the server's `combat()`). **`hurt`** counts the headshot of every reaction-0x2E hit with the hit (enemy only); `ray`, the bullet head pop and the bolts no longer count it themselves. **`takes_over`**: no `health > 0` |
+| conker-sim `net.rs` | `Combat::laser` |
+| conker-server `main.rs` | `publish` fills `Combat::laser` from `Match::laser` (it takes `Res<Collision>`). `combat()`'s `lives_left` is `Fighter::lives`. **`join_player`**'s two refusals (every team full; Race's 2 humans) trigger aeronet's `Disconnect` on the client's session with the reason |
+| conker-client `connection.rs` | `why()`: a non-empty `LinkFailed(UnlinkReason::ByPeer(r))` reads as `r` (one arm; its test updated) |
+| conker-client `hud.rs` | `results()`: a row past the pack's labels gets `P{n+1}` in the HUD's font, in the row's colour, on the row's text top, scaled with the row |
+| conker-bots `brain.rs`, `lib.rs` | `takes_over`: no `health > 0`. `Body::lives` from `Fighter::lives` (the original's byte, which the script's pick reads) |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| rules replay `combat8_xbl` (new case, crossbow at read 40) | 731 rows, pos 0.0000, **events 9/9, missing 0, extra 0**: 0x10A at 137 and 331, the shots (0x10C) at **302 and 472**, Z let go at 301 and 471 after 161-frame holds |
+| rules `the_crossbow_laser_shines_while_z_is_held` (new) | 0x18 and 0x41: shots at 236 and 406 (the releases), 0x10A from 76 and 265, the laser on over 81..236 and 270..406, its dot on player 1's body and on the released bolt's line. Off without the scope; off after a hit |
+| rules `hits_count_per_enemy_and_tick` (new) | A cook-off in the hand on 2 enemies: shots/hits/kills/suicides (1, 2, 2, 1). A burn: 2 ticks = 2 hits. An immune victim: 0. A sniper hit on an enemy: 1 hit, 1 headshot; on a team-mate: 0, 0 |
+| rules (ROM) `a_plate_sets_off_its_traps` (extended) | The presser has the kill and the hit: (1, 1), (0, 0), (1, 1), (0, 0) |
+| rules `a_dying_bot_is_taken_over` (new) | A dying bot with 2 lives (byte 2) is taken over, and the human respawns at the death's end. With its last life (byte 1), the human is out again |
+| bots (ROM) `total_war_takeover` | Passes (V t1: out 424, swap 437) |
+| client `rows_past_four_are_labelled` (new) | 6 rows: 4 pack labels, then "P5" and "P6" (2 white glyphs each) in rows 5's and 6's bands |
+| Live: `bots.sh` `MODE=total-war BOTS=0 HUMANS=5 PORT=5970` (WebSocket) and 5 clients over WebTransport on 5972 | The 5th joiner: server `the match is full: every team has its humans, disconnected`. The client shows `disconnected from 127.0.0.1:597x: the match is full: every team has its humans. Run the client again to reconnect`. The 4 others play on |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`, `-D warnings`) | 573 pass, 4 ignored (with the other G3 lanes' work in the tree). Wasm clippy is clean. `check`: my files pass `cargo fmt` and clippy. What fails is in other lanes' files still being edited: fmt in conker-bots `brain.rs`:1367, `tests/rom.rs` and `tests/g3d_probe.rs`, client `lib.rs` and `traps.rs`, rules `tank.rs` and `traps.rs`; clippy's `type_complexity` in server `tls.rs`:148 |
+
+**Findings** (V the runs above; C the code; I inferred; details in `match-flow-g3.md`).
+- **The release** (C `func_15065A5C` case 0x18/0x41). While scoped, Z up this frame with Z down last frame
+  (s126+0x88) and the cooldown at 0 fire 0x10C, with a 0x3C cooldown. Otherwise the clip stays 0x10A. There is no
+  minimum hold (C; V G2's `las`: a one-frame hold fired), and the bone crossbow behaves the same. s126+0x88 is written at the end of `func_1504CB98` on every
+  path, so a hit never makes a stale release.
+- **The laser** (C `func_15054A94` → `func_151026BC`; ended by `func_151027E8`). It is on while all of these hold:
+  the parent is in 0x10A past its blend, the scope is up (for a human, R held), Z is held. It ends on the release, a
+  hit, the holster, or the child's removal at a death or a weapon change (`func_15054A5C`). V combat8_xbl: made at
+  141 and 335, 5 frames into 0x10A; ended at 301 and 471.
+- **The scorer** `func_151E5FF4` (C): a hit counts for a human attacker on another team, and reaction 0x2E adds a
+  headshot. Kills count for anyone.
+- **The takeover** (C `func_1508E89C`): no health test. The script's pick is the most health + 6·lives > 0, and the
+  lives byte drops at the respawn, so a dying bot qualifies.
+- **The team screen** (C `func_151E1744`): up/down set the extra team size 0x8008FDA0 (≥ 0). The size is the row's
+  most humans per team plus that, clamped by the row's [min, max] over the teams, and the bots fill each team to it.
+  Every row's minimum is 0, so `--bots` (the total) reaches each such size: `TeamRow::bots` fills the teams evenly.
+  No option was added.
+
+**Left.**
+- **A human joining with no vacant participant** (or into a bot's) is one of the script's bots until the next
+  match: no Beach 90 s deadline, no Total War traitor check or takeover. The scripts split humans from bots by
+  index against a count read once at the start, and that count lives in a per-script global (G+0x1EC8 in War's
+  scripts; in Heist's that global is the carrier). Fixing it needs a remap of every per-participant array and
+  participant-valued global, or that count mapped per script. Neither fits E1's rule (only the changing slot's
+  memory starts over).
+- **The laser is not drawn (G5).** The handoff:
+  - Use `Combat::laser` for the others, and `Match::laser` on the predicted fighter for one's own.
+  - The beam runs from the muzzle to the dot and only the others' views draw it; the dot is drawn by all.
+  - Colour bytes: (0xFF, 0) for models 0x5A, 0x5F, 0x74, 0x75, 0x7A, else (0x32, 0xFF).
+  - Sound 1232 at 2000, 2D, for the aimer.
+  - **Pack:** the dot (I8 64 × 64 at 0x802288F0) and the beam (I8 128 × 32 at 0x80229900) textures (G2's
+    findings above).
+- **STATS P5+** use the HUD font, not a pack cell. The original has no P5, so there is nothing to extract.
+
+## Net and deploy details (2026-10-14)
+**Lane G3b, wave 8's leaving/joining, deployment and native HUD items.** No wire change (`net.rs`, `PROTOCOL_ID`
+untouched), no change to the shared simulation. One server rule changed for `--wait` only (the bots wait for the
+start).
+
+| Item | Result |
+|---|---|
+| 1. Ctrl-C skips the disconnect | **Fixed.** SIGINT, SIGTERM and SIGHUP now go through Bevy's Ctrl-C exit on the client (headless and windowed) and the server. ctrlc's `termination` feature adds SIGTERM and SIGHUP; the handler is set with `ctrlc::set_handler` (overwrite), because a script's background job starts with SIGINT ignored and Bevy's own plugin then stands down (it did in the first run: nothing was caught). The client's `leave` already turned an exit into the disconnect. The server's new `shutdown.rs` holds the first exit 0.2 s: it triggers lightyear's `Stop` in `PostUpdate` before the sends, so every client's disconnect goes out in the same frame, before the next frame's receive unlinks the transports. Exit code 130 (Bevy's); the systemd unit has `SuccessExitStatus=130`. A second Ctrl-C exits at once (Bevy) |
+| 2. Native WebTransport with a digest is IPv4-only | **Fixed.** `connection::wt` (was `ca`) opens every native WebTransport link itself: it binds the server address's family (`InAddrAnyV4`, `InAddrAnyV6`, dual-stack for a host name) and checks the certificate against `ca=`, else the digest, else (new) the system's roots. Lightyear's `WebTransportClientIo` is now the browser's only |
+| 3. Token fetch without a connect timeout | **Fixed.** `FETCH_SECS` = 4 to connect (each resolved address), then 4 for the answer; a timeout reads `could not get a connect token from URL: no answer in 4 s`. The native fetch now runs on a thread (one `Fetching` for both targets), so the window no longer freezes; the fetch counts as connecting (the HUD says `connecting to ... over ...`, and the 10 s watchdog bounds fetch and handshake together). `server_info`'s retries stop after 5 s in all |
+| 4. Tokens that survive a slow load | **Already so** since the asset-pack wave: both targets fetch the token in `connection::connect`, which runs only once the level and the map's characters have loaded and 10 calm frames passed (`ready`), right before the connect; `web/play.js` and `web/app` fetch none. No change; no refetch on expiry (a connect attempt lasts 10 s at most, the token 60 s) |
+| 5. Reload a renewed certificate | **Fixed.** `tls.rs`: every handshake (WebTransport and `wss://`) takes the certificate from one rustls resolver (`tls::Certificate`); with `--cert`, `tls::watch` looks at the two files every 10 s and swaps in a pair that loads and matches (`CertifiedKey::from_der` checks the key), else keeps the one in use and tries again (a renewal writes one file, then the other). Open sessions keep theirs. The WebTransport server is opened by `tls::open_webtransport` (lightyear's `WebTransportServerIo` takes a fixed identity), as lightyear does; its own observers still accept the sessions, and `relink_evicted_session` still covers the second transport. Both TLS configs use ring explicitly (rustls has aws-lc-rs compiled in too). `deploy/renew-hook.sh` no longer restarts the game server (it starts it, a no-op once it runs, for the first issue) |
+| 6. Rate-limit `/token` | **Fixed** (`ponytail:`). 10 tokens per 10 s per address (then `429`), counted in a map pruned on each request: the peer's address, or for a loopback peer the last `X-Forwarded-For` entry (Caddy's); a loopback peer without one (dev, this machine's clients) and `/info` are not limited. Still one request at a time with the 2 s read limit. An IPv6 client is counted per /128 |
+| 7. Native HUD wording | **Fixed.** `NetStatus::text` keeps the page's words in the browser and says natively: `Run the client again to reconnect`, `--transport ws tries WebSocket`, `pass --digest HEX, the server's --digest-file`, `A restarted server has a new certificate: pass its --digest`. The native ellipsis is `...`: Bevy's default font (FiraMono subset) has the 95 ASCII glyphs only, no U+2026. anyhow's numbered causes (`0: A 1: B`, the WebSocket reset) read as `A: B` |
+| 8. `--wait`'s rollback and the bots before the start | **Bots fixed; the rollback shown harmless.** The bots: the match steps from the server's own start, and the bots' AI with it, so they roamed, took weapons and fought the humans waiting for the start (tick 120 of the run below: bot 3 fighting slot 0, bot 1 holding 0x39). Now their AI waits for a `--wait` start (`idle`, next to Race's `warm_up`; the match still steps, the humans move). The rollback: at the start tick the server puts every fighter back on its start place (`Fighter::new`, a new `Match`); the client's prediction has no such step, so the first confirmed state of that tick differs and it rolls back its lead (3 ticks locally, 13-14 at `lag=150`). It is the reset itself reaching the client, once per match start, only in `--wait` replays and tests; a player that stood still (script files) moves nothing, one that walked (the circle pattern, a page) goes back to its start place as the server meant. Predicting it would need the slot's start place (not replicated) and a copy of the start block in the client's prediction (`lib.rs`, the prediction lane) |
+
+### Tests (unit)
+- conker-client 140 pass: `statuses_read_with_their_reasons_and_hints` (native words, ASCII, `connecting to ...`),
+  `a_silent_endpoint_times_out_and_sockets_follow_the_family` (a listener that never answers: `no answer in 4 s`
+  within 6 s; V4, V6 and dual binds; the hex reader), `netcode_states_read_as_words` (+ the numbered causes).
+- conker-server 30 pass: `tokens_are_limited_per_address` (over a socket: 10 then 429 for one forwarded address,
+  `/info` still 200, another address 200, the loopback without `X-Forwarded-For` unlimited; the window's end),
+  `pairs_load_checked_and_swap` (a mismatched pair refused with `KeyMismatch`; the resolver swaps).
+
+### Runs (ports 5974 and 5976)
+- `crates/conker-server/sigint.sh` (new; four headless clients):
+
+  | Signal | Seen | Exit |
+  |---|---|---|
+  | SIGINT to client 1 (WebTransport) | the server logs `client Netcode(1) left: Disconnected by peer` 0.07 s later | 0.18 s |
+  | SIGTERM to client 2 (WebTransport) | `left` 0.06 s later | 0.20 s |
+  | SIGTERM to the server | client 3 (WebTransport): `the server closed the connection` 0.04 s later; client 4 (WebSocket) 0.01 s | 0.21 s |
+
+  Before the fix (first run, same script): nothing caught; the remaining WebTransport client saw `nothing from the
+  server for 3 s`.
+- `[::1]`, `127.0.0.1` and `localhost` over WebTransport with a digest: all three connected.
+- A native WebTransport client with neither digest nor `ca=` against the dev server: refused at once, `invalid
+  peer certificate: UnknownIssuer`, with the native hint (it checked against lightyear's empty hash list before).
+- `smoke.sh wt ws ws` and `wt ws wt` (5974): 16/16 both; prediction max error 0, 0 state misses; rollbacks 0, and
+  once one 2-tick rollback (a pickup).
+- `../lab/deploy-test/test-reload.sh` (new, 5976; the test CA, plus a throwaway localhost certificate from the
+  lab's other CA): 8/8. Client A connected; the new certificate alone (old key) was refused by the server's check
+  (`KeyMismatch`) and the one in use stayed (a client trusting the first CA still connected); with the key the
+  server logged `certificate reloaded ... digest 22D6...`; clients trusting the other CA connected over
+  WebTransport and `wss://`, one trusting the first was refused (`UnknownIssuer`); client A played on until its
+  own exit (1 leave, 1 rollback of 3 ticks).
+- `--wait 1 --bots 3`, one headless client on the circle pattern: before, the bots moved from tick 30 and bot 3
+  fought slot 0 at tick 120; after, the bots stood at their places until the start (tick 193), then moved. Both
+  runs: one rollback at the start tick (`confirmed_tick` = the server's `match started at tick`), 3 ticks.
+- `combat.sh` e_w09 (5974; `--wait 2`, no bots): 39 of 43 oracle events, clock 742/742, lag compensation rewound vs
+  shown max 0: as recorded before.
+- Native windowed client, a minted token and a digest, nothing on the port: the HUD reads `connecting to
+  127.0.0.1:5974 over WebTransport...` (`../lab/screens/net-deploy/native-hud-connecting.png`).
+
+### Changed
+- conker-server: new `shutdown.rs`, `sigint.sh`; `tls.rs` rewritten (`Certificate`, `load`, `self_signed`,
+  `digest`, `configs`, `watch`, `WebTransportTls`, `open_webtransport`); `token.rs` (`PER_WINDOW`, `WINDOW`,
+  `Limit`); `main.rs`: the transport setup, `mod shutdown`, the bots' `idle` gate. Dependencies: `aeronet_webtransport
+  =0.21.0` (lightyear's, already in the tree) and `ctrlc` with `termination` (bevy_app's, already in the tree)
+  direct; `tokio` no longer direct (PEM files load with rustls' reader).
+- conker-client: `connection.rs` (`FETCH_SECS`, `page`, `wt` for `ca`, one `Fetching`, `hex`, the connecting
+  status from the token fetch on); `ctrlc` with `termination` (native).
+- deploy: `renew-hook.sh` (no restart of the game server), `conker-server.service` (`SuccessExitStatus=130`),
+  `README.md` (step 8's renewal, the token limit, graceful stops, the local reload test).
+- The landing's Kill (SIGTERM, then SIGKILL after 3 s) now gets the server's clean 0.2 s stop.
+
+### Left
+- A real host: the reload under certbot and systemd (`install` into `/etc/conker/tls`), and the native
+  system-roots WebTransport path against a real certificate.
+- Predicting the `--wait` start's reset on the client (prediction lane).
+- With `--cert`, `--digest-file` is written once at the start, not again on a reload (only a dev page pinning a
+  `--cert` server's digest would notice; https pages pin nothing).
+- `/token`: one request at a time (a slow client holds it up to 2 s); per-/64 counting for IPv6; tokens are free
+  to anyone who reaches the page anyway.
+- The 10 s connect watchdog is still untested in a browser; the browser's own words are unchanged and were not
+  re-run (no browser here).
+
 ## Held weapons: the crossbow and item 0x3A in the client (2026-10-14)
 **Batch L2b, wave G2, the client lane. The crossbow and the bone crossbow are drawn from their own rig and posed by
 the holder's clip: the bind pose in the draw, the fire clip at the holder's clock, the holster clip, else the one-tick

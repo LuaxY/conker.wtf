@@ -111,6 +111,9 @@ const HOLD_HAND: [f32; 3] = [-22.3, -12.2, 60.3];
 /// (and a shot in progress) ends 8 frames after R is let go (V e_w24 1161, ctlw_k10 251).
 const AIM_DELAY: u32 = 3;
 const AIM_EXIT: u32 = 8;
+/// The crossbow's aim laser waits this many frames into 0x10A, its blend (V g3a combat8_xbl:
+/// 0x10A from frames 136 and 330, the laser from 141 and 335; [`Match::laser`]).
+const LASER_BLEND: u32 = 5;
 /// A grenade pushes players out to this distance in xz (V: 31.64 → 32.733 and 32.747 on the
 /// throws of ctl_cd and e_gren, the thrower's next frame; I: a generic object push).
 const GRENADE_PUSH: f32 = 32.74;
@@ -506,6 +509,15 @@ impl Fighter {
     /// The body it pushes the others with (conker-sim's `Other`): its class's.
     pub fn other(&self) -> Other {
         characters::body(self.class).at(self.body.pos)
+    }
+
+    /// The original's lives byte (the stats record's +8) for a match of `start` lives: those and
+    /// [`Fighter::extra`] less the deaths, 0 once out. A dying fighter's life is still in: the game
+    /// takes it at the respawn (V `func_15085710(i,4,1)`), not at the lethal hit.
+    pub fn lives(&self, start: u8) -> u16 {
+        let dying = matches!(self.action, Action::Hurt { lethal: true, .. });
+        let left = (u16::from(start) + self.extra + u16::from(dying)).saturating_sub(self.deaths);
+        if self.out > 0 { 0 } else { left }
     }
 
     /// This slot's player in `body`'s object (`func_15062800` swaps the two objects and puts each
@@ -934,13 +946,13 @@ pub struct Match {
     /// its model has no parts (the cylinder, `func_15081C20`, no head). Empty (client prediction,
     /// the replays without a pack): the fitted cylinder and axis spheres stand in for everyone.
     pub parts: Vec<Option<projectile::BodyParts>>,
-    /// The scene's mounted guns ([`gun::spawn`]; none in a client's copy: their touch and fire are
-    /// the server's, a gunner's own frame is predicted from its [`Fighter::gun`]).
+    /// The scene's mounted guns ([`gun::spawn`]; a client's copy has them as the server last sent
+    /// them, so its own touch and fire are predicted, a gunner's frame from its [`Fighter::gun`]).
     pub guns: Vec<Gun>,
     /// War: Beach's plunger (stepped in Beach only).
     pub plunger: Plunger,
-    /// Scene 0x34's pressure plates and traps (`Traps::new`; none elsewhere, and none in a
-    /// client's copy: their hits are the server's).
+    /// Scene 0x34's pressure plates and traps (`Traps::new`; none elsewhere; a client's copy steps
+    /// them from the server's last, `net::Fighting::traps`).
     pub traps: Traps,
     /// Tank's shells, bomb and wrecks ([`crate::tank`]).
     pub tank: Tank,
@@ -1099,11 +1111,12 @@ impl Match {
     }
 
     /// One frame of player `i` alone, for a client predicting its own player: its frame as
-    /// [`Self::step_seen`] runs it (actions, movement or knock-back, death and respawn, the strikes
-    /// it makes, aimed at the others where `seen` says it showed them), the fire burning on it, the
-    /// match's grenades (a client puts its own there: they push it and blow it up) and its root's
-    /// clock. The others stand where they are, bullets, rockets and shots stay, no pickup is
-    /// touched and the clock stays: the server decides those.
+    /// [`Self::step_seen`] runs it (the doors' slide, scene 0x34's traps and cones on it, actions,
+    /// movement or knock-back, death and respawn, the strikes it makes, aimed at the others where
+    /// `seen` says it showed them), the mounted guns' touch and fire, the plates (their riders go
+    /// with them), the fire burning on it, the match's grenades (a client puts its own there: they
+    /// push it and blow it up) and its root's clock. The others stand where they are, bullets,
+    /// rockets and shots stay, no pickup is touched and the clock stays: the server decides those.
     pub fn step_player(
         &mut self,
         i: usize,
@@ -1116,9 +1129,19 @@ impl Match {
         if self.phase() == Phase::Over {
             return ev;
         }
+        if !self.settings.tank {
+            self.gas.step();
+        }
         let mut late = Vec::new();
+        self.trap_hits(i..i + 1, &mut ev);
         self.player(i, input, arena, world, seen, &mut late, &mut ev);
-        self.fire_gun(i, world, seen, &mut ev);
+        if !self.settings.race {
+            self.cones(i..i + 1, &mut ev);
+        }
+        self.mounted_guns(world, seen, &mut ev);
+        if !self.traps.list.is_empty() {
+            self.plates(world);
+        }
         self.burn_player(i, &mut ev);
         self.fly_grenades(arena.lob, world, &mut ev);
         let rays = self.late_strikes(late, world, seen, &mut ev);
@@ -1180,7 +1203,7 @@ impl Match {
         } else {
             self.gas.step();
         }
-        self.trap_hits(&mut ev);
+        self.trap_hits(0..self.players.len(), &mut ev);
         for g in &mut self.guns {
             g.leave = g.leave.saturating_sub(1);
         }
@@ -1195,7 +1218,7 @@ impl Match {
         // Race: no cone hits (0x33 has kind-0xE floor on its ramps; I: a board's height above
         // the floor, obj+0x28, is never 0 while it hovers).
         if !self.settings.race {
-            self.cones(&mut ev);
+            self.cones(0..self.players.len(), &mut ev);
         }
         self.mounted_guns(world, seen, &mut ev);
         if self.settings.beach {
@@ -1590,6 +1613,7 @@ impl Match {
                     && may(f)
                     && match self.settings.race {
                         true => race::touches(pos, f),
+                        false if self.settings.tank => tank::touches(pos, f, reach(i)),
                         false => weapon::touches(pos, f.body.pos, reach(i)),
                     }
             });
@@ -1872,6 +1896,7 @@ impl Match {
                     }
                 }
                 Effect::TankRates(i, r) => self.tank.rates.push((i, r)),
+                Effect::TankAim(i, at) => self.tank.aims.push((i, at)),
                 Effect::Hold(i, n) => {
                     if let Some(f) = self.players.get_mut(i) {
                         f.body.lock = n;
@@ -1955,20 +1980,44 @@ impl Match {
         if f.out > 0 { 0 } else { left }
     }
 
-    /// [`Effect::TakeOver`]`(i, j)` goes ahead: `i` out [`TAKEOVER_DELAY`] frames, `j` its living
+    /// [`Effect::TakeOver`]`(i, j)` goes ahead: `i` out [`TAKEOVER_DELAY`] frames, `j` its
     /// team-mate bot in play (`func_1508E89C` refuses before the skull is grown, C; the script
-    /// picks `j` and sends it every frame from the out frame's next).
+    /// picks `j` and sends it every frame from the out frame's next). A dying bot too: neither
+    /// tests health, and the script's pick (most health + 6·lives) still counts its life, which
+    /// goes at the respawn ([`Fighter::lives`], C).
     fn takes_over(&self, i: usize, j: usize) -> bool {
         let n = self.players.len();
         if i >= n || j >= n || i == j || !self.in_play(j) || self.free.contains(&i) {
             return false;
         }
         let (h, b) = (&self.players[i], &self.players[j]);
-        h.out > 0
-            && self.tick >= h.out_at + TAKEOVER_DELAY
-            && b.bot
-            && b.health > 0
-            && b.team == h.team
+        h.out > 0 && self.tick >= h.out_at + TAKEOVER_DELAY && b.bot && b.team == h.team
+    }
+
+    /// Player `i`'s aim laser as the last step left it (`func_15054A94`'s tail → `func_151026BC`,
+    /// effect type 3, C): on while the crossbow's or the bone crossbow's holder (their child
+    /// object) is in 0x10A past [`LASER_BLEND`], scoped (s126+0x197; a human's R held) with Z
+    /// held; off from the frame Z is let go, which shoots, or anything else ends it (a hit, the
+    /// holster, the child's removal at a death or a weapon change, `func_15054A5C`). V g3a
+    /// combat8_xbl: on 141-300 and 335-470, off at the releases 301 and 471. It points where the
+    /// scope's line first meets a wall or a body part, as the aimed shot's target does.
+    pub fn laser(&self, i: usize, world: &CollisionWorld) -> Option<[f32; 3]> {
+        let f = self.players.get(i)?;
+        let on = matches!(f.action, Action::Aim { .. })
+            && matches!(f.weapon, Some(0x18 | 0x41))
+            && f.anim == anim::CROSSBOW_AIM
+            && self.tick > f.since + LASER_BLEND
+            && f.buttons & BUTTON_Z != 0
+            && (f.bot || f.buttons & BUTTON_R != 0)
+            && f.body.scope_yaw.is_some();
+        if !on {
+            return None;
+        }
+        let dir = aim(f).0;
+        let eye = [f.body.pos[0], f.body.pos[1] + 67.5, f.body.pos[2]];
+        let wall = raycast(world, eye, dir, RAY_RANGE);
+        let d = (self.first_part(i, eye, dir, wall, &|_, _| None)).map_or(wall, |h| h.1);
+        Some(core::array::from_fn(|j| eye[j] + dir[j] * d))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2025,8 +2074,7 @@ impl Match {
         // A bolt sitting where it was fired pushes too, its shooter included: an object of radius 5,
         // centre 0, vertical scale 1, no owner (`func_1505D6F0`, C; V e4 cbp2: the shooter moved
         // (1.843, 2.152) then (1.577, 1.841) by the bolt at its muzzle, cb3's drift of ~5.3 a hip
-        // shot). ponytail: the client does not predict it (its bolts are not in `Fighting`), the
-        // server's correction moves it.
+        // shot). A client has the sitting bolts from `Fighting::bolts`.
         let bolts = (self.shots.iter())
             .filter(|(born, s)| {
                 s.step == projectile::BOLT_STEP && *born < t && t <= self.first_move(*born)
@@ -2978,12 +3026,7 @@ impl Match {
             // `func_15081E78` skips an immune or stunned living victim (C). The angle: V 0x6300 for
             // the facing 25345 on e_w24; the game's varies by up to 21 for the same aim
             // (combat4_w24 0x6302, combat4_pitch24 0x6313 and 0x6315; I: the rifle's pose).
-            if self.hurt(v, &kind, false, true, me.facing & !1, Some(i), ev)
-                && head
-                && self.enemies(i, v)
-            {
-                self.players[i].headshots = self.players[i].headshots.saturating_add(1);
-            }
+            self.hurt(v, &kind, false, true, me.facing & !1, Some(i), ev);
         }
     }
 
@@ -3166,7 +3209,8 @@ impl Match {
     /// `func_150A11C4` → `func_1515F270`): a player inside a trap that is on takes its hit,
     /// credited to the trap's owner; a direct hit, refused while immune or stunned, at the
     /// victim's own facing (C; V trap34 and elec34: the first touch kills, the presser credited).
-    fn trap_hits(&mut self, ev: &mut Vec<Event>) {
+    /// `players`: the slots tested (a client's frame tests its own).
+    fn trap_hits(&mut self, players: std::ops::Range<usize>, ev: &mut Vec<Event>) {
         let on: Vec<usize> = (0..self.traps.list.len())
             .filter(|&k| self.traps.hits(k))
             .collect();
@@ -3177,7 +3221,7 @@ impl Match {
                 true => damage::TRAP_SPARK,
                 false => damage::TRAP_FIRE,
             };
-            for v in 0..self.players.len() {
+            for v in players.clone() {
                 let (f, b) = (&self.players[v], &self.players[v].body);
                 if self.free.contains(&v) || f.out > 0 || !t.contains(b.pos, b.floor_y) {
                     continue;
@@ -3191,8 +3235,9 @@ impl Match {
     /// Scene 0x34's burning cones (floor kind 0xE): a living player on one at its move's end
     /// takes the cone's hit, unguarded and unowned, and catches fire (`func_1504CB98`'s end with
     /// obj+0x28 = 0, C; V cone34: hit in its first frame there, burn ticks with no attacker).
-    fn cones(&mut self, ev: &mut Vec<Event>) {
-        for v in 0..self.players.len() {
+    /// `players`: the slots tested.
+    fn cones(&mut self, players: std::ops::Range<usize>, ev: &mut Vec<Event>) {
+        for v in players {
             let (f, b) = (&self.players[v], &self.players[v].body);
             let on = b
                 .floor
@@ -3308,8 +3353,6 @@ impl Match {
                 let a = dir_angle(world, s.dir);
                 if self.hurt(v, &kind, false, true, a, Some(s.owner), ev) {
                     let head = head && self.enemies(s.owner, v);
-                    let o = &mut self.players[s.owner];
-                    o.headshots = o.headshots.saturating_add(u16::from(head));
                     // Its victim's death spin is a frame shorter than the sniper's (V combat4_w14,
                     // combat5_cb_e1: 0x17E for 75 frames, the sniper's 76; I: the frame order); a
                     // body hit's 0xD3 keeps its 30, a lethal one's too (V combat5_cb_e1 907-937,
@@ -3402,6 +3445,9 @@ impl Match {
             let a = &mut self.players[attacker];
             if enemy {
                 a.hits = a.hits.saturating_add(1);
+                // A hit of reaction 0x2E is a headshot: the type's, the one `func_151E5FF4` is
+                // given (C; a seated gunner's 0x2E comes after it, from obj+0x23B).
+                a.headshots = a.headshots.saturating_add(u16::from(kind.reaction == 0x2E));
             }
             if lethal && enemy {
                 a.kills = (a.kills + 1).min(9999);
@@ -3803,11 +3849,7 @@ impl Match {
                         f.health -= 1;
                     } else {
                         let (o, k) = (b.owner, damage::SNIPER_RAY);
-                        if self.hurt(v, &k, false, false, b.angle, Some(o), ev)
-                            && self.enemies(o, v)
-                        {
-                            self.players[o].headshots = self.players[o].headshots.saturating_add(1);
-                        }
+                        self.hurt(v, &k, false, false, b.angle, Some(o), ev);
                         continue;
                     }
                 }
@@ -4521,6 +4563,68 @@ mod tests {
         assert_eq!((p.item(132), p.item(133)), (0xA6, 0));
     }
 
+    /// What `func_151E5FF4` counts (C; `dm-maps-results.md` §5.7): a hit per enemy taken, so a
+    /// blast on two enemies is 2 hits for its one shot and the thrower's own share none; each
+    /// burn tick is one; a refused hit (immune) none; reaction 0x2E is also a headshot, never on
+    /// the attacker's own team.
+    #[test]
+    fn hits_count_per_enemy_and_tick() {
+        let (arena, m, w) = duel();
+        let mut third = Fighter::new(
+            &Placement {
+                index: 0,
+                pos: [0.0, 0.0, 120.0],
+                facing: 0,
+                camera: [0.0; 3],
+            },
+            2,
+            0,
+        );
+        third.immune = 0;
+        let players = [m.players.clone(), vec![third]].concat();
+        let mut m = Match::new(&arena, players, Rng::new(1), 0);
+        run(
+            &mut m,
+            &arena,
+            &w,
+            140,
+            |t| if t >= 10 { C_DOWN } else { 0 },
+        );
+        let p = &m.players[0];
+        assert_eq!((p.shots, p.hits, p.kills, p.suicides), (1, 2, 2, 1));
+        // A fire lit by player 0 on player 1: its 2 ticks (59 and 122 frames in) are 2 hits.
+        let (arena, mut m, w) = duel();
+        m.players[1].burn = Some(Burn::new(Some(0)));
+        let ev = run(&mut m, &arena, &w, 130, |_| 0);
+        let ticks = (ev.iter())
+            .filter(|e| {
+                matches!(
+                    e.1,
+                    Event::Hit {
+                        victim: 1,
+                        attacker: 0,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((ticks, m.players[0].hits), (2, 2));
+        // Immune: refused, no hit; reaction 0x2E: a hit and a headshot, none on a team-mate.
+        let (_, mut m, _) = duel();
+        let mut ev = Vec::new();
+        m.players[1].immune = 20;
+        assert!(!m.hurt(1, &damage::TWIN_BULLET, false, true, 0, Some(0), &mut ev));
+        assert!(!m.hurt(1, &damage::GRENADE_OUTER, true, false, 0, Some(0), &mut ev));
+        assert_eq!((m.players[0].hits, m.players[0].headshots), (0, 0));
+        m.players[1].immune = 0;
+        assert!(m.hurt(1, &damage::SNIPER_RAY, false, true, 0, Some(0), &mut ev));
+        assert_eq!((m.players[0].hits, m.players[0].headshots), (1, 1));
+        let (_, mut m, _) = duel();
+        m.players[1].team = 0;
+        assert!(m.hurt(1, &damage::SNIPER_RAY, false, true, 0, Some(0), &mut ev));
+        assert_eq!((m.players[0].hits, m.players[0].headshots), (0, 0));
+    }
+
     /// Item 0x3A on 0x1A and 0x3F (V c3a: C-down held 30 frames from read 100): pulled a frame
     /// after C-down (0x1F9), held 22 frames on (0x1FA), thrown (0x1FC, 19 frames) when let go and
     /// out of the hand at once, a step along; shown as 0xBA (0x3A to the camera, never in the hand)
@@ -4700,6 +4804,86 @@ mod tests {
         });
         let f = &m.players[0];
         assert_eq!((f.anim, f.shots), (anim::CROSSBOW_AIMED, 2));
+    }
+
+    /// combat8_xbl (V g3a): Z held from the draw into R's aim, let go 160 frames on, pressed again
+    /// in 0x10C and held 160 more. The laser comes 5 frames into each 0x10A and goes on the release,
+    /// whose frame shoots; it points at player 1's body ahead. Not without the scope, nor in a hit.
+    #[test]
+    fn the_crossbow_laser_shines_while_z_is_held() {
+        for id in [0x18, 0x41] {
+            let (arena, mut m, w) = duel();
+            m.give(0, id);
+            m.players[0].body.scope_yaw = Some(0.0);
+            let buttons = |t: u32| match t {
+                0 => BUTTON_B,
+                30..=74 => BUTTON_Z,
+                75..=235 => BUTTON_Z | BUTTON_R,
+                245..=405 => BUTTON_Z | BUTTON_R,
+                _ => BUTTON_R,
+            };
+            let (mut frames, mut aimed) = (Vec::new(), None);
+            for _ in 0..460 {
+                let (t, dot, n) = (m.tick, m.laser(0, &w), m.shots.len());
+                run(&mut m, &arena, &w, 1, buttons);
+                frames.push((t, m.players[0].anim, m.laser(0, &w)));
+                if m.shots.len() > n {
+                    aimed = aimed.or(dot.zip(m.shots.last().map(|s| s.1)));
+                }
+            }
+            // The released bolt flies at the dot the laser showed (the same scope line).
+            let (dot, bolt) = aimed.unwrap();
+            let d: [f32; 3] = core::array::from_fn(|j| dot[j] - bolt.pos[j]);
+            let u = bolt.dir;
+            let off = [
+                d[1] * u[2] - d[2] * u[1],
+                d[2] * u[0] - d[0] * u[2],
+                d[0] * u[1] - d[1] * u[0],
+            ];
+            assert!(
+                off.iter().all(|c| c.abs() < 0.01),
+                "{id:#x}: {dot:?} {bolt:?}"
+            );
+            let starts: Vec<u32> = (frames.windows(2))
+                .filter(|p| p[1].1 == anim::CROSSBOW_AIM && p[0].1 != anim::CROSSBOW_AIM)
+                .map(|p| p[1].0)
+                .collect();
+            let shots: Vec<u32> = (frames.windows(2))
+                .filter(|p| p[1].1 == anim::CROSSBOW_AIMED && p[0].1 != anim::CROSSBOW_AIMED)
+                .map(|p| p[1].0)
+                .collect();
+            let on: Vec<u32> = (frames.iter())
+                .filter(|f| f.2.is_some())
+                .map(|f| f.0)
+                .collect();
+            assert_eq!(shots, [236, 406], "{id:#x}: shots on the releases");
+            assert_eq!(starts[..2], [76, 265], "{id:#x}");
+            let want: Vec<u32> = (81..236).chain(270..406).collect();
+            assert_eq!(on, want, "{id:#x}");
+            // At player 1's body, 146.5 ahead along the scope.
+            let p = frames[100].2.unwrap();
+            assert!(p[0] > 100.0 && p[0] < 146.5 && p[2].abs() < 1e-3, "{p:?}");
+        }
+        // No scope (R's aim not looking through it): no laser.
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x18);
+        run(&mut m, &arena, &w, 120, |t| match t {
+            0 => BUTTON_B,
+            30..=74 => BUTTON_Z,
+            _ => BUTTON_Z | BUTTON_R,
+        });
+        assert_eq!(
+            (m.players[0].anim, m.laser(0, &w)),
+            (anim::CROSSBOW_AIM, None)
+        );
+        // A hit puts it out.
+        m.players[0].body.scope_yaw = Some(0.0);
+        run(&mut m, &arena, &w, 1, |_| BUTTON_Z | BUTTON_R);
+        assert!(m.laser(0, &w).is_some());
+        let mut ev = Vec::new();
+        m.hurt(0, &damage::TWIN_BULLET, false, false, 0, Some(1), &mut ev);
+        run(&mut m, &arena, &w, 1, |_| BUTTON_Z | BUTTON_R);
+        assert_eq!(m.laser(0, &w), None);
     }
 
     /// A hip bolt pushes its shooter while it sits at the muzzle: fired from Z at 131 (born 141, odd
@@ -6015,6 +6199,57 @@ mod tests {
         let h = m.players[0];
         assert_eq!((h.body.xz_speed, h.immune), (9.5, 89));
         assert!(m.ended_at.is_none());
+    }
+
+    /// A dying team-mate bot is taken over (`func_1508E89C` and the script's pick test no health,
+    /// C): the human dies on in its body and respawns at the death's end on the bot's life left;
+    /// on the bot's last life it is out again then.
+    #[test]
+    fn a_dying_bot_is_taken_over() {
+        for (bot_deaths, back) in [(0, true), (1, false)] {
+            let (arena, m, w) = duel();
+            let mut m = m.with(Settings {
+                time: None,
+                lives: 2,
+                total_war: true,
+                ..Settings::default()
+            });
+            let far = Placement {
+                index: 0,
+                pos: [-3000.0, 0.0, 0.0],
+                facing: 0,
+                camera: [0.0; 3],
+            };
+            m.players.push(Fighter {
+                bot: true,
+                deaths: bot_deaths,
+                ..Fighter::new(&far, 0, 0)
+            });
+            m.players[0].deaths = 1;
+            m.apply(&[Effect::Hit {
+                slot: 0,
+                kind: damage::GAS,
+                attacker: Some(1),
+            }]);
+            while m.players[0].out == 0 || m.tick < m.players[0].out_at + TAKEOVER_DELAY {
+                run(&mut m, &arena, &w, 1, |_| 0);
+            }
+            m.players[2].health = 1;
+            m.apply(&[Effect::Hit {
+                slot: 2,
+                kind: damage::MG_BULLET,
+                attacker: Some(1),
+            }]);
+            let b = m.players[2];
+            assert_eq!((b.health, b.lives(2)), (0, 2 - bot_deaths));
+            let ev = m.apply(&[Effect::TakeOver(0, 2)]);
+            assert_eq!(ev, [Event::TakeOver { player: 0, from: 2 }]);
+            assert!(m.players[0].health == 0 && m.players[2].out > 0);
+            while m.players[0].health == 0 && m.players[0].out == 0 {
+                run(&mut m, &arena, &w, 1, |_| 0);
+            }
+            assert_eq!(m.players[0].out == 0, back, "bot deaths {bot_deaths}");
+        }
     }
 
     /// The gas's kill ends as any kill, 86 + 52 + 55 frames on: untimed with 1 life the victim is

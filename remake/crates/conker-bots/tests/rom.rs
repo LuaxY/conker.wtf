@@ -2194,8 +2194,9 @@ fn tank_bots_run(rom: &extract_core::Rom, seed: u64) -> [u32; 7] {
 /// oracle's: shots 312-419 (350 a run), hits of 1 25.6% of them (19.6-29.5%), shell deaths 5-14
 /// (10.5), blast deaths 11-23 (14.8), plants 2-5 (3.8), its longest carry 1197 frames (each ends
 /// planted or with its carrier's death; the remake's carriers into bunker E once parked outside
-/// its trigger for good). Left: the remake's shell deaths run low for its hits (7.5 over seeds
-/// 1-12, the same 88 hits a run as the oracle's 89.5).
+/// its trigger for good). G3e (`mode-bots-g3.md`): the gun aimed at the script's enemy, the bots'
+/// pickup reach, the class script held through the hit clip and the stale health on the hit's
+/// frame took the shell deaths from 7.5 to 12.4 over seeds 1-12 (oracle h1-h5, h7: 11.5).
 #[test]
 fn tank_bots_bomb_and_fight() {
     let Some(rom) = rom() else { return };
@@ -2217,7 +2218,7 @@ fn tank_bots_bomb_and_fight() {
     assert!(runs.iter().all(|r| r[6] < 1500), "{runs:?}");
     assert!((310.0..=400.0).contains(&shots), "shots {shots}");
     assert!((0.22..=0.30).contains(&hits), "hits {hits}");
-    assert!((5.0..=14.0).contains(&shells), "shell deaths {shells}");
+    assert!((9.0..=14.0).contains(&shells), "shell deaths {shells}");
     assert!((10.0..=20.0).contains(&blasts), "blast deaths {blasts}");
     assert!((3.0..=5.0).contains(&plants), "plants {plants}");
 }
@@ -2225,7 +2226,7 @@ fn tank_bots_bomb_and_fight() {
 /// Race on 0x33 as the server sets it up: slot 0 an idle human with 99 lives (the oracle's L1/L2
 /// poke), `bots` bots on script 0xBC, 5 laps on route 11 (`high`: 12). Runs to the results (or
 /// `frames`); returns the match, the bots, each racer's lap ticks (`ride.lap` going up), the
-/// human's death ticks and the missiles fired.
+/// human's death ticks, the missiles fired and each bot death's track count.
 fn race_run(
     rom: &extract_core::Rom,
     high: bool,
@@ -2238,6 +2239,7 @@ fn race_run(
     Vec<Vec<u32>>,
     Vec<u32>,
     usize,
+    Vec<(usize, i16)>,
 ) {
     use conker_bots::{Assets, Bots, DEFAULT_SKILL};
     use conker_rules::game::Event;
@@ -2324,10 +2326,11 @@ fn race_run(
     let slots: Vec<usize> = (1..=bots).collect();
     let mut ai = Bots::new(assets, &[0], &slots, DEFAULT_SKILL, Rng { state: seed }).unwrap();
     let mut laps = vec![Vec::new(); bots + 1];
-    let (mut deaths, mut shots) = (Vec::new(), 0);
+    let (mut deaths, mut shots, mut falls) = (Vec::new(), 0, Vec::new());
     while m.race.results.is_none() && m.tick < frames {
         let mut inputs = vec![conker_sim::movement::Input::default(); bots + 1];
         let before: Vec<i8> = m.players.iter().map(|f| f.ride.lap).collect();
+        let alive: Vec<bool> = m.players.iter().map(|f| f.health > 0).collect();
         let fx = ai.tick(&m, &arena, &world, &mut inputs);
         let mut ev = m.apply(&fx);
         ai.scopes(&mut m);
@@ -2336,6 +2339,9 @@ fn race_run(
         for (i, f) in m.players.iter().enumerate() {
             if f.ride.lap > before[i] {
                 laps[i].push(m.tick);
+            }
+            if f.bot && alive[i] && f.health == 0 {
+                falls.push((i, f.ride.count));
             }
         }
         shots += ev
@@ -2355,7 +2361,7 @@ fn race_run(
             deaths.push(m.tick);
         }
     }
-    (m, ai, laps, deaths, shots)
+    (m, ai, laps, deaths, shots, falls)
 }
 
 /// Script 0xBC races its bots, one idle human with 99 lives as the oracle's L1/L2 (3 bots: laps
@@ -2378,7 +2384,7 @@ fn race_bots_finish() {
         (false, 7, 2, 0, 4249),
         (true, 7, 2, 0, 4814),
     ] {
-        let (m, ai, laps, deaths, shots) = race_run(&rom, high, bots, seed, 9000);
+        let (m, ai, laps, deaths, shots, falls) = race_run(&rom, high, bots, seed, 9000);
         let go = race::GO;
         for (i, f) in m.players.iter().enumerate() {
             let gaps: Vec<u32> = laps[i].windows(2).map(|w| w[1] - w[0]).collect();
@@ -2406,7 +2412,10 @@ fn race_bots_finish() {
             }
         }
         // The bots fire their missiles (V L1: 928 and 938, L2), so they take canisters again.
-        eprintln!("route {}: {shots} missiles", 11 + u8::from(high));
+        eprintln!(
+            "route {}: {shots} missiles, bot deaths (slot, count) {falls:?}",
+            11 + u8::from(high)
+        );
         assert!(shots > 0);
         // The 3 bots lap as L1's and L2's within 2% (the median of the last 3: a death's lap is
         // longer).
@@ -2421,9 +2430,14 @@ fn race_bots_finish() {
                 );
             }
         }
-        // Route 12's leader blown up out of the race (V L2 4128).
+        // Route 12's leader blown up out of the race (V L2 4128), and no bot lost at the chasm
+        // after node 22 (V R12r1-r3, L2: none; the board's step 150 lands them on its far ramp).
         if high && bots == 3 {
             assert!(m.players.iter().any(|f| f.bot && f.out > 0), "no bot out");
+            assert!(
+                falls.iter().all(|&(_, c)| c % 33 != 22),
+                "the chasm: {falls:?}"
+            );
         }
         // The 7 bots' mean finish after the go within 5% of L7e's, L7f's.
         if finish > 0 {

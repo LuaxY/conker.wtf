@@ -2514,6 +2514,7 @@ dependencies = [
  "conker-camera",
  "conker-rules",
  "conker-sim",
+ "ctrlc",
  "getrandom 0.3.4",
  "js-sys",
  "lightyear",
@@ -2565,6 +2566,7 @@ name = "conker-server"
 version = "0.1.0"
 dependencies = [
  "aeronet_io",
+ "aeronet_webtransport",
  "bevy",
  "bevy_replicon",
  "conker-anim",
@@ -2572,9 +2574,9 @@ dependencies = [
  "conker-bots",
  "conker-rules",
  "conker-sim",
+ "ctrlc",
  "lightyear",
  "lightyear_aeronet",
- "tokio",
 ]
 
 [[package]]

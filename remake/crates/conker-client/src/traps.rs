@@ -31,8 +31,10 @@ use bevy::transform::TransformSystems;
 use conker_anim::combat::{BURN_END, BURNING, FLAME_HIT};
 use conker_camera::volume::CameraVolume;
 use conker_rules::Rng;
+use conker_rules::net::Fighting;
 use conker_rules::traps::{PLATES, Trap};
 use conker_sim::net::MatchView;
+use lightyear::prelude::Predicted;
 
 use crate::Anim;
 use crate::render::Model;
@@ -310,9 +312,11 @@ pub(crate) fn material(texture: &Handle<Image>, rgb: [u8; 3], alpha: f32) -> Sta
     }
 }
 
-/// The plates at rest + their offsets ([`MatchView::plates`]).
+/// The plates at rest + their offsets: the local prediction's (`Fighting::traps`, where the local
+/// player stands on them), else the server's ([`MatchView::plates`]).
 fn sink_plates(
     game: Query<&MatchView>,
+    own: Query<&Fighting, With<Predicted>>,
     added: Query<(Entity, &Name), Added<Name>>,
     mut plates: Local<Vec<(Entity, usize, f32)>>,
     mut transforms: Query<&mut Transform>,
@@ -325,9 +329,13 @@ fn sink_plates(
     let Ok(m) = game.single() else {
         return;
     };
+    let offsets = own
+        .iter()
+        .find_map(|f| f.traps)
+        .map_or(m.plates, |s| s.offsets());
     for &(e, k, y) in plates.iter() {
         if let Ok(mut t) = transforms.get_mut(e) {
-            let y = y + f32::from(m.plates[k]);
+            let y = y + f32::from(offsets[k]);
             if t.translation.y != y {
                 t.translation.y = y;
             }

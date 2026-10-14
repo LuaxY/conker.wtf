@@ -63,9 +63,13 @@ pub const RIDE: u8 = 5;
 pub const KICK: u8 = 84;
 /// B (conker-rules' `BUTTON_B`).
 pub const BUTTON_B: u16 = 0x4000;
-/// The autopilot turns at most the full stick's rate (I: the game's bots steer with the AI's
-/// stick).
-pub const AUTO_TURN: i32 = 833;
+/// The floor query's reach above the board on the Race map (`D_800DBE64` 150 on scene 0x33, V). With
+/// the default 50 the centre-line bot fell through the chasm's far ramp in 5 seeds of 6; the
+/// original's bots land on floors up to 58 over their last height (V R12r2 4045) and never fell.
+pub const STEP_UP: f32 = 150.0;
+/// The autopilot turns at most 0x700 a frame (V R12r1-r3: 1792 at the start and on the sharp bends,
+/// against the full stick's 833).
+pub const AUTO_TURN: i32 = 1792;
 
 /// The board's own counters (s126+0x50 knock, the kick's frame, obj+0x81 jumped, s126+0x44 the
 /// wall's cooldown) and a bot's class script 0xF (`held`, obj+0x232).
@@ -285,7 +289,7 @@ pub fn step(
             }
         }
     }
-    let Some(f) = world.floor(p.pos[0], p.pos[2], p.pos[1], old[1], None) else {
+    let Some(f) = world.floor_up(p.pos[0], p.pos[2], p.pos[1], old[1], STEP_UP) else {
         out.void = true;
         return out;
     };

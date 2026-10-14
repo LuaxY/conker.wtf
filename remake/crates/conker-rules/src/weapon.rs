@@ -829,7 +829,11 @@ pub const START_GRENADES: u8 = 3;
 /// ([`REACH`]): within the radius horizontally and the pickup's height within it of the player's
 /// 90-unit body (C; the extra `prop.y < obj+0x17C` test is left out, I).
 pub fn touches(pickup: [f32; 3], player: [f32; 3], reach: u8) -> bool {
-    let r = 100.0 * f32::from(reach) / 64.0;
+    within(pickup, player, 100.0 * f32::from(reach) / 64.0)
+}
+
+/// [`touches`] at radius `r`.
+pub fn within(pickup: [f32; 3], player: [f32; 3], r: f32) -> bool {
     let (dx, dz) = (pickup[0] - player[0], pickup[2] - player[2]);
     dx * dx + dz * dz < r * r && pickup[1] - r < player[1] + 90.0 && player[1] < pickup[1] + r
 }

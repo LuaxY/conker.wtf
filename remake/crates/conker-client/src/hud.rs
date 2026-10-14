@@ -850,10 +850,11 @@ fn results(
     }
     for (n, (colour, row)) in rows.iter().enumerate() {
         let dy = (f32::from(r.rows[1]) * s * n as f32) as i16 + down;
+        let colour = r.colours.get(*colour).copied().unwrap_or(white);
+        let [x, y] = label_at;
+        let at = [x, y + dy];
         if let Some(label) = r.labels.get(n) {
             let [_, _, w, h] = label.rect;
-            let [x, y] = label_at;
-            let at = [x, y + dy];
             let q = quad(
                 label,
                 rect([x, y + dy, w as i16, h as i16]),
@@ -862,8 +863,18 @@ fn results(
                 5.0,
             );
             out.extend(shrink(vec![q], at));
+        } else {
+            // The pack's labels stop at P4 (the original's 4 humans): P5 on in the HUD's font, the
+            // row's colour, on the row's text top.
+            let t = Text {
+                anchor: r.anchor,
+                at: [x + 1, r.rows[0] + dy],
+                align: Align::Left,
+                colour,
+                shadow: Some(r.shadow),
+            };
+            out.extend(shrink(text(hud, &format!("P{}", n + 1), None, &t, 5.0), at));
         }
-        let colour = r.colours.get(*colour).copied().unwrap_or(white);
         for &(x, column) in &columns {
             let v = row[column];
             let t = Text {
@@ -2790,6 +2801,41 @@ mod tests {
             b8 <= b4 && h8 <= h4 / 2.0,
             "4 rows {b4} {h4}, 8 rows {b8} {h8}"
         );
+    }
+
+    /// The pack's labels stop at P4: rows 5 and 6 get "P5" and "P6" in the HUD's font, in their
+    /// row's colour (white past the 4 colours), where the labels go, each in its own row's band.
+    #[test]
+    fn rows_past_four_are_labelled() {
+        let Some(hud) = pack_hud().filter(|h| h.end.is_some()) else {
+            return;
+        };
+        let over = Shown {
+            results: Some((
+                (0..6).map(|n| (n, [1, 99, 22, 0, 11, 0])).collect(),
+                0,
+                255,
+                0,
+            )),
+            ..state()
+        };
+        let all = sprites(&hud, &over);
+        let labels = (all.iter())
+            .filter(|q| matches!(&q.tex, Tex::Texture(t) if t == "players"))
+            .count();
+        // The label column (x 60-76), white glyphs only (not their black shadows).
+        let tops: Vec<f32> = (all.iter())
+            .filter(|q| matches!(q.tex, Tex::Glyph(_)) && q.colour == [255; 4])
+            .filter(|q| q.rect[0] >= 60.0 && q.rect[0] + q.rect[2] <= 76.0)
+            .map(|q| q.rect[1])
+            .collect();
+        // Rows 4/6 of the 15-pixel step apart: P5's band from y 104, P6's from 114.
+        let band = |lo: f32| {
+            tops.iter()
+                .filter(|&&y| (lo..lo + 10.0).contains(&y))
+                .count()
+        };
+        assert_eq!((labels, tops.len(), band(104.0), band(114.0)), (4, 4, 2, 2));
     }
 
     /// Total War's gas countdown: `(t + 59) / 60` of t = countdown + 1 (5 from 299 down to 240, 1

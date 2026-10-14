@@ -2,27 +2,36 @@
 //! never leaves this process, and hands it out over plain HTTP: `GET /token[?id=N]` answers the
 //! token's 2048 bytes as hex (a random client id without `id=`). `GET /info` answers what a client
 //! needs before it loads anything, and what a server list shows:
-//! `{"map":"2d","protocol":35,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
+//! `{"map":"2d","protocol":36,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
 //! pack's fingerprint, conker-sim's `pack_hash`, and the players in the match now, [`Live`]).
 //!
 //! The endpoint lives in the game server because the server holds the key and its public
 //! addresses; production binds it to loopback and the static server (Caddy, `deploy/`) proxies the
 //! page's own `/token` to it, so HTTPS and same-origin come from there. In dev the page fetches it
 //! from the game server's host, port + 1 (`--token-addr`).
+//!
+//! Each address may take [`PER_WINDOW`] tokens per [`WINDOW`] (then `429`): the peer's, or behind
+//! the proxy (a loopback peer) the last `X-Forwarded-For` entry, the one Caddy writes. A loopback
+//! peer without one (dev, this machine's own clients) is not limited; `/info` never is (the
+//! landing polls it).
 
 use bevy::log::{info, warn};
 use conker_sim::net::PROTOCOL_ID;
 use lightyear::netcode::{ConnectToken, Key, generate_key};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Seconds a token may start a connection: the page fetches it when the ROM is picked and connects
 /// once the level has loaded (2-3 s here, 7+ s in a debug build under load).
 pub const TOKEN_SECS: i32 = 60;
 /// Netcode's timeout both ways, carried in the token (conker-client's `TIMEOUT_SECS`).
 pub const TIMEOUT_SECS: i32 = 3;
+/// Tokens one address may take per [`WINDOW`] (a page takes one per load).
+pub const PER_WINDOW: u32 = 10;
+pub const WINDOW: Duration = Duration::from_secs(10);
 
 /// The private key: 64 hex digits from `--token-key FILE` or `CONKER_TOKEN_KEY` (the file wins);
 /// without either, a random key for this run (dev: tokens from an earlier run are refused).
@@ -117,28 +126,78 @@ impl Issuer {
     }
 }
 
+/// The tokens each address took in its current window ([`PER_WINDOW`]).
+// ponytail: a fixed window per address (an IPv6 one per /128), pruned on every request; per /64
+// or Caddy's rate limiting if abuse outgrows it.
+#[derive(Default)]
+struct Limit(HashMap<IpAddr, (Instant, u32)>);
+
+impl Limit {
+    /// Whether `ip` may have one more token at `now` (counting this one).
+    fn allows(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.0
+            .retain(|_, (since, _)| now.duration_since(*since) < WINDOW);
+        let (_, n) = self.0.entry(ip).or_insert((now, 0));
+        *n += 1;
+        *n <= PER_WINDOW
+    }
+}
+
 /// Answers token requests on `listener`, one at a time, on a thread of its own.
 pub fn serve(listener: TcpListener, issuer: Issuer) {
     std::thread::spawn(move || {
+        let mut limit = Limit::default();
         for stream in listener.incoming().flatten() {
-            if let Err(e) = reply(stream, &issuer) {
+            if let Err(e) = reply(stream, &issuer, &mut limit) {
                 warn!("token request: {e}");
             }
         }
     });
 }
 
-fn reply(mut stream: TcpStream, issuer: &Issuer) -> std::io::Result<()> {
+fn reply(mut stream: TcpStream, issuer: &Issuer, limit: &mut Limit) -> std::io::Result<()> {
     // ponytail: one request at a time with a 2 s read limit; a thread per request if pages wait.
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let peer = stream.peer_addr()?.ip().to_canonical();
     let mut head = BufReader::new((&stream).take(8192));
     let mut request = String::new();
     head.read_line(&mut request)?;
-    let mut line = String::new();
+    let (mut line, mut forwarded) = (String::new(), None);
     while head.read_line(&mut line)? > 2 {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("x-forwarded-for")
+        {
+            forwarded = value
+                .rsplit(',')
+                .next()
+                .and_then(|ip| ip.trim().parse().ok());
+        }
         line.clear();
     }
-    let (status, body) = issuer.answer(&request);
+    // Behind the proxy, the address it forwards for; this machine's own clients go unlimited.
+    let who = if peer.is_loopback() {
+        forwarded
+    } else {
+        Some(peer)
+    };
+    let token = request
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|t| t.starts_with("/token"));
+    let (status, body) = match who {
+        Some(ip) if token && !limit.allows(ip, Instant::now()) => {
+            warn!(
+                "token refused to {ip}: over {PER_WINDOW} in {} s",
+                WINDOW.as_secs()
+            );
+            let wait = WINDOW.as_secs();
+            (
+                "429 Too Many Requests",
+                format!("too many tokens: try again in {wait} s\n"),
+            )
+        }
+        _ => issuer.answer(&request),
+    };
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
@@ -194,6 +253,48 @@ mod tests {
             "405 Method Not Allowed"
         );
         assert_eq!(issuer.answer("").0, "405 Method Not Allowed");
+    }
+
+    /// Behind the proxy each forwarded address has its own [`PER_WINDOW`]; this machine's own
+    /// requests and `/info` have none.
+    #[test]
+    fn tokens_are_limited_per_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        serve(
+            listener,
+            Issuer {
+                key: [7; 32],
+                addrs: vec![addr],
+                map: "2d".into(),
+                pack: String::new(),
+                live: Live::default(),
+            },
+        );
+        let get = |path: &str, from: Option<&str>| {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let forwarded = from.map_or(String::new(), |ip| format!("X-Forwarded-For: {ip}\r\n"));
+            write!(stream, "GET {path} HTTP/1.1\r\n{forwarded}\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response.split_whitespace().nth(1).unwrap().to_string()
+        };
+        let a = Some("198.51.100.1, 203.0.113.9");
+        for _ in 0..PER_WINDOW {
+            assert_eq!(get("/token", a), "200");
+        }
+        assert_eq!(get("/token?id=2", a), "429");
+        assert_eq!(get("/info", a), "200");
+        assert_eq!(get("/token", Some("203.0.113.10")), "200");
+        assert_eq!(get("/token", Some("198.51.100.1")), "200");
+        for _ in 0..=PER_WINDOW {
+            assert_eq!(get("/token", None), "200");
+        }
+        let mut limit = Limit::default();
+        let (ip, now) = ("2001:db8::7".parse().unwrap(), Instant::now());
+        assert!((0..PER_WINDOW).all(|_| limit.allows(ip, now)));
+        assert!(!limit.allows(ip, now + WINDOW / 2));
+        assert!(limit.allows(ip, now + WINDOW));
     }
 
     /// Over a real socket: the headers a page needs (cross-origin in dev, never cached).

@@ -3,23 +3,27 @@
 //!   took under [`CALM_SECS`]: the seconds the load and the first draws after it block the main
 //!   thread (V: 7 s in a debug build under load; shaders compile in the browser) would trip the 3 s
 //!   netcode timeout. Headless clients have no assets, so they connect after the calm frames.
-//! - **Status** ([`NetStatus`]): loading, connecting, connected, failed or disconnected, with the
-//!   reason; logged on every change, and in the browser shown in the page's `#net` line.
+//! - **Status** ([`NetStatus`]): loading, connecting (the token fetch, then the handshake),
+//!   connected, failed or disconnected, with the reason and what to do (the page's words in the
+//!   browser, the command line's natively); logged on every change, and shown in the page's `#net`
+//!   line or the native HUD.
 //! - **Input** starts with the follow camera (the client synced, its player arrived): no input goes
 //!   out before, `predict` steps nothing before (it reads the input), and the server holds the
 //!   player as it joined until that first input, so both start on the same tick from the same state.
-//! - **Leaving:** an exit (the window closed, `seconds`) first sends netcode's disconnect
-//!   and exits [`LEAVE_DELAY`] later, once it has gone out. A closed page runs no more frames: its
+//! - **Leaving:** an exit (the window closed, `seconds`, natively Ctrl-C, SIGTERM or SIGHUP) first
+//!   sends netcode's disconnect and exits [`LEAVE_DELAY`] later, once it has gone out. A closed page runs no more frames: its
 //!   transport closes (the browser's unload, and winit's exit dropping the session), which frees
 //!   the slot on the server as well.
 //! - **Token:** the server signs each client's netcode connect token (its key never reaches the
 //!   client). Without `token=`, the client fetches it as it connects, after the assets loaded (a
 //!   token lasts 60 s): from `token-url`, else (an https page) `/token` on the page's own origin,
-//!   else the game server's host, its port + 1 ([`token_source`]). Natively at once; in the browser
-//!   in the background, while [`connect`] waits for it.
+//!   else the game server's host, its port + 1 ([`token_source`]). In the background (natively a
+//!   thread, plain http with [`FETCH_SECS`] limits), while [`connect`] waits for it.
 //! - **TLS** ([`secure`]): an https page uses `wss://` and checks the WebTransport certificate as
 //!   any site's (no digest); a native client does so with `ca=` (dev/test only). Else the dev
 //!   server's self-signed certificate is pinned by its digest, and WebSocket is plain `ws://`.
+//!   Natively WebTransport binds the server address's family (both for a host name) and, without a
+//!   digest or `ca=`, checks the certificate against the system's roots ([`wt`]).
 
 use crate::{Config, FollowCamera, Transport};
 use bevy::prelude::*;
@@ -41,6 +45,9 @@ pub const TIMEOUT_SECS: i32 = 3;
 /// Seconds a connection attempt may take: a WebTransport handshake that never completes (a stale
 /// certificate digest in some browsers, blocked UDP) raises no error of its own.
 pub const CONNECT_SECS: f64 = 10.0;
+/// Seconds the native token and `/info` fetch waits to connect, then for the answer (under
+/// [`CONNECT_SECS`] together: the watchdog counts the fetch too).
+pub const FETCH_SECS: u64 = 4;
 /// Seconds a leaving client keeps running after its netcode disconnect, so the packets go out.
 pub const LEAVE_DELAY: f64 = 0.2;
 /// Frames in a row, each shorter than [`CALM_SECS`], before connecting.
@@ -64,22 +71,31 @@ impl NetStatus {
         let (server, over) = (&cfg.server, transport_name(cfg.transport));
         match self {
             Self::Loading => ("loading the level".into(), false),
-            Self::Connecting(_) => (format!("connecting to {server} over {over}…"), false),
+            Self::Connecting(_) => {
+                // Bevy's default font (the native HUD) has ASCII only.
+                let more = page("…", "...");
+                (format!("connecting to {server} over {over}{more}"), false)
+            }
             Self::Connected => (format!("connected to {server} over {over}"), false),
             Self::Failed(why) => {
                 let hint = match cfg.transport {
-                    Transport::WebTransport if secure(cfg) => {
+                    Transport::WebTransport if secure(cfg) => page(
                         "Is the server running? Reload the page for a new connect token. \
-                         ?transport=ws tries WebSocket"
-                    }
-                    Transport::WebTransport if cfg.digest.is_empty() => {
+                         ?transport=ws tries WebSocket",
+                        "Is the server running? --transport ws tries WebSocket",
+                    ),
+                    Transport::WebTransport if cfg.digest.is_empty() => page(
                         "No certificate digest: pass ?digest=HEX, or run the server with \
-                         --digest-file web/dist/digest.txt"
-                    }
-                    Transport::WebTransport => {
+                         --digest-file web/dist/digest.txt",
+                        "No certificate digest: pass --digest HEX, the server's \
+                         --digest-file. --transport ws tries WebSocket",
+                    ),
+                    Transport::WebTransport => page(
                         "Is the server running? A restarted server has a new certificate: \
-                         reload the page. ?transport=ws tries WebSocket"
-                    }
+                         reload the page. ?transport=ws tries WebSocket",
+                        "Is the server running? A restarted server has a new certificate: \
+                         pass its --digest. --transport ws tries WebSocket",
+                    ),
                     Transport::WebSocket => "Is the server running?",
                 };
                 (
@@ -87,11 +103,20 @@ impl NetStatus {
                     true,
                 )
             }
-            Self::Disconnected(why) => (
-                format!("disconnected from {server}: {why}. Reload to reconnect"),
-                true,
-            ),
+            Self::Disconnected(why) => {
+                let again = page("Reload to reconnect", "Run the client again to reconnect");
+                (format!("disconnected from {server}: {why}. {again}"), true)
+            }
         }
+    }
+}
+
+/// The page's words in the browser, the command line's natively.
+fn page(browser: &'static str, native: &'static str) -> &'static str {
+    if cfg!(target_family = "wasm") {
+        browser
+    } else {
+        native
     }
 }
 
@@ -115,6 +140,8 @@ pub fn why(reason: &DisconnectedReason) -> String {
             }
             _ => tidy(state),
         },
+        // The server's own words (a full match, conker-server's `join_player`).
+        DisconnectedReason::LinkFailed(UnlinkReason::ByPeer(r)) if !r.is_empty() => r.clone(),
         DisconnectedReason::ByPeer(_) | DisconnectedReason::LinkFailed(UnlinkReason::ByPeer(_)) => {
             "the server closed the connection".into()
         }
@@ -124,9 +151,10 @@ pub fn why(reason: &DisconnectedReason) -> String {
     }
 }
 
-/// A transport's error on one line: its causes joined with `: `, without the browser's
-/// `[object Event]`, a cause that repeats the one before (Chrome's WebTransport: `connection
-/// lost: Connection lost`) or a trailing period; WebSocket's abnormal close (1006) in words.
+/// A transport's error on one line: its causes joined with `: ` (also anyhow's numbered ones,
+/// `0: A 1: B`), without the browser's `[object Event]`, a cause that repeats the one before
+/// (Chrome's WebTransport: `connection lost: Connection lost`) or a trailing period; WebSocket's
+/// abnormal close (1006) in words.
 fn tidy(error: &str) -> String {
     if error.contains("code 1006") {
         return "the connection dropped (WebSocket code 1006)".into();
@@ -135,6 +163,10 @@ fn tidy(error: &str) -> String {
     let line = line
         .replace(" Caused by: ", ": ")
         .replace(": [object Event]", "");
+    let line = (0..10).fold(line, |l, n| {
+        l.replace(&format!(": {n}: "), ": ")
+            .replace(&format!(" {n}: "), ": ")
+    });
     let mut causes: Vec<&str> = Vec::new();
     for cause in line.trim_end_matches('.').split(": ") {
         if !causes.last().is_some_and(|c| c.eq_ignore_ascii_case(cause)) {
@@ -156,7 +188,18 @@ pub fn build(app: &mut App) {
             .before(LinkSystems::Send),
     );
     #[cfg(not(target_family = "wasm"))]
-    app.add_observer(ca::link);
+    {
+        app.add_observer(wt::link);
+        // Ctrl-C, SIGTERM and SIGHUP (ctrlc's `termination`) become an exit, which [`leave`]
+        // holds for the disconnect: Bevy's handler, set here unless its plugin (`DefaultPlugins`,
+        // windowed) did, as it stands down when the shell started the client ignoring SIGINT (a
+        // script's background job). Headless clients (`MinimalPlugins`) get its flag's system.
+        use bevy::app::TerminalCtrlCHandlerPlugin as CtrlC;
+        let _ = ctrlc::set_handler(CtrlC::gracefully_exit); // Err: Bevy's own is set already
+        if !app.is_plugin_added::<CtrlC>() {
+            app.add_systems(Update, CtrlC::exit_on_flag);
+        }
+    }
     app.add_observer(on_connecting)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
@@ -164,13 +207,15 @@ pub fn build(app: &mut App) {
         .add_observer(on_player_left);
 }
 
-/// Not connected yet, (windowed) the level and the characters loaded, and the frames since calm.
+/// Not connected yet, (windowed) the level and the characters loaded, and the frames since calm;
+/// or the token on its way ([`connect`] polls it).
 fn ready(
     status: Res<NetStatus>,
     assets: Option<Res<AssetServer>>,
     time: Res<Time<Real>>,
     mut calm: Local<u32>,
     cfg: Res<Config>,
+    clients: Query<(), With<Client>>,
 ) -> bool {
     // The level and the map's own characters (`render`'s assets): windowed clients connect once
     // they loaded (the picks' load after, `render::load_characters`).
@@ -188,19 +233,25 @@ fn ready(
     } else {
         0
     };
-    *status == NetStatus::Loading && *calm >= CALM
+    match *status {
+        NetStatus::Loading => *calm >= CALM,
+        NetStatus::Connecting(_) => clients.is_empty(),
+        _ => false,
+    }
 }
 
 fn connect(
     mut commands: Commands,
     mut cfg: ResMut<Config>,
     mut status: ResMut<NetStatus>,
-    #[cfg(target_family = "wasm")] mut fetching: Local<Fetching>,
+    time: Res<Time<Real>>,
+    mut fetching: Local<Fetching>,
 ) {
     if cfg.token.is_empty() {
-        #[cfg(not(target_family = "wasm"))]
-        let fetched = fetch(&token_source(&cfg), "a connect token");
-        #[cfg(target_family = "wasm")]
+        // The fetch counts as connecting (the HUD says so; the watchdog bounds it).
+        if *status == NetStatus::Loading {
+            *status = NetStatus::Connecting(time.elapsed_secs_f64());
+        }
         let Some(fetched) = fetching.poll(&cfg) else {
             return;
         };
@@ -218,12 +269,24 @@ fn connect(
         .parse()
         .unwrap_or(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0));
     #[cfg(not(target_family = "wasm"))]
-    let roots = match cfg.ca.as_deref().map(ca::roots).transpose() {
+    let roots = match cfg.ca.as_deref().map(wt::roots).transpose() {
         Ok(roots) => roots,
         Err(why) => {
             *status = NetStatus::Failed(why);
             return;
         }
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let check = match (roots.clone(), &cfg.digest[..]) {
+        (Some(roots), _) => wt::Check::Ca(roots),
+        (None, "") => wt::Check::System,
+        (None, digest) => match hex(digest).and_then(|h| <[u8; 32]>::try_from(h).ok()) {
+            Some(hash) => wt::Check::Digest(hash),
+            None => {
+                *status = NetStatus::Failed("the certificate digest is not 64 hex digits".into());
+                return;
+            }
+        },
     };
     let auth = match connect_token(&cfg.token) {
         Ok(token) => Authentication::Token(token),
@@ -256,12 +319,14 @@ fn connect(
     }
     match cfg.transport {
         #[cfg(not(target_family = "wasm"))]
-        Transport::WebTransport if let Some(roots) = roots => client
+        Transport::WebTransport => client
             .insert_if_new(Link::default())
-            .insert(ca::WebTransportCa {
-                roots,
+            .insert(wt::WebTransport {
+                check,
+                server: cfg.server.parse().ok(),
                 target: format!("https://{}", cfg.server),
             }),
+        #[cfg(target_family = "wasm")]
         Transport::WebTransport => client.insert(WebTransportClientIo {
             certificate_digest: cfg.digest.clone(),
             target: Some(format!("https://{}", cfg.server)),
@@ -271,7 +336,7 @@ fn connect(
             let ws = ClientConfig;
             #[cfg(not(target_family = "wasm"))]
             let ws = match roots {
-                Some(roots) => ca::websocket(roots),
+                Some(roots) => wt::websocket(roots),
                 None => ClientConfig::builder().with_no_encryption(),
             };
             let scheme = if secure(&cfg) { "wss" } else { "ws" };
@@ -377,16 +442,14 @@ pub fn check_pack(
     }
 }
 
-/// Natively: the server's map and its pack's fingerprint, from its `/info` (for 5 s while the
-/// server starts).
+/// Natively: the server's map and its pack's fingerprint, from its `/info` (asked again for 5 s
+/// while the server starts).
 #[cfg(not(target_family = "wasm"))]
 pub fn server_info(cfg: &Config) -> Result<(String, Option<String>), String> {
     let get = || fetch(&info_url(cfg), "the server's map");
+    let start = std::time::Instant::now();
     let mut body = get();
-    for _ in 0..20 {
-        if body.is_ok() {
-            break;
-        }
+    while body.is_err() && start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(250));
         body = get();
     }
@@ -394,59 +457,84 @@ pub fn server_info(cfg: &Config) -> Result<(String, Option<String>), String> {
     Ok((info_map(body.as_bytes())?, info_pack(body.as_bytes())))
 }
 
-/// The browser's token fetch, in flight: [`connect`] polls it.
-#[cfg(target_family = "wasm")]
+/// The token fetch, in flight (natively on a thread of its own, in the browser a promise):
+/// [`connect`] polls it.
 #[derive(Default)]
 struct Fetching(Option<std::sync::Arc<std::sync::OnceLock<Result<String, String>>>>);
 
-#[cfg(target_family = "wasm")]
 impl Fetching {
     /// The token once it has arrived; the first call starts the fetch.
     fn poll(&mut self, cfg: &Config) -> Option<Result<String, String>> {
         let done = self.0.get_or_insert_with(|| {
             let done = std::sync::Arc::new(std::sync::OnceLock::new());
             let out = std::sync::Arc::clone(&done);
-            let request = crate::web::fetch(&token_source(cfg));
-            wasm_bindgen_futures::spawn_local(async move {
-                let hex = request.await.and_then(|b| {
-                    String::from_utf8(b).map_err(|_| "the token is not text".to_string())
+            let url = token_source(cfg);
+            #[cfg(not(target_family = "wasm"))]
+            std::thread::spawn(move || out.set(fetch(&url, "a connect token")));
+            #[cfg(target_family = "wasm")]
+            {
+                let request = crate::web::fetch(&url);
+                wasm_bindgen_futures::spawn_local(async move {
+                    let hex = request.await.and_then(|b| {
+                        String::from_utf8(b).map_err(|_| "the token is not text".to_string())
+                    });
+                    let _ =
+                        out.set(hex.map_err(|e| format!("could not get a connect token from {e}")));
                 });
-                let _ = out.set(hex.map_err(|e| format!("could not get a connect token from {e}")));
-            });
+            }
             done
         });
         done.get().cloned()
     }
 }
 
-/// The netcode connect token from its hex.
-fn connect_token(hex: &str) -> Result<ConnectToken, String> {
-    let hex = hex.trim();
-    let bytes = (0..hex.len() / 2)
-        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
+/// Bytes from hex digits (any case, surrounding space ignored).
+fn hex(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    (0..text.len() / 2)
+        .map(|i| u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok())
         .collect::<Option<Vec<u8>>>()
+        .filter(|b| b.len() * 2 == text.len())
+}
+
+/// The netcode connect token from its hex.
+fn connect_token(text: &str) -> Result<ConnectToken, String> {
+    let bytes = hex(text)
         .filter(|b| b.len() == 2048)
         .ok_or("the connect token is not 2048 bytes of hex")?;
     ConnectToken::try_from_bytes(&bytes).map_err(|e| format!("bad connect token: {e}"))
 }
 
-/// A plain-HTTP GET's body (native: the token and `/info` endpoints on the game server's host).
+/// A plain-HTTP GET's body (native: the token and `/info` endpoints on the game server's host),
+/// [`FETCH_SECS`] to connect and as long for the answer.
 #[cfg(not(target_family = "wasm"))]
 fn fetch(url: &str, what: &str) -> Result<String, String> {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
     let fail = |e: &dyn std::fmt::Display| format!("could not get {what} from {url}: {e}");
+    let said = |e: std::io::Error| match e.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => {
+            fail(&format!("no answer in {FETCH_SECS} s"))
+        }
+        _ => fail(&e),
+    };
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| fail(&"natively only http:// (or pass token=HEX)"))?;
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    // ponytail: no connect timeout (a dev tool on loopback or a LAN); add one for remote hosts.
-    let mut stream = std::net::TcpStream::connect(host).map_err(|e| fail(&e))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| fail(&e))?;
+    let wait = Duration::from_secs(FETCH_SECS);
+    let mut stream = Err(fail(&"no address"));
+    for addr in host.to_socket_addrs().map_err(|e| fail(&e))? {
+        stream = TcpStream::connect_timeout(&addr, wait).map_err(said);
+        if stream.is_ok() {
+            break;
+        }
+    }
+    let mut stream = stream?;
+    stream.set_read_timeout(Some(wait)).map_err(|e| fail(&e))?;
     write!(stream, "GET /{path} HTTP/1.0\r\nHost: {host}\r\n\r\n").map_err(|e| fail(&e))?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(|e| fail(&e))?;
+    stream.read_to_string(&mut response).map_err(said)?;
     let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
     match head.split_whitespace().nth(1) {
         Some("200") => Ok(body.to_string()),
@@ -454,11 +542,11 @@ fn fetch(url: &str, what: &str) -> Result<String, String> {
     }
 }
 
-/// Dev/test only (`ca=PATH`): a native client checks the server's certificate against this CA, as
-/// a browser checks a real one: `wss://`, and WebTransport without a digest (lightyear's own
-/// WebTransport link only pins a digest, so this one spawns the transport itself).
+/// The native WebTransport link (lightyear's binds IPv4 only, and only pins a digest, so this one
+/// spawns the transport itself): it binds the server address's family (both for a host name), and
+/// checks the certificate against [`Check`]. Also `ca=`'s `wss://` ([`websocket`]).
 #[cfg(not(target_family = "wasm"))]
-mod ca {
+mod wt {
     use aeronet_webtransport::client::WebTransportClient;
     use aeronet_webtransport::wtransport;
     use bevy::prelude::*;
@@ -470,7 +558,19 @@ mod ca {
     use rustls::RootCertStore;
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
+    use std::net::SocketAddr;
     use std::sync::Arc;
+    use wtransport::config::IpBindConfig;
+
+    /// How the server's certificate is checked.
+    pub enum Check {
+        /// `ca=` (dev/test only): against this CA, as a browser checks a real one.
+        Ca(Arc<RootCertStore>),
+        /// The dev server's self-signed certificate, pinned by its SHA-256 (`digest=`).
+        Digest([u8; 32]),
+        /// Neither: against the system's roots (a real certificate).
+        System,
+    }
 
     pub fn roots(path: &str) -> Result<Arc<RootCertStore>, String> {
         let pem = std::fs::read(path).map_err(|e| format!("ca {path}: {e}"))?;
@@ -493,29 +593,47 @@ mod ca {
         )
     }
 
-    /// A WebTransport link checked against [`roots`]'s CA (lightyear's settings otherwise).
+    /// A WebTransport link to `target` (`server` when it is an address; lightyear's settings
+    /// otherwise).
     #[derive(Component)]
-    pub struct WebTransportCa {
-        pub roots: Arc<RootCertStore>,
+    pub struct WebTransport {
+        pub check: Check,
+        pub server: Option<SocketAddr>,
         pub target: String,
+    }
+
+    /// The local socket for `server`: its family, both for a host name (dual-stack).
+    pub fn bind(server: Option<SocketAddr>) -> IpBindConfig {
+        match server {
+            Some(SocketAddr::V4(_)) => IpBindConfig::InAddrAnyV4,
+            Some(SocketAddr::V6(_)) => IpBindConfig::InAddrAnyV6,
+            None => IpBindConfig::InAddrAnyDual,
+        }
     }
 
     pub fn link(
         trigger: On<LinkStart>,
-        links: Query<&WebTransportCa, (Without<Linking>, Without<Linked>)>,
+        links: Query<&WebTransport, (Without<Linking>, Without<Linked>)>,
         mut commands: Commands,
     ) -> Result {
-        let Ok(ca) = links.get(trigger.entity) else {
+        let Ok(wt) = links.get(trigger.entity) else {
             return Ok(());
         };
-        let tls = wtransport::tls::client::build_default_tls_config(ca.roots.clone(), None);
-        let config = wtransport::ClientConfig::builder()
-            .with_bind_config(wtransport::config::IpBindConfig::InAddrAnyDual)
-            .with_custom_tls(tls)
+        let config = wtransport::ClientConfig::builder().with_bind_config(bind(wt.server));
+        let config = match &wt.check {
+            Check::Ca(roots) => config.with_custom_tls(
+                wtransport::tls::client::build_default_tls_config(roots.clone(), None),
+            ),
+            Check::Digest(hash) => {
+                config.with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(*hash)])
+            }
+            Check::System => config.with_native_certs(),
+        };
+        let config = config
             .keep_alive_interval(Some(Duration::from_secs(1)))
             .max_idle_timeout(Some(Duration::from_secs(5)))?
             .build();
-        let (link, target) = (trigger.entity, ca.target.clone());
+        let (link, target) = (trigger.entity, wt.target.clone());
         commands.queue(move |world: &mut World| {
             let entity = world.spawn((AeronetLinkOf(link), Name::new("WebTransportClient")));
             WebTransportClient::connect(config, target).apply(entity);
@@ -550,13 +668,14 @@ fn delay_sends(
     }
 }
 
+/// Connecting (already so since a token fetch: the watchdog counts both).
 fn on_connecting(
     trigger: On<Add, Connecting>,
     clients: Query<(), With<Client>>,
     time: Res<Time<Real>>,
     mut status: ResMut<NetStatus>,
 ) {
-    if clients.contains(trigger.entity) {
+    if clients.contains(trigger.entity) && !matches!(*status, NetStatus::Connecting(_)) {
         *status = NetStatus::Connecting(time.elapsed_secs_f64());
     }
 }
@@ -688,6 +807,7 @@ fn leave(
 mod tests {
     use super::*;
 
+    /// Natively in the command line's words, in ASCII (Bevy's default font has nothing else).
     #[test]
     fn statuses_read_with_their_reasons_and_hints() {
         let mut cfg = Config::from_pairs([("id".to_string(), "1".to_string())]).unwrap();
@@ -697,17 +817,50 @@ mod tests {
             text(NetStatus::Connected, &cfg),
             ("connected to [::1]:5888 over WebTransport".into(), false)
         );
+        assert_eq!(
+            text(NetStatus::Connecting(0.0), &cfg),
+            (
+                "connecting to [::1]:5888 over WebTransport...".into(),
+                false
+            )
+        );
         let (t, problem) = text(NetStatus::Failed("the server did not answer".into()), &cfg);
         assert!(
-            problem && t.contains("did not answer. No certificate digest"),
+            problem && t.contains("did not answer. No certificate digest: pass --digest"),
             "{t}"
         );
         cfg.digest = "AB".into();
         let (t, _) = text(NetStatus::Failed("x".into()), &cfg);
-        assert!(t.contains("new certificate: reload"), "{t}");
+        assert!(t.contains("new certificate: pass its --digest"), "{t}");
         cfg.transport = Transport::WebSocket;
         let (t, problem) = text(NetStatus::Disconnected("left".into()), &cfg);
-        assert!(problem && t.ends_with("left. Reload to reconnect"), "{t}");
+        assert!(
+            problem && t.ends_with("left. Run the client again to reconnect"),
+            "{t}"
+        );
+        assert!(t.is_ascii(), "{t}");
+    }
+
+    /// The native fetch gives up on a server that takes the connection and never answers, and
+    /// says so; the WebTransport socket takes the server address's family.
+    #[test]
+    fn a_silent_endpoint_times_out_and_sockets_follow_the_family() {
+        let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/token", quiet.local_addr().unwrap());
+        let start = std::time::Instant::now();
+        let why = fetch(&url, "a connect token").unwrap_err();
+        assert!(
+            why.ends_with(&format!("no answer in {FETCH_SECS} s")),
+            "{why}"
+        );
+        assert!(start.elapsed().as_secs() < FETCH_SECS + 2);
+        use aeronet_webtransport::wtransport::config::IpBindConfig::*;
+        let bind = |s: &str| format!("{:?}", wt::bind(s.parse().ok()));
+        assert_eq!(bind("127.0.0.1:5888"), format!("{InAddrAnyV4:?}"));
+        assert_eq!(bind("[::1]:5888"), format!("{InAddrAnyV6:?}"));
+        assert_eq!(bind("game.example.org:5888"), format!("{InAddrAnyDual:?}"));
+        assert_eq!(hex(" 0aFf\n"), Some(vec![0x0a, 0xff]));
+        assert_eq!(hex("0aF"), None);
     }
 
     #[test]
@@ -730,6 +883,13 @@ mod tests {
             "connection lost"
         );
         assert!(e("connection closed with code 1006").contains("dropped"));
+        assert_eq!(
+            e(
+                "connection lost: 0: WebSocket protocol error: Connection reset without closing \
+               handshake 1: Connection reset without closing handshake"
+            ),
+            "connection lost: WebSocket protocol error: Connection reset without closing handshake"
+        );
         assert_eq!(why(&DisconnectedReason::UserRequested(None)), "left");
         let link = |r| why(&DisconnectedReason::LinkFailed(r));
         assert_eq!(
@@ -737,9 +897,10 @@ mod tests {
             "connection lost"
         );
         assert_eq!(
-            link(UnlinkReason::ByPeer("x".into())),
+            link(UnlinkReason::ByPeer(String::new())),
             "the server closed the connection"
         );
+        assert_eq!(link(UnlinkReason::ByPeer("full".into())), "full");
     }
 
     #[test]

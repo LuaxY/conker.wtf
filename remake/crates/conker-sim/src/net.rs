@@ -92,7 +92,9 @@ use serde::{Deserialize, Serialize};
 /// (0x1A, 0x3F) flies as the server's in the client's prediction.
 /// 35: Race's `RacerView.total`, the board's hold and wall flag and the curved track (predicted);
 /// Tank's turret C-button sign (predicted).
-pub const PROTOCOL_ID: u64 = 35;
+/// 36: `Combat::laser` (the crossbow's aim dot); `Fighting`'s `traps`, `sliding` and `bolts` (0x34's traps, the
+/// flags, the mounted guns and the bolt's push predicted); Tank's scope bullet and Race's floor reach and turn (shared).
+pub const PROTOCOL_ID: u64 = 36;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -192,6 +194,9 @@ pub struct Combat {
     /// and what is left of it: the shield's and the boost's VIs, the one-shot shells.
     pub power: u8,
     pub power_left: u16,
+    /// The crossbow's aim laser (conker-rules' `Match::laser`): where its dot is (the scope's line
+    /// on a wall or a body part), `None` while it is off.
+    pub laser: Option<[i16; 3]>,
 }
 
 /// A bullet in flight (conker-rules' `Bullet`): where it is after this frame's step, its velocity

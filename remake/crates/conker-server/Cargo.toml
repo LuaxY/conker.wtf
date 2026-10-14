@@ -17,7 +17,10 @@ lightyear = { workspace = true, features = ["server", "netcode", "webtransport",
 # The exact versions lightyear 0.30.1 uses; needed for the two-transport relink workaround.
 lightyear_aeronet = "=0.30.1"
 aeronet_io = "=0.21.0"
+# The WebTransport server opened with a certificate that reloads (`tls`); the version lightyear uses.
+aeronet_webtransport = "=0.21.0"
 # lightyear's replication backend, for a per-component visibility filter (`Fighting` to its owner).
 bevy_replicon = { version = "=0.44.3", default-features = false, features = ["server"] }
-# `--cert`: wtransport reads PEM files with tokio::fs (already in the tree through it).
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# SIGTERM (systemd's stop, the web app's kill) and SIGHUP exit as Ctrl-C does: the clients get the
+# disconnect at once. Bevy's own Ctrl-C handler (bevy_app) already brings ctrlc; this only adds the feature.
+ctrlc = { version = "3.4", features = ["termination"] }

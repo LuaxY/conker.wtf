@@ -254,10 +254,25 @@ impl CollisionWorld {
         {
             return Some(self.hit(p, h));
         }
+        self.query(x, z, y, ref_y, STEP_UP, false)
+    }
+
+    /// The board's [`Self::floor`] (no fast path): floors up to `step_up` above (`func_1510E950`'s
+    /// `D_800DBE64` for an object, which `func_15002F40` sets per scene: 150 on 0x32 and 0x33, else 85
+    /// in multiplayer; V the oracle's RAM in Race and Tank), and only those facing up (V R12r1
+    /// 1880-1885: a knocked-up board rose to 85 under a tunnel's ceiling and was never put on it).
+    pub fn floor_up(&self, x: f32, z: f32, y: f32, ref_y: f32, step_up: f32) -> Option<Floor> {
+        self.query(x, z, y, ref_y, step_up, true)
+    }
+
+    fn query(&self, x: f32, z: f32, y: f32, ref_y: f32, step_up: f32, up: bool) -> Option<Floor> {
         let (xi, zi) = (x as i32, z as i32);
-        let limit = if y < ref_y { ref_y } else { y } + STEP_UP;
+        let limit = if y < ref_y { ref_y } else { y } + step_up;
         let mut best: Option<(f32, u32)> = None;
         for &i in self.near(xi, zi) {
+            if up && self.tris[i as usize].normal[1] <= 0.0 {
+                continue;
+            }
             let Some(h) = height(&self.tris[i as usize].v, xi, zi) else {
                 continue;
             };
@@ -540,6 +555,19 @@ mod tests {
             w.floor(10.0, 10.0, -20.0, 0.0, None).map(|f| f.y),
             Some(30.0)
         );
+    }
+
+    #[test]
+    fn the_boards_query_reaches_its_step_and_skips_ceilings() {
+        let (up, down) = (
+            [[0.0, 120.0, 0.0], [0.0, 120.0, 100.0], [100.0, 120.0, 0.0]],
+            [[0.0, 100.0, 0.0], [100.0, 100.0, 0.0], [0.0, 100.0, 100.0]],
+        );
+        let w = CollisionWorld::new([(up, 0), (down, 0)]);
+        assert_eq!(w.floor(10.0, 10.0, 0.0, 0.0, None), None);
+        let reach = |step: f32| w.floor_up(10.0, 10.0, 0.0, 0.0, step).map(|f| f.y);
+        assert_eq!(reach(150.0), Some(120.0));
+        assert_eq!(reach(110.0), None);
     }
 
     #[test]

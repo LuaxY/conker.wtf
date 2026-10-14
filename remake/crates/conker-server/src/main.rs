@@ -3,8 +3,8 @@
 //!
 //! ONE lightyear `Server` entity carries both transports on the same port number:
 //! WebTransport (UDP) and WebSocket (TCP). With `--cert`/`--cert-key` (PEM, e.g. Let's Encrypt's)
-//! both use that certificate (`wss://`, [`tls`]); in dev, a self-signed WebTransport certificate
-//! pinned by its digest, and plain `ws://`. Clients connect with a netcode token the server signs
+//! both use that certificate (`wss://`, [`tls`]), reloaded when the files change; in dev, a
+//! self-signed WebTransport certificate pinned by its digest, and plain `ws://`. Clients connect with a netcode token the server signs
 //! ([`token`]: `GET /token` on `--token-addr`, default port + 1).
 //! Two `Server` entities silently stop server-side input processing (lightyear #1693); one
 //! entity with two aeronet transports needs [`relink_evicted_session`] (tested 2026-10-08).
@@ -99,8 +99,8 @@
 //!   reproduced): on the slot's Deathmatch start record's facing (the default) and camera, and it
 //!   respawns on any record.
 //! - `--wait N` starts the match (clock, scripts) `--margin` ticks (default 150, 5 s) after the N-th
-//!   human joined, every slot back on its spawn; `--first-read R`: that tick is oracle read R
-//!   (default 23, the match going live).
+//!   human joined, every slot back on its spawn (the bots stand still until then); `--first-read
+//!   R`: that tick is oracle read R (default 23, the match going live).
 //! - `--give SLOT:READ:ID` hands a weapon as its pickup does at that read (the oracle's MP+0xEB0 poke).
 //! - `--warp SLOT:READ:X,Y,Z` (test only, as the gas research's position pokes): puts that slot there at
 //!   that read, e.g. a Total War canister carrier into the shelter (a delivery).
@@ -149,6 +149,7 @@
 //!   (`LAGCOMP`).
 
 use aeronet_io::Session;
+use aeronet_io::connection::Disconnect;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::ecs::relationship::RelationshipTarget;
 use bevy::log::LogPlugin;
@@ -189,6 +190,7 @@ use lightyear_aeronet::{AeronetLink, AeronetLinkOf};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+mod shutdown;
 mod tls;
 mod token;
 
@@ -750,6 +752,7 @@ fn main() {
     );
     app.add_systems(FixedUpdate, (seat, simulate, publish, log_players).chain());
     app.add_systems(Update, log_traffic);
+    shutdown::build(&mut app);
     if let Some(seconds) = net.seconds {
         app.add_systems(
             Update,
@@ -761,25 +764,17 @@ fn main() {
         );
     }
 
-    // Dev certificate: self-signed ECDSA P-256, 14-day validity, which is what browsers accept
-    // through WebTransport `serverCertificateHashes`. Regenerated on every start.
-    let (identity, wss) = match (&net.cert, &net.cert_key) {
+    // `--cert`'s, watched for renewals, else the dev certificate (self-signed).
+    let certificate = match (&net.cert, &net.cert_key) {
         (Some(cert), Some(key)) => {
-            let (identity, wss) = tls::load(cert, key).unwrap_or_else(|e| fail(e));
-            (identity, Some(wss))
+            let current = tls::Certificate::new(tls::load(cert, key).unwrap_or_else(|e| fail(e)));
+            tls::watch(cert.clone(), key.clone(), current.clone());
+            current
         }
-        (None, None) => (
-            Identity::self_signed(["localhost", "127.0.0.1", "::1"]).expect("self-signed cert"),
-            None,
-        ),
+        (None, None) => tls::Certificate::new(tls::self_signed()),
         _ => fail("--cert and --cert-key go together".into()),
     };
-    let digest: String = identity.certificate_chain().as_slice()[0]
-        .hash()
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect();
+    let digest = tls::digest(&certificate.resolve_any());
     info!("WebTransport certificate digest: {digest}");
     if let Some(path) = net.digest_file {
         std::fs::write(&path, &digest).expect("write --digest-file");
@@ -832,11 +827,13 @@ fn main() {
             live,
         },
     );
+    let (wt_tls, ws_tls) = tls::configs(certificate);
     let ws = ServerConfig::builder().with_bind_address(addr);
-    let (ws, scheme) = match wss {
-        Some(identity) => (ws.with_identity(identity), "wss"),
+    let (ws, scheme) = match net.cert {
+        Some(_) => (ws.with_tls_config(ws_tls), "wss"),
         None => (ws.with_no_encryption(), "ws"),
     };
+    app.add_observer(tls::open_webtransport);
     app.world_mut().spawn((
         Name::new("Server"),
         NetcodeServer::new(NetcodeConfig {
@@ -849,9 +846,7 @@ fn main() {
             ..default()
         }),
         LocalAddr(addr),
-        WebTransportServerIo {
-            certificate: identity,
-        },
+        tls::WebTransportTls(wt_tls),
         WebSocketServerIo { config: ws },
     ));
     info!(
@@ -1665,13 +1660,14 @@ fn join(
             continue;
         };
         commands.entity(client).insert(Joined);
+        let session = session.map(|s| *s.collection());
         let transport = session
-            .and_then(|s| names.get(*s.collection()).ok())
+            .and_then(|s| names.get(s).ok())
             .map_or("?", |n| n.as_str());
         join_player(
             client,
             remote,
-            transport,
+            (session, transport),
             asked,
             &timeline,
             &mut game,
@@ -1680,17 +1676,24 @@ fn join(
     }
 }
 
-/// [`join`]'s player: its fighter in the match, and the entity every client sees.
+/// [`join`]'s player: its fighter in the match, and the entity every client sees. A client the
+/// match has no room for is disconnected (its aeronet `session`), the reason sent for its screen.
 fn join_player(
     client: Entity,
     remote: &RemoteId,
-    transport: &str,
+    (session, transport): (Option<Entity>, &str),
     asked: Join,
     timeline: &LocalTimeline,
     game: &mut Game,
     commands: &mut Commands,
 ) {
     let tick = timeline.tick().0;
+    let mut refuse = |why: &str| {
+        warn!("client {:?}: {why}, disconnected", remote.0);
+        if let Some(s) = session {
+            commands.trigger(Disconnect::new(s, why));
+        }
+    };
     // The team modes: the team asked for (the side's: the Tediz team 1, Raptor's raptors; Heist's
     // by `Teams` once in) if it has room for a human, else the one with the fewest humans.
     let (side, team) = match game.row() {
@@ -1703,20 +1706,15 @@ fn join_player(
                 None => None,
             };
             let Some(team) = game.human_team(&row, asked_team) else {
-                // ponytail: the client stays connected with no player; a kick needs netcode's
-                // per-client disconnect, which lightyear's server doesn't expose.
-                warn!("client {:?}: every team is full, no player", remote.0);
-                return;
+                return refuse("the match is full: every team has its humans");
             };
             (game.team_side(team), Some(team))
         }
         None => {
             if game.no_human_room() {
-                warn!(
-                    "client {:?}: Race has its {RACE_HUMANS} humans, no player",
-                    remote.0
-                );
-                return;
+                return refuse(&format!(
+                    "the race is full: it has its {RACE_HUMANS} humans"
+                ));
             }
             let side = (asked.side)
                 .filter(|_| !game.one_side())
@@ -1983,13 +1981,7 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         deaths: f.deaths,
         shots: f.shots,
         out: f.out,
-        // A life goes at the respawn (V `func_15085710(i,4,1)`), not at the lethal hit.
-        lives_left: if f.out > 0 {
-            0
-        } else {
-            let dying = matches!(f.action, Action::Hurt { lethal: true, .. });
-            (u16::from(start_lives) + f.extra + u16::from(dying)).saturating_sub(f.deaths) as u8
-        },
+        lives_left: f.lives(start_lives) as u8,
         hits: f.hits,
         headshots: f.headshots,
         carrying: f.carrying,
@@ -2006,6 +1998,7 @@ fn combat(f: &Fighter, slot: usize, tick: u32, lives: u16, start_lives: u8) -> C
         cook: f.cook,
         power: f.power,
         power_left: if f.power == 0 { 0 } else { f.boost },
+        laser: None,
     }
 }
 
@@ -2290,9 +2283,12 @@ fn simulate(
     // start) the bots would race alone, the script counting no human to hold them back, and all 7
     // crashed at node 21's corner about 60 frames after the go (the warm-up, not the match).
     let warm_up = game.m.settings.race && !game.started;
+    // Nor do the bots before a `--wait` start: the match steps from the server's start (the humans
+    // move as they join), and the bots roamed, took weapons and hit the humans waiting for it.
+    let idle = warm_up || (game.setup.wait > 0 && !game.started);
     // The AI script's effects (Total War's gas) go in before the step, its hits' events first.
     let mut events = Vec::new();
-    if let Some(bots) = game.ai.bots.as_mut().filter(|_| !warm_up) {
+    if let Some(bots) = game.ai.bots.as_mut().filter(|_| !idle) {
         for &(p, _) in &rides {
             bots.lifted(p);
         }
@@ -2371,10 +2367,10 @@ fn simulate(
         tank::seat(&mut world.0, game.m.gas.lifts());
     }
     // Scene 0x2D's doors and covers: their collision where the props stand once the script's
-    // effects are in (outside Total War the Deathmatch's set).
-    // ponytail: the step's own slide (up 10 or 40, down 2 or 8, the hide) collides a frame late.
+    // effects are in and the step has slid them (it slides them before the moves; outside Total War
+    // the Deathmatch's set).
     if game.ai.scene == 0x2D {
-        let g = &game.m.gas;
+        let g = game.m.gas.slid();
         gas::seat(
             &mut world.0,
             game.m.settings.total_war,
@@ -2671,6 +2667,7 @@ fn publish(
     mut players: Query<(&Slot, &mut Player, &mut Fighting, &mut Combat)>,
     mut view: Single<&mut MatchView>,
     live: Res<Players>,
+    world: Res<Collision>,
 ) {
     *live.0.0.lock().unwrap_or_else(|e| e.into_inner()) = (game.humans(), game.bots());
     let m = &game.m;
@@ -2690,6 +2687,7 @@ fn publish(
         player.set_if_neq(Player(f.body));
         fighting.set_if_neq(Fighting::of(m, slot.index));
         let mut c = combat(f, slot.index, m.tick, lives, m.settings.lives());
+        c.laser = (m.laser(slot.index, &world)).map(|p| p.map(|v| v.round() as i16));
         let hit = events.1.iter().rev().find(|h| h.0 == slot.index);
         c.hit = hit.map_or(combat_state.hit, |h| h.1);
         if m.settings.colors || m.settings.beach || m.settings.heist || m.settings.raptor {

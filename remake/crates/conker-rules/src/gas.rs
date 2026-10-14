@@ -46,6 +46,7 @@ pub const HAZE_FRAMES: u32 = 150;
 
 /// A prop as the engine keeps it for the script.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
 pub struct Prop {
     /// +0x6E clear: drawn, solid (a door, a cover), and a canister may be touched.
     pub shown: bool,
@@ -115,11 +116,28 @@ impl Gas {
         std::array::from_fn(|k| self.props[k].lift)
     }
 
+    /// After this frame's slide ([`Self::step`], which `Match::step` runs before the moves): where
+    /// the doors and covers stand, so collide, during the frame's moves ([`seat`]).
+    pub fn slid(&self) -> Self {
+        let mut g = *self;
+        g.step();
+        g
+    }
+
+    /// The doors and covers (placements 0-7), what a client predicts (`net::Fighting::sliding`).
+    pub fn sliding(&self) -> [Prop; 8] {
+        std::array::from_fn(|k| self.props[k])
+    }
+
+    pub fn set_sliding(&mut self, props: [Prop; 8]) {
+        self.props[..8].copy_from_slice(&props);
+    }
+
     /// The doors and covers slide while shown (`func_1511EC50`, C; V d2): up 5 steps a frame while
     /// +0x80 is set, past [`RISE`] back to it and hidden; down a step while clear, not below home.
     /// A step is 8, the doors' a quarter: they rise 10 and sink 2 (hidden after 51 moves, home 250
     /// frames after a show), the covers 40 and 8 (13 moves; home 63 frames after a show).
-    pub(crate) fn step(&mut self) {
+    pub fn step(&mut self) {
         for ((n, _), p) in PROPS.iter().zip(&mut self.props) {
             let v = match n {
                 0 | 1 => 2,
@@ -265,6 +283,9 @@ pub enum Effect {
     /// Tank: bot `.0`'s mover accel and brake ×10 this frame, from its class script's op 0x67
     /// ([`crate::tank::Tank::rates`]).
     TankRates(usize, [u8; 2]),
+    /// Tank: where bot `.0`'s gun aims this frame, its script's target led
+    /// ([`crate::tank::Tank::aims`]).
+    TankAim(usize, [f32; 3]),
 }
 
 #[cfg(test)]

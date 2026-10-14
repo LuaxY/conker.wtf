@@ -173,7 +173,8 @@ pub struct Body {
     /// Out of lives (the eliminated mask `0x800D18A0`): frames since the out frame.
     pub out: Option<u32>,
     /// Lives left (the stats record's +8): 6, never taken, in a timed match, Colors and Beach (V
-    /// s4, s5, s7; `total-war-teams.md`), 0 once out.
+    /// s4, s5, s7; `total-war-teams.md`), 0 once out; a dying one's life is still in (it goes at
+    /// the respawn, `conker_rules::Fighter::lives`).
     pub lives: u8,
 }
 
@@ -902,14 +903,15 @@ impl World<'_> {
         }
     }
 
-    /// Participant `i`, out [`TAKEOVER_DELAY`] frames, may take over `j`, its living team-mate bot
-    /// in play (`conker_rules::Match`'s own test, so the script's memory moves with the body).
+    /// Participant `i`, out [`TAKEOVER_DELAY`] frames, may take over `j`, its team-mate bot in
+    /// play, dying or not (`conker_rules::Match`'s own test, so the script's memory moves with the
+    /// body).
     fn takes_over(&self, i: usize, j: usize) -> bool {
         let (Some(h), Some(b)) = (self.bodies.get(i), self.bodies.get(j)) else {
             return false;
         };
         let out = h.out.is_some_and(|k| k >= TAKEOVER_DELAY);
-        out && i != j && b.out.is_none() && b.is_bot && b.health > 0 && b.team == h.team
+        out && i != j && b.out.is_none() && b.is_bot && b.team == h.team
     }
 
     /// Participant `p` if it is a human with a +0x70 slot here.
@@ -1362,7 +1364,12 @@ impl World<'_> {
             let hit_by = i32::from(b.hit_by);
             g.set(g::HIT_BY, p, hit_by);
             g.set(g::GRENADES, p, i32::from(b.grenades));
-            g.set(g::HEALTH, p, i32::from(b.health));
+            // Tank (V h1, h4: 35 of 38 hits, 6 of 49 the other way): on the hit's frame a victim
+            // after its shooter in slot order still reads its health before the hit, so 0xB8's
+            // retreat takes COOL 60, not 600, at 2 left (I: other modes alike, unchecked).
+            let stale = self.tank && hit_by & 0x80 != 0 && (hit_by & 0x7F) < p as i32;
+            let health = i32::from(b.health) + i32::from(stale && b.health > 0);
+            g.set(g::HEALTH, p, health);
             g.set(g::BAND, p, i32::from(self.graph.band(b.pos[1])));
             if b.health == 0 || first {
                 if g.get(g::DEAD, p) == 0 {

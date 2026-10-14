@@ -14,6 +14,8 @@ ExecStart=/opt/conker/conker-server --assets /srv/conker/assets --port 5888 \
     --token-key /etc/conker/token.key --token-addr 127.0.0.1:5889 \
     --public 203.0.113.7 --public 2001:db8::7
 Environment=RUST_LOG=info
+# A stop (SIGTERM) disconnects every player first, then exits 130 as Ctrl-C does: a clean stop.
+SuccessExitStatus=130
 Restart=always
 RestartSec=2
 NoNewPrivileges=yes
