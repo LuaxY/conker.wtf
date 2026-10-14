@@ -43,7 +43,7 @@ Decided 2026-10-14 (the user took every recommendation):
 - **`Input`** (`conker-sim/src/movement.rs:156`): `{ stick_x: i8, stick_y: i8, buttons: u16, camera_yaw: u16 }`.
   - The stick is in raw N64 units.
   - `buttons` is the N64 bitmask: A 0x8000, B 0x4000, Z 0x2000, R 0x0010, C 0x000F.
-  - It is lightyear's native input with lag compensation, at `PROTOCOL_ID = 36`.
+  - It is lightyear's native input with lag compensation, at `PROTOCOL_ID = 36` (when written; 42 after R3). File:line references are from before R1.
   - Bits 0x1000, 0x0800-0x0100, 0x0080, 0x0040 and 0x0020 are never read by any crate, and the server copies `Input`
     as-is.
   - **But recorded oracle traces do set some of them:** `lab/oracle/trajectories/combat_buttons.csv` has L and the
