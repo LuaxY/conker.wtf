@@ -75,6 +75,9 @@ fn menu(
     let Input {
         buttons, stick_x, ..
     } = input.0;
+    // The modern controls' Jump confirms as A does.
+    let jump = input.0.actions & conker_sim::movement::action::JUMP != 0;
+    let buttons = buttons | if jump { BUTTON_A } else { 0 };
     if !game
         .iter()
         .any(|m| crate::outro::results(m, &playing, &outros))

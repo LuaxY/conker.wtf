@@ -272,9 +272,11 @@ buttons the table already had. The mouse moves the stick only while R is held (2
 in a frame), so a keyboard player can aim finer than the keys' full stick.
 
 F8 toggles the free debug camera (its own keys fly it). M mutes and unmutes the sound. Ctrl is not used: browsers keep
-Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and the input
-pauses (the player stands, the camera keeps its yaw) until the next press. Natively a click grabs the cursor, and Esc or
-the window losing the focus frees it. The right mouse
+Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and opens the Esc
+menu (RESUME, SETTINGS with rebinding, LEAVE MATCH; the gamepad's Menu opens it too): the player stands, the camera
+keeps its yaw, until RESUME (a click or Enter takes the lock again; the gamepad's resumes without it). LEAVE MATCH
+comes back to this landing page. Natively a click grabs the cursor; Esc or the window losing the focus frees it and
+opens the menu. The right mouse
 button opens no context menu: winit cancels `contextmenu` on the canvas (V: Chrome 153, R reaches the server).
 Weapons come from the level's pickups: walk over one (it disappears for 4 s), then press Q to draw it.
 

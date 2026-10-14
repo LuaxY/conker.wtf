@@ -1,17 +1,44 @@
 //! The mouse pointer (CONTROLS_RESEARCH.md §6, §8). In the browser a press on the canvas takes the
-//! pointer lock with raw counts (`unadjustedMovement`; a plain lock where that is not supported);
-//! losing it (Esc: the browser's) pauses the input ([`Paused`]) until a press takes it again, and
-//! resets Bevy's grab mode (winit does not see the loss). Mouse back / forward don't leave the page.
-//! Natively a click while playing grabs the cursor (locked, hidden); losing the focus or Esc lets it
-//! go. Either way the mouse's counts are the device's (no acceleration or smoothing), as the R-held
-//! mouse aim reads them.
+//! pointer lock with raw counts (`unadjustedMovement`; a plain lock where that is not supported),
+//! but not while the Esc menu is open (only its RESUME does, [`lock`]); losing it (Esc: the
+//! browser's) raises [`Paused`], which opens the menu, and resets Bevy's grab mode (winit does not
+//! see the loss). Mouse back / forward don't leave the page. Natively a click while playing grabs
+//! the cursor (locked, hidden), and so does the menu's closing; losing the focus, Esc or the open
+//! menu lets it go. Either way the mouse's counts are the device's (no acceleration or smoothing),
+//! as the R-held mouse aim reads them.
 
 use bevy::prelude::*;
 
-/// The input is paused (sent neutral, but for the camera's yaw): in the browser, the pointer lock
-/// was lost and no press has taken it again. Round 2's Esc menu opens on it.
+/// The input is paused (sent neutral, but for the camera's yaw): the Esc menu holds it, as it sets
+/// this each frame ([`crate::menu`]). In the browser the pointer lock's loss raises it (the menu
+/// opens on it).
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Paused(pub bool);
+
+/// RESUME's click or key: the pointer lock again (the browser; natively the cursor follows
+/// [`Paused`]). Within the click's user activation; Chrome refuses it for 1.25 s after an Esc.
+pub fn lock() {
+    #[cfg(target_family = "wasm")]
+    web::relock();
+}
+
+/// The page holds the pointer lock (the browser; natively false).
+pub fn locked() -> bool {
+    #[cfg(target_family = "wasm")]
+    let locked = web::LOCKED.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_family = "wasm"))]
+    let locked = false;
+    locked
+}
+
+/// A lock request was refused since the last call (the browser's `pointerlockerror`).
+pub fn refused() -> bool {
+    #[cfg(target_family = "wasm")]
+    let refused = web::REFUSED.swap(false, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_family = "wasm"))]
+    let refused = false;
+    refused
+}
 
 pub fn build(app: &mut App, windowed: bool) {
     app.init_resource::<Paused>();
@@ -27,9 +54,11 @@ pub fn build(app: &mut App, windowed: bool) {
     app.add_systems(Update, grab);
 }
 
-/// Natively: a click while playing locks and hides the cursor; the window losing the focus, or Esc,
-/// frees it. The debug camera grabs it itself (holding the right button).
+/// Natively: a click while playing locks and hides the cursor, and so does the Esc menu's closing;
+/// the window losing the focus, Esc or the open menu frees it. The debug camera grabs it itself
+/// (holding the right button).
 #[cfg(not(target_family = "wasm"))]
+#[allow(clippy::too_many_arguments)]
 fn grab(
     mut windows: Query<
         (&Window, &mut bevy::window::CursorOptions),
@@ -39,17 +68,21 @@ fn grab(
     keys: Res<ButtonInput<KeyCode>>,
     playing: Query<(), With<crate::FollowCamera>>,
     free: Query<&bevy::camera_controller::free_camera::FreeCameraState>,
+    paused: Res<Paused>,
+    mut was: Local<bool>,
 ) {
     use bevy::window::CursorGrabMode;
+    let resumed = std::mem::replace(&mut *was, paused.0) && !paused.0;
     let Ok((window, mut cursor)) = windows.single_mut() else {
         return;
     };
     if free.iter().any(|c| c.enabled) {
         return;
     }
+    let press = resumed || mouse.get_just_pressed().next().is_some();
     let lock = match () {
-        _ if !window.focused || keys.just_pressed(KeyCode::Escape) => false,
-        _ if mouse.get_just_pressed().next().is_some() && !playing.is_empty() => true,
+        _ if !window.focused || paused.0 || keys.just_pressed(KeyCode::Escape) => false,
+        _ if press && !playing.is_empty() => true,
         _ => return,
     };
     let mode = if lock {
@@ -72,9 +105,12 @@ mod web {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
-    /// The page holds the pointer lock; it lost it since the last frame.
-    static LOCKED: AtomicBool = AtomicBool::new(false);
+    /// The page holds the pointer lock; it lost it since the last frame; a request was refused;
+    /// the Esc menu is open (as [`Paused`] was last frame).
+    pub static LOCKED: AtomicBool = AtomicBool::new(false);
     static LOST: AtomicBool = AtomicBool::new(false);
+    pub static REFUSED: AtomicBool = AtomicBool::new(false);
+    static MENU: AtomicBool = AtomicBool::new(false);
 
     fn not_supported(e: &JsValue) -> bool {
         let name = js_sys::Reflect::get(e, &"name".into()).ok();
@@ -98,15 +134,27 @@ mod web {
                 if let Ok(promise) = answer.dyn_into::<js_sys::Promise>() {
                     let canvas = canvas.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        let refused = wasm_bindgen_futures::JsFuture::from(promise).await;
-                        if refused.is_err_and(|e| not_supported(&e)) {
-                            canvas.request_pointer_lock();
+                        match wasm_bindgen_futures::JsFuture::from(promise).await {
+                            Err(e) if not_supported(&e) => canvas.request_pointer_lock(),
+                            Err(_) => REFUSED.store(true, Relaxed),
+                            Ok(_) => {}
                         }
                     });
                 }
             }
             Err(e) if not_supported(&e) => canvas.request_pointer_lock(),
             Err(_) => {}
+        }
+    }
+
+    fn canvas() -> Option<web_sys::Element> {
+        web_sys::window()?.document()?.get_element_by_id("game")
+    }
+
+    /// RESUME's request ([`super::lock`]).
+    pub fn relock() {
+        if let Some(canvas) = canvas() {
+            lock(&canvas);
         }
     }
 
@@ -130,9 +178,12 @@ mod web {
         };
         let (doc, target) = (document.clone(), canvas.clone());
         on(&canvas, "pointerdown", move |_| {
-            if doc.pointer_lock_element().is_none() {
+            if doc.pointer_lock_element().is_none() && !MENU.load(Relaxed) {
                 lock(&target);
             }
+        });
+        on(&document, "pointerlockerror", |_| {
+            REFUSED.store(true, Relaxed)
         });
         let doc = document.clone();
         on(&document, "pointerlockchange", move |_| {
@@ -154,20 +205,20 @@ mod web {
         }
     }
 
-    /// [`Paused`] from the lock; on a loss, Bevy's grab mode back to none (a lock Bevy took, the
-    /// debug camera's, would otherwise still read as locked).
+    /// A loss raises [`Paused`] (the menu opens on it) and puts Bevy's grab mode back to none (a
+    /// lock Bevy took, the debug camera's, would otherwise still read as locked); the menu's state
+    /// for the canvas's presses.
     pub fn sync(mut paused: ResMut<Paused>, mut cursors: Query<&mut CursorOptions>) {
-        let lost = LOST.swap(false, Relaxed);
-        if lost {
-            info!("pointer lock lost: input paused until a click");
+        MENU.store(paused.0, Relaxed);
+        if LOST.swap(false, Relaxed) {
+            info!("pointer lock lost: the menu opens");
             for mut cursor in &mut cursors {
                 if cursor.grab_mode != CursorGrabMode::None || !cursor.visible {
                     cursor.grab_mode = CursorGrabMode::None;
                     cursor.visible = true;
                 }
             }
+            paused.set_if_neq(Paused(true));
         }
-        let now = !LOCKED.load(Relaxed) && (lost || paused.0);
-        paused.set_if_neq(Paused(now));
     }
 }

@@ -326,7 +326,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             add_player_models.run_if(ready),
             place_players,
             pose_players.run_if(ready),
-            follow_camera,
+            (follow_camera, crate::orbit::camera).chain(),
             crate::outro::show,
             crate::beach::camera,
             crate::projectiles::fly,

@@ -180,7 +180,8 @@ pub mod action {
     pub const RELOAD: u8 = 0x08;
     /// The aim over the left shoulder (clear: the right); it moves the aim ray's start ([`super::aim_ray`]).
     pub const SHOULDER: u8 = 0x10;
-    /// Reserved for the weapon handling (C2c): the manual pickup, and the grenade (armed: holster first).
+    /// The weapon handling (C2c): Interact takes an on-foot weapon's pickup and gets on a mounted gun;
+    /// the grenade, with a weapon drawn, holsters it first and draws it again after the throw.
     pub const INTERACT: u8 = 0x20;
     pub const GRENADE: u8 = 0x40;
     /// The modern scheme, which gates everything new: `pad()`, the aim ray, [`super::aim_facing`] and the
@@ -942,11 +943,11 @@ pub fn step_among(
     let old = p.pos;
 
     // Z held makes A the high jump, from a crouch too (C: the jump branch tests no state; V q2za from
-    // 22; I: not with a weapon drawn, where Z is the weapon's).
+    // 22; I: not with a weapon drawn, where Z is the weapon's; modern: armed too, Z the crouch's).
     let high = !p.airborne
         && a_pressed
         && input.buttons & BUTTON_Z != 0
-        && p.armed == 0
+        && (p.armed == 0 || modern)
         && (can_jump(p.state) || matches!(p.state, state::CROUCH | state::CROUCH_WALK));
     if !high && !p.airborne && a_pressed && can_jump(p.state) {
         // func_1505F298 (C): a jump ends a lock and a hold; standing or running is decided on the
@@ -1063,8 +1064,10 @@ fn ground(
     others: &[Other],
     twist_x: Option<i8>,
 ) -> Choice {
-    // Z crouches only unarmed (func_1504C0E8 skips the crouch with s126+0x78 set, C).
-    let z = input.buttons & BUTTON_Z != 0 && p.armed == 0;
+    // Z crouches only unarmed (func_1504C0E8 skips the crouch with s126+0x78 set, C); the modern
+    // controls crouch armed too (the rules feed Z from the crouch action, not the trigger).
+    let modern = input.actions & action::MODERN != 0;
+    let z = input.buttons & BUTTON_Z != 0 && (p.armed == 0 || modern);
     let was = p.state;
     // The lock takes this frame's drive, then counts down (func_1504CB98 at 0x1504E7xx, func_1504BC38).
     let locked = p.lock != 0;
@@ -1081,7 +1084,6 @@ fn ground(
         p.move_angle = p.facing;
     }
     // Modern: the aim holds the facing ([`aim_facing`]) and the stick moves the player under it.
-    let modern = input.actions & action::MODERN != 0;
     let aimed = aim_facing(p, input).is_some();
     if let Some(yaw) = p.scope_yaw.filter(|_| !modern) {
         // Through the scope (func_1504CB98 at 0x1504D4B4, C; V camera4 w14, w16, w23, w24: 771 of 784
@@ -1096,8 +1098,10 @@ fn ground(
     // C-left/C-right strafe; with a weapon drawn C-up and C-down too (forward, back: the mask 0xF at
     // func_1504CB98 0x1504DD14, C; V: combat_ctlw_k6 271-273 with 0x23), but not with a grenade in hand
     // (0x26, the throw's s126+0x19B; V: combat_ctl_cdhold 85-140) nor through the scope except with 0x16
-    // (C, untraced).
-    let mask = if p.armed != 0 && p.armed != GRENADE && (p.scope_yaw.is_none() || p.armed == 0x16) {
+    // (C, untraced). The modern controls strafe with the stick: no C strafe.
+    let mask = if modern {
+        0
+    } else if p.armed != 0 && p.armed != GRENADE && (p.scope_yaw.is_none() || p.armed == 0x16) {
         C_BUTTONS
     } else {
         BUTTON_C_LEFT | BUTTON_C_RIGHT
@@ -1211,10 +1215,8 @@ impl Choice {
 /// The state with Z held (func_1504C0E8, C; V: move_crouch, anim_crouch): below speed 3 the crouch-walk
 /// is allowed (s126+0x37, until the speed passes 4 without Z); allowed and with the stick asking for more
 /// than 2.6 it crouch-walks at 40 percent of the target (35 gives f32 0x415FFFFF), else it crouches.
+/// Armed, only the modern controls get here ([`ground`]'s Z).
 fn crouch_state(p: &mut PlayerState) {
-    if p.armed != 0 {
-        return;
-    }
     if p.xz_speed < 3.0 {
         p.crouch_ok = true;
     }
@@ -2436,6 +2438,48 @@ mod tests {
             "{}",
             p.facing
         );
+    }
+
+    #[test]
+    fn modern_crouches_and_high_jumps_armed_and_leaves_the_c_strafe() {
+        // C2c: under MODERN the C buttons strafe no more (the stick does), and a drawn weapon
+        // crouches on Z (the rules feed it from CROUCH) and high-jumps with A; without MODERN it does
+        // neither.
+        let w = flat();
+        let c_left = Input {
+            buttons: BUTTON_C_LEFT,
+            camera_yaw: CAM,
+            actions: action::MODERN,
+            ..Default::default()
+        };
+        let mut p = PlayerState::spawn([0.0; 3], NORTH);
+        p.armed = 0x09;
+        run(&mut p, c_left, 10, &w);
+        assert_eq!((p.pos, p.xz_speed), ([0.0; 3], 0.0));
+        for actions in [action::MODERN, 0] {
+            let z = Input {
+                buttons: BUTTON_Z,
+                camera_yaw: CAM,
+                actions,
+                ..Default::default()
+            };
+            let mut p = PlayerState::spawn([0.0; 3], NORTH);
+            p.armed = 0x09;
+            run(&mut p, z, 5, &w);
+            let crouched = p.state == state::CROUCH;
+            step(
+                &mut p,
+                &Input {
+                    buttons: BUTTON_Z | BUTTON_A,
+                    ..z
+                },
+                &w,
+            );
+            assert_eq!(
+                (crouched, p.state == state::HIGH_JUMP),
+                (actions != 0, actions != 0)
+            );
+        }
     }
 
     #[test]

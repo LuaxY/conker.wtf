@@ -445,6 +445,14 @@ pub struct Fighter {
     /// 1004, combat_e_w39 971, e_w09 1005. Its head joints no longer take hits ([`crate::parts`]);
     /// gone at the respawn.
     pub popped: bool,
+    /// The modern controls' actions (`movement::action`) this frame and last, as [`Self::buttons`]
+    /// and [`Self::late`]: their presses (Interact, Grenade).
+    pub actions: u8,
+    pub late_actions: u8,
+    /// Modern: a grenade asked for with a weapon drawn, thrown once the holster ends; and the
+    /// weapon to draw once free (after that throw, or a pickup) ([`pad`]).
+    pub throw: bool,
+    pub redraw: bool,
 }
 
 impl Fighter {
@@ -506,6 +514,10 @@ impl Fighter {
             prey: false,
             ride: race::Ride::default(),
             popped: false,
+            actions: 0,
+            late_actions: 0,
+            throw: false,
+            redraw: false,
         }
     }
 
@@ -548,6 +560,8 @@ impl Fighter {
             extra: self.extra,
             buttons: self.buttons,
             late: self.late,
+            actions: self.actions,
+            late_actions: self.late_actions,
             r_off: self.r_off,
             z_armed: self.z_armed,
             start: self.start,
@@ -1202,7 +1216,7 @@ impl Match {
             }
         }
         self.heist.cash.step(world, self.tick);
-        self.pickups(arena, &mut ev);
+        self.pickups(arena, inputs, &mut ev);
         if self.settings.raptor {
             self.touch_eggs();
         }
@@ -1513,9 +1527,13 @@ impl Match {
         self.settings.heist && self.players.len() - self.free.len() <= 4
     }
 
-    fn pickups(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
+    /// `inputs`: the frame's, read before [`pad`] ([`can_take`]'s Interact press, a modern pickup's
+    /// draw).
+    fn pickups(&mut self, arena: &Arena, inputs: &[Input], ev: &mut Vec<Event>) {
+        use movement::action::{INTERACT, MODERN};
         let t = self.tick;
         let unique = self.unique();
+        let actions = |i: usize| inputs.get(i).map_or(0, |x| x.actions);
         for (k, (def, _)) in arena.pickups.iter().enumerate() {
             let p = &mut self.pickups[k];
             if let Some((who, at)) = p.taken {
@@ -1538,6 +1556,8 @@ impl Match {
                     Gives::Weapon(id) if t == at + 2 => {
                         p.taken = None;
                         self.give(who, id);
+                        // Modern: drawn at once, once free (decision 11; [`pad`]'s B).
+                        self.players[who].redraw |= actions(who) & MODERN != 0;
                     }
                     // Tank: the power-up's bit and timer, replacing the one held (V p1, b1).
                     Gives::Power(bit) if t == at + 2 => {
@@ -1608,22 +1628,23 @@ impl Match {
             }
             let pos = self.pickup_at(arena, k);
             let p = &mut self.pickups[k];
-            // A mask is touched only while the gas counts down (`func_1511DF6C` skips model 0x54 on
-            // scene 0x2D while G+0x1FE4 ≤ 0, C), and not by a player wearing one (I).
             let countdown = self.gas.countdown;
-            // War: Raptor's raptors take nothing (V r11; I the rule: class 9 holds no item).
-            let may = |f: &Fighter| {
-                f.class != raptor::CLASS
-                    && (def.gives != Gives::Mask || (countdown > 0 && !f.masked))
-            };
             let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
+            // Modern: Interact pressed this frame (`Fighter::actions` is still last frame's).
+            let interact = |i: usize, f: &Fighter| {
+                let a = actions(i);
+                (a & MODERN != 0).then_some(a & INTERACT != 0 && f.actions & INTERACT == 0)
+            };
             let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
-                f.health > 0
-                    && may(f)
-                    && match self.settings.race {
-                        true => race::touches(pos, f),
-                        false => tank::touches(pos, f, reach(i)),
-                    }
+                can_take(
+                    &self.settings,
+                    def.gives,
+                    pos,
+                    f,
+                    reach(i),
+                    countdown,
+                    interact(i, f),
+                )
             });
             if let Some(i) = toucher {
                 *p = PickupState {
@@ -2030,7 +2051,8 @@ impl Match {
     /// The modern aim (`movement::action::MODERN`): the player's aim ray (conker-sim's `aim_ray`, from
     /// the frame's position) in [`Self::aims`], where the bots' bullets code sends its shots along it;
     /// and on foot, through the scope, the scope's look from the aim instead of the N64 scope
-    /// camera's (a mounted gun keeps its own turn). Never cleared: without MODERN the slot is a bot's.
+    /// camera's; seated, the mounted gun's turn too, its pitch within the N64 gun scope's −60..50
+    /// (decision 19). Never cleared: without MODERN the slot is a bot's.
     fn modern_aim(&mut self, i: usize, input: &Input) {
         const DEGREES: f32 = 360.0 / 65536.0;
         if self.aims.len() < self.players.len() {
@@ -2038,9 +2060,12 @@ impl Match {
         }
         let f = &mut self.players[i];
         self.aims[i] = Some(movement::aim_ray(f.body.pos, input));
-        if f.gun.is_none() && f.body.scope_yaw.is_some() {
-            f.body.scope_yaw = Some(f32::from(movement::aim_yaw(input)) * DEGREES);
-            f.scope_pitch = -f32::from(movement::aim_pitch(input)) * DEGREES;
+        let yaw = Some(f32::from(movement::aim_yaw(input)) * DEGREES);
+        let pitch = -f32::from(movement::aim_pitch(input)) * DEGREES;
+        if f.seated() {
+            (f.body.scope_yaw, f.scope_pitch) = (yaw, pitch.clamp(-60.0, 50.0));
+        } else if f.gun.is_none() && f.body.scope_yaw.is_some() {
+            (f.body.scope_yaw, f.scope_pitch) = (yaw, pitch);
         }
     }
 
@@ -2079,6 +2104,22 @@ impl Match {
         if input.actions & movement::action::MODERN != 0 {
             self.modern_aim(i, input);
         }
+        // Then the actions' latches ([`Fighter::throw`], [`Fighter::redraw`]), all 0 without them:
+        // a grenade pressed with a weapon drawn throws once holstered and draws it again; the
+        // pull, a hit or no grenade left ends the first, the draw, a hit or no weapon the second.
+        let f = &mut self.players[i];
+        use movement::action::GRENADE;
+        if input.actions & GRENADE != 0 && f.actions & GRENADE == 0 && f.drawn && f.grenades > 0 {
+            (f.throw, f.redraw) = (true, true);
+        }
+        let hurt = matches!(f.action, Action::Hurt { .. });
+        if hurt || f.grenades == 0 || matches!(f.action, Action::GrenadePull { .. }) {
+            f.throw = false;
+        }
+        if hurt || f.weapon.is_none() || f.action == Action::Draw {
+            f.redraw = false;
+        }
+        (f.late_actions, f.actions) = (f.actions, input.actions);
         if self.settings.tank {
             return self.tank_player(i, input, arena, world, ev);
         }
@@ -2163,6 +2204,7 @@ impl Match {
             f.r_off.or(Some(t))
         };
         let unaimed = f.r_off.is_some_and(|r| t >= r + AIM_EXIT);
+        let modern = input.actions & movement::action::MODERN != 0;
         if f.stun == 0 {
             f.immune = f.immune.saturating_sub(1);
         } else if f.stun == STUN_HIT && f.action == Action::Free {
@@ -2408,9 +2450,11 @@ impl Match {
                 } else if let Some(aim) = w.aim().filter(|_| late_held(BUTTON_R)) {
                     f.set(Action::Aim { shot: NONE }, aim, t);
                 } else if let Some(c) = w.c_button.filter(|_| {
-                    // Not in a jump or its landing (V combat6_ctlw40 730: the club's C-up ignored).
+                    // Not in a jump or its landing (V combat6_ctlw40 730: the club's C-up ignored);
+                    // the C strafe's run, which the modern controls leave to the stick.
                     use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
-                    input.buttons & C_BUTTONS & !late != 0
+                    !modern
+                        && input.buttons & C_BUTTONS & !late != 0
                         && !matches!(f.body.state, JUMP | RUN_JUMP | FALL | LAND)
                 }) {
                     f.set(Action::CButton, c, t);
@@ -2665,12 +2709,22 @@ impl Match {
         // Movement: Z attacks instead of crouching while a weapon is drawn (and a Z begun then, the
         // holster's last frame included, does not crouch until let go, V ctlw_k8 216), and A reloads (guns) or does nothing
         // (sniper, flamethrower) instead of jumping.
+        // Modern: the movement jumps and crouches on the JUMP and CROUCH actions, armed or not
+        // (decisions 8, 9; conker-sim lifts its armed gates), the trigger and the reload keeping Z
+        // and A ([`pad`]); crouch and jump armed are the high jump.
         let mut mv = *input;
-        if f.drawn || f.z_armed {
-            mv.buttons &= !BUTTON_Z;
-        }
-        if f.drawn && !w.is_some_and(Weapon::jumps) {
-            mv.buttons &= !BUTTON_A;
+        if modern {
+            use movement::action::{CROUCH, JUMP};
+            let on = |a: u8, b: u16| if input.actions & a != 0 { b } else { 0 };
+            mv.buttons =
+                mv.buttons & !(BUTTON_A | BUTTON_Z) | on(JUMP, BUTTON_A) | on(CROUCH, BUTTON_Z);
+        } else {
+            if f.drawn || f.z_armed {
+                mv.buttons &= !BUTTON_Z;
+            }
+            if f.drawn && !w.is_some_and(Weapon::jumps) {
+                mv.buttons &= !BUTTON_A;
+            }
         }
         // A swing locks onto the nearest player in its first frame (that frame's step goes along
         // the new move angle at the frame's speed; the facing stays), then ignores the stick and
@@ -2714,9 +2768,11 @@ impl Match {
         // A draw or a holster holds the player still through the frame it ends in (obj+0x89 = 0xFF
         // from `func_15063E84`, C; V combat5_sg_e3 765-774: the stick held through the shotgun's
         // draw moves nothing, the idle shows on its last frame), and so does the shotgun's shot (its
-        // case of `func_15065A5C`, C).
-        let still = matches!(ended, Action::Draw | Action::Holster)
-            || matches!(f.action, Action::Draw | Action::Holster)
+        // case of `func_15065A5C`, C). The modern controls move through a draw or a holster
+        // (decision 21).
+        let still = (!modern
+            && (matches!(ended, Action::Draw | Action::Holster)
+                || matches!(f.action, Action::Draw | Action::Holster)))
             || (matches!(f.action, Action::Fire { .. })
                 && w.is_some_and(|w| matches!(w.attack, Attack::Spread { .. })));
         if still {
@@ -2786,7 +2842,7 @@ impl Match {
             // Armed locomotion: the weapon's walk or run while the stick asks for 1 or more
             // (`conker_anim::armed_move`, C; V 0x124 on e_w21, 0x15B on e_w22), else the plain
             // gait (V for 0x14: state 1 on e_w14).
-            use movement::state::{FALL, JUMP, LAND, RUN_JUMP};
+            use movement::state::{FALL, HIGH_JUMP, JUMP, LAND, RUN_JUMP};
             f.anim = match (w.filter(|_| f.drawn), f.body.state) {
                 _ if still => f.idle_anim(),
                 (_, state @ (JUMP | RUN_JUMP | FALL | LAND)) if f.flag.is_some() => {
@@ -2804,6 +2860,9 @@ impl Match {
                 (Some(w), LAND) if w.id == 0x21 && f.body.timer > 1 => anim::MELEE_LAND,
                 (Some(w), LAND) if w.id == 0x21 => w.idle,
                 (Some(_), state @ (JUMP | RUN_JUMP | FALL | LAND)) => u16::from(state),
+                // Modern: crouched or high-jumping armed, the unarmed clip, the weapon in hand (no
+                // armed crouch clip is known).
+                (Some(_), state @ (CROUCH | CROUCH_WALK | HIGH_JUMP)) if modern => u16::from(state),
                 (Some(w), state) => {
                     // The bat walks and runs as the club (V h3).
                     let id = if w.club() { 0x40 } else { w.id };
@@ -2864,9 +2923,11 @@ impl Match {
                 // obj+0x1D1 (`func_15145740`, C), which follows a bot's aim pitch +0x170 (V o34p:
                 // 0x23 within 3.4°, in 1.1° steps; the steps and the lag are not ported). The
                 // pistol's (`func_150FED30`) takes `func_150FF2D4`'s, untraced: as 0x23's here (I).
+                // The modern aim sends them all to its hit point, as the crosshair shows.
                 let ray = self.aims.get(i).copied().flatten();
+                let modern = self.players[i].actions & movement::action::MODERN != 0;
                 if let Some((eye, dir)) = ray {
-                    let to: [f32; 3] = if b.kind == damage::TWIN_BULLET {
+                    let to: [f32; 3] = if b.kind == damage::TWIN_BULLET || modern {
                         let wall = raycast(world, eye, dir, RAY_RANGE);
                         let d = self
                             .first_part(i, eye, dir, wall, seen)
@@ -3795,8 +3856,15 @@ impl Match {
                 // not in the scope, carrying nothing (I: the actions that hold a player stand in for
                 // obj+0x89, as for the flags).
                 let at = g.place.pos;
+                // Modern: with an Interact press (decision 19).
+                let interact = |f: &Fighter| {
+                    use movement::action::{INTERACT, MODERN};
+                    f.actions & MODERN == 0
+                        || (f.actions & INTERACT != 0 && f.late_actions & INTERACT == 0)
+                };
                 let toucher = self.players.iter().position(|f| {
                     f.health > 0
+                        && interact(f)
                         && f.stun == 0
                         && f.gun.is_none()
                         && f.body.scope_yaw.is_none()
@@ -4064,20 +4132,24 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
 
 /// The modern controls' actions (`movement::action`) as the N64 bits the rules read, by the player's
 /// own state at the frame's start, on the server and in prediction alike ([`Match::player`]). The
-/// identity while `actions` is 0 (bots, the oracle replays). Bits are only added: R (aim), the C
-/// buttons (the cameras) and B (holster/drop) pass through.
+/// identity while `actions` is 0 (bots, the oracle replays). R (aim) and the C buttons (the cameras)
+/// pass through, and B (holster/drop) but on a mounted gun.
 ///
 /// | Action | On foot, a weapon drawn | On foot, none drawn | Mounted gun, raptor, Tank, Race |
 /// |---|---|---|---|
 /// | JUMP | A if the weapon jumps (else A reloads) | A | A (off the gun, the jump, Tank's boost) |
 /// | CROUCH | – (Z fires) | Z, not while drawing | – |
-/// | FIRE | Z | – (C2c: B draws) | Z |
+/// | FIRE | Z | B (draws a held weapon), free | Z |
 /// | RELOAD | A if the weapon reloads | – | – |
+/// | GRENADE | B (holsters; no Z), free | C-down (held, or a tap's frame) | – |
+/// | B (Q) | | B, or the draw after a pickup or a throw ([`Fighter::redraw`]), free | A on the gun (off) |
 ///
-/// No weapon both jumps and reloads, so JUMP and RELOAD never share A. CROUCH stays off a draw: a Z
-/// held as it ends would fire.
+/// No weapon both jumps and reloads, so JUMP and RELOAD never share A; the movement's jump and crouch
+/// are the actions themselves (the rules' frame). CROUCH stays off a draw: a Z held as it ends would
+/// fire. Free: no action under way, no flag or canister carried (B puts a flag down); B (draw,
+/// holster) only after a frame without it.
 pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
-    use movement::action::{CROUCH, FIRE, JUMP, RELOAD};
+    use movement::action::{CROUCH, FIRE, GRENADE, JUMP, RELOAD};
     if input.actions == 0 {
         return *input;
     }
@@ -4086,18 +4158,73 @@ pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
     let (fire, jump, crouch, reload) = match f.weapon().filter(|_| f.drawn) {
         _ if ridden => (true, true, false, false),
         Some(w) => (true, w.jumps(), false, w.reload.is_some()),
-        // §4b (C2c): FIRE draws a holstered weapon with B here.
         None => (false, true, f.action != Action::Draw, false),
     };
     let held = |a: u8, means: bool| means && input.actions & a != 0;
+    // A grenade asked for (held, or a tap's latch) with one left: drawn, it holsters first and
+    // the trigger lets go (decision 13).
+    let grenade = !ridden && f.grenades > 0 && (input.actions & GRENADE != 0 || f.throw);
+    let free = f.action == Action::Free && f.flag.is_none() && !f.carrying;
     let mut buttons = input.buttons;
-    if held(FIRE, fire) || held(CROUCH, crouch) {
+    if (held(FIRE, fire) && !(grenade && f.drawn)) || held(CROUCH, crouch) {
         buttons |= BUTTON_Z;
     }
     if held(JUMP, jump) || held(RELOAD, reload) {
         buttons |= BUTTON_A;
     }
+    // Q gets off a mounted gun (decision 19), as A does; its B stop is the N64's.
+    if f.gun.is_some() && buttons & BUTTON_B != 0 {
+        buttons = buttons & !BUTTON_B | BUTTON_A;
+    }
+    if !ridden {
+        // A tap's C-down lasts one frame, as an N64 tap's (the pull starts on the next); B comes
+        // after a frame without it, so a press refused (in the water) comes again.
+        let tapped = f.throw && free && f.buttons & C_DOWN == 0;
+        let press = free && f.buttons & BUTTON_B == 0;
+        match f.weapon {
+            Some(_) if f.drawn => {
+                if grenade && press {
+                    buttons |= BUTTON_B;
+                }
+            }
+            _ if (grenade && input.actions & GRENADE != 0) || tapped => buttons |= C_DOWN,
+            // Fire draws (decision 10; FIRE still held fires once drawn, decision 22), as does a
+            // pickup (11) or a throw's end (23); a draw refills the magazine (24).
+            Some(_) if press && !f.throw && (input.actions & FIRE != 0 || f.redraw) => {
+                buttons |= BUTTON_B;
+            }
+            _ => {}
+        }
+    }
     Input { buttons, ..*input }
+}
+
+/// Whether player `f` (its touch reach `reach`) takes the pickup giving `gives` at `pos` this frame
+/// (`countdown`: Total War's gas, the masks' gate): alive, admitted (War: Raptor's raptors take
+/// nothing, V r11; a mask only while the gas counts down, `func_1511DF6C` skips model 0x54 on scene
+/// 0x2D while G+0x1FE4 ≤ 0, C, and not over one, I) and touching it. Under the modern controls
+/// (`interact`: Interact pressed this frame) an on-foot weapon, Raptor's bone weapons included, waits
+/// for Interact (decisions 12, 18); grenades, masks and Tank's, Race's and Beach's items stay
+/// automatic. The server's gate ([`Match::step`]'s pickups) and the client's prompt ask it alike.
+pub fn can_take(
+    s: &Settings,
+    gives: Gives,
+    pos: [f32; 3],
+    f: &Fighter,
+    reach: u8,
+    countdown: i32,
+    interact: Option<bool>,
+) -> bool {
+    let manual = matches!(gives, Gives::Weapon(id)
+        if !s.tank && !s.race && !(s.beach && id == beach::ITEM));
+    f.health > 0
+        && f.class != raptor::CLASS
+        && (gives != Gives::Mask || (countdown > 0 && !f.masked))
+        && match s.race {
+            true => race::touches(pos, f),
+            false => tank::touches(pos, f, reach),
+        }
+        && !(manual && interact == Some(false))
 }
 
 /// Where a player aims (s126+0x16C and +0x170 through the scope, else its facing, level): the unit
@@ -5625,6 +5752,287 @@ mod tests {
         let f = &m.players[0];
         assert_eq!((f.body.scope_yaw, f.scope_pitch), (Some(45.0), -22.5));
         assert_eq!(f.body.facing, 0x2000);
+    }
+
+    /// A modern input aiming along +x (`camera_yaw` 0xC000), with `actions`.
+    fn modern(actions: u8) -> Input {
+        Input {
+            camera_yaw: 0xC000,
+            actions: movement::action::MODERN | actions,
+            ..Input::default()
+        }
+    }
+
+    /// [`run`] with both players' whole inputs.
+    fn run_with(
+        m: &mut Match,
+        arena: &Arena,
+        world: &CollisionWorld,
+        frames: u32,
+        inputs: impl Fn(u32) -> [Input; 2],
+    ) -> Vec<(u32, Event)> {
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            let t = m.tick;
+            out.extend(m.step(arena, &inputs(t), world).into_iter().map(|e| (t, e)));
+        }
+        out
+    }
+
+    /// Decisions 11, 12 and 18: a modern player takes a weapon's pickup only with an Interact press
+    /// (`can_take` says so for the prompt too), and draws it at once; the grenades stay automatic.
+    #[test]
+    fn modern_weapon_pickups_wait_for_interact_and_draw() {
+        use movement::action::INTERACT;
+        let (arena, mut m, w) = duel();
+        m.players[0].body.pos = [0.0, 0.0, 2950.0]; // on the twin guns
+        m.players[1].body.pos = [0.0, 0.0, -2950.0]; // on the grenades
+        let ev = run_with(&mut m, &arena, &w, 10, |_| [modern(0); 2]);
+        assert_eq!((m.players[0].weapon, m.players[1].grenades), (None, 6));
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e.1, Event::Pickup { player: 0, .. }))
+        );
+        let (pickup, pos) = arena.pickups[0];
+        let take = |f: &Fighter, interact| {
+            can_take(
+                &m.settings,
+                pickup.gives,
+                pos,
+                f,
+                weapon::REACH,
+                0,
+                interact,
+            )
+        };
+        let f = &m.players[0];
+        assert!(!take(f, Some(false)) && take(f, Some(true)) && take(f, None));
+        // Held through: one press takes it, then it comes 2 frames later and is drawn at once.
+        let ev = run_with(&mut m, &arena, &w, 3, |_| [modern(INTERACT), modern(0)]);
+        assert_eq!(
+            ev.iter()
+                .filter(|e| matches!(e.1, Event::Pickup { player: 0, .. }))
+                .map(|e| e.0)
+                .collect::<Vec<_>>(),
+            [10]
+        );
+        let f = m.players[0];
+        assert_eq!(
+            (f.weapon, f.action, f.since),
+            (Some(0x09), Action::Draw, 12)
+        );
+        run_with(&mut m, &arena, &w, 16, |_| [modern(INTERACT), modern(0)]);
+        let f = m.players[0];
+        assert!(f.drawn && !f.redraw && f.rounds == weapon::TWIN_GUNS.rounds);
+        // `pad()`'s draw comes after a frame without B: a press refused (in the water) comes again.
+        let f = Fighter {
+            drawn: false,
+            redraw: true,
+            ..f
+        };
+        let b = |late| pad(&Fighter { buttons: late, ..f }, &m.settings, &modern(0)).buttons;
+        assert_eq!((b(0) & BUTTON_B, b(BUTTON_B) & BUTTON_B), (BUTTON_B, 0));
+    }
+
+    /// Decisions 10, 22 and 24: FIRE draws a holstered pistol (refilling it) and, still held, fires
+    /// once it is drawn, the frame after the draw ends.
+    #[test]
+    fn modern_fire_draws_and_fires_once_ready() {
+        use movement::action::FIRE;
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x39);
+        m.players[0].rounds = 0;
+        let pistol = weapon::weapon(0x39).unwrap();
+        let ev = run_with(&mut m, &arena, &w, 40, |_| [modern(FIRE), Input::default()]);
+        let shots: Vec<u32> = (ev.iter())
+            .filter(|e| matches!(e.1, Event::Shot { player: 0, .. }))
+            .map(|e| e.0)
+            .collect();
+        assert_eq!(shots, [u32::from(pistol.draw.1) + 1]);
+        assert_eq!(m.players[0].rounds, pistol.rounds - 1);
+    }
+
+    /// Decisions 8 and 9: with the twin guns drawn (A reloads them on the N64 pad) JUMP jumps and
+    /// RELOAD reloads; CROUCH crouches (the unarmed clip, the guns in hand, the crouched cylinder),
+    /// FIRE fires crouched, and CROUCH + JUMP is the high jump.
+    #[test]
+    fn modern_jumps_and_crouches_armed() {
+        use movement::action::{CROUCH, FIRE, JUMP, RELOAD};
+        use movement::state;
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+        m.give(0, 0x09);
+        m.players[0].drawn = true;
+        let mut top = 0.0f32;
+        for _ in 0..5 {
+            run_with(&mut m, &arena, &w, 1, |_| [modern(JUMP), Input::default()]);
+            top = top.max(m.players[0].body.pos[1]);
+            assert_eq!(m.players[0].action, Action::Free);
+        }
+        assert!(top > 10.0, "{top}");
+        run_with(&mut m, &arena, &w, 60, |_| [modern(0), Input::default()]);
+        assert!(!m.players[0].body.airborne);
+        run_with(&mut m, &arena, &w, 1, |_| {
+            [modern(RELOAD), Input::default()]
+        });
+        assert!(matches!(m.players[0].action, Action::Reload { .. }));
+        run_with(&mut m, &arena, &w, 80, |_| [modern(0), Input::default()]);
+        run_with(&mut m, &arena, &w, 10, |_| {
+            [modern(CROUCH), Input::default()]
+        });
+        let f = m.players[0];
+        assert_eq!(
+            (f.body.state, f.anim, f.drawn),
+            (state::CROUCH, u16::from(state::CROUCH), true)
+        );
+        // The crouched cylinder: a shot at standing head height passes over.
+        let p = f.body.pos;
+        let head = [p[0] - 500.0, p[1] + 64.6, p[2]];
+        assert_eq!(m.first_part(1, head, [1.0, 0.0, 0.0], 1e4, &here), None);
+        let shots = m.players[0].shots;
+        run_with(&mut m, &arena, &w, 10, |_| {
+            [modern(CROUCH | FIRE), Input::default()]
+        });
+        assert!(m.players[0].shots > shots);
+        assert_eq!(m.players[0].body.state, state::CROUCH);
+        run_with(&mut m, &arena, &w, 10, |_| {
+            [modern(CROUCH), Input::default()]
+        });
+        run_with(&mut m, &arena, &w, 1, |_| {
+            [modern(CROUCH | JUMP), Input::default()]
+        });
+        assert_eq!(m.players[0].body.state, state::HIGH_JUMP);
+    }
+
+    /// Decisions 13 and 23: a tap of GRENADE with the twin guns drawn holsters them, pulls and throws
+    /// a grenade (one frame of C-down, as an N64 tap) and draws them again.
+    #[test]
+    fn modern_grenade_holsters_throws_and_draws_again() {
+        use movement::action::GRENADE;
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+        m.give(0, 0x09);
+        m.players[0].drawn = true;
+        let mut began = Vec::new();
+        use std::mem::discriminant as d;
+        for _ in 0..150 {
+            let t = m.tick;
+            let a = if t == 5 { GRENADE } else { 0 };
+            run_with(&mut m, &arena, &w, 1, |_| [modern(a), Input::default()]);
+            let f = m.players[0];
+            if t > 0 && f.since == t && began.last() != Some(&d(&f.action)) {
+                began.push(d(&f.action));
+            }
+        }
+        let want = [
+            d(&Action::Holster),
+            d(&Action::Free),
+            d(&Action::GrenadePull { pull: 0 }),
+            d(&Action::GrenadeHold { pull: 0 }),
+            d(&Action::GrenadeThrow { pull: 0, hold: 0 }),
+            d(&Action::Free),
+            d(&Action::Draw),
+            d(&Action::Free),
+        ];
+        assert_eq!(began, want);
+        let f = m.players[0];
+        assert!(f.drawn && !f.throw && !f.redraw);
+        assert_eq!((f.grenades, m.grenades.len()), (2, 1));
+    }
+
+    /// Decision 21: the modern controls move through a draw; the N64's hold the player still.
+    #[test]
+    fn modern_moves_while_drawing() {
+        for actions in [0, movement::action::MODERN] {
+            let (arena, mut m, w) = duel();
+            m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+            m.give(0, 0x09);
+            let input = |t: u32| Input {
+                stick_y: 80,
+                buttons: if t == 0 { BUTTON_B } else { 0 },
+                actions,
+                ..Input::default()
+            };
+            run_with(&mut m, &arena, &w, 10, |t| [input(t), Input::default()]);
+            let f = m.players[0];
+            assert_eq!(f.action, Action::Draw);
+            assert_eq!(f.body.pos == [0.0; 3], actions == 0, "{:?}", f.body.pos);
+        }
+    }
+
+    /// Decision 19: a modern player gets on a mounted gun with Interact, not by touch, turns it with
+    /// the aim (its pitch within −60..50) and gets off with Q (B).
+    #[test]
+    fn modern_mounted_gun_on_interact_off_q_turned_by_the_aim() {
+        use movement::action::INTERACT;
+        let (arena, mut m, w) = duel();
+        let place = gun::Place {
+            pos: [0.0, 0.0, 300.0],
+            yaw: 0,
+        };
+        m.guns = vec![Gun::new(place)];
+        (m.players[0].body.pos, m.players[1].body.pos) = ([0.0, 0.0, 250.0], [3000.0, 0.0, 0.0]);
+        run_with(&mut m, &arena, &w, 5, |_| [modern(0), Input::default()]);
+        assert_eq!(m.players[0].gun, None);
+        run_with(&mut m, &arena, &w, 1, |_| {
+            [modern(INTERACT), Input::default()]
+        });
+        assert_eq!(m.gun_state(0), gun::LAUNCH);
+        for _ in 0..40 {
+            run_with(&mut m, &arena, &w, 1, |_| [modern(0), Input::default()]);
+        }
+        assert!(m.players[0].seated());
+        let aim = |pitch| Input {
+            camera_yaw: 0xC000 + 0x2000,
+            aim_pitch: pitch,
+            ..modern(0)
+        };
+        run_with(&mut m, &arena, &w, 1, |_| [aim(0x1000), Input::default()]);
+        let f = m.players[0];
+        assert_eq!((f.body.facing, f.scope_pitch), (0x2000, -22.5));
+        run_with(&mut m, &arena, &w, 1, |_| [aim(-0x3000), Input::default()]);
+        assert_eq!(m.players[0].scope_pitch, 50.0);
+        let q = Input {
+            buttons: BUTTON_B,
+            ..modern(0)
+        };
+        run_with(&mut m, &arena, &w, 1, |_| [q, Input::default()]);
+        assert_eq!((m.players[0].gun, m.gun_state(0)), (None, gun::LEAVING));
+    }
+
+    /// The modern aim sends the pistol's, 0x23's and the tommy gun's bullets from the muzzle to the
+    /// aim ray's hit point (a wall 3,000 ahead, 20 to the right of the facing: the shoulder), not
+    /// parallel to the ray.
+    #[test]
+    fn modern_bullets_go_to_the_aims_hit_point() {
+        use movement::action::FIRE;
+        let (x, big) = (3000.0, 20_000.0);
+        let w = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 5),
+            ([[x, 0.0, -500.0], [x, 500.0, -500.0], [x, 500.0, 500.0]], 5),
+            ([[x, 0.0, -500.0], [x, 500.0, 500.0], [x, 0.0, 500.0]], 5),
+        ]);
+        for weapon in [0x39, 0x23, 0x38] {
+            let (arena, mut m, _) = duel();
+            m.players[1].body.pos = [0.0, 0.0, -5000.0];
+            m.give(0, weapon);
+            let rounds = weapon::weapon(weapon).unwrap().rounds;
+            (m.players[0].drawn, m.players[0].rounds) = (true, rounds);
+            let mut first = None;
+            for _ in 0..10 {
+                run_with(&mut m, &arena, &w, 1, |_| [modern(FIRE), Input::default()]);
+                first = first.or(m.bullets.first().map(|b| (b.1.pos, b.1.dir)));
+            }
+            let (pos, dir) = first.expect("a bullet");
+            let s = (x - pos[0]) / dir[0];
+            let at: Vec<f32> = (0..3).map(|j| pos[j] + s * dir[j]).collect();
+            let side = movement::AIM_SHOULDER;
+            assert!((at[2] - side).abs() < 0.5, "{weapon:#x} {at:?}");
+            // The tommy gun's climb lifts it a little.
+            let rise = if weapon == 0x38 { 20.0 } else { 0.5 };
+            assert!((at[1] - 67.5).abs() < rise, "{weapon:#x} {at:?}");
+        }
     }
 
     /// `func_151D4DAC`'s head hits, V oracle ohit (0x30): a stunned player at 4 hit on the head

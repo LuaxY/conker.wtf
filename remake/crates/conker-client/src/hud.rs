@@ -40,6 +40,7 @@ use conker_rules::projectile::{LOB_HOLD, LOB_PULL};
 use conker_sim::net::{Combat, MatchView, Player, PlayerId};
 use lightyear::prelude::{Interpolated, LocalTimeline, PeerId, Predicted};
 
+use crate::bindings::{Bind, Bindings, KeyLabels};
 use crate::connection::NetStatus;
 use crate::{Anim, FollowCamera};
 
@@ -150,6 +151,8 @@ pub struct Shown {
     /// place, total and best lap in VIs, −1 none) in place of the results' columns.
     pub race: Option<RaceHud>,
     pub race_rows: Option<Vec<[i32; 3]>>,
+    /// The modern controls' pickup prompt ([`Prompt`]).
+    pub prompt: Option<String>,
 }
 
 /// War: Raptor's icons (HUD flag 0x4000, C `func_151E89A0`): the carried egg's (`atlas2`) while a
@@ -461,7 +464,7 @@ fn width(hud: &Hud, line: &str) -> f32 {
     items(hud, line).iter().map(|i| measure(hud, i)).sum()
 }
 
-fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<Sprite> {
+pub(crate) fn text(hud: &Hud, line: &str, suffix: Option<usize>, t: &Text, z: f32) -> Vec<Sprite> {
     let mut items = items(hud, line);
     if let Some(s) = suffix {
         // The rank: "(1" suffix ")", or "1" suffix.
@@ -1271,6 +1274,17 @@ pub fn sprites(hud: &Hud, s: &Shown) -> Vec<Sprite> {
     if let Some(n) = s.escape {
         out.extend(text(hud, &n.to_string(), None, &hud.beach.escape, 5.0));
     }
+    // The pickup prompt, under the view's centre (the crosshair's), white on a shadow.
+    if let Some(line) = &s.prompt {
+        let t = Text {
+            anchor: Anchor(Horizontal::Centre, Vertical::Middle),
+            at: [(hud.frame[0] / 2) as i16, (hud.frame[1] / 2) as i16 + 40],
+            align: Align::Centre,
+            colour: white,
+            shadow: Some([0, 0, 0, 255]),
+        };
+        out.extend(text(hud, line, None, &t, 5.0));
+    }
     // Beach: the strike's flash, the iris's quarters in red then black around the view's centre.
     if let Some(colour) = s.strike.and_then(strike_flash) {
         let i = &hud.iris;
@@ -1486,7 +1500,10 @@ struct HudCamera;
 struct HudSprite;
 
 /// Loads the HUD's pictures (`hud/` under the pack's root) and draws the HUD every frame.
-pub fn build(app: &mut App, hud: Hud) {
+pub fn build(app: &mut App, hud: Hud, pickups: Vec<conker_assets::Pickup>) {
+    app.insert_resource(Pickups(pickups));
+    app.init_resource::<Prompt>();
+    app.add_systems(Update, prompt.before(draw));
     app.add_systems(
         Startup,
         move |assets: Res<AssetServer>,
@@ -1533,7 +1550,10 @@ pub fn build(app: &mut App, hud: Hud) {
             });
         },
     );
-    app.add_systems(Update, (display_space, draw));
+    app.add_systems(
+        Update,
+        (display_space, draw.after(crate::crosshair::update)),
+    );
 }
 
 /// The HUD's camera: orthographic, one unit a window pixel, over the view (into `target` when
@@ -1843,6 +1863,7 @@ fn shown(
             .then(|| [!eggs.is_empty(), m.raptors.prey != 0].map(|carried| carried && icons)),
         race: (m.race.then(|| race_hud(m, c, p.pos, &dots, race_map))).flatten(),
         race_rows: None,
+        prompt: None,
     }
 }
 
@@ -1892,6 +1913,100 @@ pub fn race_dot([x, _, z]: [f32; 3]) -> [f32; 2] {
     ]
 }
 
+/// The pack's pickups (`pickups.json`), for the [`Prompt`]; War: Raptor's are its `raptor.json`'s.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct Pickups(pub Vec<conker_assets::Pickup>);
+
+/// The modern controls' pickup prompt this frame ([`pickup_prompt`]).
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct Prompt(pub Option<String>);
+
+/// Decision 12's prompt: "PRESS <key> TO PICK UP" while `f` stands on a weapon's pickup, shown, that
+/// it takes only with Interact: conker-rules' `can_take`, the server's gate, with and without the
+/// press (a human's reach; `pickups` the pack's, the roaming ones where `m` has them now).
+pub fn pickup_prompt(
+    pickups: &[conker_assets::Pickup],
+    m: &MatchView,
+    f: &conker_rules::Fighter,
+    key: &str,
+) -> Option<String> {
+    use conker_rules::weapon::{Gives, REACH};
+    let s = crate::match_settings(m);
+    let waits = |p: &conker_assets::Pickup| {
+        let conker_assets::Gives::Weapon(id) = p.gives else {
+            return false;
+        };
+        let taken = p.placement < 64 && m.taken >> p.placement & 1 != 0;
+        let pos = (m.roaming.iter())
+            .find(|r| r.0 == p.placement)
+            .map_or(p.position, |r| r.1);
+        let take = |interact| {
+            conker_rules::game::can_take(
+                &s,
+                Gives::Weapon(id),
+                pos,
+                f,
+                REACH,
+                m.countdown,
+                Some(interact),
+            )
+        };
+        !taken && !take(false) && take(true)
+    };
+    pickups
+        .iter()
+        .any(waits)
+        .then(|| format!("PRESS {key} TO PICK UP"))
+}
+
+/// Interact's binding as a prompt shows it, uppercase (the HUD font has no lowercase): the first
+/// key or mouse slot, else the pad's button; a key as the player's layout types it once pressed
+/// (C1's [`KeyLabels`]: on AZERTY KeyQ shows A), else its code's name.
+fn interact_label(bindings: &Bindings, labels: Option<&KeyLabels>) -> String {
+    use bevy::input::keyboard::Key;
+    let slots = bindings.get(crate::bindings::Action::Interact);
+    let Some(&bind) = slots.keys.iter().flatten().next() else {
+        return slots
+            .pad
+            .map_or("INTERACT".into(), |p| format!("{p:?}").to_uppercase());
+    };
+    match bind {
+        Bind::Key(k) => match labels.and_then(|l| l.0.get(&k)) {
+            Some(Key::Character(c)) => c.to_uppercase(),
+            _ => (format!("{k:?}").trim_start_matches("Key"))
+                .trim_start_matches("Digit")
+                .to_uppercase(),
+        },
+        Bind::Mouse(b) => format!("MOUSE {b:?}").to_uppercase(),
+        Bind::WheelUp => "WHEEL UP".into(),
+        Bind::WheelDown => "WHEEL DOWN".into(),
+    }
+}
+
+/// The local player's [`Prompt`] ([`pickup_prompt`]).
+fn prompt(
+    own: Query<(&Player, &Fighting), With<FollowCamera>>,
+    game: Query<&MatchView>,
+    pickups: Res<Pickups>,
+    nest: Option<Res<crate::raptor::Nest>>,
+    bindings: Res<Bindings>,
+    labels: Option<Res<KeyLabels>>,
+    mut out: ResMut<Prompt>,
+) {
+    let line = match (own.single(), game.single()) {
+        (Ok((p, f)), Ok(m)) => {
+            let list = match nest.as_ref().filter(|_| m.raptor) {
+                Some(n) => &n.data.pickups,
+                None => &pickups.0,
+            };
+            let key = interact_label(&bindings, labels.as_deref());
+            pickup_prompt(list, m, &f.fighter(p.0), &key)
+        }
+        _ => None,
+    };
+    out.set_if_neq(Prompt(line));
+}
+
 /// This frame's HUD: the quads of [`sprites`] for the local player while connected, placed in the
 /// HUD camera's target ([`place`]); their materials are kept for reuse.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -1904,7 +2019,7 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros, blasts, fighting, view, heads, joints, course): (
+    (playing, outros, blasts, fighting, view, heads, joints, course, crosshair): (
         Res<crate::outro::Playing>,
         Res<crate::outro::Outros>,
         Option<Res<crate::beach::Blasts>>,
@@ -1913,12 +2028,15 @@ fn draw(
         Query<&crate::held::Twisted, With<FollowCamera>>,
         Query<&GlobalTransform>,
         Option<Res<crate::race::Course>>,
+        Option<Res<crate::crosshair::Quads>>,
     ),
     timeline: Res<LocalTimeline>,
-    (mut fading, mut escaped, mut ended): (
+    (mut fading, mut escaped, mut ended, prompt, esc_menu): (
         Local<Option<(Option<(bool, u16, u32)>, Option<u32>)>>,
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
+        Res<Prompt>,
+        Option<Res<crate::menu::Quads>>,
     ),
     (mut fired, mut zoomed, mut stats, mut skull, mut opened): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
@@ -1957,6 +2075,7 @@ fn draw(
                 .and_then(|c| c.route(m.racing.route))
                 .map(|r| r.map.as_str());
             let mut shown = shown(&a.hud, own, &everyone, m, 2 * tick, map);
+            shown.prompt = prompt.0.clone();
             // Weapon 0x16's R view: its tint from the frame the scope opened.
             let scope = own.2.follow.cam.scope;
             *opened = (scope.on && scope.weapon == 0x16).then(|| opened.unwrap_or(tick));
@@ -2087,10 +2206,14 @@ fn draw(
                     h => h,
                 });
             }
-            sprites(&a.hud, &shown)
+            let mut quads = sprites(&a.hud, &shown);
+            quads.extend(crosshair.iter().flat_map(|c| c.0.iter().cloned()));
+            quads
         }
     };
-    for s in quads {
+    // The Esc menu over all of it.
+    let menu_quads = esc_menu.iter().flat_map(|q| q.sprites.iter().cloned());
+    for s in quads.into_iter().chain(menu_quads) {
         let key = (s.tex.clone(), s.uv.map(f32::to_bits), s.colour);
         let material = cache.entry(key).or_insert_with(|| {
             let (texture, size) = match &s.tex {
@@ -4020,5 +4143,53 @@ mod tests {
             let page = format!("cutscene {} frame {k} ({file})", o.cutscene);
             assert_eq!(sorted(got.collect()), sorted(want.collect()), "{page}");
         }
+    }
+
+    /// The modern pickup prompt agrees with the server's gate (`can_take`): on a weapon's pickup,
+    /// shown, it asks for Interact; not on grenades, a taken one, one out of reach, nor in Race
+    /// (automatic there). The key is Interact's, as the layout types it once pressed.
+    #[test]
+    fn the_pickup_prompt_follows_the_gate_and_the_binding() {
+        use conker_assets::{Gives, Pickup};
+        let place = conker_rules::Placement {
+            index: 0,
+            pos: [0.0, 0.0, 2950.0],
+            facing: 0,
+            camera: [0.0; 3],
+        };
+        let f = conker_rules::Fighter::new(&place, 0, 0);
+        let at = |gives| Pickup {
+            placement: 12,
+            gives,
+            position: [0.0, 0.0, 3000.0],
+            respawn: None,
+            roams: Vec::new(),
+        };
+        let (gun, grenades) = ([at(Gives::Weapon(0x09))], [at(Gives::Grenades)]);
+        let m = MatchView::default();
+        let line = Some("PRESS F TO PICK UP".to_string());
+        assert_eq!(pickup_prompt(&gun, &m, &f, "F"), line);
+        assert_eq!(pickup_prompt(&grenades, &m, &f, "F"), None);
+        let taken = MatchView {
+            taken: 1 << 12,
+            ..MatchView::default()
+        };
+        assert_eq!(pickup_prompt(&gun, &taken, &f, "F"), None);
+        let race = MatchView {
+            race: true,
+            ..MatchView::default()
+        };
+        assert_eq!(pickup_prompt(&gun, &race, &f, "F"), None);
+        let mut far = f;
+        far.body.pos[2] = 2800.0;
+        assert_eq!(pickup_prompt(&gun, &m, &far, "F"), None);
+        let bindings = Bindings::default();
+        assert_eq!(interact_label(&bindings, None), "F");
+        let mut labels = KeyLabels::default();
+        labels.0.insert(
+            KeyCode::KeyF,
+            bevy::input::keyboard::Key::Character("g".into()),
+        );
+        assert_eq!(interact_label(&bindings, Some(&labels)), "G");
     }
 }

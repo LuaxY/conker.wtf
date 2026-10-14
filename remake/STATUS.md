@@ -1,5 +1,259 @@
 # Status after wave 6 (2026-10-10)
 
+## Controls C3: the Esc menu, settings and rebinding (2026-10-15)
+**Lane C3** of `../CONTROLS_RESEARCH.md` (§5, §6, §7, §10). Client only, **no wire change** and no simulation change:
+the menu only holds the input `buffer_input` already sends while paused.
+
+**`menu.rs`** (new): RESUME / SETTINGS / LEAVE MATCH over the running match, drawn as the HUD's own quads and font
+(`hud.rs` draws `menu::Quads` after its own, z 10-13).
+- Opens on Esc, the pad's Menu (Start), natively the window losing focus, in the browser the pointer lock's loss
+  (C1's `Paused`). Only while playing, never over the results, which close it.
+- While open the menu holds `pointer::Paused` every frame. That one flag gates everything: `buffer_input` sends a
+  neutral stick and no buttons with the yaw kept, `Controls` sees no devices (team screen, H, M, F8, the pad's
+  look), `orbit::look` stands still, and the native cursor is freed (grabbed again on resume). The menu closes the
+  team screen when it opens.
+- It stays open until the closing press is let go (`Page::Closing`), so a RESUME click fires no shot. Natively the
+  click that refocuses the window is not the menu's.
+- RESUME: natively at once. In the browser a click or key asks for the pointer lock and the menu closes once it holds.
+  `pointerlockerror` or a rejected promise keeps it open ("CLICK RESUME AGAIN"). The pad resumes without the lock.
+  `pointer.rs`'s pointerdown no longer locks while the menu is open, so clicks on the menu stay clicks.
+- LEAVE MATCH: natively `AppExit` (`connection::leave` disconnects first). In the browser netcode's `Disconnect`,
+  then `index.html` after `LEAVE_DELAY`.
+- Navigation: mouse hover and click on the last frame's rectangles (`Quads::hit`, `hud::frame_point`); arrows, Enter,
+  Esc, the wheel; pad D-pad or left stick, A, B, LB / RB for the tabs; held directions repeat (0.4 s, then 0.08 s).
+
+**`settings_ui.rs`** (new): the settings screen's data.
+- Tabs Keyboard & Mouse, Controller, Mouse/Look, Gameplay. Rows are grouped Movement / Combat / Camera / UI. Every
+  §5 v1 setting is there with its range and step: sensitivities, aim multipliers, invert Y, dead zones, stick layout,
+  hold/toggle per device, crosshair colour and size, button prompts, vibration.
+- Changes apply live. APPLY saves (`settings::save`: `CONKER_SETTINGS` natively, localStorage in the browser; never
+  offscreen). BACK, B or Esc drops what wasn't applied.
+- Rebinding: "PRESS A KEY OR BUTTON - ESC CANCELS, BACKSPACE CLEARS" with a 5 s countdown.
+  - The opening press is ignored until everything is released, and a trigger counts once past 0.5.
+  - Mouse 1-5 and the wheel can be bound; Esc and the pad's Menu never can.
+  - Keyboard slots take keys and mouse, the controller slot takes pad buttons.
+  - A conflict asks SWAP / REPLACE / CANCEL. The pad's X keeps Reload and Interact together, as the defaults do.
+- Labels show the current bindings: keys through C1's `KeyLabels` (AZERTY's logical letters), pad buttons as Xbox or
+  PlayStation glyphs (vendor 054c / 045e, else the name, else Xbox; the Button prompts setting overrides).
+
+**Hooks in shared files:**
+- `bindings.rs`: `Controls::devices` is empty while paused.
+- `pointer.rs`: `lock`, `locked`, `refused`; the native grab follows `Paused`; the web lock loss sets `Paused` and
+  the menu clears it.
+- `hud.rs`: `text` is `pub(crate)` and the menu's quads are drawn.
+- `lib.rs`: the modules, `menu::build`, and the `keys=READ:KEY,…` option, which presses keys at script reads for
+  screenshots.
+- `web/play.html` and `web/README.md` describe the menu.
+
+**Tests** (16 new, `menu::tests` and `settings_ui::tests`):
+- the menu opens on each source and never over the results;
+- the closing press and the browser's lock;
+- `Controls` sees nothing while paused;
+- focus through tabs, rows, scrolling and buttons;
+- held repeats;
+- rebinding: arming, timeout, Esc / Backspace / Start, mouse 4, wheel, pad, trigger threshold;
+- conflicts: cancel, swap, replace, the X pair;
+- APPLY saves and BACK drops (a file under `$CONKER_SETTINGS`'s directory);
+- every field steps within its range;
+- labels and glyphs;
+- the pointer hits what is drawn (the pack's HUD at 1280×720).
+
+**Screens:** `lab/screens/controls-c3/` (`shots.sh`: native, offscreen, 0x2D with no bots, keys pressed by
+`--keys`).
+- `menu.png`: the main page.
+- `keys.png`, `pad.png`, `look.png`, `gameplay.png`: the four tabs.
+- `keys-end.png`: Keyboard & Mouse scrolled to its end.
+- `rebind.png`: Jump's primary waiting.
+- `conflict.png`: W pressed for it, showing Move Forward's.
+
+**Unverified / left:**
+- Browser-only paths, with no browser here: the lock loss opening the menu, RESUME's relock and its refusal, the
+  pointerdown gate, localStorage, LEAVE MATCH's navigation.
+- Real pads: vendor glyphs, triggers, Start.
+- AZERTY labels on a real layout.
+- A pad's Start opens the menu while the browser still holds the lock; the mouse stays captured until Esc.
+- Skipped: reset to defaults, per-context bindings (Tank and Race have no bindable actions of their own, so one
+  context and conflicts are global), the `getLayoutMap` fallback.
+- C2c's `hud::interact_label` duplicates `settings_ui::key_label`'s naming.
+
+## Controls C2b: the orbit camera, the crosshair and hit markers (2026-10-15)
+**Lane C2b** of `../CONTROLS_RESEARCH.md` (§3, §5, §10). Client only, **no wire change**: windowed clients now send
+MODERN (C2a's fields, C2c's GRENADE and INTERACT). Headless clients and bots without a modern script line send the
+N64 input as before, so every replay and oracle test is untouched.
+
+**`orbit.rs`** (new): the `Orbit` resource holds the look (yaw, pitch in game units), the shoulder and the hold/toggle
+latches.
+- The arm is C2a's exactly: pivot 67.5 above the feet, `±20·right` (SHOULDER: left), 160 back along the look, pitch
+  within ±`AIM_PITCH_MAX`. `camera_yaw` = aim facing − 0x4000, `aim_pitch` up positive. A test checks the start
+  against `movement::aim_ray` bit for bit (`cos_sin` only).
+- Collision slides the eye only along its look line (`CollisionWorld::ray` back from the start, 8 kept off the wall),
+  so the centre of the view stays on the aim ray.
+- Aiming (R held) zooms 1.5× (tangent ratio) over 0.06 s; the mouse's aim multiplier is FOV-normalised. A scoped
+  weapon shows the scope's own view and sight from the aim (the rules point the scope there); the wheel / D-pad zoom
+  it (C-up / C-down while aiming). The N64 follow camera keeps running underneath; Tank, Race, the raptor and the
+  mounted guns keep their cameras and inputs (the mounted gun: the mouse moves its stick, as C1).
+- Look: 0.022°/count × sensitivity, invert Y, pad 450°/s across and 270°/s up × sensitivity, radial dead zone
+  0.10, outer 0.95, curve exponent 2, no acceleration or smoothing. Integrated per frame in `PreUpdate`, the mouse
+  only while the cursor is grabbed (native; the browser's pointer lock gates it there), not on the team screen,
+  paused or in the free camera.
+- `orbit::input`: camera-relative WASD (the stick under `camera_yaw`), walk halves it, hold/toggle for aim, crouch and
+  walk from Settings, the actions JUMP, CROUCH, FIRE, RELOAD, SHOULDER, INTERACT, GRENADE from the bindings, Holster
+  on B. The look resets to the facing on a respawn.
+- `lib.rs`'s `buffer_input` sends it (`actions | MODERN`, `aim_pitch`) and `render.rs` chains `orbit::camera` after
+  `follow_camera`. Script lines take 3 optional columns (actions hex, look x and y in mouse counts), which turn a
+  scripted client modern; `results.rs` reads JUMP for the results screen's A.
+
+**`crosshair.rs`** (new): quads for the HUD's renderer (`hud.rs` draws them with its own, z 6.8).
+- The centre crosshair in the Settings' colour and size, while alive, on foot and not scoped.
+- The muzzle check: the weapon's muzzle (from its `Attack`) toward the point the aim ray meets; a wall first greys the
+  crosshair and marks that wall's point with a dot in the crosshair's colour.
+- Hit markers from the server's own counts (`Combat::hits`, `headshots`, already replicated; enemies only): a hit
+  shows 12 squares on the diagonals for 0.3 s, fading, red for a headshot; a restart's reset shows none.
+
+**Tests** (client, 9 new): the mouse's signs, invert and pitch clamp; the stick's zones and 450°/s; the aim
+FOV and scale; the arm against `aim_ray` and the wall slide along the line; the shoulder's 40 across; the default
+bindings' actions; toggles and the respawn reset; markers from the counts; a ledge blocking the muzzle; the script's
+modern columns. The full `bun run test` passes with no existing expected value edited.
+
+**Prediction** (`lab/screens/controls-c2b/predict.sh`: 2d, `--wait 2`, both given the twin guns; client 1 plays
+`modern.txt` (strafes, aims, fires, walks aimed, jumps, crouches, turns with the mouse), client 2 `n64.txt`, the same
+timeline on the N64 bits; smoke.sh's predicted-against-server test):
+
+| Run | Client | Ticks | Max / mean error | State misses | Rollbacks (ticks) | Shots |
+|---|---|---|---|---|---|---|
+| no lag | modern | 1315 | 0 / 0 | 0 | 2 (8) | not counted |
+| no lag | N64 | 1320 | 0 / 0 | 0 | 2 (6) | not counted |
+| `LAG=75` | modern | 1298 | 0 / 0 | 0 | 2 (16) | 100 |
+| `LAG=75` | N64 | 1300 | 0 / 0 | 0 | 2 (18) | 100 |
+
+The server's states show the modern client strafing at ~10.45 a tick while aiming, where the N64 client holding R
+stands still.
+
+**Screens** (`lab/screens/controls-c2b/shots.sh`, native offscreen, 2d at e_w09's places, the other player idle 146.5
+ahead):
+- `orbit.png`: the arm over the right shoulder, the green crosshair on the target.
+- `aim.png`: R held, zoomed, the target centred.
+- `hit.png` (`hit.txt`, one FIRE tap): the marker's white ticks round the crosshair, 10 reads after the server's hit.
+- `scope.png`: the sniper's scope from the aim, zoomed with C-up.
+- `blocked.png`: on 2d's tower aiming over the parapet, the crosshair grey and the muzzle's wall marked below it.
+
+**Left**:
+- Browser-only parts unverified (pointer lock and the look's gating there; no `web/dist` build here).
+- The N64 reticle still shows while aiming, under the crosshair; the radar's "ahead" and the audio listener still
+  follow the N64 camera.
+- The pad's X sends both RELOAD and INTERACT (no tap/hold split); Southpaw, the look acceleration ramp and aim assist
+  are C4's; the mounted gun's mouse aim stays C1's stopgap.
+- The shoulder's ray start can sit inside a wall; the muzzle check tests walls only (not bodies).
+- Seen in the screens: under held fire the white marker is lost in the muzzle flash, and while aiming the held gun
+  crosses the view's centre (the upper body isn't posed to the aim: C4's masked animation).
+
+## Controls C2c: weapon handling (2026-10-15)
+**Lane C2c** of `../CONTROLS_RESEARCH.md` (§1 decisions 8-24, §4b, §10). Shared simulation (conker-rules, conker-sim)
+and the client's "PRESS F" prompt. Everything new is gated on MODERN (or runs on the new fields, which stay 0 without
+it): the full `bun run test` passes with **no existing test or expected value edited**, C2a's `pad()` test included.
+
+**`Fighter`** (`conker-rules/src/game.rs`) gains `actions` and `late_actions` (this frame's and last frame's
+`movement::action` bits, as `buttons` / `late`, set right after `pad()` in `Match::player`; `in_body` keeps the slot's),
+and two latches, `throw` and `redraw`. The latches are set and cleared just after `pad()` reads them:
+- `throw`: GRENADE pressed with a weapon drawn and a grenade left; ends with the pull, a hit or no grenade left.
+- `redraw`: that same press, or a MODERN player's weapon pickup arriving; ends with the draw, a hit or no weapon.
+
+**`pad()`**: C2a's rows are unchanged. New rows, all "free" = no action under way, no flag or canister carried (B puts
+a flag down). Its B comes only after a frame without B, so a press refused (in the water, B is masked) comes again:
+
+| Action | Drawn | Not drawn | Mounted gun |
+|---|---|---|---|
+| FIRE | Z (none while a grenade is asked for) | B if a weapon is held, free (draws it) | Z |
+| GRENADE (held, or `throw`) | B, free (holsters) | C-down while held; a tap's `throw`: one frame, free | – |
+| `redraw` | – | B, free, not while `throw` | – |
+| B (Q) | B | B | A (off the gun) |
+
+Per decision:
+- **8, 9: jump and crouch armed.** Under MODERN the rules give the movement A and Z from JUMP and CROUCH directly,
+  armed or not, instead of stripping them while drawn. The trigger (Z) and the reload (A) stay `pad()`'s:
+  - the reload's `pressed(A)` now only comes from RELOAD, so "the reload reads RELOAD";
+  - this keeps C2a's table (and its test) as it was.
+  - conker-sim (`movement.rs`) lifts its armed gates under MODERN:
+    - the high jump;
+    - `ground`'s crouch Z;
+    - `crouch_state`'s armed return (reachable only through `ground`'s Z, so it was dropped).
+  - The armed animation match gains `CROUCH | CROUCH_WALK | HIGH_JUMP` under MODERN: the unarmed clip, the gun in
+    hand.
+  - The hit volumes follow from the state: the crouched cylinder, and the spheres posed from that clip.
+- **10, 22, 24: Fire draws.** FIRE with a holstered weapon is a B press (the draw refills the magazine, as the
+  original's B). FIRE still held fires the frame after the draw ends: `pad()` reads `drawn` at the frame's start.
+- **11: draw on pickup.** The weapon arrives as today (2 frames after the touch), `give()` unchanged, and `redraw` makes
+  `pad()` press B in that same frame. A pickup arriving during a hit is not drawn afterwards: the hit clears `redraw`.
+- **12, 18: manual pickup.** `game::can_take(settings, gives, pos, fighter, reach, countdown, interact)` is the whole
+  touch test, moved out of `pickups()`.
+  - `interact` is `None` without MODERN (as before), else whether Interact was pressed this frame:
+    `inputs[i].actions` against `Fighter::actions`, still last frame's since `pickups()` runs before `pad()`.
+  - Only `Gives::Weapon` waits for it, and not Tank's, Race's or Beach's item 0x3E. Grenades and masks stay automatic,
+    and so do the canisters, flags, bag, eggs and bomb, which have their own touches.
+  - Raptor's bone weapons wait (cavemen only, as before).
+- **13, 23: grenade armed.** A tap holsters (22 frames for the twin guns), presses C-down for one frame (an N64 tap),
+  pulls, throws and draws again. A held G cooks as long as it is held.
+- **19: mounted guns.** Mounting by touch needs an Interact press under MODERN (`actions` against `late_actions`, after
+  `player()`). B gets off, as A. Seated, `modern_aim` sets the gun's yaw and pitch from the aim (pitch within the N64
+  gun scope's −60..50) instead of the scope camera.
+- **21: move while drawing or holstering.** The draw's and holster's hold (`lock = 0xFF`, idle on the end frame) is
+  N64 only; the shotgun's shot still holds.
+- **R1's leftovers.**
+  - Under MODERN the pistol's, 0x23's and the tommy gun's bullets go from the muzzle to the aim ray's hit point, as the
+    twin guns' do (`strike`). Bots keep the pitch-only path, as traced.
+  - The C buttons no longer strafe under MODERN (`ground`'s mask is 0), and the armed C-button run (`Action::CButton`)
+    no longer starts.
+
+**The prompt** (`conker-client/src/hud.rs`):
+- `pickup_prompt` shows "PRESS F TO PICK UP" under the centre while `can_take` is false without the press and true
+  with it, for a weapon's pickup that is shown (`MatchView::taken`, placement < 64) and roaming pickups where
+  `MatchView::roaming` has them.
+- Its inputs: the pack's pickups (`hud::build` takes them; Raptor's from `Nest`), the predicted `Fighting` and a human's
+  reach.
+- The key is Interact's first key or mouse slot, uppercase: as the layout types it once pressed (`KeyLabels`), else the
+  `KeyCode` without `Key` / `Digit`, else the pad button's name.
+- `interact_label` is private to `hud.rs`; C3's rebinding screen may want a shared one.
+- The prompt shows whatever the client sends: decision 3 makes every human MODERN.
+
+**Tests** (headless; 8 new):
+- Rules (`game.rs`):
+  - `modern_weapon_pickups_wait_for_interact_and_draw`: no take without the press while a MODERN player on the grenades
+    takes them; `can_take` agrees with and without the press. One press of a held F takes the twin guns, whose draw
+    starts on arrival and refills them.
+  - `modern_fire_draws_and_fires_once_ready`: the pistol with 0 rounds, FIRE held: one shot on frame `draw + 1`, the
+    magazine full less one.
+  - `modern_jumps_and_crouches_armed`: twin guns drawn. JUMP jumps (no reload) and RELOAD reloads. CROUCH crouches with
+    the crouch clip, the guns drawn, and a head-height shot passes over. FIRE fires crouched, and CROUCH + JUMP is the
+    high jump.
+  - `modern_grenade_holsters_throws_and_draws_again`: one frame of GRENADE gives Holster, Free, Pull, Hold, Throw,
+    Free, Draw, Free, then 2 grenades left and one in flight.
+  - `modern_moves_while_drawing`: a forward stick moves through the twin guns' draw only under MODERN.
+  - `modern_mounted_gun_on_interact_off_q_turned_by_the_aim`: no mount by touch, a mount on F. Seated, the aim turns
+    it to 45° and −22.5°, and 67.5° down is clamped to 50. Q gets off.
+  - `modern_bullets_go_to_the_aims_hit_point`: pistol, 0x23, tommy gun. The first bullet's line meets a wall 3,000
+    ahead at the ray's hit point, 20 to the shoulder's side. It fails with the old pitch-only path.
+- Sim: `modern_crouches_and_high_jumps_armed_and_leaves_the_c_strafe`.
+- Client: `the_pickup_prompt_follows_the_gate_and_the_binding`.
+
+**Wire and shared simulation:**
+- `Fighter` (replicated in `Fighting`, serde) gains `actions`, `late_actions`, `throw` and `redraw`, so the protocol
+  needs its bump. `PROTOCOL_ID` is untouched here.
+- `Input` is unchanged.
+- `Match::pickups` takes the frame's inputs.
+- conker-sim's `ground`, `step_among` and `crouch_state` change only under MODERN.
+
+**For the client (C2b):** under MODERN, send Grenade as `action::GRENADE` and Interact as `action::INTERACT`. Stop
+sending C-down for Grenade, and C-left / C-right at all (the scope's zoom may keep C-up / C-down while aiming).
+C2b's `orbit::input` already does all of this.
+
+**Left:**
+- No prompt for the mounted gun's F.
+- A grenade tapped during a draw is lost (the latch keys on a drawn weapon).
+- FIRE held through a draw fires a frame after the original's draw ends.
+- An automatic weapon's trigger let go for a grenade takes its 7-frame tail before the holster.
+- The pad's X tap/hold split (Reload vs Interact) is the client's.
+- No browser check (the prompt's look and the key label on AZERTY are unverified).
+
 ## Controls C2a: modern rules and the aim on the wire (2026-10-14)
 **Lane C2a** of `../CONTROLS_RESEARCH.md` (§3 "Aim on the wire", §4, §10). Shared simulation (conker-sim, conker-rules)
 and the wire; the client is not wired to MODERN yet (round 2). Everything new is gated on the MODERN bit: **with

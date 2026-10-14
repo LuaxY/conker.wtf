@@ -87,7 +87,7 @@ pub enum Bind {
 }
 
 /// A unit variant of a reflected enum by name (`KeyW`, `Back`, `RightTrigger2`).
-fn variant<T: FromReflect>(name: &str) -> Option<T> {
+pub(crate) fn variant<T: FromReflect>(name: &str) -> Option<T> {
     T::from_reflect(&DynamicEnum::new(name, ()))
 }
 
@@ -270,12 +270,16 @@ pub struct Controls<'w, 's> {
     mouse: Option<Res<'w, ButtonInput<MouseButton>>>,
     pads: Query<'w, 's, &'static Gamepad>,
     windows: Query<'w, 's, &'static Window>,
+    paused: Option<Res<'w, crate::pointer::Paused>>,
 }
 
 impl Controls<'_, '_> {
     /// The devices, the first pad only while a window is focused (with two windows open, one pad
-    /// drove both).
+    /// drove both); none while the Esc menu holds the input ([`crate::pointer::Paused`]).
     pub fn devices(&self, wheel: f32, motion: Vec2) -> Devices<'_> {
+        if self.paused.as_ref().is_some_and(|p| p.0) {
+            return Devices::default();
+        }
         let focused = self.windows.iter().any(|w| w.focused);
         Devices {
             keys: self.keys.as_deref(),

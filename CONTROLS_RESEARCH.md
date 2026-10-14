@@ -377,9 +377,9 @@ Ctrl and Alt, unlike round 1.
 |---|---|---|---|
 | C1 input plumbing (**done 2026-10-14**, `remake/STATUS.md`; the browser parts unverified) | `Bindings` + `Settings` data with persistence (defaults = today's bits, crouch on C, walk on Shift); pointer lock (raw input, lock-loss listener); debug camera off C (now F8). No orbit camera yet: it only makes sense once aim follows it | client, web | no |
 | C2a modern rules (**done 2026-10-14**, `remake/STATUS.md`; `actions` is a u8: holster rides B, walk the stick; the server needed no change) | `actions` field + `pad()` mapping; `aim_pitch` + shoulder bit + humans' `m.aims`; MODERN gate (move while aiming/firing, facing on the aim, scope from the aim, speeds 0.75 / 0.5). Testable headless with bots | sim, rules, server | **bump** |
-| C2b modern client | Orbit camera feeding `camera_yaw` / `aim_pitch`; prediction with the new fields; centre crosshair; server-confirmed hit markers | client | (same bump) |
-| C2c weapon handling | Interact pickup (weapons only), draw on pickup, Fire draws, jump/crouch armed, grenade armed then redraw, move while drawing, mounted guns on F / off Q (§4b); the "PRESS F" prompt | rules, sim, client HUD | **bump** |
-| C3 Esc menu | Resume / Settings / Leave; rebinding capture with conflicts; mouse and pad settings; input zeroed while open | client | no |
+| C2b modern client (**done 2026-10-15**, `remake/STATUS.md`; no wire change: hit markers from `Combat::hits` / `headshots`; the browser's pointer lock unverified) | Orbit camera feeding `camera_yaw` / `aim_pitch`; prediction with the new fields; centre crosshair; server-confirmed hit markers | client | (same bump) |
+| C2c weapon handling (**done 2026-10-15**, `remake/STATUS.md`; `Fighter` gains 4 replicated fields; the client must send GRENADE and INTERACT as actions) | Interact pickup (weapons only), draw on pickup, Fire draws, jump/crouch armed, grenade armed then redraw, move while drawing, mounted guns on F / off Q (§4b); the "PRESS F" prompt | rules, sim, client HUD | **bump** |
+| C3 Esc menu (**done 2026-10-15**, `remake/STATUS.md`; the menu holds `Paused`, which already zeroes the input; one binding context; the browser and real pads unverified) | Resume / Settings / Leave; rebinding capture with conflicts; mouse and pad settings; input zeroed while open | client | no |
 | C4 polish | Pad look stick, curves, glyphs; masked upper-body animation; spread; shoulder swap; blocked-shot marker; aim-assist slowdown | client, rules | no (shoulder bit already in C2) |
 
 ## 11. Sources

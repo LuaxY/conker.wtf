@@ -18,6 +18,7 @@ pub mod beach;
 pub mod bindings;
 pub mod connection;
 pub mod corpses;
+pub mod crosshair;
 pub mod effects;
 pub mod faces;
 pub mod flags;
@@ -27,6 +28,8 @@ pub mod held;
 pub mod hud;
 pub mod laser;
 pub mod lights;
+pub mod menu;
+pub mod orbit;
 pub mod outro;
 pub mod pointer;
 pub mod projectiles;
@@ -36,6 +39,7 @@ pub mod render;
 pub mod results;
 pub mod segments;
 pub mod settings;
+pub mod settings_ui;
 pub mod smooth;
 pub mod tank;
 pub mod teams;
@@ -185,6 +189,9 @@ pub struct Config {
     /// `team=T`: the team modes' team to play on (Heist 0-3: REDS, BLUES, GREENS, YELLOWS; else 0
     /// or 1), asked for once the player is in ([`teams`]); default the server's.
     pub team: Option<u8>,
+    /// `keys=READ:KEY,…`: press each key (a `KeyCode` name: `Escape`, `ArrowDown`, `Enter`) for a
+    /// frame at that script read (unscripted, counted as a script's): the menu's screenshots.
+    pub keys: Vec<(u32, KeyCode)>,
 }
 
 impl Config {
@@ -212,6 +219,7 @@ impl Config {
             character: None,
             map: String::new(),
             team: None,
+            keys: Vec::new(),
         };
         for (key, value) in pairs {
             let bad = || format!("bad value for {key}: {value:?}");
@@ -252,6 +260,7 @@ impl Config {
                 "log" => cfg.log = Some(value),
                 "map" => cfg.map = value,
                 "team" => cfg.team = Some(value.parse().ok().filter(|t| *t < 4).ok_or_else(bad)?),
+                "keys" => cfg.keys = menu::parse_keys(&value).ok_or_else(bad)?,
                 "character" => cfg.character = Some(parse_pick(&value).ok_or_else(bad)?),
                 "side" => {
                     cfg.side = Some(match value.as_str() {
@@ -338,7 +347,10 @@ pub fn page_server(host: &str) -> String {
 }
 
 /// One line of an oracle input script (`lab/oracle` README): reads `from..=to` get these buttons
-/// and raw stick. Read [`FIRST_READ`] is the client's first tick with its player.
+/// and raw stick. Read [`FIRST_READ`] is the client's first tick with its player. A modern line
+/// adds the modern controls' actions (conker-sim's `movement::action` bits; MODERN is implied) and
+/// the mouse's counts each read (x right, y down), which turn the [`orbit`] camera as the mouse
+/// does (the settings' sensitivity; aiming's scale not applied).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScriptLine {
     pub from: u32,
@@ -346,9 +358,11 @@ pub struct ScriptLine {
     pub buttons: u16,
     pub x: i8,
     pub y: i8,
+    pub modern: Option<(u8, [i16; 2])>,
 }
 
-/// Parses `from to buttons_hex x y` lines; `#` starts a comment.
+/// Parses `from to buttons_hex x y` lines, or modern ones, `from to buttons_hex x y actions_hex
+/// look_x look_y`; `#` starts a comment. A script with a modern line plays the modern controls.
 pub fn parse_script(text: &str) -> Result<Vec<ScriptLine>, String> {
     text.lines()
         .map(|l| l.split('#').next().unwrap_or_default().trim())
@@ -356,8 +370,20 @@ pub fn parse_script(text: &str) -> Result<Vec<ScriptLine>, String> {
         .map(|l| {
             let w: Vec<&str> = l.split_whitespace().collect();
             let bad = || format!("bad script line: {l:?}");
-            let [from, to, buttons, x, y] = w[..] else {
+            let (head, tail) = w.split_at(w.len().min(5));
+            let [from, to, buttons, x, y] = head[..] else {
                 return Err(bad());
+            };
+            let modern = match *tail {
+                [] => None,
+                [a, lx, ly] => Some((
+                    u8::from_str_radix(a, 16).map_err(|_| bad())?,
+                    [
+                        lx.parse().map_err(|_| bad())?,
+                        ly.parse().map_err(|_| bad())?,
+                    ],
+                )),
+                _ => return Err(bad()),
             };
             Ok(ScriptLine {
                 from: from.parse().map_err(|_| bad())?,
@@ -365,18 +391,20 @@ pub fn parse_script(text: &str) -> Result<Vec<ScriptLine>, String> {
                 buttons: u16::from_str_radix(buttons, 16).map_err(|_| bad())?,
                 x: x.parse().map_err(|_| bad())?,
                 y: y.parse().map_err(|_| bad())?,
+                modern,
             })
         })
         .collect()
 }
 
-/// The script's pad at `read`: later lines win, uncovered reads are neutral (the oracle's rule).
+/// The script's line at `read`: later lines win.
+pub fn script_line(lines: &[ScriptLine], read: u32) -> Option<&ScriptLine> {
+    lines.iter().rev().find(|l| (l.from..=l.to).contains(&read))
+}
+
+/// The script's pad at `read`: uncovered reads are neutral (the oracle's rule).
 pub fn script_input(lines: &[ScriptLine], read: u32) -> (u16, i8, i8) {
-    lines
-        .iter()
-        .rev()
-        .find(|l| (l.from..=l.to).contains(&read))
-        .map_or((0, 0, 0), |l| (l.buttons, l.x, l.y))
+    script_line(lines, read).map_or((0, 0, 0), |l| (l.buttons, l.x, l.y))
 }
 
 /// Test pattern: the stick turns a full circle every 100 ticks (so 1 s log samples do not alias;
@@ -898,6 +926,11 @@ pub fn run(
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
     app.init_resource::<laser::Own>();
+    // A window's player plays the modern controls, and so does a modern script.
+    let modern = match &cfg.script {
+        None => !cfg.headless,
+        Some(_) => script.iter().any(|l| l.modern.is_some()),
+    };
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
     heist::build(&mut app, !cfg.headless, bag);
@@ -927,7 +960,9 @@ pub fn run(
             traps::build(&mut app, &triggers);
         }
         render::build(&mut app, slice, &cfg);
-        hud::build(&mut app, hud);
+        crosshair::build(&mut app, hud.frame);
+        menu::build(&mut app, hud.clone(), !cfg.offscreen);
+        hud::build(&mut app, hud, pickups.clone());
     }
     if let Some(sound) = sound {
         audio::build(
@@ -988,6 +1023,7 @@ pub fn run(
         bindings::Bindings::with(&settings.bindings),
         windowed,
     );
+    orbit::build(&mut app, modern, windowed);
     app.insert_resource(settings);
     pointer::build(&mut app, windowed);
     app.insert_resource(cfg);
@@ -1143,16 +1179,25 @@ fn buffer_input(
     game: Query<&MatchView>,
     motion: Option<Res<AccumulatedMouseMotion>>,
     team_screen: Res<teams::Screen>,
-    mut player: Query<(&mut ActionState<Input>, &FollowCamera), With<InputMarker<Input>>>,
+    mut player: Query<
+        (
+            &mut ActionState<Input>,
+            &FollowCamera,
+            &Player,
+            Option<&Fighting>,
+        ),
+        With<InputMarker<Input>>,
+    >,
     (sync, shown, mut senders, remotes): (
         Option<Res<LocalTimelineSync>>,
         Res<Shown>,
         Query<&mut MessageSender<Saw>>,
         Query<(&PlayerId, &Player), With<Interpolated>>,
     ),
+    (mut orbit, settings): (ResMut<orbit::Orbit>, Res<settings::Settings>),
 ) {
     let wheel = std::mem::take(&mut wheel.0);
-    let Ok((mut action, camera)) = player.single_mut() else {
+    let Ok((mut action, camera, p, fighting)) = player.single_mut() else {
         return;
     };
     let tick = timeline.tick().0;
@@ -1172,13 +1217,42 @@ fn buffer_input(
             debug!("SEEN t={input_tick} p={:?} pos={x},{y},{z}", id.0);
         }
     }
+    // The modern controls ([`orbit`]), but in the modes that keep their own camera (Tank, Race,
+    // Raptor: the N64 input, as C1 sends it).
+    let modern = orbit.on && camera.tank.is_none();
+    orbit.face(p.facing, camera.lives);
+    let mut actions = 0;
     let (buttons, stick_x, stick_y) = match &cfg.script {
-        Some(_) if !script.0.is_empty() => script_read(tick, camera.since, game.iter().next())
-            .map_or((0, 0, 0), |read| script_input(&script.0, read)),
+        Some(_) if !script.0.is_empty() => {
+            let read = script_read(tick, camera.since, game.iter().next());
+            let line = read.and_then(|r| script_line(&script.0, r));
+            if let Some((a, [x, y])) = line.and_then(|l| l.modern) {
+                actions = a;
+                let counts = Vec2::new(f32::from(x), f32::from(y));
+                orbit.turn(orbit::mouse_turn(counts, &settings.mouse, 1.0));
+            }
+            line.map_or((0, 0, 0), |l| (l.buttons, l.x, l.y))
+        }
         Some(_) => circle_input(cfg.id, tick),
         None if free_camera.iter().any(|c| c.enabled) => (0, 0, 0), // the keys fly the camera
         None if team_screen.open => (0, 0, 0),                      // the pad picks a team
-        None if paused.0 => (0, 0, 0), // the pointer lock lost (Esc): stand, keeping the yaw
+        None if paused.0 => (0, 0, 0), // the Esc menu holds it: stand, keeping the yaw
+        None if modern => {
+            let d = controls.devices(wheel, Vec2::ZERO);
+            let scoped = camera.follow.cam.scope.on;
+            let i = orbit::input(&controls.bindings, &d, &orbit, &settings, scoped);
+            actions = i.actions;
+            // On a mounted gun the mouse turns it as a stick (its sight is the N64 scope's).
+            let seated = fighting.is_some_and(|f| f.state.gun.is_some());
+            let motion = motion.map_or(Vec2::ZERO, |m| m.delta);
+            let stick = (i.stick_x, i.stick_y);
+            let (x, y) = if seated {
+                mouse_aim(BUTTON_R, stick, motion)
+            } else {
+                stick
+            };
+            (i.buttons, x, y)
+        }
         None => {
             let motion = motion.map_or(Vec2::ZERO, |m| m.delta);
             let d = bindings::device_input(&controls.bindings, &controls.devices(wheel, motion));
@@ -1192,12 +1266,23 @@ fn buffer_input(
             (b, x, y)
         }
     };
-    action.0 = Input {
-        stick_x,
-        stick_y,
-        buttons,
-        camera_yaw: camera.follow.yaw(),
-        ..Default::default()
+    orbit.aiming = modern && buttons & BUTTON_R != 0;
+    action.0 = match modern {
+        true => Input {
+            stick_x,
+            stick_y,
+            buttons,
+            camera_yaw: orbit.camera_yaw(),
+            actions: actions | conker_sim::movement::action::MODERN,
+            aim_pitch: orbit.aim_pitch(),
+        },
+        false => Input {
+            stick_x,
+            stick_y,
+            buttons,
+            camera_yaw: camera.follow.yaw(),
+            ..Default::default()
+        },
     };
 }
 
@@ -1875,6 +1960,23 @@ mod tests {
         assert_eq!(script_input(&lines, 143), (0, 0, 0));
         assert!(parse_script("1 2 zz 0 0").is_err());
         assert!(parse_script("1 2 0000 0").is_err());
+    }
+
+    /// A modern line adds the actions and the mouse's counts; a script with one plays modern.
+    #[test]
+    fn modern_script_lines_add_the_actions_and_the_look() {
+        let lines =
+            parse_script("760 762 4000 0 0\n800 900 0010 80 0 84 12 -3 # aim, fire\n").unwrap();
+        assert_eq!(lines[0].modern, None);
+        assert_eq!(lines[1].modern, Some((0x84, [12, -3])));
+        assert_eq!(
+            script_line(&lines, 850).map(|l| (l.buttons, l.x)),
+            Some((0x10, 80))
+        );
+        assert_eq!(script_line(&lines, 763), None);
+        assert!(parse_script("1 2 0000 0 0 84").is_err());
+        assert!(parse_script("1 2 0000 0 0 zz 0 0").is_err());
+        assert!(parse_script("1 2 0000 0 0 84 0 0 9").is_err());
     }
 
     #[test]
