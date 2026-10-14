@@ -688,6 +688,12 @@ impl Bots {
                 if m.players.get(slot).is_some_and(|f| f.aim_error != error) {
                     effects.push(Effect::AimError(slot, error));
                 }
+                // A class script's op 0x67 this frame sets the mover's rates for it alone (the
+                // tank's update puts back 0x32 each).
+                let rates = std::mem::replace(&mut n.rates, [0x32; 2]);
+                if rates != [0x32; 2] {
+                    effects.push(Effect::TankRates(slot, rates));
+                }
                 if let Some(i) = inputs.get_mut(slot) {
                     *i = input;
                 }

@@ -50,15 +50,25 @@ pub const LAP_CAP: i32 = 0x7D00;
 pub const TOTAL_CAP: i32 = 0x57E40;
 /// B's kick reaches a racer this near (I: w2's victim was 237 away).
 pub const KICK_REACH: f32 = 250.0;
-/// The missile (`func_1506C460(0x33, 310, …)`): half its speed a frame along the track, 100 above
-/// it; from its 10th frame it homes on the next racer ahead within 1000; 120 frames; a hit within
-/// [`MISSILE_HIT`] (I) knocks up (V w1b, w5).
+/// The missile (`func_1506C460(0x33, 310, …)`): at most [`MISSILE_STEP`] a frame toward the track's
+/// point [`MISSILE_AHEAD`] of a node on, 100 above it (`func_150538CC` kind 0xD, C; V L2 1883-1910:
+/// fired 1.3 nodes behind a racer boosting at 229, it hits 26 frames on); from its 10th frame it
+/// homes on the next racer ahead within 1000; 120 frames; a hit within [`MISSILE_HIT`] (I) knocks
+/// up (V w1b, w5).
 pub const MISSILE_SPEED: f32 = 310.0;
+pub const MISSILE_STEP: f32 = 200.0;
+pub const MISSILE_AHEAD: f32 = 0.2;
 pub const MISSILE_LIFE: u32 = 120;
 pub const HOMING: u32 = 10;
 pub const HOMING_RANGE: f32 = 1000.0;
 pub const MISSILE_HIT: f32 = 120.0;
 pub const MISSILE_LIFT: f32 = 100.0;
+/// A racer's s126+0x1AF, set by 0xBC's command 0x7B for every racer (V L1, L2: 168 from the
+/// match's start): a power-up touches within 100 · 168 / 64 = 262.5, and 1.4 times that for a racer
+/// the AI drives (s126+0x84: a bot, a finished human; `func_1511DF6C`'s `0x800A3304` = 1.4, V RAM).
+/// V L2 1881: a bot 198 off and 324 above the missile at placement 6 took it.
+pub const REACH: f32 = 100.0 * 168.0 / 64.0;
+pub const AUTO_REACH: f32 = 1.4;
 /// The table's projection: within 50 of the racer, 0.75 of the gap a step, at most 11 (C).
 const NEAR: f32 = 50.0;
 /// The lateral's ease toward its target a frame (I: `0x8009D9E0` unread).
@@ -129,13 +139,29 @@ impl Track {
         ]
     }
 
+    /// The track at `frac` from node `count` to the next and its direction (not normalized): the
+    /// Catmull-Rom spline through the nodes before, at, after and after that (`func_15088F30`,
+    /// `func_150497E0`, `func_150498A4`; C).
+    fn spline(&self, count: i16, frac: f32, lateral: f32) -> ([f32; 3], [f32; 3]) {
+        let p = [-1, 0, 1, 2].map(|d| self.point(i32::from(count) + d, lateral));
+        let t = frac;
+        let axis = |k: usize| {
+            let (p0, p1, p2, p3) = (p[0][k], p[1][k], p[2][k], p[3][k]);
+            let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+            let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+            let c = 0.5 * (p2 - p0);
+            (
+                ((a * t + b) * t + c) * t + p1,
+                (3.0 * a * t + 2.0 * b) * t + c,
+            )
+        };
+        let v = [0, 1, 2].map(axis);
+        (v.map(|v| v.0), v.map(|v| v.1))
+    }
+
     /// The track at `frac` from node `count` to the next.
     pub fn at(&self, count: i16, frac: f32, lateral: f32) -> [f32; 3] {
-        let (a, b) = (
-            self.point(count.into(), lateral),
-            self.point(i32::from(count) + 1, lateral),
-        );
-        [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * frac)
+        self.spline(count, frac, lateral).0
     }
 
     /// The track's direction there (the centre line's tangents at the two nodes, blended).
@@ -179,10 +205,10 @@ impl Track {
                 self.point((*count).into(), lateral),
                 self.point(i32::from(*count) + 1, lateral),
             );
-            let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
-            let len = (dx * dx + dz * dz).sqrt().max(1.0);
-            let p = self.at(*count, *frac, lateral);
-            let d = ((pos[0] - p[0]) * dx + (pos[2] - p[2]) * dz) / len;
+            let len = (b[0] - a[0]).hypot(b[2] - a[2]).max(1.0);
+            let (p, dir) = self.spline(*count, *frac, lateral);
+            let d = ((pos[0] - p[0]) * dir[0] + (pos[2] - p[2]) * dir[2])
+                / dir[0].hypot(dir[2]).max(1e-3);
             if d.abs() <= NEAR {
                 break;
             }
@@ -313,6 +339,12 @@ pub enum Op {
     Drive(usize, u8),
     /// `command(0xF000, 0x14, r, v)`: the lateral target, v / 256.
     Lateral(usize, i32),
+    /// Player command 0x20 (obj+0x1CA = 0): the script blows up a bot the wall moved outside
+    /// trigger 0xF (0xBC at 0xAE4; V L2 1915: hp 0 by the script, state 112 the frame after).
+    Kill(usize),
+    /// Player command 0x14: a bot's class script (0xBC: 0xD at 0xBE6 61 frames after a hit, 0x1F
+    /// with its B press), which ends a hit's hold ([`board::Board::class`]).
+    Class(usize, u8),
 }
 
 /// The countdown's stage at match frame `elapsed`: 0, then 1, 2, 3 at 60, 30 and 5 frames left
@@ -339,6 +371,16 @@ impl Match {
             Op::Lateral(i, v) => {
                 if let Some(f) = self.players.get_mut(i) {
                     f.ride.aim = v as f32 / 256.0;
+                }
+            }
+            Op::Kill(i) => {
+                if let Some(f) = self.players.get_mut(i).filter(|f| f.out == 0) {
+                    f.health = 0;
+                }
+            }
+            Op::Class(i, script) => {
+                if let Some(f) = self.players.get_mut(i) {
+                    f.ride.board.class(&mut f.body, script);
                 }
             }
         }
@@ -384,6 +426,11 @@ impl Match {
                 self.race_respawn(i, arena, world, ev);
             }
             return;
+        }
+        // No health left (the script's command 0x20): the board's frame is the death
+        // (`func_1504CB98` tests obj+0x1CA first).
+        if f.health == 0 {
+            return self.race_death(i, ev);
         }
         // The finish (the script's, on the lap of the frame before: `0xF000` c0x16).
         if per > 0 && f.ride.order == 0 && f.ride.laps(per) >= i16::from(laps) {
@@ -544,10 +591,16 @@ impl Match {
         }
     }
 
-    /// A missile's or a kick's hit: `v` knocked up, its health kept.
+    /// A missile's or a kick's hit: `v` knocked up, its health kept (a bot by its class script 0xF,
+    /// its canister's boost gone: V L2 1911, 229 → 204 → … → 100 by 25 a frame).
     fn knock(&mut self, v: usize, attacker: usize, ev: &mut Vec<Event>) {
         let f = &mut self.players[v];
-        f.ride.board.knock(&mut f.body);
+        if f.bot {
+            f.ride.board.bot_knock(&mut f.body);
+            f.boost = 0;
+        } else {
+            f.ride.board.knock(&mut f.body);
+        }
         f.ride.board.kick = 0;
         ev.push(Event::Hit {
             victim: v,
@@ -576,6 +629,8 @@ impl Match {
         );
         f.body.state = DEAD;
         (f.body.xz_speed, f.body.y_vel) = (0.0, 0.0);
+        // I: the wall's flag gone with the board (the script would blow the respawn up).
+        f.body.walled = false;
         f.ride.board = Board::default();
         ev.push(Event::Hit {
             victim: i,
@@ -644,7 +699,7 @@ impl Match {
     /// then at their target.
     pub(crate) fn fly_missiles(&mut self, arena: &Arena, ev: &mut Vec<Event>) {
         let track = &arena.track;
-        let step = 0.5 * MISSILE_SPEED;
+        let step = MISSILE_STEP;
         let mut missiles = std::mem::take(&mut self.race.missiles);
         let mut hits = Vec::new();
         missiles.retain_mut(|m| {
@@ -692,7 +747,7 @@ impl Match {
                     let len = ((b[0] - a[0]).powi(2) + (b[2] - a[2]).powi(2))
                         .sqrt()
                         .max(1.0);
-                    let (n, fr) = ahead(m.count, m.frac + step / len);
+                    let (n, fr) = ahead(m.count, m.frac + (step / len).min(MISSILE_AHEAD));
                     (m.count, m.frac) = (n, fr);
                     let p = track.at(n, fr, m.lateral);
                     m.pos = [p[0], p[1] + MISSILE_LIFT, p[2]];
@@ -770,6 +825,15 @@ impl Match {
             self.race.results = Some(t);
         }
     }
+}
+
+/// The touch test of a power-up at `pickup` (`func_1511DF6C`, as [`crate::weapon::touches`] with
+/// the racer's radius).
+pub fn touches(pickup: [f32; 3], f: &Fighter) -> bool {
+    let r = REACH * if f.ride.auto { AUTO_REACH } else { 1.0 };
+    let p = f.body.pos;
+    let (dx, dz) = (pickup[0] - p[0], pickup[2] - p[2]);
+    dx * dx + dz * dz < r * r && pickup[1] - r < p[1] + 90.0 && p[1] < pickup[1] + r
 }
 
 /// `(count, frac)` moved on by whole nodes.
@@ -999,6 +1063,32 @@ mod tests {
         let f = m.players[0];
         assert_eq!((f.health, f.immune, f.deaths), (6, 150, 1));
         assert_eq!(f.body.pos, [4200.0, 0.0, -2000.0]);
+    }
+
+    /// 0xBC's command 0x20 blows a racer up on its next frame (V L2 1915-1916). A power-up touches
+    /// within 262.5, 1.4 times that on the autopilot (V L2 1881: a bot 198 off and 324 above).
+    #[test]
+    fn the_scripts_kill_and_the_reach() {
+        let (arena, world) = course();
+        let mut m = race(2, 1, 5);
+        m.tick = GO;
+        let mut f = m.players[1];
+        let at = f.body.pos;
+        f.body.pos = [at[0] + 198.0, at[1] + 324.0, at[2]];
+        assert!(touches(at, &f));
+        f.ride.auto = false;
+        assert!(!touches(at, &f));
+        m.race_op(Op::Kill(1));
+        let ev = m.step(&arena, &[Input::default(); 2], &world);
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            Event::Hit {
+                victim: 1,
+                lethal: true,
+                ..
+            }
+        )));
+        assert_eq!(m.players[1].body.state, DEAD);
     }
 
     /// A canister boosts at 254 for 60 frames; a missile flies the track and knocks the racer ahead

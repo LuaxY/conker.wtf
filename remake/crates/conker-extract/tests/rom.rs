@@ -114,8 +114,9 @@ fn slice_in_memory() {
 
     // The weapons and the grenades in the hand: 18 models (the twin guns are two; the Tediz' grenade
     // and everyone else's; map 0x1A's bat and tommy gun; War: Raptor's bone crossbow and knives),
-    // the gas mask in the hand and on the head, and Race's kick, one mesh each but the crossbows,
-    // child objects with a list per joint.
+    // the gas mask in the hand and on the head, Race's kick and item 0x3A's two grenades (#137 on
+    // 0x1A, #186 on 0x3F: child objects, no events), one mesh each but the crossbows and the
+    // grenades, child objects with a list per joint.
     let (held, _) = parse_glb(&slice.held_glb);
     let names: Vec<&str> = held["meshes"]
         .as_array()
@@ -123,7 +124,7 @@ fn slice_in_memory() {
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(slice.held.len(), 22);
+    assert_eq!(slice.held.len(), 24);
     // The grenades on the left hand from the pull's t19 to the throw's t15: the Tediz' #75 (0x176,
     // 0x16B), everyone else's #76 (0x175, 0x16C; ROM clip events, C `func_15065A5C`).
     let grenade = |entry| slice.held.iter().find(|h| h.entry == entry).unwrap();
@@ -1055,13 +1056,13 @@ fn projectiles_and_undrawn_quads() {
     let Some(rom) = rom() else { return };
     let (level, scenes) = conker_extract::projectiles_level(&rom).unwrap();
     let counts: Vec<_> = (level.meshes.iter()).map(|m| m.ir.vertices.len()).collect();
-    assert_eq!(counts, [28, 16, 34, 23, 16, 45]);
+    assert_eq!(counts, [28, 16, 34, 23, 16, 45, 46, 46]);
     let z: Vec<_> = (level.meshes[1].ir.vertices.iter())
         .map(|v| v.position[2])
         .collect();
     assert_eq!((z.iter().min(), z.iter().max()), (Some(&-316), Some(&484)));
     assert!(level.meshes.iter().all(|m| m.ir.unresolved.len() <= 1));
-    assert_eq!(scenes.as_array().unwrap().len(), 6);
+    assert_eq!(scenes.as_array().unwrap().len(), 8);
     // Tank's shell: a five-sided prism with its nose at +48 (V sh1 DL 42, drawn at 1.5).
     let z: Vec<_> = (level.meshes[4].ir.vertices.iter())
         .map(|v| v.position[2])
@@ -2048,4 +2049,144 @@ fn character_materials_follow_the_oracle() {
         (0, blend.clone())
     );
     assert!(modes(g_lit, 4216).is_superset(&blend));
+}
+
+/// The child objects' rigs (`conker_assets::RIGS`; `../lab/research/mp-original/held-leftovers.md`
+/// §1): the crossbow (#110) has 3 joints and the clips the game poses it with, the bone crossbow
+/// (#47) the same joints and clips, as item 0x3A's two grenades (#137, #186) have; each pair is one
+/// glTF, one clip set, the second model's primitives on list 1.
+#[test]
+fn child_object_rigs() {
+    use extract_character::{Character, Clip, JOINT_SCALE, SCALE_ONE};
+    let Some(rom) = rom() else { return };
+    let crossbow = Character::load(&rom, 110).unwrap();
+    let joints = &crossbow.model.joints;
+    assert_eq!(joints.len(), 3);
+    // (pair, stored frames, ticks): the draw's bind pose (pair 0, empty), the idle's one-tick
+    // pose, the fire and the holster.
+    let clips: Vec<_> = (crossbow.clips.iter())
+        .map(|c| (c.pair, c.frames.len(), c.duration))
+        .collect();
+    assert_eq!(clips, [(0, 0, 66), (1, 1, 1), (2, 9, 31), (3, 10, 36)]);
+    let clip = |pair: usize| -> &Clip { crossbow.clips.iter().find(|c| c.pair == pair).unwrap() };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.001;
+    // The idle: the nock (joint 1) drawn back to (13.015, -2.472, 67.389) in joint 0's frame.
+    let a = usize::from(joints[1].anim);
+    let delta = clip(1).frames[0].translations[a].unwrap();
+    let nock: [f32; 3] =
+        std::array::from_fn(|k| joints[1].translation[k] + f32::from(delta[k]) / JOINT_SCALE);
+    assert!(
+        near(nock[0], 13.015) && near(nock[1], -2.472) && near(nock[2], 67.389),
+        "{nock:?}"
+    );
+    // The fire: the loaded bolt's joint 2 grows from nothing by t8 (a frame every 4 ticks).
+    let a = usize::from(joints[2].anim);
+    let scales: Vec<f32> = (clip(2).frames[..3].iter())
+        .map(|f| f.scales[3 * a].map_or(1.0, |v| f32::from(v) / SCALE_ONE))
+        .collect();
+    assert!(
+        near(scales[0], 0.002) && near(scales[1], 0.703) && near(scales[2], 1.0),
+        "{scales:?}"
+    );
+    let textures = rom.textures().unwrap();
+    for (name, [first, second]) in conker_assets::RIGS {
+        let (a, b) = (
+            Character::load(&rom, first).unwrap(),
+            Character::load(&rom, second).unwrap(),
+        );
+        assert_eq!(
+            (&a.model.joints, &a.clips),
+            (&b.model.joints, &b.clips),
+            "{name}"
+        );
+        let rig = conker_extract::rig(&rom, [first, second]).unwrap();
+        let (json, _) = parse_glb(&rig.gltf(&textures, true).unwrap().glb());
+        let animations: Vec<&str> = (json["animations"].as_array().unwrap().iter())
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            animations,
+            [
+                "pair_0001_anim_0001",
+                "pair_0002_anim_0002",
+                "pair_0003_anim_0003"
+            ]
+        );
+        let lists: BTreeSet<u64> = (json["meshes"][0]["primitives"].as_array().unwrap().iter())
+            .map(|p| p["extras"]["list"].as_u64().unwrap())
+            .collect();
+        assert_eq!(lists, [0, 1].into(), "{name}");
+    }
+    let lob = Character::load(&rom, 137).unwrap();
+    let clips: Vec<_> = (lob.clips.iter()).map(|c| (c.pair, c.duration)).collect();
+    assert_eq!(
+        (lob.model.joints.len(), clips),
+        (4, vec![(0, 10), (1, 30), (2, 24), (3, 30)])
+    );
+}
+
+/// The body-part spheres (`../lab/research/mp-original/held-leftovers.md` §2, its `parts_rom.txt`
+/// and `broad_rom.txt`): the table's 23 models with their set, sphere count and head (part 0xA)
+/// spheres, in order; 117's and 83's spheres; no parts for the models off the table.
+#[test]
+fn body_part_spheres() {
+    let Some(rom) = rom() else { return };
+    let table: [(usize, u8, usize, usize); conker_extract::PART_ENTRIES] = [
+        (83, 0, 7, 0),
+        (0, 1, 42, 3),
+        (1, 1, 42, 3),
+        (2, 1, 42, 3),
+        (3, 1, 42, 3),
+        (4, 1, 42, 3),
+        (59, 2, 43, 2),
+        (90, 3, 21, 4),
+        (116, 3, 21, 4),
+        (122, 3, 21, 4),
+        (117, 4, 35, 3),
+        (128, 5, 42, 3),
+        (136, 6, 31, 3),
+        (144, 7, 27, 3),
+        (150, 8, 37, 3),
+        (159, 10, 37, 3),
+        (160, 10, 37, 3),
+        (156, 11, 37, 3),
+        (157, 11, 37, 3),
+        (178, 11, 37, 3),
+        (180, 11, 37, 3),
+        (176, 11, 37, 3),
+        (177, 11, 37, 3),
+    ];
+    let models = conker_extract::part_models(&rom).unwrap();
+    assert_eq!(models, table.map(|t| (t.0, t.1)));
+    for (model, _, n, heads) in table {
+        let parts = conker_extract::body_parts(&rom, model).unwrap().unwrap();
+        let head = parts.spheres.iter().filter(|s| s[1] == 0xA).count();
+        assert_eq!((parts.spheres.len(), head), (n, heads), "{model}");
+    }
+    let tedi = conker_extract::body_parts(&rom, 117).unwrap().unwrap();
+    assert_eq!(
+        (tedi.broad, tedi.spheres[0]),
+        ([117, 95], [12, 0xA, 38, 0, 33, 5])
+    );
+    // The ears last, after the body's spheres.
+    assert_eq!(
+        tedi.spheres[33..],
+        [[12, 0xA, 22, 20, 21, 9], [12, 0xA, 22, -22, 21, 6]]
+    );
+    let raptor = conker_extract::body_parts(&rom, 83).unwrap().unwrap();
+    assert_eq!(
+        (raptor.broad, raptor.spheres[4]),
+        ([339, 227], [5, 0, 58, 0, 42, 115])
+    );
+    // The zombies' limbs: parts 4-9 besides the head and the body.
+    let zombie = conker_extract::body_parts(&rom, 159).unwrap().unwrap();
+    let parts: BTreeSet<i16> = zombie.spheres.iter().map(|s| s[1]).collect();
+    assert_eq!(parts, [0, 4, 5, 6, 7, 8, 9, 0xA].into());
+    for model in [152, 154, 155, 119, 138] {
+        assert_eq!(
+            conker_extract::body_parts(&rom, model).unwrap(),
+            None,
+            "{model}"
+        );
+    }
 }

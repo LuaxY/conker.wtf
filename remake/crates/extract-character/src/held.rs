@@ -5,7 +5,10 @@
 //! - A route's events (`func_1506AD30`; route +4 is their offset from the table's payload +0x10):
 //!   12-byte records, the clip time (f32 ticks), the opcode in the second word's low byte and an
 //!   argument, until a time of 900 or more. Opcode 105 creates the attachments of action `argument`
-//!   (`func_15072DD8`), 106 removes them (`func_15072E38`). An event fires in the frame the clip's
+//!   (`func_15072DD8`), 106 removes them (`func_15072E38`), and 41 deletes the actor's first child
+//!   object (`func_1506DBD4`: `func_15072208(actor, 0)`, then `func_15054A5C`; the holster 0xC6's at
+//!   t14, the only op-41 route in the Tedi's table; V `../lab/research/mp-original/held-leftovers.md`
+//!   hol: the crossbow gone at read 393). An event fires in the frame the clip's
 //!   clock reaches its time (V: f32 clock, twin guns' draw t 15 at 15.4, holster t 14 at 15.4 after
 //!   13.999998, flamethrower t 9 at 9.0). The dispatcher stops at the first record not yet due, so
 //!   a record fires at the latest time of those before it ([`due`]; V: the mask's take-off 0x14E,
@@ -29,9 +32,10 @@ use crate::{ROUTE_BANK, Result, animation_entry, be32, parse_routes};
 
 /// The action headers (`func_15083568`).
 const ACTIONS: usize = 0x8008_6CC4;
-/// Event opcodes: create and remove an action's attachments.
+/// Event opcodes: create and remove an action's attachments, and delete the first child object.
 const CREATE: u32 = 105;
 const REMOVE: u32 = 106;
+const REMOVE_CHILD: u32 = 41;
 /// Where an attachment's vertices start (segment 1).
 const VERTICES: usize = 0x18;
 /// Segment 8 while an attachment draws opaque: the renderer's render-state lists in `.game` data
@@ -44,11 +48,13 @@ pub(crate) const RENDER_STATES: usize = 0x8008_3140;
 pub struct Held {
     /// Bank-09 entry, or bank-01 entry of a child object.
     pub entry: usize,
-    /// A child object (kind 0, I: drawn in its bind pose, its own clips not played).
+    /// A child object (kind 0): a bank-01 model with its own rig and clips, which the game poses from
+    /// its parent's clip (`func_15054A94`, `../lab/research/mp-original/held-leftovers.md` §1).
     pub object: bool,
     /// The character's matrix slot (joint) it is drawn with.
     pub joint: u8,
-    /// (logical animation id, clip time in ticks) of every event that creates it, and removes it.
+    /// (logical animation id, clip time in ticks) of every event that creates it, and removes it
+    /// (a child object's: its action's op 106 and every op 41).
     pub create: Vec<(u16, f32)>,
     pub remove: Vec<(u16, f32)>,
 }
@@ -59,7 +65,7 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
     let game_data = rom.game_data()?;
     let anims = animation_entry(&game_data, entry)?;
     let table = rom.asset(&[ROUTE_BANK, animation_entry(&game_data, anims)?])?;
-    // (logical id, time, creates, action)
+    // (logical id, time, creates, action); op 41's action is None: any child object's.
     let mut events = Vec::new();
     for (id, route) in parse_routes(&table)?.iter().enumerate() {
         if route.aux_offset == 0 {
@@ -74,7 +80,9 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
             let time = due(&mut last, time);
             let op = be32(&table, at + 4)? & 0xFF;
             if op == CREATE || op == REMOVE {
-                events.push((id as u16, time, op == CREATE, be32(&table, at + 8)?));
+                events.push((id as u16, time, op == CREATE, Some(be32(&table, at + 8)?)));
+            } else if op == REMOVE_CHILD {
+                events.push((id as u16, time, false, None));
             }
             at += 12;
         }
@@ -82,20 +90,23 @@ pub fn held_models(rom: &Rom, entry: usize, clips: &[u16]) -> Result<Vec<Held>> 
     let mut actions: Vec<u32> = events
         .iter()
         .filter(|e| e.2 && clips.contains(&e.0))
-        .map(|e| e.3)
+        .filter_map(|e| e.3)
         .collect();
     actions.sort_unstable();
     actions.dedup();
     let mut held = Vec::new();
     for action in actions {
-        let of = |creates: bool| {
-            let e = events.iter().filter(|e| e.3 == action && e.2 == creates);
-            e.map(|e| (e.0, e.1)).collect()
-        };
         for r in action_records(&game_data, action)? {
+            let object = r[3] == 0;
+            let of = |creates: bool| {
+                let e = (events.iter())
+                    .filter(|e| e.2 == creates)
+                    .filter(|e| e.3 == Some(action) || (object && e.3.is_none()));
+                e.map(|e| (e.0, e.1)).collect()
+            };
             held.push(Held {
                 entry: r[0] as usize,
-                object: r[3] == 0,
+                object,
                 joint: r[1],
                 create: of(true),
                 remove: of(false),

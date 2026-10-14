@@ -35,6 +35,13 @@ pub const KNOCK_Y: f32 = 50.0;
 pub const KNOCK_GRAVITY: f32 = 2.0;
 pub const KNOCK_FRAMES: u8 = 30;
 pub const KNOCK_SPEED: f32 = 3.5;
+/// A bot's hit also runs its class script 0xF (`func_1505C1E4`; V L1 234, 288, L2 1911, 2949): y
+/// velocity 55 (op 6), the speed kept, state 84 [`Board::held`] until script 0xBC sets it riding
+/// again (61 frames on, [`Board::class`]), the autopilot turning at most [`KNOCKED_TURN`] meanwhile
+/// (V L1 288-337), a kick allowed once the knock's 30 frames are over (V L1 305).
+pub const BOT_KNOCK_Y: f32 = 55.0;
+pub const KNOCKED_TURN: i32 = 256;
+pub const RIDE_AGAIN: f32 = 75.0;
 /// B's kick: state 84 for 29 frames, the hop (y velocity 25) on the 12th (V c_b 241-269, 252); the
 /// match tests its victim on the 10th (V w2 226).
 pub const KICK_FRAMES: u8 = 29;
@@ -61,7 +68,7 @@ pub const BUTTON_B: u16 = 0x4000;
 pub const AUTO_TURN: i32 = 833;
 
 /// The board's own counters (s126+0x50 knock, the kick's frame, obj+0x81 jumped, s126+0x44 the
-/// wall's cooldown).
+/// wall's cooldown) and a bot's class script 0xF (`held`, obj+0x232).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "net", derive(serde::Serialize, serde::Deserialize))]
 pub struct Board {
@@ -69,6 +76,7 @@ pub struct Board {
     pub kick: u8,
     pub jumped: bool,
     pub wall: u8,
+    pub held: bool,
 }
 
 impl Board {
@@ -79,9 +87,26 @@ impl Board {
         p.xz_speed -= KNOCK_SPEED;
     }
 
+    /// A bot's hit: the knock at [`BOT_KNOCK_Y`], held.
+    pub fn bot_knock(&mut self, p: &mut PlayerState) {
+        (self.knock, self.held) = (KNOCK_FRAMES, true);
+        (p.y_vel, p.gravity) = (BOT_KNOCK_Y, KNOCK_GRAVITY);
+    }
+
+    /// Script 0xBC's command 0x14 (the class script): 0xD rides again at most [`RIDE_AGAIN`] (V L1
+    /// 348), 0x1F (its kick's, V L1 305) ends the hold too.
+    pub fn class(&mut self, p: &mut PlayerState, script: u8) {
+        if self.held && script != 0xF {
+            self.held = false;
+            if script == 0xD {
+                p.xz_speed = p.xz_speed.min(RIDE_AGAIN);
+            }
+        }
+    }
+
     /// State 5 or 84.
     pub fn state(&self) -> u8 {
-        if self.kick > 0 || self.knock > 0 {
+        if self.kick > 0 || self.knock > 0 || self.held {
             KICK
         } else {
             RIDE
@@ -178,6 +203,7 @@ pub fn step(
     let (x, y) = (deadzone(input.stick_x), deadzone(input.stick_y));
     let mut lean = (f32::from(y) * STICK).clamp(-35.0, 45.0);
     let mut steer = i32::from(x) * STEER;
+    let turn = if b.held { KNOCKED_TURN } else { AUTO_TURN };
     if b.knock > 0 {
         b.knock -= 1;
         steer /= 3;
@@ -191,7 +217,7 @@ pub fn step(
         Some((speed, at)) => {
             target = speed;
             let to = atan2_u16(p.pos[2] - at[2], at[0] - p.pos[0]);
-            let d = angle_diff(to, p.move_angle).clamp(-AUTO_TURN, AUTO_TURN);
+            let d = angle_diff(to, p.move_angle).clamp(-turn, turn);
             p.move_angle = p.move_angle.wrapping_add(d as u16);
         }
         None if p.lock == 0 => p.move_angle = p.move_angle.wrapping_sub((steer / 9) as u16),
@@ -241,7 +267,9 @@ pub fn step(
         (p.pos, p.y_vel) = (swept.pos, swept.y_vel);
     }
     b.wall = b.wall.saturating_sub(1);
-    if (p.pos[0], p.pos[2]) != (pre[0], pre[2]) {
+    // obj+0xF4 bit 0x10000, which script 0xBC reads to blow up a bot off trigger 0xF (query 0xC3).
+    p.walled = (p.pos[0], p.pos[2]) != (pre[0], pre[2]);
+    if p.walled {
         let away = atan2_u16(pre[2] - p.pos[2], p.pos[0] - pre[0]);
         let d = p.move_angle.wrapping_sub(away);
         if (0x1E01..0xE200).contains(&d) {
@@ -462,6 +490,34 @@ mod tests {
         assert_eq!(states[29], (RIDE, UP, 75.0));
         assert!((p.xz_speed - 57.5).abs() < 1e-3, "{}", p.xz_speed);
         assert!(p.pos[1] - y > 290.0, "{}", p.pos[1] - y);
+    }
+
+    /// V L1 288-348, L2 1911: a bot's hit rises at 55 with the hover off for the knock's 30 frames,
+    /// is held in state 84 (turning at most 256) until the script's class 0xD, then rides at most 75.
+    #[test]
+    fn bot_knocked_up_as_l1() {
+        let world = flat();
+        let (mut p, mut b) = (racer(), Board::default());
+        p.xz_speed = 100.0;
+        b.bot_knock(&mut p);
+        let drive = Drive {
+            auto: Some((100.0, [-1000.0, FLOOR, 0.0])),
+            ..go()
+        };
+        let angle = p.move_angle;
+        step(&mut p, &mut b, &input(0, 0, 0), &world, drive);
+        assert_eq!((p.y_vel, p.state), (BOT_KNOCK_Y - KNOCK_GRAVITY, KICK));
+        assert_eq!(angle_diff(p.move_angle, angle).abs(), KNOCKED_TURN);
+        for _ in 0..40 {
+            step(&mut p, &mut b, &input(0, 0, 0), &world, drive);
+        }
+        assert_eq!(
+            (b.knock, p.state, p.gravity == KNOCK_GRAVITY),
+            (0, KICK, false)
+        );
+        b.class(&mut p, 0xD);
+        step(&mut p, &mut b, &input(0, 0, 0), &world, drive);
+        assert_eq!((p.state, p.xz_speed), (RIDE, RIDE_AGAIN + 1.0));
     }
 
     /// A wall: deflected, stunned above 30 (×0.7, 12 frames without the stick); the next damage

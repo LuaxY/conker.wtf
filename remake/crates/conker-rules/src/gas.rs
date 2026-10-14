@@ -262,6 +262,9 @@ pub enum Effect {
     Race(crate::race::Op),
     /// Tank: bot `.0`'s aim error s126+0x12A, 0 or 1 ([`crate::game::Fighter::aim_error`]).
     AimError(usize, u8),
+    /// Tank: bot `.0`'s mover accel and brake ×10 this frame, from its class script's op 0x67
+    /// ([`crate::tank::Tank::rates`]).
+    TankRates(usize, [u8; 2]),
 }
 
 #[cfg(test)]

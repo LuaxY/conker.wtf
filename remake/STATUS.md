@@ -1,5 +1,285 @@
 # Status after wave 6 (2026-10-10)
 
+## Race: the leftovers (2026-10-14)
+**Batch G1, the Race lane. Route 12's 3 bots now lap as L2's: 1067-1081 frames against 1063-1081 (934 before). The
+cause was the leader's deaths. In L2 the second bot takes the missile at placement 6 from 324 above it and fires at
+once. The missile catches the leader (boosting at 229) 26 frames on. The hit runs the bot's class script 0xF: up at 55,
+held in state 84. The wall then moves it, and script 0xBC blows it up (command 0x20: health 0). That happens three
+times, then the leader is out (4128), and the other two ride at the rubber band's 100. The remake missed five things:
+the AI's pickup reach (1.4 × 262.5), the missile's 200 a frame (155), the class script's hold, the wall's flag and the
+kill. The track is now the original's Catmull-Rom spline. Route 11's laps went from 832-835 to 836-837 (L1 837), and
+every finish moved into L1's, L2's, L7e's and L7f's spreads. The race total is on the wire, and the HUD reads it. The
+camera's springs and finish cameras, the death blast and the hums' pitch are findings and a pack handoff only (Left).**
+Research: `../lab/research/mp-original/race-leftovers-scratch/`: `code/` (`func_1505C1E4`, `func_1505C7D8`,
+`func_15075C24`, `func_150497E0`, `func_150498A4`, `func_1511DF6C`, `func_15058EA4`, `func_150D5124` and others),
+`path.py` (a racer's rows), `prog.py` (the table every N reads), `seg.py` (per-node times), `lldb.sh`. Runs on the
+private `ConkerRecomp.g1c` (traces not kept):
+- L1, L2 (M11's, read again): 3 bots and an idle human with 99 lives, routes 11 and 12.
+- k1-k3 (lldb on L2's set-up): k3 watched bot 3's obj+0x232 and obj+0x1CA. The class went 13 → 15 at 1909
+  (`func_1505C1E4` < `func_1505C7D8` < `func_150538CC`, the missile's hit). Health went 0 at 1915 (`func_15097A8C` <
+  the script machine), the respawn put 1536 back at 2006, and 0x14 0xD came at 1977.
+- d1: L1's set-up with DL and RAM dumps at reads 380, 384, 392 and 404 (the idle human dies at 378).
+
+**The wire changed:** `RacerView.total` (`PROTOCOL_ID` stays 34, as the batch asked). **The shared simulation
+changed:** the board's `held` and wall flag, Race's pickup reach, the track's spline (the client predicts with it), the
+missile's step, and the script's `Kill` and `Class` ops.
+
+| Part | What |
+|---|---|
+| conker-rules `race.rs` | **`Track::spline`**: `at` is the Catmull-Rom curve through the nodes before, at, after and after that, at the lateral (x, y, z; `func_15088F30`, `func_150497E0`). `follow` projects on the curve's tangent there (`func_150498A4`), with the chord as the scale. `angle` and `respawn` are unchanged. **`touches`**: a power-up touches within `REACH` 262.5 (100 · s126+0x1AF 168 / 64; 0xBC's command 0x7B sets 168 for every racer), × `AUTO_REACH` 1.4 on the autopilot, height as `func_1511DF6C`. **`Op::Kill`** (player command 0x20 with 0): health 0, so the racer's next frame is its death. **`Op::Class`** (command 0x14): a bot's class script (`Board::class`). A bot's hit (`knock`) is `bot_knock` and ends its canister's boost. The missile moves at most `MISSILE_STEP` 200 a frame, and at most `MISSILE_AHEAD` 0.2 of a node along the track (`func_150538CC`). The racer's wall flag is cleared at its death |
+| conker-sim `board.rs` | **`walled`**: the wall routine moved the board this frame (obj+0xF4 bit 0x10000, query 0xC3). **`Board::held`** (a bot's class script 0xF): state 84 until `class` 0xD (speed ≤ `RIDE_AGAIN` 75) or 0x1F (its kick's). **`bot_knock`**: the knock's 30 frames (no hover, gravity 2) at `BOT_KNOCK_Y` 55, the speed kept. While held, the autopilot turns at most `KNOCKED_TURN` 256 a frame |
+| conker-bots `brain.rs` | Race: player command 0x20 → `Kill`, 0x14 → `Class`, query 0x91 → 0xF while held, else 0xD |
+| conker-rules `game.rs` | Race's pickups touch by `race::touches` |
+| conker-sim `net.rs`, conker-server `main.rs`, conker-client `hud.rs` | **`RacerView.total`**: the race clock at the racer's last lap crossing (`0x800E0C18`), −1 for a racer the end rule finished short. The STATS rows show it. The client's per-human "finished its laps" map is gone, so a client that joins after the finish shows the total too |
+| conker-client `audio.rs` | The missiles' sounds match within 8 frames at `MISSILE_STEP` |
+| conker-bots `tests/rom.rs` | `race_bots_finish`: route 11 runs seed 2 (below). Route 12 runs seeds 1 and 2. The 3 bots' steady lap (the median of the last 3) is within 2% of L1's and L2's, and on route 12 a bot is out |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| rules `the_scripts_kill_and_the_reach` (new) | Command 0x20 kills on the next frame. A power-up 198 off and 324 below a bot touches it, but not a human |
+| sim `bot_knocked_up_as_l1` (new) | y velocity 53 after the hit's frame, turning 256 a frame. After 41 frames the knock is over (hover back) but the hold remains (state 84). 0xD → state 5 at 75 + 1 |
+| bots ROM `race_bots_finish` | Passes. Route 11 (seed 2): laps 836-837, finishes 4164-4214, 2 missiles, the human dies at 376, 596, 844. Route 12 (seeds 1 and 2): steady laps 1067-1081, finishes 5156-5229, 10 and 11 missiles; the leader is hit at 1886, 2927, 3997 (seed 2: 1903, 2938, 4010), blown up 7-40 frames later each time, out after the third. 7 bots: mean finish 4245 (route 11) and 4766 (route 12) |
+| `bots.sh MODE=race MAP=33 BOTS=3`, 60 s: route 12 seeds 1 and 2, route 11 seed 1 (ports 5980, 5982, 5984) | All pass: every bot moves, every client sees it; no fault, unknown native or panic. Each race is decided at the idle human's elimination (t 1169, 1174, 1149; 3 lives), before the first lap ends. Boosts 3, 3, 2; missiles 1, 3, 2; knocks 2, 4, 2; bot 1 dies once in each (the chasm, Left) |
+| `bun run test`, `bun run check`, wasm clippy (`conker-client`) | 552 pass, 1 ignored (with the Tank and pack lanes' work in the tree); `check` and wasm clippy pass |
+
+| Run (ROM path, an idle human with 99 lives) | Before | After | Oracle |
+|---|---|---|---|
+| route 12, 3 bots: steady laps | 934, nobody dies | 1067-1081; the leader out after 3 deaths | 1063-1081 (L2: the leader blown up at 1916, 2971, 4036, out at 4128) |
+| route 12, 3 bots: finishes after the go | (not kept) | 5156-5229 | 5170-5190 |
+| route 12, 3 bots: missiles | 1 | 10, 11 | 10 (L2: 846 … 5077) |
+| route 11, 3 bots: steady laps / finishes | 832-835 / (not kept) | 836-837 / 4164-4214 | 837 / 4178-4230 (L1) |
+| 7 bots, mean finish: route 11 / route 12 | 4224 / 4720 | 4245 / 4766 | 4249 / 4814 (L7e, L7f) |
+
+**Findings** (V the runs; C the code).
+- **The hit** (k3, L1, L2). The missile's hit (`func_1505C7D8` → `func_1505C1E4`) sets a bot's class script to 0xF. Its
+  op 6 (`func_15075C24`) gives y velocity 55 under gravity 2, and it holds state 84. The board's knock still turns the
+  hover off for 30 frames (L1 bot 1, hit at 234: gravity 2 to 265, then the hover). 0xBC counts 61 frames of 0xF
+  (`G[0x114]`, `timer9`), then sends 0x14 0xD: state 5, speed 100 → 75 (L1 bot 2, 288 → 348). While held the bot turns
+  at most 256 a frame (L1 288-337). A B press (0x14 0x1F) ends the hold too (L1 bot 1, held from 234, kicks at 305).
+- **The kill** (0xBC). A bot the wall moved gets command 0x20(0), then 0x21 and `obj(0xE020)`: outside trigger 0xF
+  (at 0xAE4), and in class 0xF on any walled frame (0xBF2-0xC5A). In L2 the hit bot's speed falls 25 a frame to 100;
+  the wall moves it at 1915, and it is in state 112 at 1916. At 2971 the bot, lifted again at 2959, hits the roof at
+  y 566.
+- **The reach** (L1, L2, RAM). s126+0x1AF is 168 for every racer from the match's start. `func_1511DF6C` multiplies by
+  `0x800A3304` = 1.4 when s126+0x84 ≠ 0 (an AI-driven racer). It does so in every mode for bots; only Race's is ported.
+  L2 1881: bot 2, 198 off and 324 above, takes placement 6's missile.
+- **The missile** (`func_150538CC` kind 0xD). Each frame it moves at most 200 toward the track point 0.2 of a node
+  past its own place, 100 up. Homing, it moves toward the target's feet. L2: fired at 1883, 1.3 nodes behind the
+  leader boosting at 229, it hits 26 frames on.
+- **The spline.** `func_15087350` projects with the curve's point and normalized tangent, scaled by the chord: at
+  most ±0.5 a step, within 50, 11 steps. Its +0x14 is the along-track speed (about the xz speed).
+- **The hums' second value** (`func_150D5124`, C). Hum 0 (0x5B3): 5 × the height (at most 1000) in state 2, else 400.
+  Hum 1 (0x5B4): 400 in state 0, 0 in state 1 or with 5 or more racers, else 400. Hum 2 (0x5BC): 0. It rises dt · 256
+  a frame and falls dt · 8 (512 and 16 at 2 VIs a frame). It goes to the voice's +0x20, and to
+  `func_100111C8(id, value, volume)` at the stop. I: the pitch, in a unit not measured.
+- **The death blast** (d1). Effect type 0x19 (`func_151321D0` update, `func_15132B80` draw; lists at 0x800DCE50 +
+  4 × type). At read 380 there are 11 objects, 51 above the death point:
+  - a smoke shell: scale 2.75, alpha 234, model DL 0x801C5310;
+  - a fire shell: scale 1.35, alpha 110, DL 0x801C4360;
+  - 9 debris: scale 0.5, alpha 255, flying 12-20 a frame outward. DLs 0x801C3520 ×2, 0x801C2EA0 ×2, 0x801C1E00,
+    0x801C2210, 0x801C0B00, 0x801C0480 and 0x801BAB40, with textures 0x801C2890 and 0x801BADD0.
+
+  5 debris are left at 404.
+
+**Left.**
+- **The lateral-0 bot at the chasm** (after node 22, lap 1). In about half the seeds it is lifted 9 frames where L2's
+  is lifted 10 (846-855), lands about 40 low on the far ramp at (−8517, −350, 263) (L2: (−8523, −316, 225)) and dies.
+- **The bots' turn.** In state 5 the original's bots turn up to 1792 a frame (V). The remake's `AUTO_TURN` is 833 (I).
+  Not changed.
+- **The start's kicks** follow the script's `random(0x78)` timers. L1's bot kicks the idle human at 305-316 (its
+  deaths 378, 599, 845). Seed 2 does too (376, 596, 844), but seed 1 doesn't (357, 577, 825), so the ROM test runs
+  seed 2. Not ported: a kick's speed 60 at its start and end (L1 bot 3, 276 and 288), the class script's frame
+  of state 15, and 0x21 and `obj(0xE020)` at the kill.
+- The missile's hit radius (`MISSILE_HIT` 120, I), and its homing aims 40 up (C: the feet).
+- **Camera** (unchanged). M13's list in "Race: the client" stands: mode 8 (`func_150D1530`) with its FOV, the boost's
+  distance, the vertical springs, the hand-over after the go, the death's look-down and the finish cameras.
+- **Hums' pitch.** The law is above. `Playing` takes its rate at the start, so a per-tick rate control (like the
+  volume's) is needed, and an oracle audio dump (`CONKER_AUDIO_DUMP`) to fix the unit.
+- **Handoff, pack lane: the death blast.** The pack needs the type-0x19 models above (the two shells and the 7
+  debris models) with their textures, and the shells' scale and alpha over time (decompile `func_151321D0`). Their
+  asset is not identified. Then the client draws them in place of `beach::burst`. To regenerate the dumps:
+  `OUT=/tmp/g1c/runs BIN=./host/build-headless/ConkerRecomp.g1c SCEN=11 BOTS=3 RACE=5 POKE=30:800D2144=63060000
+  DLS=380,384,392,404 race-scratch/run.sh d1 20 race-scratch/idle.txt`. Then run `race-client-scratch/cam/deb.py
+  dl_380.bin 0x19`, and `../lab/hud/texfind` on the dumps for the texture ids.
+
+## Tank: the leftovers (2026-10-14)
+**Batch G1 L2b. The bots' shells now hit at the original's rate: 26.7% of their shots over seeds 1-12, against the
+oracle's 25.6% over ten runs (33.8% before). Two fixes did it: the gun's pitch is now the original's slow controller
+instead of a solve, and the hull's volume is the original's ellipsoid. C-right turned the turret the wrong way. The ROM
+test's tiny seeds drew too many Collectors. Seeded as the server is, the bomb's numbers fall in the oracle's spread
+(blast deaths 16.5 against 14.8, plants 3.9 against 3.8). Op 0x67 of the class scripts sets a bot tank's accel and
+brake for one frame. Without it, the carriers into bunker E parked 2 units outside its trigger and never planted.
+Wrecks are solid while they show, and lie where the death's knock left the body. The scope shot does 1 damage, as the
+remake's already did. The client tilts the hull on slopes. Left: shell deaths run low (7.5 against 10.5), the per-side
+treads (a pack handoff), the scope's bullet path, the engine's pitch.** Research: `../lab/research/mp-original/tank.md`
+§10 and `tank-leftovers-scratch/`: `run.sh` on the private `ConkerRecomp.g1b`, and `counts.py`, `blast.py`,
+`carry.py`, `cycle.py`, `plantpos.py`, `roles.py`, `shells.py`, `aim.py`, `ellipsoid.py`, `pitch.py`, `states.py`.
+The runs (traces not kept):
+- h1-h9: 7 bots and an idle human, 310 s, the RNG word 0x800885B4 poked at read 20: h1 1234567, h2 7654321,
+  h3 24681357, h4 99991111, h5 31415926, h7 16180339, h8 14142135, h9 27182818. h6 is unpoked.
+- sc1, sc2: two humans, P2 600 ahead of P1 (`sc1.poke`, `sc1_p1.txt`, `sc2_p1.txt`). P1 takes the launcher,
+  scope-fires 4 times, kills P2 with shells, then drives at P2's wreck (sc1 from 560, sc2 from 380).
+
+The wire is unchanged: `PROTOCOL_ID` stays 34. **The shared simulation changed.** conker-sim's tank `step` turns the
+turret the other way on C-right/C-left (a client predicts its tank's turret as the server now turns it), and
+`Drive::Stick`'s `clip` became `rates`. The rules' shells, the bots' pitch and rates and the solid wrecks are
+server-side.
+
+| Part | What |
+|---|---|
+| conker-rules `tank.rs` | **`BODY`**: model 119 has no body parts (`func_1508114C` → −1), so the shell's test is `func_15081C20`'s ellipsoid: radius obj+0xD2 113 across, obj+0xD4 90 up, centred obj+0xD6 52 over the feet. `hits_hull` scales y by 113/90 and casts against a sphere. A dead tank stops a shell unhurt (its obj+0xF8 keeps 0x40). **The pitch**: `solve_pitch` gives way to `range_error` (`func_150ED298`: how far short a shell at this pitch lands, 148.25 a frame each way, 1.25·t² of fall; out of reach, the pitch it lacks × 1000). Each frame adds 0.001 × that error. A bot's aims at the target's feet with no clamp, and its aim error aims 400 nearer. A human's aims 40 over and is clamped to ±4° a frame. **`Tank::rates`**: the bots' mover rates for this frame (cleared after the players). A bot steps with them, else with 0x32 each; a human gets 0x32 in its fire clip, else the stick's. **Wrecks**: the pos is set after the death's knock frame, and a wreck pushes as a tank body while it shows once its slot is back. `hull_pitch` is public |
+| conker-sim `tank.rs`, `movement.rs` | C-right −3, C-left +3: `turret` is −s126+0x1BC (the shells fly at facing − 0x1BC, C-right adds 3, V b1). `Drive::Stick { rates: Option<[u8; 2]> }` (accel and brake ×10, obj+0x247/+0x248) replaces `clip`, and `CLIP_RATE` 0x32 replaces `CLIP_ACCEL` |
+| conker-rules `gas.rs`, `game.rs` | `Effect::TankRates(slot, [accel, brake])` goes into `Tank::rates` |
+| conker-bots `npc.rs`, `lib.rs` | Op 0x67 (`func_15077364`) keeps a1 and a2 in `Npc::rates`. The tank branch sends them as `TankRates` once, then puts back 0x32 |
+| conker-client `tank.rs` | The hull is pitched by `hull_pitch` (obj+0xB8, V t1), so the gun's world pitch is now the rules' |
+| conker-bots `tests/rom.rs` | `tank_match` is seeded as the server (`GAME_SEED ^ seed`). `tank_bots_bomb_and_fight` checks against the ten runs, including the longest carry. `tank_bomb_as_c1` waits for both the doors and the bomb, since the new seed's bomb is back before the doors open |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| rules `shells_hit_as_f2`, `wrecks_stand_as_tanks`, `shield_and_turret` | f2's lines 98 off the feet (hit), 148 and 197 (miss). sc2: the wreck lies where the knocked body lay, and a tank driving at it stops 110-160 short. C-right → 357 |
+| sim `a_bots_mover_takes_its_scripts_rates`, `tanks_push_and_turrets_turn` | h4 3424-3427: 10 → 9.2 → 4.2 → 0, and 0.4 from rest. C-right then C-left |
+| bots ROM `tank_bots_bomb_and_fight` (seeds 1-4) | A run: 340 shots, hits 26.3%, shell deaths 7.2, blast deaths 17.2, plants 4.2, the longest carry 1194. Every run plants, kills by blast and ends each carry within 1500 |
+| bots ROM `tank_bomb_as_c1` | shown 401, plant 429, doors +231, haze +271, blast +300, open +389, back +347 |
+| `bots.sh` `MODE=tank MAP=24 BOTS=7`, 150 s, seeds 1 and 2 (ports 5970, 5974) | Both pass: every bot moves, fights, dies and respawns, every client sees it; no fault, unknown native or panic. Seed 1: 3 takes, plants at 1617 and 3237, blast deaths 9, shell deaths 2, 3 power-ups. Seed 2: 3 takes, plants at 1675 and 3514, 9 and 3, 5 power-ups |
+| `../lab/screens/tank-leftovers/shots.sh` a, t (ports 5972, 5974; release build) | climb70.png, climb90.png: slot 0 stopped on the bridge's south ramp (z −1264, 9°), seen level from the side. The hull lies along the ramp, nose up (its top edge ~7° against the ramp's ~10° in the frame). climb62.png from above. Part a's four shots are unchanged |
+| `bun run test`, `bun run check`, wasm clippy | Pass: 552 tests, 1 ignored (with `CONKER_ROM`); `check` and wasm clippy clean |
+
+**The numbers** to read 9023: the oracle's ten runs (b1, h1-h9) against the remake's seeds 1-12.
+
+| | Oracle (range) | Remake, old seeding | Remake now |
+|---|---|---|---|
+| Shots a run | 350 (312-419) | 327 | 331 |
+| Hits of 1 / shots | 25.6% (19.6-29.5) | 33.8% before this batch, 27.5% with the pitch and volume | 26.7% |
+| Shell deaths | 10.5 (5-14) | 7.0 | 7.5 |
+| Blast deaths | 14.8 (11-23) | 17.9 | 16.5 |
+| Plants | 3.8 (2-5) | 4.2 | 3.9 |
+| Takes; failed carries | 5.2; 0.9 | 5.0; 0.3 | 5.1; 0.8 |
+| Longest carry | 1197 | ≥ 3300 in 3 of 12 seeds (once seeded as the server) | 1415 |
+
+**Findings** (V the runs above; C).
+- **The hits.** The gun's pitch is never solved. The original adds 0.001 × `func_150ED298`'s miss distance a frame
+  (`func_150ED748`), so the pitch trails a moving target and the original's bots miss more. The volume: f2 hits a line
+  98 off the feet and misses 148 (M9 had 150 and 200). On b1 the ellipsoid calls 58 of the 60 hits, and the old
+  150-wide cylinder 81. Residual (I): clip 1's recoil moves joint 3, whose matrix the shell takes, and the pitch
+  ignores the lead.
+- **The bomb.** The "21 against 12" compared seed 1 with b1 alone, and b1's first bomb waited 5485 frames. Per blast
+  the deaths agree (4.1 in the oracle). Every tank outside a bunker dies, immune or not (14 immune ones died over b1
+  and h1-h5), and the dead are spared, as in the remake. Seeding the test with `Rng { state: 1..4 }` made the first
+  draws near 0 (the 2nd and 7th are 0 for any small seed). The role roll (30/25/15/15) then gave Collectors: slot 4
+  collected the whole match in 3 of 6 seeds.
+- **The E carriers.** Scripts 4 (path) and 5 (stop) start with `67 8a 04 08 00`: accel 0.4 and brake 0.8 for that
+  frame. The tank's update sets 0x32 (5) every frame. V h4 to read 4000: +5 ×396, −5 ×168, first steps +0.4 ×82 and
+  −0.8 ×37, never the stick's 1.4 or 2.0. A carrier into E stops 120 from home node 0 (x 7127) and coasts 6.7 to
+  x 7021-7023 (b1, h4, h5: 4 plants), inside trigger 0x14 (x > 7017). Braking 5 from the first frame, it stopped at
+  7015.2 and never planted (seeds 1, 6 and 9: 3300-5100 frames).
+- **The scope shot** (sc1). With 0x02 and R held, each Z plays the fire clip and the target loses 1 hp two reads after
+  the press (the read after the fire clip's), with clip 7 and the knock. No shell object flies: it is the bullet
+  pool's shot. The remake's scoped Z fires a shell, 1 damage too, which arrives a frame later (+3 at 600) on an arc.
+- **Wrecks** (sc1, sc2). Prop 18 + slot shows at the knocked body's spot (5904, −716, 708 at 279). While it shows it
+  holds a tank driving at it 127-150 off, after P2's respawn (366; sc2 444-471). Once it is gone (609), a tank drives
+  through (sc1 630).
+- **The class scripts' other ops** (0x31, 0x9B, 0x70, 0x3B, 0x8A) are not ported. Op 0x67's +0x246 (a0 + rand % a3,
+  the turn, I) is not read. The AI states' shares and their distances already match b1, h1 and h2.
+
+**Left.**
+- **Shell deaths run low**: 7.5 against 10.5, from the same hits (88 a run against 89.5). The oracle's hits finish
+  more tanks. I: the attackers' "weakest enemy" (0x66) or the retreat at hp ≤ 2, not checked.
+- **Per-side treads, a pack handoff.** `characters/119/character.gltf` draws both treads in one primitive (mesh
+  `bank01_0119`, primitive 13, `material_13`), skinned on joints 12 and 13. The game scrolls two tiles
+  (`func_150ED638`). The pack should split that primitive by joint into two, each with its own material, and list them
+  in `character.json`'s `tank` as `treads: [m, n]` in `tread_joints`' order. The client then scrolls each by
+  clamp(v ± Δfacing/70, ±45) × −7 (model 119: slot 0 takes v + Δ/70). Above |target| 4, v is
+  v·[0x800A15B8] + target·[0x800A15B4] (constants not read).
+- **The E plants' margin is thin.** The remake's carrier arrives about x 7012.5 and coasts to about 7019, 2 past the
+  trigger's edge, because a bot's stick asks 10.24 and 33.28 where the original sets obj+0x44 to 10 and 33. Changing
+  the bots' stick mapping can park E's carriers again (`tank_bots_bomb_and_fight`'s longest carry guards it).
+- **The scope's bullet**: the pool's (`func_151C0698`: speed 200, life 0x12C). Its line is not read (I: from the
+  scope's eye, level along the turret).
+- **The engine's pitch.** V snd saw f14 at 1.445-1.482 from idle to full speed (≤ 2.5%). `func_151BB0E0`'s formula
+  is not read, and the engine is `audio.rs`'s (another lane).
+- **Muzzle smoke and the carried bomb's look** need what the pack lacks: `func_15102B38`'s smoke particles, and the
+  model and joint item 0x18 draws on the tank (`command(p, 0x4B, 0x18)`). Next: a DL dump of c1 around 60.
+
+## Held weapons: the crossbow's rig, body parts and item 0x3A in the pack (2026-10-14)
+**Batch G1 L2a, the pack lane. The pack now holds what the crossbow's string, the head test and item 0x3A need; nothing
+draws or tests them yet (the handoffs below). The crossbow and the bone crossbow have their own rig with the string's 3
+clips (`crossbow.gltf`), and `held.json` hides them at the holster's op 41 (0xC6, t14). Every player model in the game's
+body-part table has its spheres and broad sphere in `character.json` (`parts`). Item 0x3A's grenade (#137 on 0x1A,
+#186 on 0x3F) is in the hand glTF, in flight in `projectiles.gltf` and rigged with its clips (`lob.gltf`). Its sounds
+and HUD icon were traced on the oracle and packed: a looping fuse from the pull, its own bounces, 0x26's blast, and
+another cell of the grenade texture. Left: the client and rules sides (handoffs).** Research:
+`../lab/research/mp-original/held-leftovers.md` §1, §2 and `held-pack-scratch/`: `run.sh` (plain runs: the grenade
+object's anim struct `*800CCBF8`, P1's s126, DL dumps) and `snd.sh` (lldb sound calls), on the private
+`ConkerRecomp.g1a`, with L1's C-down script (`scripts/c3.txt`); `tools/*.py`, `out/` (the runs' summaries). Runs: p1a,
+p3f, p34 (C-down on 0x1A, 0x3F, 0x34; DLs 110, 126, 140), s1a, s3f, s34 (the same with the sound calls).
+
+No wire change: `PROTOCOL_ID` stays 34. The pack format stays 1 (new fields are optional, new files additive).
+
+| Part | What |
+|---|---|
+| extract-character `held.rs` | **Op 41** (`func_1506DBD4`: delete the actor's first child object) is read as a removal of every kind-0 child at its time: #110's and #47's `remove` gain (0xC6, 14.0) (the only op-41 route in the Tedi's table) |
+| conker-extract `lib.rs`, conker-assets `lib.rs` | **The rigs** (`assets::RIGS`, `rig_gltf`, `conker_extract::rig`): `weapons/deathmatch/crossbow.gltf` (+ `.bin`, `textures/crossbow-00..07.png`): one skinned mesh `bank01_0110` on `joint_00..02`, list 0 = #110 (the crossbow), list 1 = #47 (the bone crossbow), animations `pair_0001_anim_0001` (1 tick), `pair_0002_anim_0002` (31, the fire), `pair_0003_anim_0003` (36, the holster). `lob.gltf` (+ `.bin`, `textures/lob-00..02.png`): mesh `bank01_0137` on `joint_00..03`, list 0 = #137 (0x1A), list 1 = #186 (0x3F), the same three names (30, 24, 30 ticks). Clip 0 of both is the bind pose (the glTF's rest). **Item 0x3A's models** (`LOB_ACTIONS` 0x86, 0x9F): `held.json` gains #137 and #186 (the last two, joint 9, no events: code creates them), so 24 held models; `projectiles.gltf` scenes 6 (#137) and 7 (#186). `held.gltf` keeps the crossbows' bind-pose scenes |
+| conker-extract `lib.rs`, conker-assets `lib.rs` | **`parts`** (`body_parts`, `part_models`, `assets::Parts`): `{"broad": [r, h], "spheres": [[joint, part, radius, x, y, z], …]}` in table order, from the 23-entry table at 0x8009BD30 (set pointers 0x80086C60, counts 0x8009CBCC) and the bank-0x11 record's +0xE/+0x10; on 0, 59, 83, 117, 128, 136, 144, 150, 156, 157, 159, 160, 176-178, 180. None on 119, 152 and the rest (the cylinder) |
+| conker-extract `audio.rs`, conker-assets `audio.rs` | **Item 0x3A's cues**: `On::Lit { weapon: 0x3A }` (new): sound 0x96 (it loops: `loop` 1-5143), volume 14000, 400-17000, channel `a`, at the grenade from the pull's first frame; `On::Bounce { weapon: 0x3A }`: 0x186-0x188, 28000, 300-1800, channel `a`; `On::Explosion { weapon: 0x3A }` = 0x26's (0x60D, 32700, 100-3000, pitch 0-499) |
+| conker-extract `hud.rs`, conker-assets `hud.rs` | **`grenades.lob_icon`**: `grenade.png` texels [16, 15, 11, 14] (the bomb, 11 × 14) |
+| conker-extract `pack-readme.md` | The new files, `parts`, `lit`, `lob_icon`, the held entries and glTF names |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| extract (ROM) `child_object_rigs` | #110: 3 joints, clips (id, pair, ticks) (0, 0, 66), (1, 1, 1), (2, 9, 31), (3, 10, 36); clip 1's joint-1 translation (13.015, −2.472, 67.389); clip 2's joint-2 scales start (0.002, 0.703, 1.0); #47 and #186 equal their rig's first entry in joints and clips; both rig glTFs name the three animations and draw lists {0, 1}. #137: 4 joints, ticks 10, 30, 24, 30 |
+| extract (ROM) `body_part_spheres` | All 23 entries (model, set, spheres, head spheres) as `parts_rom.txt`. 117: set 4, 35 spheres, the first [12, 0xA, 38, 0, 33, 5], the ears last, broad [117, 95]. 83: 7 spheres, none of part 0xA, broad [339, 227]. 159: parts {0, 4-9, 0xA}. 152, 154, 155, 119, 138: none |
+| extract (ROM) `slice_in_memory`, `projectiles_and_undrawn_quads` | 24 held models (mesh `01-89-00`, `01-ba-00`); 8 projectile scenes |
+| extract (ROM) `pack_reads_back_as_the_rom_path` | #110 removes at (0xC6, 14); the last two entries (137, 9) and (186, 9) without events; the Tedi's `parts`; none in 152's and 119's `character.json`; both rig glTFs read back equal to the ROM path's |
+| extract (ROM) `pack_audio_reads_back`, `pack_hud_reads_back` | The three 0x3A cues as above, no `holding` or `fuse` for 0x3A, its sounds in `sounds.json`; `lob_icon` |
+| Pack | `bun run pack --force`, then `lab/tools/verify-pack.sh`: pack equal (2099 files) |
+| `bun run test`, `bun run check`, wasm clippy | Pass: 551 tests, 1 ignored (with `CONKER_ROM`); `check` (fmt, clippy on the 10 packages, `web/app`) and wasm clippy pass. Run with a private `CARGO_TARGET_DIR`: in `target-net` the parallel lanes' builds removed dependencies mid-build three times. The first run stopped on conker-client's doctest build (`hull_pitch` private, the Tank lane's in-progress `tank.rs`), which passes since. A last `bun run check` in `target-net` passes |
+
+**Findings** (V p1a/p3f, s1a/s3f; C).
+- **The grenade in the hand is a child object** (actions 0x86/0x9F, kind 0, joint 9), created by code at the pull's
+  first frame (P1's item s126+0x75 = 0xBA from then to the throw's first frame), not by a clip event. Its own clips (obj
+  2's anim struct): clip 2 from the pull's first frame (own clock 0 → 22, a tick a frame), clip 1 from the next frame
+  (own clock from 0, a 30-tick loop) while 0x1FA holds, and clip 0 (the bind pose, no longer a child) from the throw's
+  first frame (0x1FC). The same on 0x3F with #186. Its object scale (obj+0x14C) is 1.0, a player's 0.5 (I: whether the
+  hand draw uses it was not checked on a DL).
+- **Its sounds** (V s1a, s3f; C `func_150C44A4`): 0x96 at the pull's first frame (14000, 400-17000), the grenade's
+  one sound at a time; each bounce plays one of 0x186-0x188 (28000, 300-1800) by the shuffle of 0x26's bounces
+  (`func_1000F568`, a bounce leaving it faster than 5 up); its blast is 0x26's (0x60D through `func_10010F88`, 32700,
+  100-3000, 120 frames after the pull, as s34's 0x26). No in-hand hiss (0x513), no last-60
+  fuse (0x3A1), no throw sound (the throw clip's sound ops are filtered by class, and the Wise Guy's check against
+  0x3B fails).
+- **Its HUD** (V p1a, p3f DL 110, 126; `rects.py`): one bomb per grenade left, at 0x26's x 247, 236, 225 and y 6, from
+  the pull to the throw (gone by DL 140, where 0x26's icons stay).
+- Noted, not changed: `clip_sounds` passes the model entry to `sound_op`'s character filter, while the game compares
+  the anim owner's remapped model (`func_1506BF5C`: 0x800D1C90[model]+4 → the 0x80086CAC table) (C). Class-filtered
+  sounds may differ on the picks. `MATCH_CLIPS` lacks 0x175/0x16C (the non-Tedi grenade clips).
+
+**Left: the handoffs.**
+- **Client, the crossbow** (`held.rs`, held-leftovers §1's recipe). Load `weapons/deathmatch/crossbow.gltf#Scene0`
+  (`conker_assets::rig_gltf(PACK_WEAPONS, "crossbow")`), draw only the primitives of `extras.list` 0 for weapon 0x18
+  (#110) or 1 for 0x41 (#47), hung on the holder's `joint_09` in place of `held.gltf`'s bind-pose scene, scaled as the
+  held models. Pose: draw (0xFB, 0x2C8) → the bind pose; fire (0xFC, 0x2C9) → `pair_0002_anim_0002` at the holder's
+  clock, clamped to length − 1 (30); holster 0xC6 → `pair_0003_anim_0003` likewise (35); anything else →
+  `pair_0001_anim_0001` (one tick). The loaded bolt: `projectiles.gltf` scene 3 under the rig's `joint_02` while the
+  fire clock is in [6, 11). `held.json`'s #110 and #47 remove at (0xC6, 14): `shows()` already hides it from t14 (#47's is inert: the bone
+  crossbow has no holster in multiplayer).
+- **Client, item 0x3A** (`held.rs`, `projectiles.rs`, `hud.rs`, `audio.rs`; L1's handoff). In the hand: `lob.gltf`,
+  list 0 on 0x1A, list 1 on 0x3F, on `joint_09`, from the pull's first frame to the throw's first (`Fighter::lobs`):
+  `pair_0002_anim_0002` at frames since the pull (0-22), then `pair_0001_anim_0001` looping from 0. (`held.json`'s
+  last two entries, `held.gltf` scenes 22 and 23, are the same models in the bind pose, for a client that doesn't
+  pose them; they have no events, so `shows()` must key them on the item.) Thrown: `projectiles.gltf` scene 6 (0x1A)
+  or 7 (0x3F) in place of the placeholder sphere (`projectiles.rs` loads scenes 0-3 by index, so 6 and 7 are inert
+  until then). HUD: `grenades.lob_icon` instead of `icon`, at `at` + k·`step`, one
+  per grenade left, while the item is 0xBA. Audio: `On::Lit { weapon: 0x3A }` at the grenade from the pull, stopped
+  by its next sound (a bounce) or the blast (the grenade's channel `a`); `Bounce { weapon: 0x3A }` and
+  `Explosion { weapon: 0x3A }` play as 0x26's do; there is no `Holding` or `Fuse` for it.
+- **Rules/server, the head test** (held-leftovers §2's server recipe): read `conker_assets::Character::parts`
+  (`Parts { broad: [i16; 2], spheres: Vec<[i16; 6]> }`; `None` → the cylinder). The broad sphere first (radius and
+  height × the scale, a miss is no hit), then each sphere in table order at joint matrix · (x, y, z), radius × the
+  scale, skipping joints hidden by the pop (0xF000 on 159/160, 0xFF8 on 90/116/122); a hit replaces the best if it is
+  the first or **nearer and of a part ≥ the best's**. Who tests parts: the twin guns' and the pistol 0x39's bullets,
+  the sniper ray and the projectiles. Check: `pc2`/`pc3` (the standing shot misses, the crouched one hits part 0xA on
+  joint 12 at 177.7).
+
 ## Beach: the sea (2026-10-14)
 **Batch E7b. War: Beach's sea is water now, not a floor. A player who falls in swims 41.67 under the surface, drifts
 shoreward on the current, strokes with the stick at 40 %, wades out at the shore, and can jump out with A. The replays of

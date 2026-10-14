@@ -1823,20 +1823,13 @@ fn shown(
     }
 }
 
-/// Race's STATS rows: each human (by slot) its place, total and best lap. The total is the race
-/// clock, which stopped the frame after the last lap's; −1 for a racer the end rule finished short
-/// of the laps (`completed`: whether each finished racer had its laps when this client first saw
-/// it finished; I: [`MatchView`] sends no total).
-pub fn race_rows(m: &MatchView, humans: &[u16], completed: &HashMap<u16, bool>) -> Vec<[i32; 3]> {
+/// Race's STATS rows: each human (by slot) its place, total and best lap. The total is the
+/// server's (the race clock at the last lap's crossing; −1 for a racer the end rule finished short
+/// of the laps).
+pub fn race_rows(m: &MatchView, humans: &[u16]) -> Vec<[i32; 3]> {
     let mut rows: Vec<_> = (m.racing.racers.iter())
         .filter(|r| humans.contains(&r.slot))
-        .map(|r| {
-            let total = match completed.get(&r.slot) {
-                Some(true) => (r.time - 2).min(conker_rules::race::TOTAL_CAP),
-                _ => -1,
-            };
-            (r.slot, [i32::from(r.place), total, r.best])
-        })
+        .map(|r| (r.slot, [i32::from(r.place), r.total, r.best]))
         .collect();
     rows.sort_by_key(|r| r.0);
     rows.into_iter().map(|r| r.1).collect()
@@ -1904,13 +1897,12 @@ fn draw(
         Local<(u8, Option<u32>)>,
         Local<Option<u32>>,
     ),
-    (mut fired, mut zoomed, mut stats, mut skull, mut opened, mut completed): (
+    (mut fired, mut zoomed, mut stats, mut skull, mut opened): (
         Local<(Option<(usize, u16)>, [Option<(u32, u16)>; 2])>,
         Local<(u32, f32, bool, Option<u32>)>,
         Local<Option<u32>>,
         Local<(u32, u8)>,
         Local<Option<u32>>,
-        Local<HashMap<u16, bool>>,
     ),
     old: Query<Entity, With<HudSprite>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -2048,17 +2040,6 @@ fn draw(
             } else {
                 *zoomed = Default::default();
             }
-            // Race: whether each finished racer had its laps when first seen finished.
-            for r in (m.racing.racers.iter()).filter(|_| m.race) {
-                match r.order {
-                    0 => completed.remove(&r.slot),
-                    _ => Some(
-                        *completed
-                            .entry(r.slot)
-                            .or_insert(r.lap >= i16::from(m.racing.laps)),
-                    ),
-                };
-            }
             // Race: its STATS in the level from the results (phase 6: no HUD); a human out ends it
             // as Deathmatch's (result 2, V b1).
             let raced = m.race && m.racing.results.is_some() && m.racing.result == 1;
@@ -2075,7 +2056,7 @@ fn draw(
                 shown.results = Some((rows, menu.choice, alpha, 2 * tick));
                 if raced {
                     let humans: Vec<u16> = (all.iter()).filter(|p| p.0).map(|p| p.1.slot).collect();
-                    shown.race_rows = Some(race_rows(m, &humans, &completed));
+                    shown.race_rows = Some(race_rows(m, &humans));
                 }
                 // Raptor's team headers are not in the pack: "YOU WIN" or "YOU LOSE" (I).
                 shown.header = teams.then(|| match header(&all, own.1.team, m.winner) {

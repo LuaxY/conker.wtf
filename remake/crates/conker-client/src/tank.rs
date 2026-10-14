@@ -25,11 +25,11 @@ use bevy::transform::TransformSystems;
 use bevy::world_serialization::WorldAssetRoot;
 use conker_assets::{Character, PACK_WEAPONS, Tank, projectiles_gltf};
 use conker_rules::Fighter;
-use conker_rules::tank::{BOMB, POST, SCOPE, SHELL_SPEED};
+use conker_rules::tank::{BOMB, POST, SCOPE, SHELL_SPEED, hull_pitch};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, PlayerState, cos_sin};
-use conker_sim::net::{Combat, MatchView, Player};
+use conker_sim::net::{Collision, Combat, MatchView, Player};
 use lightyear::prelude::LocalTimeline;
 
 use crate::render::{Model, Rig, model_yaw};
@@ -311,13 +311,18 @@ fn find_parts(
     }
 }
 
-/// The turret and gun over the clip's pose, and the model hidden while dead.
+/// The hull pitched along its floor (the rules' [`hull_pitch`], obj+0xB8: so the gun's pitch over
+/// it is the rules' too), the turret and gun over the clip's pose, and the model hidden while dead.
 fn pose(
-    tanks: Query<(&Player, &Combat, &Parts, &Model)>,
+    tanks: Query<(Entity, &Player, &Combat, &Parts, &Model)>,
     mut joints: Query<&mut Transform>,
     mut shown: Query<&mut Visibility>,
+    world: Option<Res<Collision>>,
 ) {
-    for (p, c, parts, model) in &tanks {
+    for (entity, p, c, parts, model) in &tanks {
+        if let (Ok(mut t), Some(w)) = (joints.get_mut(entity), &world) {
+            t.rotation *= Quat::from_rotation_x(-hull_pitch(&p.0, &w.0).to_radians());
+        }
         let (turret, gun) = turns(p.turret, p.pitch);
         if let Ok(mut t) = joints.get_mut(parts.turret) {
             t.rotation *= turret;

@@ -2870,6 +2870,7 @@ fn race_view(m: &Match, per: usize, high: bool, laps: u8) -> RaceView {
                     time: r.time,
                     last: r.last,
                     best: r.best,
+                    total: r.total,
                     boost: f.boost,
                     kick: r.board.kick,
                     knock: r.board.knock,

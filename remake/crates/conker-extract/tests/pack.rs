@@ -248,6 +248,26 @@ fn pack_reads_back_as_the_rom_path() {
         assert_eq!(events(&p.create), events(&s.create));
         assert_eq!(events(&p.remove), events(&s.remove));
     }
+    // The holster's op 41 (t14) removes the crossbow, a child object; item 0x3A's two grenades end
+    // the list, on the right hand, with no events (`held-leftovers.md` §1, `LOB_ACTIONS`).
+    let held = |entry| pack.held.iter().find(|h| h.entry == entry).unwrap();
+    assert_eq!(held(0x6E).remove, [(0xC6, 14.0)]);
+    let lobs: Vec<_> = (pack.held[pack.held.len() - 2..].iter())
+        .map(|h| (h.entry, h.joint, h.create.len() + h.remove.len()))
+        .collect();
+    assert_eq!(lobs, [(137, 9, 0), (186, 9, 0)]);
+    // Body parts (`held-leftovers.md` §2): the Tedi's head sphere first; none for the weasel guard
+    // and the tank, which the game tests as a cylinder.
+    let parts = tedi.parts.as_ref().unwrap();
+    assert_eq!(
+        (parts.broad, parts.spheres.len(), parts.spheres[0]),
+        ([117, 95], 35, [12, 0xA, 38, 0, 33, 5])
+    );
+    for name in ["152", "119"] {
+        let path = format!("characters/{name}/character.json");
+        let c: Value = serde_json::from_slice(files[path.as_str()]).unwrap();
+        assert!(c.get("parts").is_none(), "{name}");
+    }
 
     // The server's reads: pickups on their placements, the bots' four assets, the acos table.
     let placements = extract_scene::scene_placements(&rom, SLICE_SCENE).unwrap();
@@ -326,6 +346,12 @@ fn pack_reads_back_as_the_rom_path() {
         (conker_assets::held_gltf(PACK_WEAPONS), &slice.held_glb),
     ] {
         check_gltf(&dir, &path, glb);
+    }
+    // The child objects' rigs, as `rig` draws them.
+    for (name, entries) in conker_assets::RIGS {
+        let rig = conker_extract::rig(&rom, entries).unwrap();
+        let glb = rig.gltf(&textures, true).unwrap().glb();
+        check_gltf(&dir, &conker_assets::rig_gltf(PACK_WEAPONS, name), &glb);
     }
     // 0x2D's Total War props: its doors, masks and canisters in place, then the canister at the
     // origin, a glTF scene each.
@@ -1523,6 +1549,50 @@ fn pack_audio_reads_back() {
         cue(&On::Lose { team: 1 }, None),
         Some(vec![0x662, 0x663, 0x664])
     );
+    // Item 0x3A on 0x1A and 0x3F (`held-pack-scratch` s1a, s3f): its fuse from the pull, its own
+    // bounces and 0x26's blast; no hiss in the hand and no last-60-ticks fuse.
+    let lob = |on: On| {
+        (audio.events.cues.iter())
+            .filter(|c| c.on == on)
+            .map(|c| {
+                (
+                    c.play.sounds.clone(),
+                    c.play.volume,
+                    c.play.near,
+                    c.play.far,
+                    c.play.channel,
+                    c.play.pitch,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lob(On::Lit { weapon: 0x3A }),
+        [(vec![0x96], 14000, 400, 17000, Channel::A, [0, 0])]
+    );
+    assert_eq!(
+        lob(On::Bounce { weapon: 0x3A }),
+        [(
+            vec![0x186, 0x187, 0x188],
+            28000,
+            300,
+            1800,
+            Channel::A,
+            [0, 0]
+        )]
+    );
+    assert_eq!(
+        lob(On::Explosion { weapon: 0x3A }),
+        lob(On::Explosion { weapon: 0x26 })
+    );
+    assert!(
+        lob(On::Holding { weapon: 0x3A }).is_empty() && lob(On::Fuse { weapon: 0x3A }).is_empty()
+    );
+    assert!(
+        [0x96, 0x186, 0x187, 0x188]
+            .iter()
+            .all(|id| audio.sounds.sounds.contains_key(id))
+    );
     // War: Raptor's egg splat: both sounds at it, both in the pack (0x434 also Race's blow-up).
     let splat: Vec<_> = (audio.events.cues.iter())
         .filter(|c| c.on == On::RaptorSplat)
@@ -1574,6 +1644,12 @@ fn pack_hud_reads_back() {
         .collect();
     let hud = Hud::load(|p| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
     assert_eq!(hud.to_json(), files[HUD]);
+    // Item 0x3A's icon: the grenade texture's bomb (V `held-pack-scratch` p1a, p3f DL 110).
+    let lob = hud.grenades.lob_icon.as_ref().unwrap();
+    assert_eq!(
+        (lob.texture.as_str(), lob.rect),
+        ("grenade", [16, 15, 11, 14])
+    );
     let end = End::load(|p| files.get(p).map(|d| d.to_vec()).ok_or("missing")).unwrap();
     assert_eq!(end.to_json(), files[END]);
     // The STATS stick's 6 frames side by side (0x7E7..0x7EC).

@@ -526,13 +526,42 @@ fn clips(character: &Character) -> (Vec<ClipInfo>, Vec<RootClip>) {
     (clips, roots)
 }
 
-/// The held models ([`HELD_CLIPS`]'), their meshes as one pseudo-level (a mesh per part, at the
-/// origin; a child object's per display list, in its bind pose), and one glTF scene per model
-/// listing its parts' nodes.
+/// Item 0x3A's grenade (`conker_rules::projectile::LOB`, on 0x1A and 0x3F): the child object of
+/// action 0x86 (bank 01 #137, 0x1A's) or 0x9F (#186, 0x3F's) on the right hand (C: the manager
+/// gives 0x3A on those scenes). No clip event makes it: the game does on the pull's first frame and
+/// lets it go on the throw's (V `../lab/research/mp-original/held-pack-scratch` p1a, p3f: object 137
+/// or 186 made at read 102, 0x1F9's first frame; thrown at 132, 0x1FC's first), so its held
+/// entries have no events.
+pub const LOB_ACTIONS: [u32; 2] = [0x86, 0x9F];
+
+/// The held models ([`HELD_CLIPS`]', then [`LOB_ACTIONS`]'), their meshes as one pseudo-level (a
+/// mesh per part, at the origin; a child object's per display list, in its bind pose), and one glTF
+/// scene per model listing its parts' nodes.
 fn held_level(rom: &Rom) -> Result<(Vec<Held>, Level, Value)> {
-    let held = held_models(rom, SLICE_CHARACTER, &HELD_CLIPS)?;
+    let mut held = held_models(rom, SLICE_CHARACTER, &HELD_CLIPS)?;
+    let game_data = rom.game_data()?;
+    for action in LOB_ACTIONS {
+        for r in action_records(&game_data, action)? {
+            held.push(Held {
+                entry: usize::from(r[0]),
+                object: r[3] == 0,
+                joint: r[1],
+                create: vec![],
+                remove: vec![],
+            });
+        }
+    }
     let (models, scenes) = attached_level(rom, &held)?;
     Ok((held, models, scenes))
+}
+
+/// [`assets::RIGS`] entry `entries`: one model on the first's rig with its clips, list k the k-th
+/// entry's (each has one list; C: the same joints and clips, `tests/pack.rs`).
+pub fn rig(rom: &Rom, entries: [usize; 2]) -> Result<Character> {
+    let mut rig = Character::load(rom, entries[0])?;
+    let other = parse_model(&rom.asset(&[0x01, entries[1]])?, &rom.game_data()?)?;
+    rig.model.lists.extend(other.lists);
+    Ok(rig)
 }
 
 /// The models of `held` as [`held_level`] lays them out: a glTF scene each.
@@ -583,15 +612,19 @@ fn attached_level(rom: &Rom, held: &[Held]) -> Result<(Level, Value)> {
 /// drawn at 1.5: V sh1 DL 42, `../lab/research/mp-original/tank-pack-scratch`; Race's missile, drawn
 /// at 1.0: V m1 DL 224, `../lab/research/mp-original/race-pack-scratch`), and War: Raptor's
 /// bone knife (0x3F: #0x7C, action 34, V k1 DLs 97 on, `../lab/research/mp-original/raptor-pack-scratch`;
-/// the bone crossbow's bolt is #0x35, V c1), at the origin with +z along the flight. A bullet has no
+/// the bone crossbow's bolt is #0x35, V c1), at the origin with +z along the flight; then item
+/// 0x3A's thrown grenade on 0x1A and on 0x3F ([`LOB_ACTIONS`]' bank 01 #137, #186: their bind
+/// pose, clip 0, the one the game gives them once thrown; V p1a, p3f from read 132). A bullet has no
 /// model in flight (V twin DLs 104-110: only the muzzle flash).
-pub const PROJECTILES: [[usize; 2]; 6] = [
+pub const PROJECTILES: [[usize; 2]; 8] = [
     [0x01, 0x7E],
     [0x09, 0xE1],
     [0x09, 0x23],
     [0x09, 0x35],
     [0x09, 0x33],
     [0x09, 0x7C],
+    [0x01, 137],
+    [0x01, 186],
 ];
 
 /// [`PROJECTILES`] as one pseudo-level (a mesh each, a bank-01 model in its bind pose) and their
@@ -938,7 +971,8 @@ pub fn map_name(scene: usize) -> String {
 /// The asset pack (`conker-extract pack`): the data files ([`conker_assets::Slice`]) of each map
 /// (the first one also writes the shared files), their levels, the characters
 /// ([`PACK_CHARACTERS`]: the squirrel soldier, the Tedi and the caveman) and held models as `.gltf` + `.bin` +
-/// PNG files, the sound ([`audio::pack_audio`]), `pack.json` and `README.md`; with 0x2D, 0x30 or
+/// PNG files (and the child objects' rigs, [`assets::RIGS`]), the sound ([`audio::pack_audio`]),
+/// `pack.json` and `README.md`; with 0x2D, 0x30 or
 /// 0x2B, War's outros ([`outro::outros`]): their actors' characters (with the clips they play) and
 /// voice lines; with 0x30, War: Colors' two flags as characters (every clip); with 0x30, 0x34 or 0x2B,
 /// the mounted gun ([`MOUNTED_GUN`]) as a character (its clip); with 0x2B, the [`VILLAGERS`] after
@@ -1153,6 +1187,11 @@ pub fn pack(rom: &Rom, maps: &[PackMap]) -> Result<Export> {
     let g = held_gltf(&projectiles, scenes, &textures, "projectiles.bin")?;
     let path = assets::projectiles_gltf(PACK_WEAPONS);
     gltfs.push((path, parse(&g.json)?, g.bin, g.images));
+    for (name, entries) in assets::RIGS {
+        let g = rig(rom, entries)?.gltf(&textures, true)?;
+        let (json, bin, images) = external_images(g.with_uri(&format!("{name}.bin")), &g.bin, name);
+        gltfs.push((assets::rig_gltf(PACK_WEAPONS, name), json, bin, images));
+    }
     // The flamethrower's stream draws the fire jets' flame (V flame DL 130: blob 0x916).
     let (_, id, format, w, h) = traps::TEXTURES[0];
     let flame = extract_gbi::decode(format, w, h, &textures.get(id)?, &[], true)?;
@@ -2186,19 +2225,27 @@ fn character_file(
             .transpose()?,
         tank: (c.entry == TANK).then(|| tank_parts(rom, c)).transpose()?,
         faces: faces.to_vec(),
+        parts: body_parts(rom, c.entry)?,
     })
 }
 
-/// Model units bank-01 model `entry` is drawn above its player: +6 of its bank-0x11 record, copied
-/// to obj+0xC8 at spawn (`func_150837D4`; V: 43 for the Tedi, 42 for the squirrel). The asset
-/// starts with the record's offset.
-fn model_lift(rom: &Rom, entry: usize) -> Result<i16> {
+/// `N` s16 words from `at` in bank-01 model `entry`'s bank-0x11 record (the asset starts with the
+/// record's offset).
+fn record<const N: usize>(rom: &Rom, entry: usize, at: usize) -> Result<[i16; N]> {
     let model = rom.asset(&[0x11, entry])?;
-    let lift = (model.get(..4))
-        .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize + 6)
-        .and_then(|at| model.get(at..at + 2))
+    let r = (model.get(..4))
+        .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize + at)
+        .and_then(|at| model.get(at..at + 2 * N))
         .context("short bank-0x11 record")?;
-    Ok(i16::from_be_bytes([lift[0], lift[1]]))
+    Ok(std::array::from_fn(|k| {
+        i16::from_be_bytes([r[2 * k], r[2 * k + 1]])
+    }))
+}
+
+/// Model units bank-01 model `entry` is drawn above its player: +6 of its bank-0x11 record, copied
+/// to obj+0xC8 at spawn (`func_150837D4`; V: 43 for the Tedi, 42 for the squirrel).
+fn model_lift(rom: &Rom, entry: usize) -> Result<i16> {
+    Ok(record::<1>(rom, entry, 6)?[0])
 }
 
 /// Model `entry`'s hitbox (radius, half height, centre) and push body (radius, height, centre) at
@@ -2206,13 +2253,54 @@ fn model_lift(rom: &Rom, entry: usize) -> Result<i16> {
 /// `characters-scratch/rec11.py`; × the class's scale, truncated, they are obj+0xD2-D6 and
 /// +0xE4-E8 for every pick, V `bodies.py`).
 pub fn hitbox_body(rom: &Rom, entry: usize) -> Result<([i16; 3], [i16; 3])> {
-    let model = rom.asset(&[0x11, entry])?;
-    let r = (model.get(..4))
-        .map(|w| u32::from_be_bytes(w.try_into().unwrap()) as usize)
-        .and_then(|at| model.get(at + 0x1A..at + 0x26))
-        .context("short bank-0x11 record")?;
-    let h = |k: usize| i16::from_be_bytes([r[2 * k], r[2 * k + 1]]);
-    Ok(([h(3), h(4), h(5)], [h(0), h(1), h(2)]))
+    let [r, h, c, hr, hh, hc] = record::<6>(rom, entry, 0x1A)?;
+    Ok(([hr, hh, hc], [r, h, c]))
+}
+
+/// The body-part sphere table (`func_1508108C`, `func_1508114C`; `../lab/research/mp-original/
+/// held-leftovers.md` §2): [`PART_ENTRIES`] entries at `PART_MODELS` (u16 model, u8 set), each
+/// set's spheres at the pointer `PART_SETS` + 4·set, their count the byte `PART_COUNTS` + set;
+/// 10-byte spheres (u8 joint, u8 part, s16 radius, x, y, z). ROM == RAM (V parts_rom/parts_ram).
+const PART_MODELS: usize = 0x8009_BD30;
+pub const PART_ENTRIES: usize = 23;
+const PART_SETS: usize = 0x8008_6C60;
+const PART_COUNTS: usize = 0x8009_CBCC;
+
+/// The models with body-part spheres and their set, in the table's order.
+pub fn part_models(rom: &Rom) -> Result<Vec<(usize, u8)>> {
+    let game_data = rom.game_data()?;
+    let at = PART_MODELS - GAME_DATA;
+    let table = (game_data.get(at..at + 4 * PART_ENTRIES)).context(".game data too short")?;
+    Ok((table.as_chunks::<4>().0.iter())
+        .map(|e| (usize::from(u16::from_be_bytes([e[0], e[1]])), e[2]))
+        .collect())
+}
+
+/// Model `entry`'s body-part spheres and its broad sphere (its bank-0x11 record's +0xE radius and
+/// +0x10 centre height); None for a model the table lacks (the game tests a cylinder instead,
+/// `func_15081C20`).
+pub fn body_parts(rom: &Rom, entry: usize) -> Result<Option<assets::Parts>> {
+    let Some(set) =
+        (part_models(rom)?.into_iter()).find_map(|(m, set)| (m == entry).then_some(set))
+    else {
+        return Ok(None);
+    };
+    let game_data = rom.game_data()?;
+    let data = |a: usize, n: usize| {
+        let a = a.checked_sub(GAME_DATA).context("not in .game data")?;
+        game_data.get(a..a + n).context(".game data too short")
+    };
+    let set = usize::from(set);
+    let first = u32::from_be_bytes(data(PART_SETS + 4 * set, 4)?.try_into().unwrap()) as usize;
+    let n = usize::from(data(PART_COUNTS + set, 1)?[0]);
+    let h = |s: &[u8; 10], k: usize| i16::from_be_bytes([s[k], s[k + 1]]);
+    let spheres = (data(first, 10 * n)?.as_chunks::<10>().0.iter())
+        .map(|s| [s[0].into(), s[1].into(), h(s, 2), h(s, 4), h(s, 6), h(s, 8)])
+        .collect();
+    Ok(Some(assets::Parts {
+        broad: record(rom, entry, 0xE)?,
+        spheres,
+    }))
 }
 
 /// (relative path, PNG file) of a glTF's images.

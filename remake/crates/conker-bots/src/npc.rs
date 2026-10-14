@@ -112,6 +112,9 @@ pub struct Npc {
     /// s126+0x12A: a tank's aim error, 10° of turret yaw a unit (`func_150ED748`, C); 0 or 1,
     /// drawn as its fire counter starts over (`func_1508D850`, C).
     pub error: i8,
+    /// +0x247 and +0x248: the mover's accel and brake ×10 that op 0x67 set (C `func_15077364`); a
+    /// tank's update sets 0x32 each every frame, so they last the frame (the Tank bots' [`crate::Bots`]).
+    pub rates: [u8; 2],
     /// +0x22C bit 0x200: placed since the AI's last frame (the match start, a respawn, a lift). The
     /// placement (`func_15085430`) sets it; the AI's frame takes it: state 0 and a replan (V, the
     /// oracle on 0x30: p6 lifted at 323, cleared with the state at 324).
@@ -148,6 +151,7 @@ impl Default for Npc {
             stick: None,
             error: 0,
             placed: false,
+            rates: [0x32; 2],
         }
     }
 }
@@ -304,10 +308,13 @@ impl Npc {
                 }
                 at
             }
+            // `func_15077364`: +0x246 = a0 + rand % a3 (the turn, I; unread here), +0x247 and
+            // +0x248 = a1 and a2 (the mover's accel and brake ×10).
             0x67 => {
                 if a[3] != 0 {
                     rng.next_u32();
                 }
+                self.rates = [a[1], a[2]];
                 at
             }
             0x0C => at,

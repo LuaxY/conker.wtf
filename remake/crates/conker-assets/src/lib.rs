@@ -11,7 +11,8 @@
 //!   `effects.gltf` (+ `effects.bin`);
 //! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
 //!   per character;
-//! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`;
+//! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`, `projectiles.gltf`, the child
+//!   objects' rigs ([`RIGS`], [`rig_gltf`]);
 //! - `game/`: `acos.json`, `sink.json`, `class.bin` (map 24 has its own `class.bin`);
 //! - `audio/`: `sounds.json`, `events.json` and WAV files ([`audio::Audio`]);
 //! - `hud/`: `hud.json` and PNGs ([`hud::Hud`]).
@@ -134,9 +135,27 @@ pub fn held_gltf(weapons: &str) -> String {
 }
 
 /// The projectiles in flight: glTF scenes 0-5 the thrown grenade, the rocket, the knife, the bolt
-/// (both crossbows'), Tank's shell and the bone knife, at the origin with +z along the flight.
+/// (both crossbows'), Tank's shell and the bone knife, at the origin with +z along the flight; 6
+/// and 7 item 0x3A's thrown grenade on 0x1A (bank 01 #137) and on 0x3F (#186), in their bind pose
+/// (clip 0, the empty one, the game's once thrown).
 pub fn projectiles_gltf(weapons: &str) -> String {
     format!("weapons/{weapons}/projectiles.gltf")
+}
+
+/// The child objects a character holds that have their own rig and clips (bank-01 models, the
+/// held list's `object` kind; `../lab/research/mp-original/held-leftovers.md` §1), as (the glTF's
+/// name, the bank-01 entries it draws). Each [`rig_gltf`] is one skinned mesh on the first entry's
+/// joints (`joint_00`..) with its clips (`pair_NNNN_anim_IIII`, as a character's), the k-th entry
+/// drawn by the primitives whose `extras.list` is k: the entries share one rig and one clip set
+/// (C: equal joints and clips). `crossbow`: the crossbow 0x18's 0x6E and War: Raptor's bone
+/// crossbow 0x41's 0x2F, 3 joints (the nock `joint_01`, the loaded bolt's `joint_02`), clips 1 (a
+/// one-tick pose), 2 (the fire, 31 ticks) and 3 (the holster, 36), clip 0 the bind pose. `lob`:
+/// item 0x3A's grenade on 0x1A (0x89) and on 0x3F (0xBA), 4 joints, clips 1 (30 ticks), 2 (24) and
+/// 3 (30), clip 0 the bind pose.
+pub const RIGS: [(&str, [usize; 2]); 2] = [("crossbow", [0x6E, 0x2F]), ("lob", [0x89, 0xBA])];
+
+pub fn rig_gltf(weapons: &str, rig: &str) -> String {
+    format!("weapons/{weapons}/{rig}.gltf")
 }
 
 /// The flamethrower's flame (blob 0x916, RGBA32 32 × 32): its stream's texture.
@@ -255,7 +274,8 @@ pub struct RootClip {
 /// `joint` while the last of its events that fired created it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Held {
-    /// Bank-09 entry (the held glTF's mesh `09-<entry>-<part>`, hex).
+    /// Bank-09 entry (the held glTF's mesh `09-<entry>-<part>`, hex), or a child object's bank-01
+    /// entry (`01-<entry>-<list>`; [`RIGS`] has its rig and clips).
     pub entry: usize,
     pub joint: u8,
     /// (logical animation id, clip time in ticks) of every event that creates it, and removes it.
@@ -390,6 +410,24 @@ pub struct Character {
     /// that never does. Its glTF draws every face segment's default (eyes open; Conker's mouth).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub faces: Vec<FaceSegment>,
+    /// The body-part spheres a bullet or a projectile tests; absent for a model the game gives
+    /// none (it tests a cylinder instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Parts>,
+}
+
+/// A model's body-part spheres (`func_1508114C`, `../lab/research/mp-original/held-leftovers.md`
+/// §2), at full size (the game scales radii by obj+0x14C, the broad sphere by obj+0x150).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Parts {
+    /// The broad sphere, tested first: radius and centre height, as `hitbox`'s (its bank-0x11
+    /// record's +0xE, +0x10). A ray that misses it hits nothing.
+    pub broad: [i16; 2],
+    /// (joint, part, radius, x, y, z) in the game's table order: a sphere of `radius` at (x, y, z)
+    /// in joint `joint`'s frame (the matrix slot, the glTF's `joint_NN`); `part` goes to the hit
+    /// (0xA the head, 0 the body, 4-9 the zombies' limbs). A hit sphere replaces the best one if
+    /// it is the first, or nearer and of a part ≥ the best's.
+    pub spheres: Vec<[i16; 6]>,
 }
 
 /// One eye segment of a blinking character: the materials the game draws from it and its three
@@ -1192,6 +1230,10 @@ mod tests {
                         textures: ["open", "half", "shut"]
                             .map(|t| format!("textures/face-{t}.png")),
                     }],
+                    parts: Some(Parts {
+                        broad: [117, 95],
+                        spheres: vec![[12, 0xA, 38, 0, 33, 5], [12, 0, 14, 0, -9, 0]],
+                    }),
                 },
                 Character {
                     model_lift: 43,
@@ -1216,6 +1258,7 @@ mod tests {
                     teams: None,
                     tank: None,
                     faces: vec![],
+                    parts: None,
                 },
             ],
             held: vec![Held {
@@ -1459,8 +1502,13 @@ mod tests {
         assert!(
             !tedi.contains("hitbox") && !tedi.contains("clips_from") && !tedi.contains("hidden")
         );
-        // `faces` only when the character blinks.
-        assert!(!tedi.contains("faces"), "{tedi}");
+        // `faces` only when the character blinks, `parts` only when the model has them.
+        assert!(!tedi.contains("faces") && !tedi.contains("parts"), "{tedi}");
+        assert!(
+            squirrel
+                .contains("\"parts\": {\n    \"broad\": [117,95],\n    \"spheres\": [[12,10,38,"),
+            "{squirrel}"
+        );
         assert!(squirrel.contains("\"faces\": [\n    {\"segment\":6,\"materials\":[12,13],\"textures\":[\"textures/face-open.png\""), "{squirrel}");
         assert_eq!(bits(&back), bits(&slice));
         // Integers stay integers, -0.0 keeps its sign, and one triangle per line.

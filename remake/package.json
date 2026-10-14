@@ -12,6 +12,7 @@
     "server": "target-net/release/conker-server --digest-file web/dist/digest.txt",
     "client": "target-net/release/conker-client --server 127.0.0.1:5888 --digest \"$(cat web/dist/digest.txt)\"",
     "test": "rom=\"$PWD/../Conker's Bad Fur Day (USA).z64\" && CONKER_ROM=\"${CONKER_ROM:-$rom}\" CARGO_TARGET_DIR=target-net cargo test -q -p conker-rules -p conker-sim -p conker-bots -p conker-anim -p conker-server -p conker-client -p conker-assets -p conker-extract -p extract-scene -p extract-character",
-    "check": "cargo fmt --check && CARGO_TARGET_DIR=target-net cargo clippy -q -p conker-rules -p conker-sim -p conker-bots -p conker-anim -p conker-server -p conker-client -p conker-assets -p conker-extract -p extract-scene -p extract-character -- -D warnings && cd web/app && bun run check"
+    "check": "cargo fmt --check && CARGO_TARGET_DIR=target-net cargo clippy -q -p conker-rules -p conker-sim -p conker-bots -p conker-anim -p conker-server -p conker-client -p conker-assets -p conker-extract -p extract-scene -p extract-character -- -D warnings && cd web/app && bun run check",
+    "clean:cache": "rm -rf target-net/debug"
   }
 }

@@ -1578,7 +1578,12 @@ impl Match {
             };
             let reach = |i: usize| self.reach.get(i).copied().unwrap_or(weapon::REACH);
             let toucher = (self.players.iter().enumerate()).position(|(i, f)| {
-                f.health > 0 && may(f) && weapon::touches(pos, f.body.pos, reach(i))
+                f.health > 0
+                    && may(f)
+                    && match self.settings.race {
+                        true => race::touches(pos, f),
+                        false => weapon::touches(pos, f.body.pos, reach(i)),
+                    }
             });
             if let Some(i) = toucher {
                 *p = PickupState {
@@ -1858,6 +1863,7 @@ impl Match {
                         f.aim_error = e;
                     }
                 }
+                Effect::TankRates(i, r) => self.tank.rates.push((i, r)),
                 Effect::Hold(i, n) => {
                     if let Some(f) = self.players.get_mut(i) {
                         f.body.lock = n;

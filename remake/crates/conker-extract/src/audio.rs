@@ -969,6 +969,34 @@ fn code_cues() -> Vec<Cue> {
                 "grenade (C func_15055A2C kind 1: 0x60D, pitch + rand % 500 cents; V e_gren)",
             )
         },
+        // Item 0x3A, the lobbed grenade on 0x1A and 0x3F (`../lab/research/mp-original/
+        // held-pack-scratch`, s1a and s3f against 0x26's s34): its own fuse and bounces, 0x26's
+        // blast; no hiss in the hand, no last-60-ticks fuse and no throw sound.
+        cue(
+            On::Lit { weapon: 0x3A },
+            play([0x96], 14000, None, 400, 17000, Channel::A),
+            "the fuse at the grenade from the pull's first frame (C func_150C44A4, its spark effect: \
+             func_10010154(0x96, 14000, 400, 17000); V s1a, s3f read 102); the grenade's next sound \
+             takes its place (func_1000FD38), the blast stops it (func_10010AA8)",
+        ),
+        cue(
+            On::Bounce { weapon: 0x3A },
+            play(range(0x186, 3), 28000, None, 300, 1800, Channel::A),
+            "a bounce leaving it faster than 5 upward, from the shuffle bag (C func_1505B5F8: its word \
+             0xFF030186 → func_1506E46C, func_1000F568; func_1506BA4C(300, 1800); V s1a 0x186, 0x187, \
+             s3f 0x187, 0x186 at its two bounces)",
+        ),
+        Cue {
+            play: Play {
+                pitch: [0, 499],
+                ..record([1549], 32700, 100, 3000)
+            },
+            ..cue(
+                On::Explosion { weapon: 0x3A },
+                record([], 0, 0, 0),
+                "0x26's (C func_15055A2C kind 1; V s1a, s3f: 0x60D at 32700, 100/3000, pitch 0 and 311 cents)",
+            )
+        },
         Cue {
             play: Play {
                 pitch: [0, 499],

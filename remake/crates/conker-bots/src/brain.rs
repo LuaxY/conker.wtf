@@ -548,6 +548,11 @@ impl World<'_> {
                 7 => i32::from(m.settings.laps),
                 _ => 0,
             },
+            // A racer's class script: 0xF knocked up (the match's bot knock), else 0xD riding.
+            (2, 0x91) => match self.slot(index(h) as i32).and_then(|s| m.players.get(s)) {
+                Some(f) if f.ride.board.held => 0xF,
+                _ => 0xD,
+            },
             (5, 0x27 | 0x28) => 0,
             (3, 0x21) => {
                 let k = ((h & 0xFFF) as usize).wrapping_sub(1);
@@ -587,7 +592,22 @@ impl World<'_> {
                 0
             }
             (0xE, 5) | (3, 0 | 1 | 4) => 1,
-            (2, 0x18 | 0x20 | 0x21 | 0x27 | 0x76 | 0x78) => 0,
+            // 0x20: obj+0x1CA, the health; 0xBC sets 0 to blow a walled bot up.
+            (2, 0x20) => {
+                if let Some(s) = self.slot(index(h) as i32).filter(|_| a(2) == 0) {
+                    self.effects.push(Effect::Race(RaceOp::Kill(s)));
+                }
+                0
+            }
+            // 0x14: the class script (0xD riding, 0x1F the kick's), ending a hit's hold.
+            (2, 0x14) => {
+                if let Some(s) = self.slot(index(h) as i32) {
+                    self.effects
+                        .push(Effect::Race(RaceOp::Class(s, a(2) as u8)));
+                }
+                0
+            }
+            (2, 0x18 | 0x21 | 0x27 | 0x76 | 0x78) => 0,
             _ => return None,
         })
     }

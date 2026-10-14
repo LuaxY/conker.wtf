@@ -90,7 +90,9 @@ use serde::{Deserialize, Serialize};
 /// 34: War: Beach's sea (swimming, predicted): `PlayerState`'s `swimming`, `water`, `drift`, `rise`,
 /// `jump_out`, `water_jump`, `aloft` and `wade`; the pack's water layer and current. Item 0x3A's lob
 /// (0x1A, 0x3F) flies as the server's in the client's prediction.
-pub const PROTOCOL_ID: u64 = 34;
+/// 35: Race's `RacerView.total`, the board's hold and wall flag and the curved track (predicted);
+/// Tank's turret C-button sign (predicted).
+pub const PROTOCOL_ID: u64 = 35;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -411,10 +413,12 @@ pub struct RacerView {
     pub place: u8,
     pub order: u8,
     pub progress: i32,
-    /// The race clock, the last lap and the best (VIs; −1 none): humans only.
+    /// The race clock, the last lap and the best (VIs; −1 none): humans only. `total`: the race
+    /// clock at its last lap's crossing (`0x800E0C18`), −1 for a racer the end rule finished short.
     pub time: i32,
     pub last: i32,
     pub best: i32,
+    pub total: i32,
     /// The canister's boost left (VIs), the board's kick frame (1-29, 0 none), knocked up (frames
     /// left), mid-jump.
     pub boost: u16,

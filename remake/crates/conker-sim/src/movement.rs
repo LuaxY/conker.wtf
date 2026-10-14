@@ -255,7 +255,8 @@ pub struct PlayerState {
     /// cleared at the frame's start by `func_1504A730`; C, V `q2f4`). The bots' scripts read it (query
     /// 0xC3) to press Z+A against a wall: the high jump.
     pub walled: bool,
-    /// Tank: s126+0x1BC, the turret's yaw in degrees off the hull's facing (0..360), and s126+0x1B8,
+    /// Tank: −s126+0x1BC, the turret's yaw in degrees off the hull's facing (0..360, as the facing
+    /// turns: the shells fly at facing + `turret`), and s126+0x1B8,
     /// the gun's pitch in degrees (−20..80, up positive); 0 on foot ([`crate::tank`]).
     pub turret: f32,
     pub pitch: f32,

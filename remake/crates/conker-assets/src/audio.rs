@@ -204,6 +204,10 @@ pub enum On {
     Holding { weapon: u8 },
     /// The thrown weapon's fuse, its last 60 ticks, in the hand or not: a loop until the blast.
     Fuse { weapon: u8 },
+    /// The weapon's lit fuse (item 0x3A's), at the grenade from the pull's first frame, in the hand
+    /// or not, until the grenade's next sound (a bounce) or the blast: the grenade has one sound
+    /// at a time (its [`Channel::A`]).
+    Lit { weapon: u8 },
     /// A hit by the weapon (conker-rules `Event::Hit`), at the victim; `lethal` None = any hit.
     Hit { weapon: u8, lethal: Option<bool> },
     /// A bullet of the weapon popping the victim's head (`func_151D4DAC`: a hit on the head below 3

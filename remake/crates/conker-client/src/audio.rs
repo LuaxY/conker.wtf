@@ -1843,7 +1843,7 @@ impl Sounds {
         let mut next = old.iter().peekable();
         // ponytail: matched in order within 8 frames' flight (updates come in bunches); a missile
         // gone with a newer one that close behind it swaps identities.
-        let step = 4.0 * conker_rules::race::MISSILE_SPEED;
+        let step = 8.0 * conker_rules::race::MISSILE_STEP;
         let mut now = Vec::new();
         let mut kept = Vec::new();
         for (k, &(pos, _)) in r.missiles.iter().enumerate() {

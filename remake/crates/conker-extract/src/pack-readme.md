@@ -51,10 +51,11 @@ in the message. `conker-extract pack` refuses to overwrite a pack, so your edits
 | `characters/165/`, `characters/171/`, `characters/22/` `character.gltf`, `.bin`, `textures/*.png` | War: Raptor's baby raptor (165: the raptor's 39 joints and its 37 clips, as the game plays them), egg (171: one joint, no clip) and the body a raptor carries (22: 31 joints, 32 clips), packed with map 3f; no `character.json` |
 | `characters/144/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | Character 144: Race's bots (classes 0xC-0xF), packed with map 33 (a human racer, class 0xB, is 136). The Tedi's skeleton and animations; its `looks` hide list 1 on class 0xF. Riding is clip 5 (also jumping and steering), the kick 0x354, knocked up 0x54, dead 0x170 |
 | `characters/0/`, `150/`, `152/`, `159/`, `160/`, `176/`, `177/`, `178/`, `180/` `character.gltf`, `.bin`, `textures/*.png`, `character.json` | The picks the cheats and map 1a add (Deathmatch and Race): Conker (0: model 0's pick, drawn as its model 1, 701 vertices), Neo Conker (150), the weasel guard (152), two zombies (159, 160), the Sergeant (176) and the Tediz Leader (177, both drawn at 0.6), Gregg (178, 180). The Tedi's skeleton, **no animations**: their `character.json` says `clips_from` 117 |
-| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, a player model's hitbox and body, the clips' owner and the undrawn lists of the picks, the villagers' and Race's bots' looks, the Wise Guy's team looks, the tank's flags and parts and the eyes that blink (`faces`) |
-| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), War: Total War's gas mask in the hand and on the head, and Race's kick (bank 09 #0x34 in the hand, clip 0x354): glTF scene `i` is `held.json[i]` |
+| `characters/<id>/character.json` | Its model lift, one entry per glTF animation, the root-motion clips, a player model's hitbox and body, the clips' owner and the undrawn lists of the picks, the villagers' and Race's bots' looks, the Wise Guy's team looks, the tank's flags and parts, the eyes that blink (`faces`) and the body parts that shots test (`parts`) |
+| `weapons/deathmatch/held.gltf`, `.bin`, `textures/*.png` | The weapons and the grenade in a player's hand (18 models: the twin guns are two; the Vault's bat and tommy gun and War: Raptor's bone crossbow and bone knives among them), War: Total War's gas mask in the hand and on the head, Race's kick (bank 09 #0x34 in the hand, clip 0x354) and item 0x3A's grenade in the hand (bank 01 #137 on map 1a, #186 on 3f; the crossbows and these in their bind pose): glTF scene `i` is `held.json[i]` |
 | `weapons/deathmatch/held.json` | For each: the joint it hangs from and the animation events that show and hide it |
-| `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5; Race's missile, drawn at 1.0), 5 War: Raptor's bone knife (bank 09 #0x7C; the bone crossbow's bolt is 3) (a bullet has none) |
+| `weapons/deathmatch/projectiles.gltf`, `.bin` | The projectiles in flight, the game's own models at the origin with +z along the flight: glTF scene 0 the thrown grenade, 1 the rocket, 2 weapon 0x14's knife, 3 the crossbow's bolt, 4 Tank's shell (drawn at 1.5; Race's missile, drawn at 1.0), 5 War: Raptor's bone knife (bank 09 #0x7C; the bone crossbow's bolt is 3), 6 and 7 item 0x3A's thrown grenade on map 1a (bank 01 #137) and 3f (#186), in their bind pose (a bullet has none) |
+| `weapons/deathmatch/crossbow.gltf`, `.bin`, `textures/crossbow-NN.png`; `lob.gltf`, `.bin`, `textures/lob-NN.png` | The child objects' rigs, each one skinned mesh with its own joints and clips (the game poses them from the holder's clip): `crossbow` the crossbow (bank 01 #110, `extras.list` 0) and War: Raptor's bone crossbow (#47, list 1) on 3 joints; `lob` item 0x3A's grenade on map 1a (#137, list 0) and 3f (#186, list 1) on 4 joints. Draw the one list; animations `pair_000N_anim_000N` are clips 1-3 (clip 0 is the bind pose) |
 | `weapons/deathmatch/flame.png` | The flamethrower's stream (blob 0x916, as `maps/34/traps/flame.png`): a ribbon through its flame points, its S along the stream |
 | `game/acos.json` | The game's arc-cosine table |
 | `game/sink.json` | The sink table: how far players sink into each kind of surface |
@@ -369,6 +370,12 @@ What Race (scenarios 11 and 12) adds to map 33 (`lab/research/mp-original/race.m
   the brake lights' material and `brake_lit` its texture while the tank brakes; `treads` the treads'
   material, its texture scrolling along each tread as that side moves: `tread_joints` the two
   treads' joints, in the order of the game's two speeds.
+- `parts` (0, 59, 83, 117, 128, 136, 144, 150, 156, 157, 159, 160, 176-178, 180): the
+  body parts a shot tests, the game's. `broad`: `[radius, height]`, the sphere around the whole body
+  (centred `height` up, as `hitbox`'s centre) tested first: a shot missing it hits nothing. `spheres`: `[joint,
+  part, radius, x, y, z]` each, at `(x, y, z)` in joint `joint`'s frame (model units at full size,
+  × the object's scale, as `hitbox`), in the game's order; `part` names the part hit (0xA the head).
+  A model without `parts` is tested by its `hitbox`.
 - `faces` (the players with eyes, 0, 83, 128, 136, 144, 150, 156, 157 and 176, and Raptor's body,
   22): the eyes that blink, segments 6 and 7. `materials`: the glTF materials that draw the eye;
   `textures`: open, half shut and shut (`textures/face-<entry>.png`, the model's texture-table
@@ -396,8 +403,8 @@ the server and the clients; `hitbox` and `body` hold them for every player model
 ### `weapons/deathmatch/held.json`
 One entry per glTF scene of `held.gltf`, in order:
 - `entry`: the model, whose meshes are named `09-<entry>-<part>` in hex (the crossbow, a child
-  object: `01-6e-<list>`, the bone crossbow's `01-2f-<list>`, their bank-01 models in their bind
-  pose; for reference: glTF scene `i` is
+  object: `01-6e-<list>`, the bone crossbow's `01-2f-<list>`, item 0x3A's grenades `01-89-<list>`
+  and `01-ba-<list>`, their bank-01 models in their bind pose; for reference: glTF scene `i` is
   entry `i`).
 - `joint`: the character joint it hangs from (`joint_09`, the right hand; `joint_04`, the left;
   `joint_12`, the head).
@@ -406,6 +413,8 @@ One entry per glTF scene of `held.gltf`, in order:
   first not yet due, so a tick here is never below an earlier event's of the same clip).
 - The gas mask (War: Total War): entry 67 in the hand while its put-on (animation 337) plays,
   entry 66 on the head while it is worn after that; neither while it comes off (animation 334).
+- Item 0x3A's grenades (entries 137 and 186, the last two) have no events: the game's code shows
+  one in the hand from the pull to the throw.
 
 ### `game/acos.json`, `game/sink.json`
 - `acos.json`: acos(x) in units of π/65536, at 132 sample points (x = i·512, then 0x7800 + i·32,
@@ -457,7 +466,8 @@ Sections:
   whose `on` (and `character`) matches plays: a head shot plays two. `head` is a bullet popping a
   head (a hit on it below 3 health kills); `bounce` plays one of its sounds at each bounce leaving the
   grenade faster than 5 upward, from a shuffle bag shared by all (each once before any again, the
-  last not first); `fly_by` is a bullet passing the listener's camera: a bullet of a weapon in
+  last not first); `lit` is item 0x3A's fuse, at the grenade from the pull until its next sound (a
+  `bounce`) or its blast; `fly_by` is a bullet passing the listener's camera: a bullet of a weapon in
   `chances` (weapon, out of 256, rolled at its birth) plays its k-th sound, k random each frame, once
   the camera is `leads[k]` − 10 to `leads[k]` frames of its flight ahead, within its range and cos
   0.9 of its line, one a bullet, panned. War: Total War's: `gas` (a loop
@@ -526,7 +536,8 @@ the left edge and the radar at the right one. Rectangles are `[x, y, width, heig
   weapon id in decimal (9 is 0x09, the twin guns). None while a grenade is in the hand. Race's
   canister (49) and missiles (51) show one icon per item held, each next 18 pixels to the left.
 - `grenades`: while a grenade is in the hand, one `icon` per grenade left, the first at `at`, each
-  next `step` pixels along.
+  next `step` pixels along; item 0x3A's (maps 1a and 3f) show `lob_icon` instead, from the pull to
+  the throw.
 - `score` (kills), `clock` (minutes:seconds left) and `rank` (`(1st)`): text at `at`, centred on
   it or starting there (`align`), in `colour`, with a `shadow` colour drawn one pixel right and down
   first (or `null`). The rank's suffixes are the textures in `suffixes` (st, nd, rd, th), drawn
@@ -629,13 +640,16 @@ The same frame, anchors, rectangles, colours and pictures as `hud.json`, with it
 - **JSON:** any text editor. Keep the field names; numbers are plain decimals.
 - **PNG textures:** any image editor. Keep the file name and the size, and keep the alpha channel
   where there is one.
-- **glTF models** (`level.gltf`, `props.gltf`, `character.gltf`, `held.gltf`): in Blender, *File > Import >
+- **glTF models** (`level.gltf`, `props.gltf`, `character.gltf`, `held.gltf`, `crossbow.gltf`,
+  `lob.gltf`): in Blender, *File > Import >
   glTF 2.0*. Export with *Format: glTF Separate (.gltf + .bin + textures)*, *Include > Custom
   Properties* on, to the same file name and folder. Keep:
-  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbows' `01-6e-…`, `01-2f-…`), and the level's and props' `…@N` nodes (the client
+  - node and mesh names: `joint_NN`, the held meshes `09-…` (the crossbows' `01-6e-…`, `01-2f-…`,
+    item 0x3A's `01-89-…`, `01-ba-…`), and the level's and props' `…@N` nodes (the client
     hides node `…@N` while the pickup on placement N is taken, and War: Total War's props as its match says);
-  - the character's animations' names (`pair_NNNN_anim_IIII`): the client finds each clip by its
-    name, so their order may change;
+  - the character's and the rigs' animations' names (`pair_NNNN_anim_IIII`): the client finds each
+    clip by its name, so their order may change;
+  - the primitives' `extras.list`: the looks and the rigs pick display lists by it;
   - one scene per held model, in `held.json`'s order.
 
   Moving level geometry changes only what is drawn: players collide with `collision.json`.

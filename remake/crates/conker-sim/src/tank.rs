@@ -13,13 +13,13 @@ use crate::movement::{
 pub const DRIVE: f32 = 0.64;
 /// The speed a frame toward the target: +1.4, 0.014 within 1 of it; letting go of forward brakes 2.0,
 /// of reverse 3.4 (both) (V t1 31-114, 521-600). The fire clip's mover takes 5 both ways (the clip's
-/// 0x32 / 10: V c1 62-68, 92-94).
+/// 0x32 / 10: V c1 62-68, 92-94), as a bot's always does ([`Drive::Stick`]'s `rates`).
 pub const ACCEL: f32 = 1.4;
 pub const BRAKE: f32 = 2.0;
-pub const CLIP_ACCEL: f32 = 5.0;
+pub const CLIP_RATE: u8 = 0x32;
 /// The facing turns at most this a frame (V t1 441-499: 1024 turning in place).
 pub const TURN_CAP: i32 = 1024;
-/// The turret's turn on C-right (+) and C-left (−), degrees a frame (V t1).
+/// The turret's turn on C-right (clockwise from above) and C-left, degrees a frame (V t1).
 pub const TURRET_RATE: f32 = 3.0;
 /// The gun's pitch, degrees (C).
 pub const PITCH_MIN: f32 = -20.0;
@@ -46,12 +46,16 @@ pub fn body(pos: [f32; 3]) -> Other {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drive {
     /// The stick: `boost` with power-up 0x01 (A held: full forward at twice the speed scale), `scope`
-    /// R with 0x02 (stopped, no turn), `clip` the fire clip's mover, `fired` its first frame (the speed
-    /// holds, V c1 61).
+    /// R with 0x02 (stopped, no turn), `fired` the fire's frame (the speed holds, V c1 61). `rates`:
+    /// the mover's accel and brake ×10 (obj+0x247/+0x248) in place of the stick's [`ACCEL`] and
+    /// [`BRAKE`]: the fire clip's [`CLIP_RATE`] both ways, and a bot's every frame: the tank's update
+    /// sets 0x32 each before the AI's (C `func_150ED748`), whose class script's op 0x67 sets its own
+    /// for that frame (C `func_15077364`; V h4, h5: a bot's first step from rest 0.4 and into a stop
+    /// 0.8, script 4's and 5's `67 8a 04 08`, else 5).
     Stick {
         boost: bool,
         scope: bool,
-        clip: bool,
+        rates: Option<[u8; 2]>,
         fired: bool,
     },
     /// A hit's knock-back along the move angle, no stick ([`KNOCK`]).
@@ -107,7 +111,7 @@ pub fn step(
         Drive::Stick {
             boost,
             scope,
-            clip,
+            rates,
             fired,
         } => {
             let boosting = boost && input.buttons & BUTTON_A != 0;
@@ -120,11 +124,7 @@ pub fn step(
             let x = if scope { 0 } else { deadzone(input.stick_x) };
             let to = (p.facing).wrapping_sub((i32::from(x) * rate(p.xz_speed, scale)) as u16);
             p.target_speed = if scope { 0.0 } else { f32::from(y) * scale };
-            let (a, d) = if clip {
-                (CLIP_ACCEL, CLIP_ACCEL)
-            } else {
-                (ACCEL, BRAKE)
-            };
+            let [a, d] = rates.map_or([ACCEL, BRAKE], |r| r.map(|v| f32::from(v) / 10.0));
             p.xz_speed = match () {
                 _ if scope => 0.0,
                 _ if fired => p.xz_speed,
@@ -132,11 +132,13 @@ pub fn step(
             };
             p.facing = turn(p.facing, to);
             p.move_angle = p.facing;
+            // `turret` is the game's s126+0x1BC negated (counter-clockwise from above, as the
+            // facing): C-right adds 3 to 0x1BC, and the shells fly at facing − 0x1BC (V b1).
             if input.buttons & BUTTON_C_RIGHT != 0 {
-                p.turret += TURRET_RATE;
+                p.turret -= TURRET_RATE;
             }
             if input.buttons & BUTTON_C_LEFT != 0 {
-                p.turret -= TURRET_RATE;
+                p.turret += TURRET_RATE;
             }
             p.turret = p.turret.rem_euclid(360.0);
             p.xz_speed
@@ -196,7 +198,7 @@ mod tests {
         Drive::Stick {
             boost: false,
             scope: false,
-            clip: false,
+            rates: None,
             fired: false,
         }
     }
@@ -278,7 +280,7 @@ mod tests {
         let drive = Drive::Stick {
             boost: true,
             scope: false,
-            clip: false,
+            rates: None,
             fired: false,
         };
         step(&mut p, &input(0, 82, BUTTON_A), &world, &[], drive);
@@ -297,13 +299,38 @@ mod tests {
         let clip = |fired| Drive::Stick {
             boost: false,
             scope: false,
-            clip: true,
+            rates: Some([CLIP_RATE; 2]),
             fired,
         };
         step(&mut p, &input(0, 82, 0), &world, &[], clip(true));
         assert_eq!(p.xz_speed, 14.0);
         step(&mut p, &input(0, 82, 0), &world, &[], clip(false));
         assert_eq!(p.xz_speed, 19.0);
+    }
+
+    /// V h4 3424-3427, 364: a bot stopping from 10 brakes 0.8 on its stop script's frame (op 0x67's
+    /// 8), then 5 (0x32); from rest its path script's frame gains 0.4.
+    #[test]
+    fn a_bots_mover_takes_its_scripts_rates() {
+        let world = flat();
+        let mut p = PlayerState {
+            xz_speed: 10.0,
+            ..PlayerState::spawn([0.0; 3], 0)
+        };
+        let bot = |rates| Drive::Stick {
+            boost: false,
+            scope: false,
+            rates: Some(rates),
+            fired: false,
+        };
+        let mut speeds = Vec::new();
+        for rates in [[4, 8], [CLIP_RATE; 2], [CLIP_RATE; 2]] {
+            step(&mut p, &input(0, 0, 0), &world, &[], bot(rates));
+            speeds.push(p.xz_speed);
+        }
+        assert_eq!(speeds, [9.2, 4.2, 0.0]);
+        step(&mut p, &input(0, 82, 0), &world, &[], bot([4, 8]));
+        assert_eq!(p.xz_speed, 0.4);
     }
 
     /// V f1 44-57: the knock moves 24.95, then the speed is 44.91.
@@ -319,21 +346,21 @@ mod tests {
         assert!((p.xz_speed - 44.91).abs() < 1e-3);
     }
 
-    /// Two tanks push apart; the turret turns 3° a frame on C-right, wrapping.
+    /// Two tanks push apart; the turret turns 3° a frame, C-right clockwise, wrapping.
     #[test]
     fn tanks_push_and_turrets_turn() {
         let world = flat();
         let mut p = PlayerState::spawn([0.0; 3], 0);
         step(
             &mut p,
-            &input(0, 0, BUTTON_C_LEFT),
+            &input(0, 0, BUTTON_C_RIGHT),
             &world,
             &[body([100.0, 0.0, 0.0])],
             stick(),
         );
         assert!(p.pos[0] < 0.0, "{:?}", p.pos);
         assert_eq!(p.turret, 357.0);
-        step(&mut p, &input(0, 0, BUTTON_C_RIGHT), &world, &[], stick());
+        step(&mut p, &input(0, 0, BUTTON_C_LEFT), &world, &[], stick());
         assert_eq!(p.turret, 0.0);
     }
 

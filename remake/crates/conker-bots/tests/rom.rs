@@ -2013,7 +2013,8 @@ fn tank_match(
         respawn: Some(150),
         ..Default::default()
     };
-    let mut r = Rng { state: seed };
+    // Seeded as the server (`GAME_SEED ^ seed`): a tiny state's first draws are near 0.
+    let mut r = Rng::new(Rng::GAME_SEED ^ seed);
     let fighters = (0..humans.len() + bots.len())
         .map(|i| {
             let record = if i < 4 { i } else { 0x10 + i - 4 };
@@ -2028,7 +2029,14 @@ fn tank_match(
         tank: true,
         ..Default::default()
     });
-    let ai = Bots::new(assets, humans, bots, DEFAULT_SKILL, Rng { state: seed }).unwrap();
+    let ai = Bots::new(
+        assets,
+        humans,
+        bots,
+        DEFAULT_SKILL,
+        Rng::new(Rng::GAME_SEED ^ seed),
+    )
+    .unwrap();
     (m, arena, world(rom, scene), ai)
 }
 
@@ -2082,7 +2090,7 @@ fn tank_bomb_as_c1() {
     put(&mut m, 0, BUNKERS[3]);
     let mut plant = None;
     let (mut doors, mut haze, mut blast, mut open, mut back) = (None, None, None, None, None);
-    while back.is_none() && m.tick < 3000 {
+    while (back.is_none() || open.is_none()) && m.tick < 3000 {
         tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
         let t = m.tick - 1;
         if plant.is_none() && m.gas.countdown == 300 {
@@ -2100,7 +2108,7 @@ fn tank_bomb_as_c1() {
         if blast.is_some() && open.is_none() && m.gas.props[0].flag == 0 {
             open = Some(t);
         }
-        if plant.is_some() && m.tank.bomb.shown {
+        if plant.is_some() && back.is_none() && m.tank.bomb.shown {
             back = Some(t);
         }
     }
@@ -2127,31 +2135,33 @@ fn tank_bomb_as_c1() {
     assert_eq!(ai.faults, 0);
 }
 
-/// Script 0xB8's bots against oracle b1 (7 bots, an idle human; 10 minutes there, 5 here): they
-/// fetch the bomb and plant it, its blasts and their shells kill, no native is unknown. They fire
-/// as b1's (`func_1508D850`: 321 shells to read 9023, here within 10%) and their shells kill
-/// about as many (b1 about 10; the old rule, firing whenever ready and aimed, 20).
-#[test]
-fn tank_bots_bomb_and_fight() {
-    let Some(rom) = rom() else { return };
-    let (mut m, arena, mut world, mut ai) = tank_match(&rom, &[0], &[1, 2, 3, 4, 5, 6, 7], 1);
+/// One Tank match of b1's roster (7 bots, an idle human) on `seed`, 9000 frames as the oracle's
+/// reads 23-9023: `[shots, hits of 1, shell deaths, blast deaths, plants, takes, longest carry]`
+/// (the carry still on at the end counts to there). No native is unknown, no script faults.
+fn tank_bots_run(rom: &extract_core::Rom, seed: u64) -> [u32; 7] {
+    use conker_rules::tank::CLIP_BOMB;
+    let (mut m, arena, mut world, mut ai) = tank_match(rom, &[0], &[1, 2, 3, 4, 5, 6, 7], seed);
     let mut inputs = vec![conker_sim::movement::Input::default(); 8];
     let (mut plants, mut taken, mut shells, mut bomb_kills, mut hits) = (0, 0, 0, 0, 0);
-    let (mut counting, mut carrier) = (false, None);
+    let (mut counting, mut carrier, mut took, mut longest) = (false, None, 0, 0);
     for _ in 0..9000 {
         let before: Vec<u8> = m.players.iter().map(|f| f.health).collect();
         let ev = tank_frame(&mut m, &arena, &mut world, &mut ai, &mut inputs);
         hits += (m.players.iter().zip(&before))
-            .filter(|(f, b)| f.health + 1 == **b)
-            .count();
+            .filter(|(f, b)| f.health + 1 == **b && f.body.state != CLIP_BOMB)
+            .count() as u32;
         if m.gas.countdown > 0 && !counting {
             plants += 1;
         }
         counting = m.gas.countdown > 0;
         if m.tank.carrier.is_some() && m.tank.carrier != carrier {
             taken += 1;
+            took = m.tick;
         }
         carrier = m.tank.carrier;
+        if carrier.is_some() {
+            longest = longest.max(m.tick - took);
+        }
         for e in ev {
             if let conker_rules::game::Event::Hit {
                 victim,
@@ -2161,25 +2171,50 @@ fn tank_bots_bomb_and_fight() {
                 && before[victim] > 0
             {
                 match m.players[victim].body.state {
-                    conker_rules::tank::CLIP_BOMB => bomb_kills += 1,
+                    CLIP_BOMB => bomb_kills += 1,
                     _ => shells += 1,
                 }
             }
         }
     }
-    let kills: Vec<u16> = m.players.iter().map(|f| f.kills).collect();
-    let fired: Vec<u16> = m.players.iter().map(|f| f.shots).collect();
-    eprintln!(
-        "tank bots: {taken} pickups, {plants} plants, {bomb_kills} bomb deaths, {shells} shell \
-         deaths, {hits} hits of 1, kills {kills:?}, shots {fired:?}; unknown {:?}",
-        ai.unknown
-    );
-    assert!(plants >= 1 && taken >= plants && bomb_kills >= 1);
-    let total: u32 = fired.iter().map(|&s| u32::from(s)).sum();
-    assert!(total.abs_diff(321) * 10 <= 321, "shots {total}");
-    assert!((5..=15).contains(&shells), "shell deaths {shells}");
+    let shots = m.players.iter().map(|f| u32::from(f.shots)).sum();
     assert!(ai.unknown.is_empty(), "{:?}", ai.unknown);
     assert_eq!(ai.faults, 0);
+    [shots, hits, shells, bomb_kills, plants, taken, longest]
+}
+
+/// Script 0xB8's bots against the oracle's ten runs to read 9023 (7 bots, an idle human: b1, h6
+/// unpoked, h1-h5 and h7-h9 with the RNG poked; G1 `tank-leftovers-scratch`), seeds 1-4 here: they
+/// fetch the bomb and plant it, its blasts and their shells kill, no native is unknown. The
+/// oracle's: shots 312-419 (350 a run), hits of 1 25.6% of them (19.6-29.5%), shell deaths 5-14
+/// (10.5), blast deaths 11-23 (14.8), plants 2-5 (3.8), its longest carry 1197 frames (each ends
+/// planted or with its carrier's death; the remake's carriers into bunker E once parked outside
+/// its trigger for good). Left: the remake's shell deaths run low for its hits (7.5 over seeds
+/// 1-12, the same 88 hits a run as the oracle's 89.5).
+#[test]
+fn tank_bots_bomb_and_fight() {
+    let Some(rom) = rom() else { return };
+    let runs: Vec<[u32; 7]> = (1..=4).map(|seed| tank_bots_run(&rom, seed)).collect();
+    let sum = |k: usize| runs.iter().map(|r| r[k]).sum::<u32>() as f32;
+    let n = runs.len() as f32;
+    let (shots, hits) = (sum(0) / n, sum(1) / sum(0));
+    let (shells, blasts, plants) = (sum(2) / n, sum(3) / n, sum(4) / n);
+    eprintln!(
+        "tank bots, seeds 1-4 [shots, hits, shell deaths, blast deaths, plants, takes, longest \
+         carry]: {runs:?}; a run: {shots:.0} shots, hits {:.1}%, shell deaths {shells:.1}, blast \
+         deaths {blasts:.1}, plants {plants:.1}",
+        hits * 100.0
+    );
+    assert!(
+        runs.iter().all(|r| r[4] >= 1 && r[5] >= r[4] && r[3] >= 1),
+        "{runs:?}"
+    );
+    assert!(runs.iter().all(|r| r[6] < 1500), "{runs:?}");
+    assert!((310.0..=400.0).contains(&shots), "shots {shots}");
+    assert!((0.22..=0.30).contains(&hits), "hits {hits}");
+    assert!((5.0..=14.0).contains(&shells), "shell deaths {shells}");
+    assert!((10.0..=20.0).contains(&blasts), "blast deaths {blasts}");
+    assert!((3.0..=5.0).contains(&plants), "plants {plants}");
 }
 
 /// Race on 0x33 as the server sets it up: slot 0 an idle human with 99 lives (the oracle's L1/L2
@@ -2322,16 +2357,19 @@ fn race_run(
 /// 837 frames on route 11, 1063-1081 on route 12; finishes 4178-4230 and 5170-5190 frames after
 /// the go; the human's first 3 deaths) and L7e/L7f (7 bots: finishes 4165-4323 and 4762-4880
 /// frames after the go, means 4249 and 4814): no native unknown, the bots finish (a few may run
-/// out of lives at the chasm after node 8, as L2's bot at 4128), the results follow, the 3 bots'
-/// steady laps stay within 3% of L1's (route 12: 15% of L2's), they fire missiles, and the 7 bots'
-/// mean finish stays within 5%.
+/// out of lives), the results follow, the 3 bots' steady laps stay within 2% of L1's and L2's,
+/// they fire missiles, and the 7 bots' mean finish stays within 5%. Route 12's leader is knocked
+/// up by the missile from placement 6 and blown up by the script (L2: 3 times, out at 4128).
+/// Route 11 runs seed 2: L1's bot kicks the idle human at 305-316 (21 frames before its first
+/// death), and the bots' kicks wait for the script's `random(0x78)` timers; seed 1's bots don't.
 #[test]
 fn race_bots_finish() {
     use conker_rules::race;
     let Some(rom) = rom() else { return };
     for (high, bots, seed, oracle, finish) in [
-        (false, 3, 1, 837, 0),
+        (false, 3, 2, 837, 0),
         (true, 3, 1, 1066, 0),
+        (true, 3, 2, 1066, 0),
         (false, 7, 2, 0, 4249),
         (true, 7, 2, 0, 4814),
     ] {
@@ -2365,17 +2403,22 @@ fn race_bots_finish() {
         // The bots fire their missiles (V L1: 928 and 938, L2), so they take canisters again.
         eprintln!("route {}: {shots} missiles", 11 + u8::from(high));
         assert!(shots > 0);
-        // Route 11's 3 bots lap as L1's within 3%; route 12's convoy leads at the boosts where
-        // L2's passes, so its laps run about 12% fast (STATUS's "Bots: the follow-ups").
+        // The 3 bots lap as L1's and L2's within 2% (the median of the last 3: a death's lap is
+        // longer).
         if oracle > 0 {
-            let within = if high { 15 } else { 3 };
             for l in laps.iter().skip(1) {
-                let lap = l[l.len() - 1] - l[l.len() - 2];
+                let mut last: Vec<u32> = l[l.len() - 4..].windows(2).map(|w| w[1] - w[0]).collect();
+                last.sort();
+                let lap = last[1];
                 assert!(
-                    lap.abs_diff(oracle) * 100 <= oracle * within,
+                    lap.abs_diff(oracle) * 100 <= oracle * 2,
                     "lap {lap} vs {oracle}"
                 );
             }
+        }
+        // Route 12's leader blown up out of the race (V L2 4128).
+        if high && bots == 3 {
+            assert!(m.players.iter().any(|f| f.bot && f.out > 0), "no bot out");
         }
         // The 7 bots' mean finish after the go within 5% of L7e's, L7f's.
         if finish > 0 {

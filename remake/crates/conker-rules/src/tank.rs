@@ -9,7 +9,7 @@
 use crate::damage::Hitbox;
 use crate::game::{Action, Arena, Event, Match, Seen};
 use crate::gas::{Gas, Prop};
-use crate::projectile::{hits_body, raycast, rise_along};
+use crate::projectile::{hits_sphere, raycast, rise_along};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::movement::{BUTTON_A, BUTTON_Z, Input, Other, atan2_u16, cos_sin};
 use conker_sim::tank::{self as hull, Drive, KNOCK, PITCH_MAX, PITCH_MIN};
@@ -27,12 +27,14 @@ pub const BOT_REFIRE: u32 = 51;
 pub const SHELL_SPEED: f32 = 296.5;
 pub const SHELL_GRAVITY: f32 = 5.0;
 pub const MUZZLE: [f32; 2] = [128.0, 113.0];
-/// A shell hits a tank whose axis its path passes within 150 (V f2: 150 hits, 200 misses; f1: a
-/// tank 600 ahead is hit on the third frame), I: from the feet to 180 up.
+/// A tank's body for the shells (model 119 has no body parts, so `func_15081690` takes
+/// `func_15081C20`): the ellipsoid of radius obj+0xD2 across and obj+0xD4 up, centred obj+0xD6
+/// over the feet (V f2, b1 RAM: 113, 90, 52). V f2: 98 off the line hits, 148 misses; b1 to read
+/// 9023: it calls 58 of the 60 hits (a cylinder of 150 from the feet to 180 calls 81).
 pub const BODY: Hitbox = Hitbox {
-    radius: 150.0,
+    radius: 113.0,
     half: 90.0,
-    centre: 90.0,
+    centre: 52.0,
 };
 /// The hit clip (7): 15 frames, the knock-back the first 13 (V f1 44-58).
 pub const HIT_FRAMES: u8 = 15;
@@ -119,6 +121,9 @@ pub struct Tank {
     pub planted: Option<u8>,
     /// Per slot, its last wreck.
     pub wrecks: Vec<Option<Wreck>>,
+    /// This frame's bots whose class script set their mover's accel and brake ×10 (op 0x67,
+    /// obj+0x247/+0x248; [`crate::gas::Effect::TankRates`]); the others' are 0x32 each.
+    pub rates: Vec<(usize, [u8; 2])>,
 }
 
 /// The doors' frame: toward open while +0x80 is 0 (from the match start), shut while 1. Their
@@ -161,8 +166,9 @@ fn to_u16(d: f32) -> u16 {
     (d.rem_euclid(360.0) * DEG) as u32 as u16
 }
 
-/// The hull's pitch in degrees along its facing on its floor (obj+0xB8, up positive).
-fn hull_pitch(b: &conker_sim::movement::PlayerState, world: &CollisionWorld) -> f32 {
+/// The hull's pitch in degrees along its facing on its floor (obj+0xB8, up positive; V t1: it
+/// follows the ground). The client tilts the hull by it.
+pub fn hull_pitch(b: &conker_sim::movement::PlayerState, world: &CollisionWorld) -> f32 {
     let (c, s) = cos_sin(b.facing);
     let rise = (b.floor)
         .filter(|_| !b.airborne)
@@ -171,14 +177,37 @@ fn hull_pitch(b: &conker_sim::movement::PlayerState, world: &CollisionWorld) -> 
     wrap180(deg(a))
 }
 
-/// The pitch (degrees) a shell needs to fall onto a point `h` above the muzzle `d` away (I: the
-/// game's solve `func_150ED298` unread; this one is the shell's own flight).
-fn solve_pitch(d: f32, h: f32) -> f32 {
-    let step = 0.5 * SHELL_SPEED;
-    let n = (d / step).max(1.0);
-    // y(n) = vy·n/2 − 1.25n² − 0.125n (`Shell::fly` from vy).
-    let s = ((h + 1.25 * n * n + 0.125 * n) / (step * n)).clamp(-0.99, 0.99);
-    wrap180(deg(atan2_u16(s, (1.0 - s * s).sqrt())))
+/// `func_150ED298`: how far short (+) or past (−) a point `d` ahead (at least 100) and `h` above
+/// the muzzle a shell fired at `pitch` degrees comes down, at the later time its height is `h`
+/// (148.25 a frame each way, 1.25·t² of fall: C, RAM 0x800A159C/A0); out of its reach, the pitch
+/// it lacks × 1000.
+fn range_error(d: f32, h: f32, pitch: f32) -> f32 {
+    const STEP: f32 = 0.5 * SHELL_SPEED;
+    let (s, c) = pitch.to_radians().sin_cos();
+    let vy = STEP * s;
+    let disc = vy * vy - 5.0 * h;
+    if disc <= 0.0 {
+        let need = ((5.0 * h).sqrt() / STEP).min(1.0).asin().to_degrees();
+        return (need - pitch) * 1000.0;
+    }
+    let t = (vy + disc.sqrt()) / 2.5;
+    if t > 0.0 {
+        d.max(100.0) - t * STEP * c
+    } else {
+        5000.0
+    }
+}
+
+/// Where the segment from `p` along the unit `dir`, `len` long, enters the [`BODY`] of a tank at
+/// `at` (`func_15081C20`: y scaled by radius / half about the centre, then `func_151452C4`'s
+/// ray-sphere; a start inside hits at 0).
+fn hits_hull(p: [f32; 3], dir: [f32; 3], len: f32, at: [f32; 3]) -> Option<f32> {
+    let k = BODY.radius / BODY.half;
+    let s = |v: [f32; 3]| [v[0], v[1] * k, v[2]];
+    let d = s(dir);
+    let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let c = s([at[0], at[1] + BODY.centre, at[2]]);
+    hits_sphere(s(p), d.map(|v| v / n), len * n, c, BODY.radius).map(|t| t / n)
 }
 
 impl Shell {
@@ -206,9 +235,16 @@ impl Match {
         ev: &mut Vec<Event>,
     ) {
         let t = self.tick;
+        // A wreck pushes as a tank while it shows, once its slot is back (until then the body
+        // lying there does; V sc2: a tank at 48 held 120-150 off P2's wreck, 88-192 frames after
+        // the death; sc1: through its spot at 351, the wreck gone).
+        let wrecks = (self.wrecks().into_iter())
+            .filter(|w| self.players.get(w.0).is_some_and(|p| p.health > 0))
+            .map(|w| hull::body(w.1));
         let others: Vec<Other> = (self.players.iter().enumerate())
             .filter(|&(j, _)| j != i && !self.free.contains(&j))
             .map(|(_, p)| hull::body(p.body.pos))
+            .chain(wrecks)
             .collect();
         // Where the others are, for the gun's aim: living tanks.
         let targets: Vec<[f32; 3]> = (self.players.iter().enumerate())
@@ -238,6 +274,12 @@ impl Match {
                     hull::step(&mut f.body, input, world, &others, Drive::Knock);
                 }
                 f.body.xz_speed = 0.0;
+                // Its wreck is where it lies after that (V sc2: prop 19 at 279 on P2's spot).
+                if step == 1
+                    && let Some(Some(w)) = self.tank.wrecks.get_mut(i)
+                {
+                    w.pos = f.body.pos;
+                }
                 if step >= RESPAWN {
                     self.down(i, arena, ev);
                     let f = &mut self.players[i];
@@ -281,11 +323,19 @@ impl Match {
             f.ready = t + if f.bot { BOT_REFIRE } else { REFIRE };
             f.shots = f.shots.saturating_add(1);
         }
+        // The mover's rates: a bot's every frame (its class script's, else 0x32 each), the fire
+        // clip's for a human, else the stick's ([`Drive::Stick`]).
         let clip = t < f.ready;
+        let script = (self.tank.rates.iter()).find_map(|&(j, r)| (j == i).then_some(r));
+        let rates = match (f.bot, script) {
+            (true, Some(r)) => Some(r),
+            _ if f.bot || clip => Some([hull::CLIP_RATE; 2]),
+            _ => None,
+        };
         let drive = Drive::Stick {
             boost,
             scope,
-            clip,
+            rates,
             fired,
         };
         hull::step(&mut f.body, input, world, &others, drive);
@@ -294,8 +344,11 @@ impl Match {
             let want = wrap180(deg(input.camera_yaw) - deg(f.body.facing) - f.body.turret);
             f.body.turret = (f.body.turret + want * 0.125).rem_euclid(360.0);
         }
-        // The gun's pitch: toward the best target within the turret's cone, else back to level;
-        // a bot's aim error solves for it 400 nearer, at least 100 off (`func_150ED298`, C).
+        // The gun's pitch (`func_150ED748`): + 0.001 a frame per unit its shell falls short of the
+        // best target within the turret's cone ([`range_error`], from the gun's pitch over the
+        // hull's), else back to level ×0.9. A human's aims 40 over the target's feet, at most 4° a
+        // frame; a bot's at the feet, unbounded, and its aim error aims 400 nearer (C; V b1, h1,
+        // h2: the bots' shells come down at their target's feet, error or not).
         let short = if f.bot {
             400.0 * f32::from(f.aim_error)
         } else {
@@ -314,14 +367,12 @@ impl Match {
             .max_by(|a, b| a.0.total_cmp(&b.0));
         let hull_pitch = hull_pitch(b, world);
         let pitch = match best {
+            Some((_, d, y)) if f.bot => {
+                b.pitch + 0.001 * range_error(d - short, y - muzzle, b.pitch + hull_pitch)
+            }
             Some((_, d, y)) => {
-                let d = if short > 0.0 {
-                    (d - short).max(100.0)
-                } else {
-                    d
-                };
-                let want = solve_pitch(d, y + 40.0 - muzzle) - hull_pitch;
-                b.pitch + (want - b.pitch).clamp(-PITCH_RATE, PITCH_RATE)
+                let up = 0.001 * range_error(d, y + 40.0 - muzzle, b.pitch + hull_pitch);
+                b.pitch + up.clamp(-PITCH_RATE, PITCH_RATE)
             }
             None => b.pitch * 0.9,
         };
@@ -359,6 +410,8 @@ impl Match {
     /// first tank its frame's path passes (where its owner saw it), else a wall or the ground.
     pub(crate) fn fly_shells(&mut self, world: &CollisionWorld, seen: Seen, ev: &mut Vec<Event>) {
         let t = self.tick;
+        // The bots' script rates were this frame's (the players stepped before).
+        self.tank.rates.clear();
         let mut shells = std::mem::take(&mut self.tank.shells);
         shells.retain_mut(|s| {
             if s.born == t {
@@ -369,12 +422,12 @@ impl Match {
             let len = (seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2]).sqrt();
             let dir = seg.map(|v| v / len);
             let wall = raycast(world, from, dir, len);
+            // A dead tank stops shells too, unhurt (its obj+0xF8 keeps 0x40; V b1 1912).
             let hit = (0..self.players.len())
                 .filter(|&v| v != s.owner && !self.free.contains(&v))
-                .filter(|&v| self.players[v].health > 0)
                 .filter_map(|v| {
                     let at = seen(s.owner, v).unwrap_or(self.players[v].body.pos);
-                    hits_body(from, dir, wall, at, BODY, false).map(|d| (d, v))
+                    hits_hull(from, dir, wall, at).map(|d| (d, v))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0));
             if let Some((_, v)) = hit {
@@ -573,11 +626,11 @@ mod tests {
         assert_eq!(m.players[0].hits, 1);
     }
 
-    /// V f2: 150 to the side hits, 200 misses.
+    /// V f2 (the shell's line 98, 148 and 197 off the target's feet, 60 over them): only 98 hits.
     #[test]
-    fn shells_hit_within_150() {
+    fn shells_hit_as_f2() {
         let world = flat();
-        for (side, hit) in [(150.0, true), (200.0, false)] {
+        for (side, hit) in [(98.0, true), (148.0, false), (197.0, false)] {
             let (mut m, arena) = duel(600.0, side);
             m.step(&arena, &[press(BUTTON_Z), Input::default()], &world);
             for _ in 0..8 {
@@ -646,7 +699,35 @@ mod tests {
         assert!(m.wrecks().is_empty());
     }
 
-    /// V p1: the shield keeps the tank immune for 900 frames; C-right turns the turret.
+    /// V sc2: the wreck lies where the knock left the body, and once the slot is back it stops a
+    /// tank driving at it 120-150 short.
+    #[test]
+    fn wrecks_stand_as_tanks() {
+        let world = flat();
+        let (mut m, arena) = duel(600.0, 0.0);
+        (m.players[0].power, m.players[0].boost) = (SHELLS, power_timer(SHELLS));
+        m.step(&arena, &[press(BUTTON_Z), Input::default()], &world);
+        while m.players[1].health > 0 || m.wrecks().is_empty() {
+            m.step(&arena, &[Input::default(); 2], &world);
+        }
+        m.step(&arena, &[Input::default(); 2], &world);
+        let at = m.wrecks()[0].1;
+        assert_eq!(at, m.players[1].body.pos);
+        while m.players[1].health == 0 {
+            m.step(&arena, &[Input::default(); 2], &world);
+        }
+        let ahead = Input {
+            stick_y: 82,
+            ..Input::default()
+        };
+        for _ in 0..60 {
+            m.step(&arena, &[ahead, Input::default()], &world);
+        }
+        let gap = at[0] - m.players[0].body.pos[0];
+        assert!((110.0..160.0).contains(&gap), "{gap}");
+    }
+
+    /// V p1: the shield keeps the tank immune for 900 frames; C-right turns the turret clockwise.
     #[test]
     fn shield_and_turret() {
         let world = flat();
@@ -661,7 +742,7 @@ mod tests {
             m.step(&arena, &[Input::default(); 2], &world);
         }
         assert_eq!(m.players[1].health, 6);
-        assert_eq!(m.players[0].body.turret, 3.0);
+        assert_eq!(m.players[0].body.turret, 357.0);
         for _ in 0..900 {
             m.step(&arena, &[Input::default(); 2], &world);
         }
