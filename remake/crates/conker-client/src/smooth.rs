@@ -105,8 +105,9 @@ impl Drawn {
             return;
         };
         own.step_view(view, input, world);
-        // The drawn body crosses a hint on another tick than the predicted one: cut with `follow`.
-        own.cam.hint_cut = follow.cam.hint_cut;
+        // The drawn body crosses a hint on another tick than the predicted one: cut with `follow`,
+        // and take or leave a fixed camera (Beach's sea) with it.
+        (own.cam.hint_cut, own.cam.fixed) = (follow.cam.hint_cut, follow.cam.fixed);
         let at = |f: &Follow| Vec3::from_array(f.cam.at);
         if at(own).distance(at(follow)) > SNAP {
             self.reset(f.body.pos, f.body.facing);

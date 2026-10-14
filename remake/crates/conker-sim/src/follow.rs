@@ -58,6 +58,12 @@ impl CameraWorld for Level<'_> {
         f.map(|f| f.y)
     }
 
+    /// The full query, the last triangle neither used nor kept (V c34 643: the eye 40 over a ledge at
+    /// y 79 that the floor triangle's fast path, still holding the eye, would have hidden).
+    fn floor_at(&mut self, eye: [f32; 3], start_y: f32) -> Option<f32> {
+        (self.world.floor(eye[0], eye[2], eye[1], start_y, None)).map(|f| f.y)
+    }
+
     /// The game's line query (V: the 2,527 rays of the camera captures, bit for bit).
     fn ray(&mut self, origin: [f32; 3], dir: [f32; 3], len: f32) -> Option<RayHit> {
         let hit = self.world.ray(origin, dir, len)?;
@@ -189,14 +195,17 @@ impl Follow {
             floor,
             skip_objects: false,
         };
+        let hints = world.camera.as_ref();
+        if cam.cut {
+            // A spawn: its first frame's player update tests the hints at the spawn (V east 24).
+            cam.fixed = hints.and_then(|c| c.fixed(p.pos, p.pos, p.floor_y));
+        }
         let before = cam.prev_pos;
         cam.step_pad(&p, buttons, stick, &mut level);
         // Next frame's player update tests the hints with this frame's move (`func_150A11C4`, before
         // the move), and the camera reads them at the end of that frame.
-        cam.hint_cut = world
-            .camera
-            .as_ref()
-            .is_some_and(|c| c.hint_cut(before, p.pos, p.floor_y));
+        cam.hint_cut = hints.is_some_and(|c| c.hint_cut(before, p.pos, p.floor_y));
+        cam.fixed = hints.and_then(|c| c.fixed(before, p.pos, p.floor_y));
     }
 
     /// The camera angle the next input carries ([`crate::movement::Input::camera_yaw`]):
@@ -329,6 +338,35 @@ mod tests {
         }
         // The move from -10 to 10 crosses it; the next step consumes the cut.
         assert_eq!(cuts, [false, false, true, false, false]);
+    }
+
+    #[test]
+    fn a_spawn_in_a_fixed_hint_cuts_onto_its_camera() {
+        let mut world = CollisionWorld::new([(
+            [
+                [-20000., -463., -20000.],
+                [-20000., -463., 20000.],
+                [20000., -463., 0.],
+            ],
+            5,
+        )]);
+        // Beach's east beach (V east 24): a box hint (type 0, shape 2) of kind 5, point 0, reach 751.
+        let mut hint = [0u8; 0x34];
+        for (k, v) in [2471i16, -1000, 7827, 500, 2000, 500].iter().enumerate() {
+            hint[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        (hint[0x15], hint[0x17]) = (2, 5);
+        hint[0x1C..0x20].copy_from_slice(&751u32.to_be_bytes());
+        world.camera = Some(conker_camera::volume::CameraLevel::new(0x2B, &hint));
+        let mut p = PlayerState::spawn([2471.0, -463.0, 7827.0], 27392);
+        let mut f = Follow::spawn([2922.0, -261.0, 8004.0], &p);
+        f.step(&p, 0, &world);
+        let target = [0x4510_2A31, 0xC369_4390, 0x4605_133E]; // (2306.64, -233.26, 8516.81)
+        assert_eq!(f.cam.eye.map(f32::to_bits), target);
+        assert!(f.cam.fixed.is_some());
+        p.pos[0] += 1000.0;
+        f.step(&p, 0, &world);
+        assert!(f.cam.fixed.is_none());
     }
 
     #[test]

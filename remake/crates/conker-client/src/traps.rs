@@ -15,9 +15,11 @@
 //!   blended (C, V DLs 300, 330).
 //! - A burning player (a cone's, the flamethrower's): the jets' particles about its body (I: the
 //!   original's burning look is not traced).
+//! - The electric floor's sparks: a glow at both ends of each arc and bolt, `hud/shell.png` (0x1042)
+//!   in the arc's colour (`crate::effects::arc_glow`; V elec, elec2).
 //!
-//! I: not drawn, the electric floor's sparks (texrects of blobs 0x904, 0x908 and 0x1042 in DLs 300,
-//! 330), the jets' light (`func_1516284C`).
+//! I: not drawn, the jets' light (`func_1516284C`). The texrects of 0x904-0x908 in DLs 300 and 330
+//! are the cones' flames (`../lab/research/mp-original/effects-g4.md` §11).
 
 use std::f32::consts::TAU;
 
@@ -433,7 +435,8 @@ fn jets(
     }
 }
 
-/// The electric floor's bolts and arcs while it is on.
+/// The electric floor's bolts and arcs while it is on, a glow at both ends of each
+/// ([`crate::effects::arc_glow`]).
 #[allow(clippy::too_many_arguments)]
 fn sparks(
     time: Res<Time>,
@@ -445,6 +448,7 @@ fn sparks(
     mut rng: Local<Rng>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut glows: Option<ResMut<crate::effects::Queue>>,
     mut commands: Commands,
 ) {
     let bits = game.single().map_or(0, |m| m.traps);
@@ -462,6 +466,10 @@ fn sparks(
             let mut points = [ends[0]; 9];
             points[8] = ends[1];
             split(&mut points, 0, 8, &mut || rng.next_f32());
+            if let Some(q) = glows.as_mut() {
+                let glow = |at| crate::effects::arc_glow(rng, at, rgb, width == BOLT_WIDTH, life);
+                q.0.extend(ends.map(glow));
+            }
             commands.spawn((
                 Mesh3d(meshes.add(strip(&points, width, eye))),
                 MeshMaterial3d(materials.add(material(&look.arc, rgb, alpha / 255.0))),

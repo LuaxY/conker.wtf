@@ -154,7 +154,48 @@ pub struct CameraHint {
 /// [`CameraHint::command`] that cuts behind the player (`func_1512FE00` case 30 → `func_15128774`).
 pub const HINT_CUT: u32 = 30;
 
+/// [`CameraHint::kind`] of the fixed cameras ([`Fixed`]).
+pub const HINT_FIXED: u8 = 5;
+
+/// [`Fixed::point`]s on scene 0x2B, the first two of `*0x800DC020` (the scene's asset `[0x0C, scene,
+/// 8]`, 0x18-byte records, s16 x, y, z first), as the oracle read them at `cam+0x288` (V swim1 24-100
+/// and 450-482: the sea's east and west sides, hints 0x26 and 0x27). Not in the pack yet; none elsewhere.
+const SEA_POINTS: [[i16; 3]; 2] = [[2024, 277, 9703], [-2290, 728, 10913]];
+
+/// A kind-5 hint's camera, mode 0x40 (`func_1512E8E0` → `func_15129934`, C; V swim1 450-482, east
+/// 24-660): the eye springs toward the line from the hint's point to the look-at, `reach` short of the
+/// look-at ([`crate::CameraState::fixed`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fixed {
+    /// `cam+0x27C` (from `cam+0x288`): the point.
+    pub point: [f32; 3],
+    /// `cam+0x278`.
+    pub reach: f32,
+}
+
+impl Fixed {
+    /// A hint record's fixed camera: kind 5, its point `+0x18` (`cam+0x718` → `cam+0x272`) in
+    /// `points`, its reach `+0x1C` (`cam+0x71C` → `cam+0x278`).
+    ///
+    /// ponytail: command 0 only (0x2B's two). 5 and 0x11 (Heist's ring wires 0x40-0x43, whose points
+    /// the pack lacks) also cut onto the point when it changes, and a command's low nibble keeps the
+    /// eye at the point's height: not ported.
+    fn parse(r: &[u8; 0x34], points: &[[i16; 3]]) -> Option<Self> {
+        let word = |o: usize| u32::from_be_bytes(r[o..o + 4].try_into().unwrap());
+        let point = points.get(word(0x18) as usize)?;
+        (r[0x17] == HINT_FIXED && word(0x20) == 0).then(|| Self {
+            point: point.map(f32::from),
+            reach: word(0x1C) as f32,
+        })
+    }
+}
+
 impl CameraHint {
+    /// Type 0, not kind 0xC (ignored by `func_150A11C4`), not switched off (`+0x14` = 1).
+    fn is_hint(r: &[u8; 0x34]) -> bool {
+        r[0x15] >> 2 == 0 && r[0x17] != 0xC && r[0x14] != 1
+    }
+
     /// The hints of a trigger table (`[0x0C, scene, 5]`), in table order: type 0, not kind 0xC (ignored
     /// by `func_150A11C4`), not switched off (`+0x14` = 1).
     pub fn parse_table(table: &[u8]) -> Vec<Self> {
@@ -162,7 +203,7 @@ impl CameraHint {
             .as_chunks::<0x34>()
             .0
             .iter()
-            .filter(|r| r[0x15] >> 2 == 0 && r[0x17] != 0xC && r[0x14] != 1)
+            .filter(|r| Self::is_hint(r))
             .map(|r| Self {
                 zone: CameraVolume::parse_record(r),
                 on_floor: r[0x16] & 1 != 0,
@@ -210,6 +251,8 @@ pub struct CameraLevel {
     /// Not the camera's: the type-1 records of action 1 or 3 (`kind`), player zones that switch
     /// the floor query's same-triangle fast path off or on ([`CameraLevel::full_floor`]).
     pub floor_zones: Vec<CameraHint>,
+    /// One per hint, in [`hints`](Self::hints)' order: its fixed camera, if any (kind 5, [`Fixed`]).
+    pub fixed: Vec<Option<Fixed>>,
 }
 
 impl CameraLevel {
@@ -218,6 +261,7 @@ impl CameraLevel {
     pub fn new(scene: u16, table: &[u8]) -> Self {
         let records = table.as_chunks::<0x34>().0;
         let zones: &[usize] = if scene == 0x2D { &[0x58, 0x59] } else { &[] };
+        let points: &[[i16; 3]] = if scene == 0x2B { &SEA_POINTS } else { &[] };
         Self {
             volumes: CameraVolume::parse_table(table),
             skip_objects: zones
@@ -234,6 +278,9 @@ impl CameraLevel {
                     kind: r[0x17],
                     command: 0,
                 })
+                .collect(),
+            fixed: (records.iter().filter(|r| CameraHint::is_hint(r)))
+                .map(|r| Fixed::parse(r, points))
                 .collect(),
         }
     }
@@ -260,6 +307,14 @@ impl CameraLevel {
             .rev()
             .find(|h| h.contains(old, pos, floor_y))
             .is_some_and(|h| h.kind != 0xA && h.command == HINT_CUT)
+    }
+
+    /// The fixed camera of the last hint the player is in (`func_15128CB0` keeps the last one
+    /// `func_150A11C4` queued, in table order), if it has one ([`Fixed`]; arguments as for
+    /// [`hint_cut`](Self::hint_cut)).
+    pub fn fixed(&self, old: [f32; 3], pos: [f32; 3], floor_y: f32) -> Option<Fixed> {
+        let i = (self.hints.iter()).rposition(|h| h.contains(old, pos, floor_y))?;
+        *self.fixed.get(i)?
     }
 
     pub fn in_volume(&self, eye: [f32; 3]) -> bool {
@@ -327,6 +382,29 @@ mod tests {
         off[0x14] = 1;
         assert!(CameraHint::parse_table(&[wire(0xC, HINT_CUT), off].concat()).is_empty());
         assert!(CameraHint::parse_table(&record([0, 0, 0], [100, 50, 20], 0.0, 0)).is_empty());
+    }
+
+    #[test]
+    fn the_last_hint_the_player_is_in_decides_the_fixed_camera() {
+        let fixed = |point: u32, command: u32| {
+            let mut r = wire(HINT_FIXED, command);
+            r[0x18..0x1C].copy_from_slice(&point.to_be_bytes());
+            r[0x1C..0x20].copy_from_slice(&707u32.to_be_bytes());
+            r
+        };
+        let (old, new) = ([0.0, 10.0, -10.0], [0.0, 10.0, 10.0]);
+        let sea = |table: Vec<u8>| CameraLevel::new(0x2B, &table).fixed(old, new, 0.0);
+        let west = Fixed {
+            point: [-2290.0, 728.0, 10913.0],
+            reach: 707.0,
+        };
+        assert_eq!(sea(fixed(1, 0).to_vec()), Some(west));
+        assert_eq!(sea(fixed(2, 0).to_vec()), None); // no such point
+        assert_eq!(sea(fixed(1, 5).to_vec()), None); // command 5: not ported
+        assert_eq!(sea([fixed(1, 0), wire(4, 0)].concat()), None);
+        assert_eq!(sea([wire(4, 0), fixed(1, 0)].concat()), Some(west));
+        let elsewhere = CameraLevel::new(0x2D, &fixed(0, 0));
+        assert_eq!(elsewhere.fixed(old, new, 0.0), None);
     }
 
     #[test]

@@ -70,7 +70,8 @@ fn main() {
         .then(|| Race::load(&cfg.map, |p| std::fs::read(dir.join(p))))
         .transpose()
         .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    conker_client::run(cfg, slice, hud, sound, script, raptor, race);
+    let gun = conker_client::guns::load(&cfg.map, |p| std::fs::read(dir.join(p)).ok());
+    conker_client::run(cfg, slice, hud, sound, script, raptor, race, gun);
 }
 
 /// wasm-bindgen runs `main` on `init()`; the page then calls [`start`].
@@ -114,6 +115,7 @@ pub async fn start() -> Result<(), String> {
     if race {
         files.push(conker_assets::race::race_json(&cfg.map));
     }
+    files.extend(conker_client::guns::files(&cfg.map));
     let requests: Vec<_> = (files.iter())
         .map(|f| conker_client::web::fetch(&format!("{root}/{f}")))
         .collect();
@@ -157,7 +159,8 @@ pub async fn start() -> Result<(), String> {
         .then(|| Race::load(&cfg.map, |p| bytes.remove(p).ok_or("not fetched")))
         .transpose()
         .map_err(|e| format!("{root}/{e}"))?;
+    let gun = conker_client::guns::load(&cfg.map, |p| bytes.remove(p));
     // `?script` drives the player with the test pattern; script files are native only.
-    conker_client::run(cfg, slice, hud, sound, Vec::new(), raptor, race);
+    conker_client::run(cfg, slice, hud, sound, Vec::new(), raptor, race, gun);
     Ok(())
 }

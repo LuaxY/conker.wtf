@@ -223,6 +223,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     crate::faces::build(app, &slice.characters, &names);
     crate::beach::build(app, &slice.characters);
     crate::projectiles::build(app);
+    crate::effects::build(app);
     let carried = (slice.lights.lights.iter())
         .find(|l| l.when == conker_assets::When::Carried)
         .cloned();
@@ -1231,7 +1232,7 @@ mod tests {
     fn a_scope_narrows_the_view_by_its_zoom() {
         let mut scope = conker_camera::Scope {
             on: true,
-            zoom: [-26.373, -26.373 * 50.0 / conker_camera::VIEW_ANGLES[0]],
+            zoom: [-26.373, -26.373 * 50.0 / 82.416], // gcA's 2-view angles
             ..default()
         };
         let cot = |deg: f32| 1.0 / (deg / 2.0).to_radians().tan();

@@ -48,6 +48,12 @@ pub const KICK_FRAMES: u8 = 29;
 pub const KICK_HIT: u8 = 10;
 pub const KICK_HOP: u8 = 12;
 pub const HOP: f32 = 25.0;
+/// A bot's kick, script 0xBC's B press with class script 0x1F (C `01 fb 00 3c`: speed 60 until
+/// the clip ends, then 0xD's 60 again): state 84 for 12 frames, no hop, the victim tested on the
+/// 12th, the target 60 on the first frame and the one after the last (V R11r1-r3, R12r1-r2: 203,
+/// 222, 276, 336, 376; R11r1 214 the idle human knocked).
+pub const BOT_KICK_FRAMES: u8 = 12;
+pub const BOT_KICK_SPEED: f32 = 60.0;
 /// A canister's boost holds the speed at 254 (V w3).
 pub const BOOST: f32 = 254.0;
 /// An autopilot racer's canister speed (V L1, L2: the bots at 229 whatever their target; I: why).
@@ -81,6 +87,9 @@ pub struct Board {
     pub jumped: bool,
     pub wall: u8,
     pub held: bool,
+    /// The kick is a bot's ([`BOT_KICK_FRAMES`]); the server's alone (a client predicts its human).
+    #[cfg_attr(feature = "net", serde(skip))]
+    pub bot: bool,
 }
 
 impl Board {
@@ -98,13 +107,16 @@ impl Board {
     }
 
     /// Script 0xBC's command 0x14 (the class script): 0xD rides again at most [`RIDE_AGAIN`] (V L1
-    /// 348), 0x1F (its kick's, V L1 305) ends the hold too.
+    /// 348), 0x1F (its kick's, V L1 305) ends the hold too and makes the kick a bot's.
     pub fn class(&mut self, p: &mut PlayerState, script: u8) {
         if self.held && script != 0xF {
             self.held = false;
             if script == 0xD {
                 p.xz_speed = p.xz_speed.min(RIDE_AGAIN);
             }
+        }
+        if script == 0x1F && self.kick == 0 && self.knock == 0 {
+            self.bot = true;
         }
     }
 
@@ -219,7 +231,10 @@ pub fn step(
     match drive.auto {
         _ if !drive.go => target = 0.0,
         Some((speed, at)) => {
-            target = speed;
+            target = match b.bot && matches!(b.kick, 0 | BOT_KICK_FRAMES) {
+                true => BOT_KICK_SPEED,
+                false => speed,
+            };
             let to = atan2_u16(p.pos[2] - at[2], at[0] - p.pos[0]);
             let d = angle_diff(to, p.move_angle).clamp(-turn, turn);
             p.move_angle = p.move_angle.wrapping_add(d as u16);
@@ -313,19 +328,23 @@ pub fn step(
         p.gravity = if p.pos[1] > rest { UP } else { DOWN };
         p.y_vel = p.y_vel.clamp(-cap, 80.0);
     }
-    // B's kick (not while one runs or knocked up).
+    // B's kick (not while one runs or knocked up), or a bot's.
+    let (frames, hit) = match b.bot {
+        true => (BOT_KICK_FRAMES, BOT_KICK_FRAMES),
+        false => (KICK_FRAMES, KICK_HIT),
+    };
     if b.kick > 0 {
         b.kick += 1;
-        if b.kick == KICK_HOP {
+        if b.kick == KICK_HOP && !b.bot {
             p.y_vel = HOP;
         }
-        if b.kick > KICK_FRAMES {
-            b.kick = 0;
+        if b.kick > frames {
+            (b.kick, b.bot) = (0, false);
         }
-    } else if drive.go && pressed & BUTTON_B != 0 && b.knock == 0 {
+    } else if b.bot || drive.go && pressed & BUTTON_B != 0 && b.knock == 0 {
         b.kick = 1;
     }
-    out.kick = b.kick == KICK_HIT;
+    out.kick = b.kick == hit;
     p.state = b.state();
     out
 }
@@ -473,6 +492,35 @@ mod tests {
         assert_eq!((states[0], states[29]), (KICK, RIDE));
         assert_eq!(hit, Some(10));
         assert_eq!(p.xz_speed, 32.0);
+    }
+
+    /// V R11r2 276-288 (bot 3): a bot's kick, class 0x1F with its B press, is 12 frames of state 84
+    /// with no hop and the hit's test on the 12th; the target is 60 on its first frame (73 → 60)
+    /// and on the frame after (71 → 60), the drive's in between.
+    #[test]
+    fn a_bot_kicks_as_r11() {
+        let world = flat();
+        let (mut p, mut b) = (racer(), Board::default());
+        p.xz_speed = 73.0;
+        let drive = Drive {
+            auto: Some((100.0, [-1000.0, FLOOR, 0.0])),
+            ..go()
+        };
+        b.class(&mut p, 0x1F);
+        let mut rows = Vec::new();
+        for k in 1..=14 {
+            let buttons = if k == 1 { BUTTON_B } else { 0 };
+            let m = step(&mut p, &mut b, &input(0, 0, buttons), &world, drive);
+            rows.push((p.state, p.target_speed, p.xz_speed, m.kick));
+            assert!(p.y_vel < HOP, "frame {k}: {}", p.y_vel);
+        }
+        assert_eq!(rows[0], (KICK, 60.0, 60.0, false));
+        assert_eq!(rows[1].1, 100.0);
+        assert!(rows[..12].iter().all(|r| r.0 == KICK));
+        assert_eq!(rows.iter().position(|r| r.3), Some(11));
+        assert_eq!((rows[12].0, rows[12].1), (RIDE, 60.0));
+        assert_eq!(rows[13].1, 100.0);
+        assert!(!b.bot);
     }
 
     /// V w5 234-265: knocked up, 50 under gravity 2 with no hover for 29 frames (the rise about

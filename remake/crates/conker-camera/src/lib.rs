@@ -28,7 +28,8 @@
 //! - an eye within 42 of the look-at turns the stick's yaw 90 degrees for a while
 //!   ([`CameraState::stick_override`]);
 //! - the level's camera hints ([`volume::CameraHint`]): one cuts behind the player at ledge read 410
-//!   ([`CameraState::hint_cut`], set by the simulation from [`volume::CameraLevel::hint_cut`]).
+//!   ([`CameraState::hint_cut`], set by the simulation from [`volume::CameraLevel::hint_cut`]);
+//!   on Beach's sea sides the kind-5 ones hold a fixed camera (mode 0x40, [`CameraState::fixed`]).
 //!
 //! Not ported: ceilings (`cam+0x364` from action-2 volumes, none on scene 0x2D; the cut when the
 //! floor under the eye is above `obj+0x17C`, which is about 20000 in every trace), 3-VI frames.
@@ -44,6 +45,8 @@ pub const DT: f32 = 2.0 * f32::from_bits(0x3C88_8889);
 /// Horizontal eye distance and eye height above the player (zoom level 1 of `D_800A34B0`).
 pub const DISTANCE: f32 = 247.0;
 pub const HEIGHT: f32 = 100.0;
+/// [`CameraState::eye_spring`] at rest.
+const EYE_SPRING: [f32; 4] = [6.0, 0.0, 8.0, 0.0];
 /// Head height of a standing player (`struct126+0x114`); the look-at sits at 0.75 of it.
 pub const HEAD_STANDING: f32 = 90.0;
 /// N64 button bits the camera reads.
@@ -152,6 +155,9 @@ pub struct PlayerView {
     /// On a mounted gun (weapon 0x1B, with [`attached`](Self::attached)): its origin (gun+0x2C). The
     /// scope's eye is then the gun's ([`gun_eye`]), turned with the player's facing (the gun's yaw).
     pub gun: Option<[f32; 3]>,
+    /// The gun's fire clip as last drawn ([`gun_eye_kicked`]): the root's and the barrels' pitch in
+    /// degrees nose down and the barrels' pivot's shift ahead in model units; 0 at rest.
+    pub gun_kick: [f32; 3],
     /// Swimming (`obj+0xAD` = 1), with the water's height over the player (`obj+0x118`): the look-at
     /// and the eye go by the water, not the sea floor ([`CameraWorld::water_below`]).
     pub swim: Option<f32>,
@@ -179,6 +185,7 @@ impl PlayerView {
             busy: false,
             attached: false,
             gun: None,
+            gun_kick: [0.0; 3],
             swim: None,
         }
     }
@@ -231,12 +238,28 @@ pub fn gun_tilt(pitch10: i32) -> f32 {
 /// the eye (0, 58, 65) from it. V m2: level, origin + (126.42 ahead, 110.27 up), to the hundredth;
 /// pitched, within 4 (I: the game's eye also lags the gun's turn a frame, its last matrix).
 pub fn gun_eye(origin: [f32; 3], yaw: u16, pitch: f32) -> [f32; 3] {
+    gun_eye_kicked(origin, yaw, pitch, [0.0; 3])
+}
+
+/// [`gun_eye`] with the gun's fire clip posed as `[root, barrels, shift]` ([`PlayerView::gun_kick`]):
+/// the clip turns the root and joint 4 about x and slides joint 4 along z, and the eye is joint 4's
+/// matrix as last drawn (C). V k2 (e1 under lldb, pitch 12): firing, the eye cycles through the
+/// clip's 6-frame recoil, up to 8.3 up and 5.6 back, each read showing the frame drawn the read
+/// before.
+pub fn gun_eye_kicked(
+    origin: [f32; 3],
+    yaw: u16,
+    pitch: f32,
+    [root, barrels, shift]: [f32; 3],
+) -> [f32; 3] {
     let t = gun_tilt(gun_pitch10(pitch));
-    let (pc, ps) = (cos((pitch - t) * DEG_TO_RAD), sin((pitch - t) * DEG_TO_RAD));
+    let b = (pitch - t + barrels) * DEG_TO_RAD;
+    let (pc, ps) = (cos(b), sin(b));
     let (f, u) = (
-        61.42 + 65.0 * pc + 58.0 * ps,
+        61.42 + 0.5 * shift + 65.0 * pc + 58.0 * ps,
         52.265 + 58.0 * pc - 65.0 * ps,
     );
+    let t = t + root;
     let (tc, ts) = (cos(t * DEG_TO_RAD), sin(t * DEG_TO_RAD));
     let (ahead, up) = (f * tc + u * ts, u * tc - f * ts);
     let a = f32::from(yaw) * (360.0 / 65536.0) * DEG_TO_RAD;
@@ -268,10 +291,16 @@ pub struct RayHit {
 pub trait CameraWorld {
     /// The floor height under a point (`func_1510E950`, as for the player: the point's height is its
     /// current height, `eye_y_at_tick_start` the height at the start of the frame), None if there is
-    /// none. The camera asks under the eye: with the floor it found last ([`CameraState::floor`],
-    /// `cam+0x35C`) as the height (`func_1512A390`), or with the eye's own height after the sweep moved
-    /// it (`func_1512BB10`).
+    /// none. The camera asks under the eye with the floor it found last ([`CameraState::floor`],
+    /// `cam+0x35C`) as the height (`func_1512A390`: first the last floor triangle's fast path,
+    /// `func_150A3FC4` on `cam+0x644`, which the full query then refills).
     fn floor_below(&mut self, eye: [f32; 3], eye_y_at_tick_start: f32) -> Option<f32>;
+    /// [`floor_below`](Self::floor_below) as `func_1512BB10` asks it after the sweep moved the eye:
+    /// at the eye's own height, the full query only (no last triangle in or out: `func_1510E8BC`'s
+    /// first argument is 0; C). Defaults to `floor_below`.
+    fn floor_at(&mut self, eye: [f32; 3], eye_y_at_tick_start: f32) -> Option<f32> {
+        self.floor_below(eye, eye_y_at_tick_start)
+    }
     /// `func_150AC9C0` (hand-written MIPS, a walk of the collision grid): the nearest hit along `dir`
     /// from `origin`, up to `len` units; it normalizes `dir` itself. The camera passes a unit `dir`
     /// for its forward ray and the eye offset (length = the distance) for the reverse one.
@@ -381,8 +410,8 @@ pub struct Scope {
     pub yaw_vel: f32,
     pub pitch_vel: f32,
     /// The zoom: degrees added to the view's horizontal and vertical angles (`+0x184`, `+0x188`, the
-    /// view's `cam+0x19C`, `+0x1A0`; 0 unzoomed, -38.7 and -23.5 on opening, as far as -77.4 with the
-    /// sniper rifle). Kept for the next scope with the same weapon.
+    /// view's `cam+0x19C`, `+0x1A0`; 0 unzoomed, -27.8 and -22.94 on opening (V h1, tank_pw2), as far
+    /// as -55.6 with the sniper rifle (C)). Kept for the next scope with the same weapon.
     pub zoom: [f32; 2],
     /// The weapon of the last scope (`+0x190`), and whether the next one looks ahead again (`+0x194`:
     /// set by a new weapon or by the stick moving outside the scope).
@@ -438,9 +467,11 @@ pub fn zoom_limit(weapon: u8) -> f32 {
     }
 }
 
-/// The view's angles the zoom narrows (`*0x800BE628 + 0x6C`, `+0x70`; I: horizontal and vertical
-/// field of view in degrees).
-pub const VIEW_ANGLES: [f32; 2] = [f32::from_bits(0x42A4_D4FE), 50.0];
+/// The view's angles the zoom narrows, one view's (`*0x800BE628 + 0x6C`, `+0x70`, which
+/// `func_15126378` reads; `func_1510B128` writes their sum with the zoom, the field of view, to
+/// `+0x74`, `+0x78`; C). V h1, tank_pw2 (1 human): 60.6 and 50 (0x42726666, 0x42480000); the
+/// 2-player split screen's are 82.416 and 50 (V h2: 0x42A4D4FE, both views), the remake has none.
+pub const VIEW_ANGLES: [f32; 2] = [f32::from_bits(0x4272_6666), 50.0];
 
 /// The camera's whole state (field offsets in the game's camera struct). Plain data, so it can be
 /// rolled back and replicated with the player.
@@ -476,6 +507,16 @@ pub struct CameraState {
     /// then the same snap, after the look-at has sprung as usual (V). Ignored while R aims. Every step
     /// clears it.
     pub hint_cut: bool,
+    /// A kind-5 hint holds the player ([`volume::CameraLevel::fixed`]): the next step runs mode 0x40
+    /// ([`volume::Fixed`]) instead of the follow camera, unless R aims or the player is dead (the
+    /// hint's veto, `cam+0x6D2` on `s126+0x120`: V die1 461). Every step clears it.
+    pub fixed: Option<volume::Fixed>,
+    /// Mode 0x40's eye spring velocities (`cam+0x3C0`..`+0x3C8`), kept from one visit to the next.
+    pub fixed_vel: [f32; 3],
+    /// The distance and height springs' constant and damping and their velocities (`+0x964`, `+0x984`,
+    /// `+0x968`, `+0x988`): mode 0x40 drops them to 1 and 2, after it they spring back to 6 and 8
+    /// (`func_15123A54`, `cam+0x84` bit 0x200000; V swim1k 483-: 1.0111, 2.0133 the first tick).
+    pub eye_spring: [f32; 4],
     /// The eye at the start of the last step (`+0x304`): where the sweep starts.
     pub prev_eye: [f32; 3],
     /// This tick's [`CameraWorld::in_volume`] (`+0x84` bit 0x40000).
@@ -532,6 +573,9 @@ impl Default for CameraState {
             prev_pos: [0.0; 3],
             cut: false,
             hint_cut: false,
+            fixed: None,
+            fixed_vel: [0.0; 3],
+            eye_spring: EYE_SPRING,
             prev_eye: [0.0; 3],
             volume: false,
             wall_hit: false,
@@ -605,6 +649,7 @@ impl CameraState {
         world: &mut impl CameraWorld,
     ) {
         let hint = std::mem::take(&mut self.hint_cut);
+        let fixed = std::mem::take(&mut self.fixed).filter(|_| !p.dead);
         if self.aim.phase != 3 && !(self.aim.on && self.aim.phase == 0) {
             self.weapon = p.weapon;
         }
@@ -625,10 +670,15 @@ impl CameraState {
         if self.cut {
             self.at[1] = self.look_at_height(p);
             self.at_vel = 0.0;
+            if let Some(f) = fixed {
+                return self.fixed_step(p, f, world);
+            }
             return self.snap(p, start_y, world);
         }
         self.yaw = self.yaw_to(self.at);
-        if buttons & C_BUTTONS != 0 {
+        // func_15126138: not in mode 0x40 (I: the game tests last tick's mode, so a strafe on a
+        // hint's first tick still runs and on its last does not).
+        if buttons & C_BUTTONS != 0 && fixed.is_none() {
             let (from_old, to_new) = (self.yaw_to(old_at), self.yaw);
             if buttons & C_DOWN == 0 {
                 self.yaw = from_old;
@@ -669,6 +719,9 @@ impl CameraState {
             (self.eye, self.prev_eye, self.floor) = (p.pos, p.pos, p.floor_y);
             self.cut = true;
             return self.snap(p, p.pos[1], world);
+        }
+        if let Some(f) = fixed.filter(|_| !self.aim.on) {
+            return self.fixed_step(p, f, world);
         }
         if self.aim.on {
             self.aim_step(p, buttons, stick, world);
@@ -759,7 +812,7 @@ impl CameraState {
             return false;
         }
         let eye = match p.gun.filter(|_| gun) {
-            Some(origin) => gun_eye(origin, p.facing, s.pitch),
+            Some(origin) => gun_eye_kicked(origin, p.facing, s.pitch, p.gun_kick),
             None => [p.pos[0], p.pos[1] + p.head * 0.75, p.pos[2]],
         };
         let open = (s.zoom[0] / far).clamp(0.0, 1.0);
@@ -1130,12 +1183,18 @@ impl CameraState {
         let target = self.wall_ray(p, r, world);
         let (dx, dz) = (self.eye[0] - self.at[0], self.eye[2] - self.at[2]);
         let mut d = (dx * dx + dz * dz).sqrt();
-        let (k, damp) = if self.wall_hit {
-            (8.0, 10.0)
-        } else if self.aim.on {
+        let (k, damp) = if self.aim.on {
             (6.0, 10.0)
         } else {
-            (6.0, 8.0)
+            let [k, kv, c, cv] = &mut self.eye_spring;
+            spring(k, EYE_SPRING[0], kv, 1.0, 2.0, DT);
+            spring(c, EYE_SPRING[2], cv, 1.0, 2.0, DT);
+            (*k, *c)
+        };
+        let (k, damp) = if self.wall_hit {
+            (8.0, 10.0)
+        } else {
+            (k, damp)
         };
         spring(&mut d, target, &mut self.dist_vel, k, damp, DT);
         self.eye[0] = sin(r) * d + self.at[0];
@@ -1196,7 +1255,11 @@ impl CameraState {
             return;
         }
         let mut h = self.eye[1] - self.base;
-        let (k, damp) = if self.aim.on { (5.0, 9.0) } else { (6.0, 8.0) };
+        let (k, damp) = if self.aim.on {
+            (5.0, 9.0)
+        } else {
+            (self.eye_spring[0], self.eye_spring[2])
+        };
         spring(
             &mut h,
             self.height_target,
@@ -1210,8 +1273,8 @@ impl CameraState {
 
     /// `func_1512BB10` (C; V on camera_ledge): the eye moves from where it started the tick to where
     /// the camera put it, as an object of size 30×60 (20×20 while strafing, the size springing there),
-    /// through the player's mover; when that collides, the eye stays 40 above the floor under it. Off
-    /// while inside a volume.
+    /// through the player's mover; when that collides, the eye stays 40 above the floor under it (the
+    /// full query at its own height, [`CameraWorld::floor_at`]; V c34 643). Off while inside a volume.
     fn sweep(&mut self, p: &PlayerView, world: &mut impl CameraWorld) {
         if self.volume {
             return;
@@ -1234,10 +1297,56 @@ impl CameraState {
             return;
         };
         self.eye = eye;
-        if let Some(floor) = world.floor_below(eye, self.prev_eye[1])
+        if let Some(floor) = world.floor_at(eye, self.prev_eye[1])
             && self.eye[1] < floor + 40.0
         {
             self.eye[1] = floor + 40.0;
+        }
+    }
+
+    /// Mode 0x40, a kind-5 hint's fixed camera (`func_15129934`, C; V swim1 450-482, east 24-660):
+    /// the eye springs (1 and 3 across, 1 and 2 up; [`fixed_vel`](Self::fixed_vel)) toward the line
+    /// from the hint's point to the look-at, `reach` short of the look-at, its height the point's plus
+    /// 1.2 of the line's rise; a cut puts it there (V east 24, die1 548). The follow camera's springs
+    /// stand still. Then the end of the frame, twice on a cut as in [`snap`](Self::snap).
+    ///
+    /// ponytail: the floor under the eye (`cam+0x35C`), which the game refreshes only while the eye
+    /// stays over the follow camera's last floor triangle, stays as the follow camera left it.
+    fn fixed_step(&mut self, p: &PlayerView, f: volume::Fixed, world: &mut impl CameraWorld) {
+        const RISE: f32 = f32::from_bits(0x3F99_999A); // 1.2, D_800A3614
+        let d: [f32; 3] = std::array::from_fn(|k| self.at[k] - f.point[k]);
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let inv = if len == 0.0 { len } else { 1.0 / len }; // func_1504917C
+        let reach = len - f.reach;
+        let reach = if reach < 0.0 { 0.0 } else { reach };
+        let target = [
+            f.point[0] + d[0] * inv * reach,
+            f.point[1] + d[1] * inv * reach * RISE,
+            f.point[2] + d[2] * inv * reach,
+        ];
+        let cut = self.cut;
+        for (k, t) in target.into_iter().enumerate() {
+            if cut {
+                (self.eye[k], self.prev_eye[k], self.fixed_vel[k]) = (t, t, 0.0);
+            } else {
+                let damp = if k == 1 { 2.0 } else { 3.0 };
+                spring(&mut self.eye[k], t, &mut self.fixed_vel[k], 1.0, damp, DT);
+            }
+        }
+        self.ease_override(); // func_1512C150
+        (self.strafe_spring[0], self.strafe_spring[2]) = (1.0, 2.0);
+        (self.eye_spring[0], self.eye_spring[2]) = (1.0, 2.0);
+        self.yaw = self.yaw_to(self.at);
+        for _ in 0..if cut { 2 } else { 1 } {
+            self.near_eye(p, world);
+            self.sweep(p, world);
+        }
+        self.cut = false;
+        self.end_tick(p);
+        if cut {
+            (self.look_offset, self.look_offset_vel) = (self.look_offset_target, 0.0);
+        } else {
+            self.spring_look_offset();
         }
     }
 
@@ -1259,6 +1368,7 @@ impl CameraState {
             self.yaw = self.yaw_to(self.at);
         }
         (self.yaw_vel, self.dist_vel, self.height_vel) = (0.0, 0.0, 0.0);
+        self.eye_spring = EYE_SPRING; // func_15123A54 on a cut
         for _ in 0..2 {
             self.near_eye(p, world);
             self.sweep(p, world);
@@ -1440,6 +1550,37 @@ mod tests {
             cam.step(&spawn_player(), 0, |_, _| Some(-421.0));
         }
         assert_eq!(cam.eye[1], -321.0);
+    }
+
+    #[test]
+    fn a_swept_eye_keeps_clear_of_a_ledge_the_fast_path_misses() {
+        // c34 read 643 (V): the sweep leaves the eye on a ledge at y 79 over the corridor's floor at
+        // -48, which the floor triangle's fast path still answers (cam+0x35C); the full query after
+        // the sweep finds the ledge and lifts the eye to 119.
+        struct Ledge;
+        impl CameraWorld for Ledge {
+            fn floor_below(&mut self, _: [f32; 3], _: f32) -> Option<f32> {
+                Some(-48.0)
+            }
+            fn floor_at(&mut self, _: [f32; 3], _: f32) -> Option<f32> {
+                Some(79.0)
+            }
+            fn ray(&mut self, _: [f32; 3], _: [f32; 3], _: f32) -> Option<RayHit> {
+                None
+            }
+            fn sweep(&mut self, _: [f32; 3], to: [f32; 3], _: [f32; 2]) -> Option<[f32; 3]> {
+                Some([to[0], 79.0, to[2]])
+            }
+            fn in_volume(&mut self, _: [f32; 3]) -> bool {
+                false
+            }
+        }
+        let p = PlayerView::new([-670.199, -48.0, -359.885], -48.0, 0);
+        let mut cam = CameraState::spawn([-562.106, 79.0, -522.398], &p);
+        for _ in 0..2 {
+            cam.step_with(&p, 0, &mut Ledge);
+            assert_eq!((cam.eye[1], cam.floor), (119.0, -48.0));
+        }
     }
 
     #[test]
@@ -1651,6 +1792,41 @@ mod tests {
         assert_eq!(hinted, aiming);
     }
 
+    #[test]
+    fn a_fixed_hint_holds_the_eye_short_of_the_look_at() {
+        // V east 24: player 1's spawn in Beach's hint 0x26 (point 0, reach 751). The cut puts the eye on
+        // the line from the point to the look-at, 751 short of the look-at, the rise × 1.2.
+        let fixed = volume::Fixed {
+            point: [2024.0, 277.0, 9703.0],
+            reach: 751.0,
+        };
+        let p = PlayerView::new([2471.0, -463.0, 7827.0], -463.0, 27392);
+        let floor = |_: [f32; 3], _: f32| Some(-463.0);
+        let target = [0x4510_2A31, 0xC369_4390, 0x4605_133E]; // (2306.64, -233.26, 8516.81)
+        let mut cam = CameraState::spawn([2922.0, -261.0, 8004.0], &p);
+        for _ in 0..2 {
+            cam.fixed = Some(fixed);
+            cam.step(&p, 0, floor);
+            assert_eq!(cam.at, [2471.0, -395.5, 7827.0]);
+            assert_eq!(cam.eye.map(f32::to_bits), target);
+            assert_eq!(cam.fixed, None);
+        }
+        // Dead (the hint's veto) or aiming, the follow camera; its distance and height springs then
+        // start back from 1 and 2 (V swim1k 483).
+        let (mut follow, mut dead) = (cam, cam);
+        follow.step(&p, 0, floor);
+        dead.fixed = Some(fixed);
+        dead.step(&PlayerView { dead: true, ..p }, 0, floor);
+        assert_eq!(dead, follow);
+        let (mut aim, mut hinted) = (cam, cam);
+        aim.step(&p, R, floor);
+        hinted.fixed = Some(fixed);
+        hinted.step(&p, R, floor);
+        assert_eq!(hinted, aim);
+        assert!((follow.eye_spring[0] - 1.0111).abs() < 1e-4);
+        assert!((follow.eye_spring[2] - 2.0133).abs() < 1e-4);
+    }
+
     /// The spawn player holding `weapon`, in hand.
     fn armed(weapon: u8) -> PlayerView {
         PlayerView {
@@ -1765,7 +1941,7 @@ mod tests {
             wrap360(yaw - 75.0 * 75.0 * (1.0 / 57.5) * (1.0 / 57.5))
         );
         cam.step(&p, R | C_UP, flat);
-        assert!(cam.scope.zoom[0] < -38.7);
+        assert!(cam.scope.zoom[0] < -27.8);
         cam.step(&p, 0, flat); // let go: cut back behind the player
         assert!(!cam.scope.on && !cam.cut);
         assert!((cam.eye[0] - behind[0]).abs() < 1e-3 && (cam.eye[2] - behind[2]).abs() < 1e-3);
@@ -1780,6 +1956,25 @@ mod tests {
             flat,
         );
         assert!(!cam.scope.on && cam.aim.on);
+    }
+
+    /// One view's zoom (V h1, 0x23's scope: `cam+0x19C`, `+0x1A0` to the bit): -27.8 and -22.94 on
+    /// opening (read 201), 5 C-up frames on (245), clamped at three quarters of -55.6 (270).
+    #[test]
+    fn the_scope_zooms_as_one_view() {
+        let p = armed(0x23);
+        let mut cam = settled();
+        cam.step(&p, R, flat);
+        let bits = |cam: &CameraState| cam.scope.zoom.map(f32::to_bits);
+        assert_eq!(bits(&cam), [0xC1DE_6666, 0xC1B7_7F94]);
+        for _ in 0..5 {
+            cam.step(&p, R | C_UP, flat);
+        }
+        assert_eq!(bits(&cam), [0xC207_70A4, 0xC1DF_7F94]);
+        for _ in 0..30 {
+            cam.step(&p, R | C_UP, flat);
+        }
+        assert_eq!(bits(&cam), [0xC226_CCCC, 0xC209_9FAF]);
     }
 
     /// The mounted gun's scope (V m2): open without R or the hand, level along the facing, from the

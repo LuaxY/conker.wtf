@@ -148,9 +148,11 @@ pub struct Actor {
     dressed: Option<Dressed>,
 }
 
-/// An actor's head and jaw joints and its attachments (bank-09 entry, joint, the model under it).
+/// An actor's head and jaw joints and its attachments (bank-09 entry, joint, the model under it);
+/// a villager's joint 1, between its head and joint 0 ([`head_turn`]).
 struct Dressed {
     head: Option<Entity>,
+    spine: Option<Entity>,
     jaw: Option<Entity>,
     attached: Vec<(u16, u8, Entity)>,
 }
@@ -173,10 +175,19 @@ pub struct OutroLight(usize, u16);
 #[derive(Component)]
 struct Worn;
 
-/// The villagers' head turn is left to their clips: their joint 12's channels compose with the
-/// clip in a way the research does not settle (I: `heads_b3.csv`, `heads_b4.csv`).
-fn turns_head(a: &script::Actor) -> bool {
-    !matches!(a.character.as_str(), "156" | "157")
+/// Whether a villager (156, 157): its head turns in joint 0's frame ([`head_turn`]).
+fn villager(a: &script::Actor) -> bool {
+    matches!(a.character.as_str(), "156" | "157")
+}
+
+/// A turned head's own rotation at `t`: its channels' [`turn`] (−pitch, yaw; roll 0) in the frame
+/// of `func_15038620`'s a1 joint, the head's parent for 88/90/135 (`func_15036F34`), joint 0 for a
+/// villager (`func_15036CE8`'s a1 0, its a0 joint 12; its switch argument, sp+0x30, is 0 as the
+/// others'): so `under`, the rotation of the joints between (a villager's joint 1, the clip's), is
+/// undone. V `cameras-clips-g4-scratch/outros/villager_heads.py`: Beach cs4's and cs3's turned
+/// villagers' head against joint 0 is the channels' turn exactly (b4 reads 500, 600; b3 148, 300).
+pub fn head_turn(h: &script::Head, t: f32, under: Quat) -> Quat {
+    under.inverse() * turn(-value(&h.pitch, t), value(&h.yaw, t))
 }
 
 /// A joint's own rotation of `x` then `y` degrees, as the game composes them (`func_15038620`'s
@@ -629,6 +640,7 @@ fn dress(
             }
             actor.dressed = Some(Dressed {
                 head: a.head.as_ref().and_then(|h| joint(h.joint)),
+                spine: villager(&a).then(|| joint(1)).flatten(),
                 jaw: a.talk.as_ref().and_then(|t| joint(t.jaw)),
                 attached,
             });
@@ -654,8 +666,8 @@ fn dress(
 }
 
 /// Over the sampled pose (after the animation, before the transforms propagate): a turned head's
-/// joint is its channels' rotation from the turn's time (the villagers' aside, [`turns_head`]); a
-/// talking jaw's is its openness and skew.
+/// joint is its channels' rotation from the turn's time ([`head_turn`]); a talking jaw's is its
+/// openness and skew.
 fn pose(
     playing: Res<Playing>,
     outros: Res<Outros>,
@@ -673,12 +685,13 @@ fn pose(
         let (a, Some(d)) = (actor.of(&outros), &actor.dressed) else {
             continue;
         };
+        let under =
+            (d.spine.and_then(|s| joints.get(s).ok())).map_or(Quat::IDENTITY, |s| s.rotation);
         if let (Some(h), Some(joint)) = (&a.head, d.head)
-            && turns_head(a)
             && t >= f32::from(h.t)
             && let Ok(mut j) = joints.get_mut(joint)
         {
-            j.rotation = turn(-value(&h.pitch, t), value(&h.yaw, t));
+            j.rotation = head_turn(h, t, under);
         }
         let seed = (actor.outro as u64) << 8 | actor.n as u64;
         if let (Some(talk), Some(joint)) = (&a.talk, d.jaw)
@@ -873,6 +886,45 @@ mod tests {
             let got = pose(o, n, t);
             let near = got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.5);
             assert!(near, "actor {n} at t {t}: {got:?}, the oracle {want:?}");
+        }
+    }
+
+    /// Beach's turned villagers (cs4's 0x15 and 0x17, cs3's 0x17): joint 12's rotation against its
+    /// parent joint 1 is the channels' turn in joint 0's frame, joint 1's own (the oracle's: its
+    /// yaw, pitch and roll against joint 0, `villager_heads.py` on the DL dumps) undone: within
+    /// 0.5° of `heads_b4.csv` and `heads_b3.csv` (their 0.1° rounding is the residual).
+    #[test]
+    fn villager_heads_match_the_oracle() {
+        let Some(beach) = pack_outros("2b") else {
+            eprintln!("no pack outros: skipping");
+            return;
+        };
+        // (outro, actor, t, joint 1's yaw/pitch/roll, the head's): b4 reads 500, 600; b3 148, 300.
+        let cases = [
+            (0, 3, 418, [-5.28_f32, -0.17, -5.60], [-1.9, -52.0, 9.1]),
+            (0, 3, 618, [-5.28, -0.10, -2.98], [1.5, -52.1, 4.8]),
+            (0, 2, 418, [-3.82, -1.87, 3.69], [4.4, -9.9, -3.6]),
+            (0, 2, 618, [4.62, -15.11, -9.46], [-8.4, -24.9, 9.1]),
+            (1, 4, 6, [-5.61, -22.94, -0.95], [54.2, -12.3, 20.8]),
+            (1, 4, 310, [-5.61, -22.76, -0.95], [54.2, -12.4, 20.7]),
+        ];
+        for (o, n, t, [y, p, r], want) in cases {
+            let a = beach[o].actors().nth(n).unwrap();
+            assert!(villager(a), "cs{} actor {n}", beach[o].cutscene);
+            let h = a.head.as_ref().filter(|h| t >= h.t).unwrap();
+            let under = Quat::from_euler(
+                EulerRot::YXZ,
+                y.to_radians(),
+                p.to_radians(),
+                r.to_radians(),
+            );
+            let got = angles(head_turn(h, f32::from(t), under));
+            let near = got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.5);
+            assert!(
+                near,
+                "cs{} actor {n} at t {t}: {got:?}, the oracle {want:?}",
+                beach[o].cutscene
+            );
         }
     }
 

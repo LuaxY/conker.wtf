@@ -703,6 +703,12 @@ fn main() {
     app.insert_resource(Collision(world));
     let mut game = Game::new(arena, setup);
     game.starts = starts;
+    // The level script's start draws (0x34's and 0x3F's Deathmatch, Beach). ponytail: once a
+    // server run (the original draws each match); a rematch keeps everyone's start place, as
+    // `reseat` re-places only moved players.
+    if !game.setup.settings.raptor {
+        game.starts.draw(scene, &mut game.m.rng);
+    }
     game.outros = (pack.outros.iter())
         .map(|o| (o.winner, o.cutscene, o.frames()))
         .collect();

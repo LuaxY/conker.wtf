@@ -362,7 +362,13 @@ impl Bots {
     /// hears ([`noises`]).
     pub fn observe(&mut self, events: &[Event], m: &Match) {
         self.noises = noises(m);
-        self.noises.extend(jets(&m.traps, &mut self.emit));
+        let sparks: Vec<[f32; 3]> = match m.traps.list.is_empty() {
+            true => Vec::new(),
+            false => (SPARKS.iter().filter_map(|&r| self.zones.get(r)))
+                .map(|(z, _)| z.zone.center.map(f32::from))
+                .collect(),
+        };
+        self.noises.extend(jets(&m.traps, &mut self.emit, &sparks));
         let k = |slot: usize| self.slots.iter().position(|&s| s == Some(slot));
         for e in events {
             match *e {
@@ -873,24 +879,36 @@ impl Bots {
 /// 0x34's fire jets as the AI hears them: while a plate's jets burn, the emitter of each row's middle
 /// jet (the record's command 1) is heard 500 around (`func_151A6600` → `func_1508B20C` while its
 /// +0x127 ≠ 0, C), from the jets' first burning frame to the frame after their last, 121 frames.
-/// The electric floor has no emitter. V noise34 (plate 6 stood on from read 80, the jets burning
-/// 83-202 as trap34): records 28, 31 and 64 heard 83-203; o34emit, bots' presses: 121 frames, the
-/// three middle jets of plate 6, then of plate 7. A bot that hears one walks out of the 500
-/// (`World`'s `noises`). `emit`: per trap, the frames its emitter has left.
-fn jets(t: &Traps, emit: &mut Vec<u8>) -> Vec<([f32; 3], f32)> {
+/// V noise34 (plate 6 stood on from read 80, the jets burning 83-202 as trap34): records 28, 31
+/// and 64 heard 83-203; o34emit, bots' presses: 121 frames, the three middle jets of plate 6, then
+/// of plate 7. A bot that hears one walks out of the 500 (`World`'s `noises`). `emit`: per trap,
+/// the frames its emitter has left.
+///
+/// The electric floor is heard first, at `sparks` (trigger records [`SPARKS`]' centres): three
+/// level objects (`func_15105BC8`, +0x34 bit 1) call `func_1508B20C` there with 500 from its first
+/// live frame for 150 of its 151 (V elec1: the calls from the frame of message 0x38, record 43 on
+/// and the noises in the same dump; o15s0-s9, 15 bots: 150-frame spans, before the jets' in G).
+fn jets(t: &Traps, emit: &mut Vec<u8>, sparks: &[[f32; 3]]) -> Vec<([f32; 3], f32)> {
     emit.resize(t.list.len(), 0);
+    let live = (t.list.iter().position(|x| x.electric))
+        .is_some_and(|k| (1..traps::SPARK_FRAMES).contains(&t.left[k]));
+    let mut heard: Vec<_> = (sparks.iter().filter(|_| live))
+        .map(|&at| (at, 500.0))
+        .collect();
     let middle = |k: &usize| t.list[*k].command == 1 && !t.list[*k].electric;
-    (0..t.list.len())
-        .filter(middle)
-        .filter_map(|k| {
-            emit[k] = match t.left[k] == traps::FIRE_FRAMES - 1 {
-                true => traps::FIRE_FRAMES as u8 + 1,
-                false => emit[k].saturating_sub(1),
-            };
-            (emit[k] > 0).then(|| (t.list[k].zone.zone.center.map(f32::from), 500.0))
-        })
-        .collect()
+    heard.extend((0..t.list.len()).filter(middle).filter_map(|k| {
+        emit[k] = match t.left[k] == traps::FIRE_FRAMES - 1 {
+            true => traps::FIRE_FRAMES as u8 + 1,
+            false => emit[k].saturating_sub(1),
+        };
+        (emit[k] > 0).then(|| (t.list[k].zone.zone.center.map(f32::from), 500.0))
+    }));
+    heard
 }
+
+/// The trigger records of 0x34's electric floor's three noise objects (kind 3, action 20, off; V elec1:
+/// `func_15105BC8`'s objects 0x8021DD90, DD48, DD00 in that order).
+const SPARKS: [usize; 3] = [60, 59, 58];
 
 /// The bag's walker reaches a node this near it, across (I: the game's NPC mover, `func_1504A730`
 /// on obj+0x25C, is unported; this clears the bag's turning circle at 17.5 a frame).
@@ -1167,7 +1185,8 @@ mod tests {
 
     /// 0x34's jets against the oracle (noise34: plate 6 stood on from read 80, its jets burning
     /// 83-202 as trap34): the middle jet of the row is heard 500 around on frames 83-203; its
-    /// neighbours and the electric floor (plate 9, stood on too) never are.
+    /// neighbours never are. The electric floor (plate 9, stood on too) is heard at its noise
+    /// objects on the first 150 of its 151 live frames (V elec1, o15s0-s9), before the jets.
     #[test]
     fn the_jets_are_heard_while_they_burn() {
         let record = |at: [i16; 3], arg: u32, id: u32, command: u32| {
@@ -1190,19 +1209,33 @@ mod tests {
         .concat();
         let mut t = Traps::new(traps::SCENE, &table);
         let (mut emit, mut burning, mut heard) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut live, mut sparks) = (Vec::new(), Vec::new());
+        let at = [1.0, 2.0, 3.0];
         for frame in 0..300 {
             if t.hits(1) {
                 burning.push(frame);
             }
+            if t.hits(3) {
+                live.push(frame);
+            }
             let on = (frame >= 80).then_some(0);
             t.step([on, None, None, on]);
-            for (pos, r) in jets(&t, &mut emit) {
-                assert_eq!((pos, r), ([-2587.0, -379.0, 3247.0], 500.0));
-                heard.push(frame);
+            let noises = jets(&t, &mut emit, &[at]);
+            for (k, &(pos, r)) in noises.iter().enumerate() {
+                assert_eq!(r, 500.0);
+                if pos == at {
+                    assert_eq!(k, 0);
+                    sparks.push(frame);
+                } else {
+                    assert_eq!(pos, [-2587.0, -379.0, 3247.0]);
+                    heard.push(frame);
+                }
             }
         }
         assert_eq!(burning, (83..=202).collect::<Vec<_>>());
         assert_eq!(heard, (83..=203).collect::<Vec<_>>());
+        assert_eq!(live.len(), 151);
+        assert_eq!(sparks, live[..150]);
     }
 
     #[test]

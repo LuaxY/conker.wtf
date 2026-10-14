@@ -94,7 +94,8 @@ use serde::{Deserialize, Serialize};
 /// Tank's turret C-button sign (predicted).
 /// 36: `Combat::laser` (the crossbow's aim dot); `Fighting`'s `traps`, `sliding` and `bolts` (0x34's traps, the
 /// flags, the mounted guns and the bolt's push predicted); Tank's scope bullet and Race's floor reach and turn (shared).
-pub const PROTOCOL_ID: u64 = 36;
+/// 37: e1's knock slide (every airborne knock) and the Race bots' start kick (shared).
+pub const PROTOCOL_ID: u64 = 37;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

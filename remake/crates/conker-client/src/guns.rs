@@ -11,7 +11,9 @@ use bevy::gltf::{Gltf, GltfMaterialName};
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
+use conker_anim::{AnimPlayer, Request};
 use conker_assets::character_gltf;
+use conker_assets::pose::Skeleton;
 use conker_rules::gun;
 use conker_rules::net::Fighting;
 use conker_sim::net::{MatchView, Player};
@@ -67,6 +69,87 @@ struct Rig {
     pivot: Entity,
     rest: Vec<(Entity, Transform)>,
     belt: Option<(Handle<StandardMaterial>, Affine2)>,
+}
+
+/// The model's files, which [`load`] reads on the maps with guns, and its fire clip (logical clip
+/// 1, a 12-frame loop; clip 0, the rest pose, has no keys).
+const FILES: [&str; 2] = [
+    "characters/138/character.gltf",
+    "characters/138/character.bin",
+];
+const FIRE_CLIP: &str = "pair_0000_anim_0001";
+const FIRE_FRAMES: u16 = 12;
+
+/// The fire clip's pose each frame as the scope's eye takes it
+/// ([`conker_camera::PlayerView::gun_kick`]): `joint_00`'s and `joint_04`'s turns about x (degrees
+/// nose down) and `joint_04`'s slide ahead (model units) from the rest pose. Empty without the
+/// model: no recoil.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct FireClip(pub Vec<[f32; 3]>);
+
+impl FireClip {
+    pub fn parse(gltf: &[u8], bin: &[u8]) -> conker_assets::Result<Self> {
+        let sk = Skeleton::parse(gltf, bin)?;
+        let pitch = |q: [f32; 4]| 2.0 * q[0].atan2(q[3]).to_degrees();
+        let frame = |f: u16| {
+            let p = sk.sample(FIRE_CLIP, f32::from(f));
+            [pitch(p[0].r), pitch(p[4].r), p[4].t[2] - sk.rest[4].t[2]]
+        };
+        Ok(Self((0..FIRE_FRAMES).map(frame).collect()))
+    }
+}
+
+/// The pack files [`load`] reads on `map`: the gun model's where the map has guns.
+pub fn files(map: &str) -> Vec<String> {
+    let scene = conker_sim::net::map_scene(map).map_or(0, usize::from);
+    match gun::places(scene).is_empty() {
+        true => Vec::new(),
+        false => FILES.map(String::from).into(),
+    }
+}
+
+/// The fire clip from the pack ([`files`]), on the maps with guns.
+pub fn load(map: &str, mut read: impl FnMut(&str) -> Option<Vec<u8>>) -> Option<FireClip> {
+    let [gltf, bin] = <[String; 2]>::try_from(files(map)).ok()?;
+    FireClip::parse(&read(&gltf)?, &read(&bin)?).ok()
+}
+
+/// The local gunner's gun as drawn, for its scope's eye: every frame the gun asks for its fire clip
+/// while it fires (state 4), else its rest (clip 0), at rate 1 with a 2-frame cross-fade
+/// (`func_1505841C` → `func_1505E650(gun, id, 1.0, 2.0, …)`, V a1), and the eye takes the pose
+/// drawn the frame before (V k2: the gun fires from read 101; the eye is at rest at 101 and 102, at
+/// the clip's frame 3 at 105, frame 0 at 108).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Recoil {
+    clock: AnimPlayer,
+    drawn: [f32; 3],
+}
+
+impl Recoil {
+    /// One tick with the gun `firing` or not: the kick drawn the tick before.
+    pub fn step(&mut self, firing: bool, clip: &FireClip) -> [f32; 3] {
+        let eye = self.drawn;
+        let c = &mut self.clock;
+        c.advance();
+        let id = u16::from(firing);
+        let req = Request {
+            id,
+            rate: 1.0,
+            blend: 2.0,
+            start: 0.0,
+        };
+        c.play(req, FIRE_FRAMES);
+        // I: the game's pose mixer is unread (conker-anim's linear weight): V k2's eye is up to 0.85
+        // off on the fades' reads.
+        let pose = |id: u16, t: f32| match id {
+            1 => clip.0.get(t as usize).copied().unwrap_or_default(),
+            _ => [0.0; 3],
+        };
+        let w = c.prev_weight();
+        let (from, to) = (pose(c.prev, c.prev_time), pose(c.id, c.time));
+        self.drawn = core::array::from_fn(|i| from[i] * w + to[i] * (1.0 - w));
+        eye
+    }
 }
 
 /// The fire clip's graph and node, made once (its length set once).
@@ -328,6 +411,52 @@ mod tests {
             }
         }
         assert!((tilt(30.0) * Vec3::Z).y < 0.0);
+    }
+
+    /// V k2 (e1 under lldb; 0x34's gun at yaw 0xA000, pitched 12°, firing reads 101-179): the
+    /// scope's eye per read, the pack's fire clip through [`Recoil`] and
+    /// `conker_camera::gun_eye_kicked`. At rest and while the clip loops (every read 105-180, a
+    /// 6-frame cycle) within 0.1 (the rest pose's own 0.07); the fades in (103, 104: 0.46, 0.57)
+    /// and out (181-183: 0.85, 0.48, 0.1) within 0.9 (I, the pose mixer).
+    #[test]
+    fn the_fire_clip_kicks_the_scopes_eye_as_k2() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets/");
+        let Some(clip) = load("34", |p| std::fs::read(format!("{dir}{p}")).ok()) else {
+            eprintln!("no pack gun model: skipping");
+            return;
+        };
+        let v = [
+            (100, [2330.659, 739.789, 634.340]),
+            (101, [2330.659, 739.789, 634.340]),
+            (102, [2330.662, 739.796, 634.338]),
+            (103, [2332.242, 742.598, 632.758]),
+            (104, [2332.707, 741.434, 632.293]),
+            (105, [2332.307, 741.148, 632.693]),
+            (106, [2332.542, 742.781, 632.458]),
+            (107, [2333.676, 746.025, 631.324]),
+            (108, [2334.595, 748.123, 630.405]),
+            (109, [2333.614, 744.838, 631.386]),
+            (110, [2332.541, 741.059, 632.459]),
+            (180, [2334.595, 748.123, 630.405]),
+            (181, [2333.932, 745.466, 631.068]),
+            (182, [2332.322, 742.718, 632.678]),
+            (183, [2330.738, 739.920, 634.262]),
+            (184, [2330.659, 739.789, 634.340]),
+        ];
+        let at = |t: u32| v.iter().find(|r| r.0 == t).map(|r| r.1);
+        let mut recoil = Recoil::default();
+        for t in 90..=190 {
+            let kick = recoil.step((101..=179).contains(&t), &clip);
+            let eye = conker_camera::gun_eye_kicked([2428.0, 645.0, 537.0], 0xA000, 12.0, kick);
+            let (want, near) = match t {
+                105..=180 => (at(105 + (t - 105) % 6), 0.1),
+                103 | 104 | 181..=183 => (at(t), 0.9),
+                _ => (at(t).or(at(100)), 0.1),
+            };
+            let want = Vec3::from_array(want.unwrap());
+            let off = Vec3::from_array(eye).distance(want);
+            assert!(off < near, "read {t}: {eye:?} vs {want}");
+        }
     }
 
     /// The belt moves 2.5 of its 16 texels a frame on 0x30 and 4 elsewhere (C), its v rising:

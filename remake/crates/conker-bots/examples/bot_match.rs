@@ -8,9 +8,10 @@
 //!   [out.csv] [seed]`
 //! prints a summary per participant; `out.csv` gets one row per frame and participant
 //! (`read,player,x,y,z,health,weapon,grenades,script,ai,goal,kills,sees,target,role,drawn,gdc,enemy,
-//! attacking,shots`: the role G+0x15C, the drawn item s126+0x78, the script's goal G+0xDC, G+0x11C,
-//! G+0x21C and the shot counter s126+0x1AB, the sniper's shots counted from its fire clip), the columns
-//! `lab/oracle/tools/bot_stats.py` reads for both sides.
+//! attacking,shots,action,immune,stun`: the role G+0x15C, the drawn item s126+0x78, the script's goal
+//! G+0xDC, G+0x11C, G+0x21C and the shot counter s126+0x1AB, the sniper's shots counted from its fire
+//! clip; the rules' action, immune and stun frames), the columns `lab/oracle/tools/bot_stats.py` reads
+//! for both sides.
 
 use conker_bots::brain::g;
 use conker_bots::lift::Lifts;
@@ -110,7 +111,16 @@ fn main() {
     let players = 1 + bots;
     let rng = seed.map_or_else(Rng::default, |s| Rng { state: s });
     // `Match::deathmatch` with the scene's start table.
-    let starts = spawn::starts(scene as u16).expect("the scene's start tables");
+    let mut starts = spawn::starts(scene as u16).expect("the scene's start tables");
+    // 0x34's and 0x3F's first record as the oracle's boot draws it for the roster (V: 1 + 3 drew 0,
+    // 1 + 5 3, 1 + 15 7; others unseen, 7), so both sides start alike (`Starts::draw`).
+    if matches!(scene, 0x34 | 0x3F) {
+        starts.deathmatch = spawn::ring(match players {
+            4 => 0,
+            6 => 3,
+            _ => 7,
+        });
+    }
     let mut r = rng;
     spawn::place(&arena.spawns, 0, &mut r);
     let fighters = (0..players)
@@ -145,7 +155,7 @@ fn main() {
     if let Some(w) = &mut csv {
         writeln!(
             w,
-            "read,player,x,y,z,health,weapon,grenades,script,ai,goal,kills,sees,target,role,drawn,gdc,enemy,attacking,shots"
+            "read,player,x,y,z,health,weapon,grenades,script,ai,goal,kills,sees,target,role,drawn,gdc,enemy,attacking,shots,action,immune,stun"
         )
         .unwrap();
     }
@@ -174,7 +184,7 @@ fn main() {
             let f = &m.players[slot];
             let [x, y, z] = f.body.pos;
             println!(
-                "{} pos {x:.0} {y:.0} {z:.0} cur {} prev {} goal {} avoid {} script {} mode {} spd {} xz {:.1} wait {} wp {:?} in {:?} state {} ai {:?}",
+                "{} pos {x:.0} {y:.0} {z:.0} cur {} prev {} goal {} avoid {} script {} mode {} spd {} xz {:.1} wait {} wp {:?} in {:?} state {} ai {:?} action {:?} hp {} stun {} immune {}",
                 m.tick,
                 n.cur,
                 n.prev,
@@ -188,7 +198,11 @@ fn main() {
                 n.waypoint,
                 inputs[slot],
                 f.body.state,
-                ai.state(k)
+                ai.state(k),
+                f.action,
+                f.health,
+                f.stun,
+                f.immune
             );
             let t = usize::try_from(ai.globals().get(g::TARGET, k) - 2)
                 .ok()
@@ -320,7 +334,7 @@ fn main() {
                 let (sees, target) = (g.get(g::SEES, p), g.get(g::TARGET, p));
                 writeln!(
                     w,
-                    "{},{p},{x},{y},{z},{},{},{},{script},{state},{goal},{},{sees},{target},{},{drawn},{},{},{},{}",
+                    "{},{p},{x},{y},{z},{},{},{},{script},{state},{goal},{},{sees},{target},{},{drawn},{},{},{},{},{},{},{}",
                     m.tick,
                     f.health,
                     f.weapon.unwrap_or(0),
@@ -330,7 +344,11 @@ fn main() {
                     g.get(0xDC, p),
                     g.get(g::ENEMY, p),
                     g.get(g::ATTACKING, p),
-                    f.shots + snipes[p]
+                    f.shots + snipes[p],
+                    // The action's name (its fields dropped: the CSV's commas).
+                    format!("{:?}", f.action).split([' ', '(']).next().unwrap_or(""),
+                    f.immune,
+                    f.stun
                 )
                 .unwrap();
             }

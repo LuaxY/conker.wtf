@@ -1342,7 +1342,7 @@ pub(crate) fn sweep_walls(
 }
 
 /// The direction the walls pushed the player this frame (`func_1505A630` of the push), if they did.
-fn push_angle(p: &PlayerState, pre: [f32; 3], world: &CollisionWorld) -> Option<u16> {
+pub fn push_angle(p: &PlayerState, pre: [f32; 3], world: &CollisionWorld) -> Option<u16> {
     let (dx, mdz) = (p.pos[0] - pre[0], pre[2] - p.pos[2]);
     (p.pos[0] != pre[0] || p.pos[2] != pre[2]).then(|| match &world.acos {
         Some(t) => t.angle(dx, mdz),
@@ -1351,7 +1351,7 @@ fn push_angle(p: &PlayerState, pre: [f32; 3], world: &CollisionWorld) -> Option<
 }
 
 /// A push within ±0x2200 (47.8°) of straight against the motion (`0x5E01 ≤ move − away < 0xA200`).
-fn against(move_angle: u16, away: u16) -> bool {
+pub fn against(move_angle: u16, away: u16) -> bool {
     (0x5E01..0xA200).contains(&move_angle.wrapping_sub(away))
 }
 

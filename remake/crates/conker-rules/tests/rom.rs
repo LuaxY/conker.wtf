@@ -472,3 +472,55 @@ fn a_cone_throws_and_burns() {
     eprintln!("cone34k: y within {worst} of the oracle's over reads 41-139");
     assert!(worst < 0.01);
 }
+
+/// V e1 (`mounted-gun-scratch/e1`): the mounted gun's bullet (type 0x2C: k 5, xz 70, y-vel 25)
+/// knocks player 2 along 0x9595 at read 101. In the air it loses 0.5 a frame, a wall at read 105
+/// caps it at 14 and it slides along, two bounces keep 0.6 of it, and below speed 1 it stops: at
+/// rest at read 129, 140.7 from where it stood. Per read 102-129: position and speed.
+#[test]
+fn the_gun_bullets_knock_slides_as_e1() {
+    use conker_rules::gas::Effect;
+    use conker_sim::movement::Input;
+    let Some(rom) = rom() else { return };
+    let lab = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../lab");
+    let Ok(text) = std::fs::read_to_string(format!(
+        "{lab}/research/mp-original/mounted-gun-scratch/e1/e1.csv"
+    )) else {
+        return;
+    };
+    let mut lines = text.lines();
+    let header: std::collections::HashMap<&str, usize> =
+        (lines.next().unwrap().split(',').enumerate())
+            .map(|(i, h)| (h, i))
+            .collect();
+    let rows: BTreeMap<u32, [f32; 4]> = (lines.map(|l| l.split(',').collect::<Vec<_>>()))
+        .filter(|c| c[header["player"]] == "1" && !c[header["x"]].is_empty())
+        .map(|c| {
+            let v = |k: &str| c[header[k]].parse::<f32>().unwrap();
+            let read = c[header["read"]].parse().unwrap();
+            (read, [v("x"), v("y"), v("z"), v("xz_speed")])
+        })
+        .collect();
+    let world = world_34(&rom);
+    let (arena, mut m) = match_34(&rom, &[[2216.0, 645.0, 749.0]], 101);
+    m.apply(&[Effect::Hit {
+        slot: 0,
+        kind: conker_rules::damage::MG_BULLET,
+        attacker: None,
+    }]);
+    // The bullet's own direction (G4c's aim lands 30 units off it).
+    m.players[0].body.move_angle = 0x9595;
+    while m.tick < 129 {
+        m.step(&arena, &[Input::default()], &world);
+        let (b, v) = (&m.players[0].body, rows[&m.tick]);
+        let near = (0..3).all(|j| (b.pos[j] - v[j]).abs() < 0.01);
+        assert!(
+            near && (b.xz_speed - v[3]).abs() < 1e-4,
+            "read {}: {:?} {} vs {v:?}",
+            m.tick,
+            b.pos,
+            b.xz_speed
+        );
+    }
+    assert!(!m.players[0].body.airborne);
+}

@@ -851,4 +851,41 @@ mod tests {
         let want = ((heading - 90.0) * 65536.0 / 360.0) as i32 as u16;
         assert!(follow.yaw().abs_diff(want) <= 1, "{} {want}", follow.yaw());
     }
+
+    /// An egg carrier keeps the on-foot camera (V carry2 231-400, cameras-clips-g4-scratch/scope:
+    /// mode 8, `s126+0x78` and `cam+0x23E` 0, head 90): at rest 247 behind and 100 over the feet,
+    /// looking at 61.5 over them (0.75 × 90 and the nest floor's sink −6; carry2 246-258); R opens
+    /// the unarmed aim, 90 from the look-at, lifted 25 (V carry3 354-380).
+    #[test]
+    fn the_egg_carrier_keeps_the_on_foot_camera() {
+        let place = conker_rules::spawn::Placement {
+            index: 0,
+            pos: [-7247.095, 209.0, -3095.0],
+            facing: 21760,
+            camera: [0.0; 3],
+        };
+        let mut f = Fighter::new(&place, 0, 0);
+        (f.class, f.flag) = (
+            conker_rules::raptor::CAVEMAN,
+            Some(conker_rules::raptor::EGG),
+        );
+        f.body.sink = -6;
+        let p = crate::camera_view(&f, 0);
+        assert_eq!((p.weapon, p.head), (0, 90.0));
+        let mut cam = conker_camera::CameraState::spawn([0.0; 3], &p);
+        let step = |cam: &mut conker_camera::CameraState, buttons, n| {
+            for _ in 0..n {
+                cam.step(&p, buttons, |_, _| Some(209.0));
+            }
+            let (e, a) = (cam.view_eye(), cam.view_at());
+            let d = (e[0] - a[0]).hypot(e[2] - a[2]);
+            [d, e[1] - 209.0, a[1] - 209.0]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 0.01);
+        let rest = step(&mut cam, 0, 60);
+        assert!(near(rest, [247.0, 100.0, 61.5]), "{rest:?}");
+        let aimed = step(&mut cam, conker_camera::R, 40);
+        assert!(cam.aim.on && cam.weapon == 0);
+        assert!(near(aimed, [90.0, 86.5, 86.5]), "{aimed:?}");
+    }
 }

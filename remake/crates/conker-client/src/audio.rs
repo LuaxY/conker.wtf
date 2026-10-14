@@ -284,6 +284,8 @@ enum Owner {
     Gun(usize),
     /// An outro's script sound (an index of its `sounds`).
     Outro(usize),
+    /// An outro's tank (an index of its actors): its engine and gears ([`Sounds::outro_tanks`]).
+    OutroTank(usize),
     /// A map's sound zone (an index of its `zones`).
     Zone(usize),
     /// Scene 0x34's trap (an index of its `traps`).
@@ -2233,10 +2235,11 @@ impl Sounds {
     /// `cents`.
     fn outro_sounds(&mut self, cx: &Cx, playing: Option<(&Outro, u32)>) {
         let Some((o, k)) = playing else {
-            self.stop(|v| matches!(v.owner, Owner::Outro(_)));
+            self.stop(|v| matches!(v.owner, Owner::Outro(_) | Owner::OutroTank(_)));
             self.outro.clear();
             return;
         };
+        self.outro_tanks(cx, o, k);
         let t = o.t(k);
         for (i, s) in o.sounds.iter().enumerate() {
             let owner = Owner::Outro(i);
@@ -2297,6 +2300,52 @@ impl Sounds {
                     self.push(cx, v);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// An outro's tanks' own engines at frame `k` (model 40's class, the Tank mode's: [`engine`],
+    /// [`On::TankEngine`], [`On::TankGear`]; C `func_151BB044`, `func_151BB0E0`), besides the
+    /// script's sounds: idling (0x4A7, from its creation before frame 0), coasting (0x4A8) from the
+    /// frame its path moves it faster than 5 (obj+0x3C, twice its step a frame; obj+0x44 stays 0,
+    /// so it never speeds up), a gear change at each switch, at the tank. V cs5b: 0x4A7 at both
+    /// tanks' creation (read 437), 0x4A5 and 0x4A8 at t 2 (439), the lit tank's stop at t 804
+    /// (840: one of 0x4A3-0x4A6 and 0x4A7); speeds 7.70 and 6.86, +0xB8 0 (its pitch term).
+    fn outro_tanks(&mut self, cx: &Cx, o: &Outro, k: u32) {
+        let cues = &cx.pack.audio.events.cues;
+        for (n, a) in o.actors().enumerate() {
+            if a.character.split('-').next() != Some("40") {
+                continue;
+            }
+            let (owner, at) = (Owner::OutroTank(n), |k| a.place(o.t(k)));
+            let state = |k: u32| match k {
+                0 => 0,
+                _ => engine(2.0 * dist2(at(k), at(k - 1)).sqrt(), 0.0),
+            };
+            let src = Src {
+                owner,
+                ..Src::at(at(k))
+            };
+            for v in self.voices.iter_mut().filter(|v| v.owner == owner) {
+                v.pos = src.pos;
+            }
+            let is = state(k);
+            if k > 0 && state(k - 1) != is {
+                self.stop(|v| v.owner == owner && v.tag.is_some());
+                let gear = On::TankGear { coast: is == 2 };
+                for c in cues.iter().filter(|c| c.on == gear) {
+                    self.start(cx, &c.play, &c.play.sounds, 1.0, src);
+                }
+            }
+            if !(self.voices.iter()).any(|v| v.owner == owner && !v.stopped && v.tag.is_some()) {
+                let on = On::TankEngine { moving: is != 0 };
+                for (i, c) in cues.iter().enumerate().filter(|c| c.1.on == on) {
+                    let src = Src {
+                        tag: Some(i),
+                        ..src
+                    };
+                    self.start(cx, &c.play, &c.play.sounds, 1.0, src);
+                }
             }
         }
     }
@@ -3252,6 +3301,56 @@ mod tests {
         assert_eq!((heard[49].0.is_some(), heard[50].0), (true, None));
         let once: Vec<u32> = (0..60).filter(|&k| heard[k as usize].1.is_some()).collect();
         assert_eq!(once, [25]);
+    }
+
+    /// Colors cs5's tanks run their own engines (V cs5b): both idle at frame 0 (0x4A7, from their
+    /// creation at read 437), coast from frame 1 (t 2, read 439: 0x4A5 and 0x4A8) at their paths'
+    /// speeds (the oracle's obj+0x3C 7.70 and 6.86), and the lit one (actor 4) idles at frame 402
+    /// (t 804, read 840: a gear change and 0x4A7) while the other drives on; the outro's end stops
+    /// them.
+    #[test]
+    fn the_outro_tanks_run_their_engines() {
+        let Some(pack) = colors_pack() else { return };
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let Ok(json) = std::fs::read(format!("{dir}/maps/30/outros.json")) else {
+            return;
+        };
+        let outros: Vec<Outro> = serde_json::from_slice(&json).unwrap();
+        let o = outros.iter().find(|o| o.cutscene == 5).unwrap();
+        let speed = |n: usize| {
+            let a = o.actors().nth(n).unwrap();
+            2.0 * dist2(a.place(o.t(1)), a.place(o.t(0))).sqrt()
+        };
+        assert!(
+            (speed(4) - 7.70).abs() < 0.3 && (speed(7) - 6.86).abs() < 0.3,
+            "{} {}",
+            speed(4),
+            speed(7)
+        );
+        let mut s = Sounds::default();
+        let ids = heard(&mut s, &pack, 0..403, |s, cx| s.outro_tanks(cx, o, cx.tick));
+        let at = |k: u32| -> Vec<u16> { ids.iter().filter(|i| i.0 == k).map(|i| i.1).collect() };
+        assert_eq!(
+            (at(0), at(1)),
+            (vec![1191; 2], vec![1189, 1192, 1189, 1192])
+        );
+        assert!(matches!(at(402)[..], [1187..=1190, 1191]), "{ids:?}");
+        let engine = |n| {
+            let live = |v: &&Voice| v.owner == Owner::OutroTank(n) && !v.stopped && v.tag.is_some();
+            s.voices
+                .iter()
+                .filter(live)
+                .map(|v| v.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!((engine(4), engine(7)), (vec![1191], vec![1192]));
+        s.outro_sounds(&cx(&pack, 403), None);
+        assert!(
+            s.voices
+                .iter()
+                .all(|v| v.stopped || !matches!(v.owner, Owner::OutroTank(_)))
+        );
     }
 
     /// A line (no bank sound) plays once unless it is the background; an effect's muffle is a

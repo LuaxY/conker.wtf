@@ -71,7 +71,7 @@ const CAM_WALL: f32 = 10.0;
 /// behind the hull (V pw2 202: 309.9 back, 159 up).
 const SCOPE_EYE: [f32; 2] = [27.5, 111.6];
 const SCOPE_ITEM: u8 = 0x1F;
-const SCOPE_ZOOM: [f32; 2] = [-38.7, -23.5];
+const SCOPE_ZOOM: [f32; 2] = [-27.8, -22.937_294]; // V tank_pw2 171 (one view)
 /// The bomb over its carrier (I: item 0x18's look is not found): this high over the tank, at this
 /// share of the post's scale.
 const CARRIED: (f32, f32) = (190.0, 0.3);

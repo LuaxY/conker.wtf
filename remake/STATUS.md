@@ -1,5 +1,197 @@
 # Status after wave 6 (2026-10-10)
 
+## Cameras, clips and outros (2026-10-14)
+**Batch G4b. Beach's sea sides hold the original's fixed cameras (hints 0x26/0x27, mode 0x40), and a swimmer dies in
+clip 0x24. Map 0x34's corridor camera now matches the original's eye bit for bit through read 777. The scope opens at
+one view's zoom, so its dots start at 177°. The original's egg carrier keeps the on-foot camera, as the remake's
+already did. A dead body draws the 0x18A twitch as the original does (1 in 8, again every 64 frames), and a head kill
+hides the head. A mounted gun's scope eye kicks with its fire clip. e1's knock slides 140.9 (V 140.7, was 167.7).
+In the outros the villagers' heads turn in joint 0's frame, and Colors cs5's tanks run their own engines. No wire
+change; the knock is shared simulation (below).** Research: `../lab/research/mp-original/cameras-clips-g4.md` (§1-11
+and the G5 pack list), scratch `cameras-clips-g4-scratch/` (one folder per item group; oracle `ConkerRecomp.g4b`).
+
+| Part | What |
+|---|---|
+| conker-camera `volume.rs`, `lib.rs` | **Kind-5 hints** (`Fixed`, `HINT_FIXED`, `CameraLevel::fixed`; `func_1512E8E0` → mode 0x40, `func_15129934`): the eye springs (1/3 across, 1/2 up) toward the line from the hint's point to the look-at, `reach` short of it, the rise × 1.2; a cut puts it there; a death (the hint's veto, cam+0x6D2) or R's aim drops it, C-strafe is skipped under it. 0x26: point 0 (2024, 277, 9703), reach 751; 0x27: point 1 (−2290, 728, 10913), reach 707 (`SEA_POINTS`, V cam+0x288; the pack lacks [0x0C, scene, 8]). **`eye_spring`** (cam+0x964/0x968 and velocities): mode 0x40 drops the distance and height springs to 1/2, `func_15123A54` brings them back to 6/8 at (1, 2). **`CameraWorld::floor_at`**: after a sweep that hit, the full floor query at the eye's own height, no fast path, the cached triangle untouched (`func_1512BB10` → `func_1510E8BC(0, …)`). **`VIEW_ANGLES`** = one view's 60.6 × 50 (0x42726666; the split screen's 82.416 is gone). **`PlayerView::gun_kick`**, `gun_eye_kicked`: the scope eye on the gun's fire clip as last drawn |
+| conker-sim `follow.rs` | Reads the spawn's hints on a cut; sets `fixed` after each step; `Level::floor_at` = `world.floor(x, z, eye y, start y, None)` |
+| conker-rules `game.rs` (shared simulation) | **`knock()`'s airborne branch**: the brake is 0.1·k a frame (obj+0x109, `func_150585F0`), a wall met within ±0x2200 of head-on caps the speed at 14 (`func_1504CB98`), no move under speed 1 (`func_15059C84`). conker-sim `movement.rs`: `push_angle`, `against` public |
+| conker-client `lib.rs`, `smooth.rs` | **`DROWN`** (0x24, rate 1, blend 3) for a dead player whose body still swims, before the twitch. The drawn camera takes `fixed` with `hint_cut`. `predict` sets `view.gun_kick` from `FollowCamera.gun` |
+| `corpses.rs` (new) | **`Corpse::shown`**: frames in 0x59 (or the server's fixed 0x18A rows); draw k at frame 63 + 64(k − 1), `(rand & 7) < k` (`func_15072A7C`), seeded by slot, `Combat::deaths` and k (every client agrees); a hit shows 0x18A (rate 1, blend 4) to the end of the dead pose. **The head pop**: from the tick `Combat::anim` is 0x17E with `Combat::hit` not 0x37/0x22 while health is 0, to the respawn, `hide_heads` scales `joint_12` (with joints 13-15 below it) to 0 (`func_1507DE4C` → obj+0x9C 0xF000 on every model, `func_15034728`) |
+| `guns.rs`, `main.rs` | `FireClip` (138's 12 fire frames from its skeleton: joint 0's and 4's x turns, joint 4's z slide), `Recoil` (an `AnimPlayer` clock: the fire clip at rate 1, blend 2 in gun state 4, the pose drawn the tick before), loaded on maps with guns (fs native, fetch on wasm) |
+| `outro.rs` | Villagers (156/157): `head_turn(h, t, under)` = under⁻¹ · turn(−pitch, yaw), `under` joint_01's sampled rotation (`func_15036CE8` poses the head in joint 0's frame, a1 = 0) |
+| `audio.rs` | **`Sounds::outro_tanks`**: Colors cs5's tanks' engines (`func_151BB0E0`: 1191 idle / 1192 moving by the path's speed, gears 1187-1190, 1189 into coasting), following each tank, stopped with the outro's sounds (`Owner::OutroTank`) |
+| `tank.rs`, `hud.rs`, `render.rs` | `SCOPE_ZOOM` (−27.8, −22.94) (V tank_pw2); the dots and Tank bar tests on one view's zoom; `render.rs`' gcA fov test pinned to gcA's own 82.416 (a 2-view run) |
+| `package.json` | `bun run test` and `bun run check` include conker-camera (its 35 unit and 7 oracle tests were not run before) |
+| `../lab/oracle/map2b/sea/` | `east.csv`, `east_fields.csv`, `east.txt`: a villager on the east beach inside 0x26 (mode 0x40 over reads 24-660) |
+| `../lab/screens/cameras-g4/shots.sh` | `sea`, `scope`, `outro` (below) |
+
+| Check (2026-10-14) | Result |
+|---|---|
+| sim (ROM) `tests/sea.rs` | swim1's camera now over 300-749 (the 450-599 exclusion lifted): eye max 0.00098. New `east`: 25-85 eye 0.0, 225-660 0.00297 (86-224 skipped: the movement replay is 0.25 off from a wall push on) |
+| sim (ROM) `corridor_camera_matches_the_game` | reads 113-777 (was 113-335): 113-335 0.0042 (unchanged), 336-642 0.0 (was 39.38: the test fed the facing for obj+0x40, which faces the wall in state 122; `c34/obj.csv` now feeds the game's), 643-777 0.0 (was 40.0, 508.5 at 677) |
+| camera unit | `a_fixed_hint_holds_the_eye_short_of_the_look_at` (east read 24's eye bits; dead and aiming; the springs 1.0111/2.0133 after, V swim1k 483), `the_last_hint_the_player_is_in_decides_the_fixed_camera`, `a_swept_eye_keeps_clear_of_a_ledge_the_fast_path_misses` (c34 643: eye 119, floor −48), `the_scope_zooms_as_one_view` (h1 reads 201, 245, 270 to the bit). sim `a_spawn_in_a_fixed_hint_cuts_onto_its_camera` |
+| rules (ROM) `the_gun_bullets_knock_slides_as_e1` | e1's reads 102-129 to 0.01 in position, 1e-4 in speed (V's angle 0x9595), at rest (2086.506, 645, 804.079); bots' `mounted_guns_m2_and_e1`: "P2 knocked 140.9" |
+| client | `a_dead_swimmer_drowns_until_the_respawn`; `a_first_death_twitches_one_time_in_eight` (call k hits k/8 ± 0.015 over 8000 deaths), `the_twitch_comes_63_frames_into_the_dead_pose`, `a_body_that_lies_draws_again` (V out1: a miss at 63, a twitch at 127), `every_client_draws_the_same`, `a_head_kill_pops_to_the_respawn`, `the_pop_hides_the_head_joints` (16 models); `the_fire_clip_kicks_the_scopes_eye_as_k2` (reads 105-180 within 0.074); `villager_heads_match_the_oracle` (b4 t 418/618, b3 t 6/310, within 0.5°); `the_outro_tanks_run_their_engines`; `the_egg_carrier_keeps_the_on_foot_camera` ([247, 100, 61.5], aimed [90, 86.5, 86.5]); the dots test: 177.35° at the open (was 136°) |
+| `bun run test` (all lanes' edits in the tree) | pass: 639 tests, 1 ignored (with `CONKER_ROM`; conker-camera's now included) |
+| `bun run check`, `cargo clippy -p conker-client --target wasm32-unknown-unknown -- -D warnings` | pass |
+| Pack (`../lab/tools/verify-pack.sh`) | pack equal (2103 files); no re-export |
+| `smoke.sh` (`MAP=30`, port 5976) | pass: three clients, prediction error 0, 0 rollbacks (the knock's change predicted as the server steps it) |
+| `bots.sh` (`MAP=2b MODE=beach BOTS=7 HUMANS=2`, port 5974, 120 s) | every bot moves and is seen moving; no fault, unknown native or panic |
+| Screens (`../lab/screens/cameras-g4/shots.sh`, ports 5974/5976, debug binaries, 1280 × 720) | `fixed-east.png` (a villager on the east beach in hint 0x26: the eye held off on the line from point 0, the villager small on the boardwalk), `fixed-west.png` (a swimmer carried along the west shore in hint 0x27), `follow.png` (a swimmer off the pier out of both hints: the follow camera behind it), `scope-open.png` (the sniper scope at the open: the dots turned 177°), `outro-cs4.png` (Beach cs4: the villagers' heads turned up in joint 0's frame) |
+
+**Findings.**
+- **The egg carrier's camera** (V carry2, carry3): mode 8, s126+0x78 = 0, targets 247/100, head 90; R opens the
+  unarmed aim. Nothing to port. `lab/screens/raptor/egg-carried.png`'s eye sat in the rock because `--warp` moves a
+  player 12,000 units without a camera cut (the original does the same under a poked teleport).
+- **Corrections to earlier notes:** the head pop hides joints 12-15 on every model, not only the zombies' (every player
+  object has obj+0 = 1; conker-rules `parts.rs`' zombie-only `hidden` is wrong too). The villagers' head turn is case 0
+  as the others' (the m2c `arg12` = 1 was an unused argument); its base is joint 0.
+- **A swimmer's death** (V die1, die2): 0x24 from the hit's next frame, the respawn 88 frames after the hit, the body
+  afloat and drifting with the current; the camera stays the follow camera.
+- **The gun's muzzle** (V k2): the shot's eye is the pose drawn the tick before, its muzzle and sight the pose after
+  this tick's advance; with that the directions match to 2e-4 (at rest 0.005-0.046 off).
+
+**Handoffs (G4c, rules; details in the research doc).**
+- A lethal hit on a swimmer: one 0x24 state of 88 frames, the body floating on the current (today `damage::sequence`'s
+  163 frames for 0x20 and `knock()`'s ground movement). If the drift ashore lands, the client must latch "died
+  swimming".
+- `damage::sequence`'s (0x33, true) and (AREA_STAGGER, true) become plain `(DEAD, 81)` (the client draws the twitch);
+  the replays expecting 0x18A on e_w38, e_w21, sg_e2 then expect 0x59.
+- The corpse's head pop: a per-fighter pop mask (0xF000 on a pop, 0xFFFE on a 0x2F kill, 0 at the respawn) used as
+  `parts.rs`' `hidden` for every model, and a bullet on a dead head producing it (`hurt()` returns false at health 0).
+- The gun's muzzle half: `fire_gun` at tick n with the eye on kick(n − 1), the muzzle and sight on kick(n), the clock on
+  the `Mount`, the table from 138's skeleton.
+- `--warp` should raise the spawn cut (cam+0x23C).
+
+**G5 pack list.**
+1. The camera points [0x0C, scene, 8] (0x18-byte records, s16 x, y, z at +0; 0x2B's 6, 0x1A's 4), for
+   `CameraLevel::new` in place of `SEA_POINTS` (and Heist's trip-wire hints 0x40-0x43, commands 5/0x11, not ported).
+2. Sound 0x4A9 (1193), the tank's rumble: a `tank_cues()` cue `record([1193], 0x2EE0, 200, 800)` for character 119
+   (`audio/characters/119/1193.wav`); the client's timers are in the research doc.
+3. The shotgun's and chainsaw's head stumps: bank-09 #0x59 (action 0x73, joint 0, model 117) and #0x58 (action 0x72,
+   joint 1, model 128) as held models in `weapons/deathmatch/held.json`.
+
+**Left.**
+- I: the gun eye's fades (reads 103-104, 181-183 off by 0.1-0.85: the pose mixer is unread); `smooth::Drawn`'s
+  corrected view has no kick. The knock's speed cap on the ground (no V). The fixed camera's floor refresh (cam+0x35C)
+  in mode 0x40; whether cam+0x6D2 stays set after a respawn into the same hint.
+- C, not exercised: R's aim's sweep without a floor clamp, the other sweep sizes, `func_1510E950` clearing the
+  triangle on a miss (`cameras-clips-g4.md` §3).
+- Colors cs5's other tank binds segment 7 to noise (I: a stale binding); the pack draws it untextured.
+
+## Effects: research and the first ports (2026-10-14)
+**Lane G4a, wave G4.** A recipe for each of the 14 effects is in `../lab/research/mp-original/effects-g4.md` (scratch:
+`effects-g4-scratch/`, including `beach.md` and `maps.md`). Each covers the trigger, the timing and motion, the
+geometry, the texture, the blend, the sound and the pack's export, with every claim tagged V, C or I.
+
+The client now draws, on every map, the effects whose textures are already in the pack. They live in the new
+`conker-client/src/effects.rs`. Each is a port of the original's 2D sprite (`func_15130280` / `func_151303EC`): a
+camera-facing square of 0.1464 × its size, with its life counted in VIs, its fades, its y change and its drag.
+- **The guns' flashes.** One spawns each time a player's `Combat::shots` goes up with a weapon drawn, using a random
+  one of `hud/race_exhaust_0..3`. Life 7-10 VIs, alpha 255, then life × 85 below 3 VIs. Placement:
+  - the twin guns alternate between their two V muzzle points;
+  - the other guns use the rules' bullet muzzle (I);
+  - the rocket launcher fires two flashes, one ahead of the tube and one behind it (V).
+- **The rocket.** Its glow follows it, and a streak runs from it back to a tail that leaves the launch point at
+  50 a frame, untextured. Its trail puffs are `explosion.png`, one every 90 units (I), riding at 0.6-0.76 of its
+  motion and darkening over their last 25 VIs.
+- **Blasts.** Where a rocket or a grenade leaves the match's lists:
+  - 3-7 columns of 7-10 `explosion.png` puffs, each puff slower and bigger than the last;
+  - their motion keeps 0.7744 a frame, and their colour class fades in below 20 VIs;
+  - the rocket's blast also leaves 60-90 frames of rising, growing `fire.png` smoke.
+
+  I: the columns rise straight up, and the grenade uses the rocket's numbers.
+- **Flame puffs.** While a player's clip is the flamethrower's fire clip, `puff.png` puffs spawn at 0.23 a frame from
+  the nozzle (life 60-80 VIs, the push fitted to V).
+- **0x34's electric sparks.** A `shell.png` glow sits at both ends of each arc and bolt, in the arc's colour. `traps.rs`
+  pushes the glows through `effects::Queue`.
+
+**Not ported:** what the pack lacks (recipes in the doc), the race board's trail (its exhaust point is not decoded) and
+cs3's bubbles (`outro.rs` is lane G4b's).
+
+| Check | Result |
+|---|---|
+| `effects::tests` | `flashes_as_the_original`: the V flash points within 0.1, 4-5 frames, the last at alpha 85 or 170. `the_rocket_trail_as_the_original`: the trail's motion share and fades, and the streak's tail at V DLs 120/122. `the_blast_as_the_original`: the column law, V's drag step (−387.72 → −334.66 → −262.5), the smoke's growth, the arc glow. `the_flame_puffs_as_the_original`: the rate 0.2255 and the mean push (2.84, 3.84) |
+| Screens `../lab/screens/effects-g4/` | `shots.sh twin` (5970): `twin.png`, `twin-side.png`, the flash at the guns. The client logged the flashes at exactly V's (−2228.99, −458.66, 5974.02) / (−2269.32, −476.56, 5966.6). `rocket`: `rocket-side.png` shows the glow, streak and trail. `blast`: `blast.png` shows the launch pair, `blast-side.png` the columns and `blast-smoke.png` the columns rising. `flame`: `flame.png` shows the puffs at the nozzle. `electric.sh` (5972): `electric*.png` shows the glows on the arcs and the bolt's foot. The oracle's matching texrects are in the e8 runs' hudwalks (split-screen, so position and size are compared in world units, not pixels) |
+
+**G5's pack list** (the full table is at the doc's end):
+- textures: 0x3CF, 0x11FE, 0xBA7, 0x721, the ten ripple frames, 0x4B3 (it replaces `bubble_particle`'s 0xC01),
+  0x8FF-0x908, 0x4BD;
+- bank-09 models: #0x132, #0xE5, #0xBE;
+- moves: the ring 0x157 and puff 0xBA6 out of the 0x2B and 0x34 folders, to shared names.
+
+**The wire is unchanged** (no `net.rs` type; `PROTOCOL_ID` untouched). **The shared simulation is unchanged** (client
+drawing only). The pack is unchanged (no `conker-extract` edit).
+
+## Rules and bots: G3's leftovers (2026-10-14)
+**Lane G4c, wave G4.** Notes: `lab/research/mp-original/rules-bots-g4.md` (+ `-scratch/`).
+- **0x34's, 0x3F's and Beach's start records are drawn as the level script does.** On 0x34 and 0x3F (Deathmatch),
+  the first record is `random(8)` and slot s starts on `(first + s) % 12`. On Beach, the Tediz draw `random(2)` on
+  `[3, 10]`, then the villagers draw `random(3)` on `[0, 1, 2, 11]`. The other maps keep their tables. This was read in
+  scripts 0xBD, 0xBE and 0xB9 and matches 10 oracle captures; the draw depends on the roster (1 + 3: 0, 1 + 5: 3,
+  2 + 3 and 1 + 15: 7).
+  - `spawn::Starts::draw`: the server draws once a run from the match's RNG. A rematch keeps everyone's place.
+  - The harnesses (`bot_match`, the ROM `play`) start 0x34 and 0x3F on the oracle's draw.
+  - Test `the_scripts_draw_the_first_records`: each capture's records and the RNG after.
+  - Re-check of 0x34 1 + 3 with matched starts (8 seeds each side): deaths 6.2 against 7.8, hp drops 28.8 against 22.0.
+    The twin guns fire 302 shots a run against 107. The older comparison, 7.8 deaths and 18.3 drops, had mismatched
+    starts.
+- **0x34's electric floor is heard.** While the floor is live, the AI's noise list holds three noises of radius 500 at
+  trigger records 60, 59 and 58. These are `func_15105BC8`'s objects. They are heard on the first 150 of the floor's 151
+  frames, ahead of the jets (V `elec1`, and the oracle's 15-bot runs). Bots in that radius walk out, as they do from the
+  jets. The remake had no noise there; its comment said "the electric floor has no emitter", from a run where no bot
+  heard it.
+  - Test: `the_jets_are_heard_while_they_burn` now covers the floor too.
+  - 0x34 with 15 bots, 1,737 frames (oracle o15s0/3/6/9; remake seeds 1-6):
+
+    | | Oracle | Remake before | Remake now |
+    |---|---|---|---|
+    | Box frames a run | 232 | 527 | 348 |
+    | Visits | 3.8 | 7.0 | 5.2 |
+    | Standing | 2.5 | 62.5 | 28.7 |
+    | Deaths on the floor | 0.25 | 1.5 | 0.5 |
+    | Box entries in state 11 (a heard noise) | 0.25 | 7.2 | 3.5 |
+    | Bots seeing an enemy from the box | 39% | 73% | 59% |
+
+  - Ruled out:
+    - The rules refusing hits on immune or stunned players (C, 0x60000 on the trap damage types).
+    - The draw and holster lock (V: 183 of 189 draws and 148 of 149 holsters stop).
+    - The sight ray: 1,402 of 1,418 oracle flips agree, 12 of 12 in the box.
+- **Race bots kick as the original's.** Script 0xBC pairs every B press with class script 0x1F. That kick is 12 frames
+  of state 84, with no hop. The victim is tested on the 12th frame. The target speed is 60 on the first frame and on the
+  frame after the last. The oracle runs show this in R11r1-r3 and R12r1-r2, and R11r1 214 knocks the idle human.
+  - Before, the bots used the human's 29-frame kick.
+  - `board::Board::bot`: server-only, `serde(skip)`, so the wire is unchanged. It is set by `Board::class(0x1F)`.
+  - Test `a_bot_kicks_as_r11`.
+
+  | Route, seeds 1-6, 3 bots | Oracle | Remake before | Remake now |
+  |---|---|---|---|
+  | 11: laps 3 to 5 | 836-837 | 836-838 | 836-838 |
+  | 11: finishes after the go | 4131-4268 | 4130-4213 | 4150-4248 |
+  | 12: steady laps | 1063-1081 | 1064-1081 | 1061-1081 |
+  | 12: finishes after the go | 5122-5213 | 5015-5179 | 5006-5192 |
+
+  The 1061 is seed 6's lap after a death. The idle human's deaths on route 11, seed 2, are 376, 596 and 844, against
+  the oracle's 378, 599 and 845.
+- **Left.**
+  - *0x34:* the bots still fight in the pit. They stand 28.7 frames a run against 2.5, mostly grenade pulls (11.8) and
+    hits (7.3). The oracle's bots make no grenade noise within 1,600 of the box, but the remake's make 168 noise-frames
+    a run there (before this fix). Not traced.
+  - *Tank's hit rate (findings only):* the same shell tool on both sides (oracle h1-h5 and h7; remake seeds 1-6):
+
+    | | Oracle | Remake |
+    |---|---|---|
+    | Hits per shot | 27.6% | 30.2% |
+    | Shots under 2,000, hit rate by aim error 0 / 1 | 32.5% / 29.2% | 39.3% / 39.0% |
+    | Hit rate at 250-750 | 40% / 18% | 49% / 34% |
+    | Hit rate at 1,250-2,000 | 9-19% | 19-29% |
+    | Shots beyond 2,000 a run | 60 | 84 |
+
+    Point-blank shots match. The hit volume matches: hits to 100, mixed at 100-125, then misses. Neither side's shells
+    take the hull's speed. So the remake's aim at mid range is tighter: the lead, the gun pitch's convergence, or the
+    targets' motion. Not resolved.
+  - *Heist's attack share near the carrier (71% against 75-84%):* not worked. G3e's findings stand.
+
 ## Bots in Heist, Tank and Race (2026-10-14)
 **Lane G3e, wave G3.**
 - **Tank.** The scope's Z fires a bullet now, as the original does: instant, 1 damage, 2 frames after the press. The

@@ -2,7 +2,8 @@
 //! player 1's rows of `sea` (dropped into the sea at read 100, floating, drifting with the current, moved
 //! back into it at read 200, carried to the shore, standing up, the hard landing) and `swim1` (the same
 //! drop, strokes to the shore, the wade, back into the water, the jump out, a landing on the sea floor
-//! that goes back into the water, B and Z, a second swim out and the walk up the beach), replayed through
+//! that goes back into the water, B and Z, a second swim out and the walk up the beach), and G4b's `east`
+//! (the spawn in the sea's east camera hint, a walk and a swim), replayed through
 //! [`movement::step_among`] on the ROM's collision with placement 1 as water and the current's path.
 //! Frame N runs on row N's input and camera and is checked against row N+1, as `tests/oracle.rs` does;
 //! `<run>_fields.csv` holds what the trace's columns do not (the water flag obj+0xAD, the drift
@@ -165,6 +166,15 @@ fn replay(
     p.prev_buttons = rows[start - 1].input.0;
     let mut cam = Follow::spawn(rows[start].eye, &p);
     (cam.cam.at, cam.cam.cut) = (rows[start].at, false);
+    // The camera as the run had it: in a kind-5 hint's fixed camera (mode 0x40) if the last move ended in one.
+    let level = world.camera.as_ref().unwrap();
+    cam.cam.fixed = level.fixed(rows[start - 1].state.pos, p.pos, p.floor_y);
+    if cam.cam.fixed.is_some() {
+        // Its eye springs' velocities, from the last move (`cam+0x3C0`..; the eye moves by v·dt; the
+        // look-at's height spring is not seeded, so a start needs it at rest).
+        let (eye, last) = (rows[start].eye, rows[start - 1].eye);
+        cam.cam.fixed_vel = std::array::from_fn(|k| (eye[k] - last[k]) / conker_camera::DT);
+    }
     let mut report = Report::default();
     for pair in rows[start..].windows(2).take_while(|w| w[1].read <= to) {
         let (row, next) = (&pair[0], &pair[1]);
@@ -310,10 +320,20 @@ fn sea_floats_drifts_and_stands_up() {
 /// held, speed 15 braking 0.175 for 12 frames), the landing on the sea floor and in again, B and Z doing
 /// nothing, the swimmer's 90-wide box against the shore's wall (476), the second swim out and the walk up
 /// the beach onto the shelf (540). The camera from 300 (the swimmer's look-at 67.5 over it, the eye 100
-/// over 50 above the surface), but for 450-599: from 449 the player is in the sea's west camera hint
-/// (trigger 0x27, kind 5, 0x2C3 at +0x1C), which takes the original's camera out of its follow mode
-/// (not ported).
+/// over 50 above the surface), with 450-482 in the sea's west camera hint (trigger 0x27, kind 5: point
+/// 1, reach 707), the fixed camera, and the follow camera taking over again from 483 (its distance and
+/// height springs' constants back from 1 and 2 to 6 and 8).
 #[test]
 fn swim_strokes_wades_and_jumps_out() {
-    check("swim1", 101, 749, &[], &[(300, 449), (600, 749)]);
+    check("swim1", 101, 749, &[], &[(300, 749)]);
+}
+
+/// The spawn on the east beach inside the sea's east camera hint (trigger 0x26, kind 5: point 0, reach
+/// 751; `east.txt`, no poke), which the player never leaves: from the spawn's cut (read 24, the eye on
+/// the fixed camera's target, still at 25) the walk east until the wall (86-104, where the player is
+/// 0.25 off), and from the fall into the sea (225) the swim.
+#[test]
+fn east_spawns_in_the_fixed_camera() {
+    check("east", 25, 85, &[], &[(26, 85)]);
+    check("east", 225, 660, &[], &[(226, 660)]);
 }

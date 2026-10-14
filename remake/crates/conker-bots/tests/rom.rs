@@ -1577,7 +1577,16 @@ fn play(
         ..Default::default()
     };
     let rng = Rng { state: seed };
-    let starts = spawn::starts(scene as u16).unwrap();
+    let mut starts = spawn::starts(scene as u16).unwrap();
+    // 0x34's and 0x3F's first record as the oracle's boot draws it for the roster (V: 1 + 3 drew 0,
+    // 1 + 5 3, 1 + 15 7; others unseen, 7), as `bot_match` (`Starts::draw`).
+    if matches!(scene, 0x34 | 0x3F) && !raptor {
+        starts.deathmatch = spawn::ring(match bots {
+            3 => 0,
+            5 => 3,
+            _ => 7,
+        });
+    }
     let mut r = rng;
     spawn::place(&arena.spawns, 0, &mut r);
     let mut members = [0; 2];

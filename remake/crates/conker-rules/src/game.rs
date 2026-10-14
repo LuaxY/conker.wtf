@@ -4041,12 +4041,15 @@ fn clear(world: &CollisionWorld, source: [f32; 3], victim: [f32; 3]) -> bool {
 /// knocked back on the ground (V e_w09, e_w39, e_w21, e_w23), moving like a step of conker-sim's
 /// ground movement (the plane-following step, the fall step, the wall routine, the floor).
 ///
-/// In the air the speed drops 0.1 a frame. Each landing keeps 0.6 of the speed and bounces: the
-/// first one out of the blast (step 0) with y velocity 28, later ones with half the landing
-/// velocity; the frame after a landing follows the floor's plane. Once a bounce would be below 5
-/// (I: 4.56 stopped, 5.875 bounced) the player stays down and slides with the hit's friction.
+/// In the air the speed drops 0.1·k a frame (`func_150585F0`: obj+0x109 × 0.1, C; V e1: the
+/// mounted gun's k 5 takes 70 to 69.5), it moves nothing below 1, and a wall met within ±0x2200 of
+/// head-on caps it at 14 (`func_1504CB98`'s wall block, C; V e1 105: 68 → 14). Each landing keeps
+/// 0.6 of the speed and bounces: the first one out of the blast (step 0) with y velocity 28, later
+/// ones with half the landing velocity; the frame after a landing follows the floor's plane. Once
+/// a bounce would be below 5 (I: 4.56 stopped, 5.875 bounced) the player stays down and slides
+/// with the hit's friction.
 fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others: &[Other]) {
-    let me = f.other();
+    let (me, k) = (f.other(), f.knock_k);
     let b = &mut f.body;
     // The facing turns first: a root step goes along the turned facing (V e_w22 851-858).
     let turn = |to: u16, facing: u16| {
@@ -4066,11 +4069,15 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
     let old = b.pos;
     let (c, s) = cos_sin(b.move_angle);
     if b.airborne {
-        b.xz_speed = (b.xz_speed - 0.1).max(0.0);
+        b.xz_speed = (b.xz_speed - 0.1 * f32::from(k)).max(0.0);
         let rise = b.floor.take().map_or(0.0, |fl| {
             rise_along(world.tris[fl.tri as usize].normal, c, s)
         });
-        let d = 0.5 * b.xz_speed / (1.0 + rise * rise).sqrt();
+        // Below speed 1 it does not move (`func_15059C84`, C; V e1 123-124: 0.76 and 0.26 stay put).
+        let d = match b.xz_speed >= 1.0 {
+            true => 0.5 * b.xz_speed / (1.0 + rise * rise).sqrt(),
+            false => 0.0,
+        };
         let mut new = [
             old[0] + d * c,
             old[1] + d * rise + 0.5 * b.y_vel - 0.275 * b.gravity,
@@ -4086,6 +4093,9 @@ fn knock(f: &mut Fighter, reaction: u8, step: u8, world: &CollisionWorld, others
             b.y_vel,
         );
         (b.pos, b.y_vel) = (swept.pos, swept.y_vel);
+        if movement::push_angle(b, new, world).is_some_and(|a| movement::against(b.move_angle, a)) {
+            b.xz_speed = b.xz_speed.min(movement::WALL_SPEED);
+        }
         let floor = world.floor(b.pos[0], b.pos[2], b.pos[1], old[1], None);
         if let Some(fl) = floor
             && b.y_vel >= 0.0
@@ -4935,6 +4945,7 @@ mod tests {
             f.body.gravity,
             f.body.xz_speed,
         ) = ([0.0, 5.0, 0.0], true, -66.0, 3.4, 16.0);
+        f.knock_k = damage::GRENADE_OUTER.k;
         knock(f, 0x2B, 0, &w, &[]);
         assert_eq!(
             (f.body.pos[1], f.body.y_vel, f.body.gravity),

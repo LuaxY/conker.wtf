@@ -601,7 +601,7 @@ impl Match {
         } else {
             f.ride.board.knock(&mut f.body);
         }
-        f.ride.board.kick = 0;
+        (f.ride.board.kick, f.ride.board.bot) = (0, false);
         ev.push(Event::Hit {
             victim: v,
             attacker,

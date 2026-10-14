@@ -24,10 +24,8 @@
 //!   point a frame leaves the nozzle ([`NOZZLE`]); the ribbon runs from the nozzle through the
 //!   points, youngest first, [`FLAME`]'s width each, facing the eye, `flame.png` along it.
 //!
-//! I: not drawn, the muzzle flashes (the twin guns' bank-09 #0xDF model and texrects of blobs
-//! 0x923, 0x924 and 0x926; the rocket's launch flash, the same blobs), the rocket's trail
-//! (texrects of blob 0x78A, 7-13 units, 4-5 every other frame), the stream's puffs (texrects of
-//! 0xBA6) and tongues (ribbons of 0xBA7 at the nozzle).
+//! The guns' flashes, the rocket's glow, streak and trail, the blasts and the stream's puffs are
+//! [`crate::effects`]'. I: not drawn, the stream's tongues (ribbons of 0xBA7, not in the pack).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};

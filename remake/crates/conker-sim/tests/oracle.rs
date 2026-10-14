@@ -1775,9 +1775,12 @@ fn corridor_camera_calls_match_the_game() {
 }
 
 /// The follow camera on scene 0x34's corridor (`out/c34/trace.csv.gz`, P1 from start record 9: down the
-/// −z ramp, back toward the camera, then the +x corridor), fed the original's player rows (open loop),
-/// against the original's eye. Walking back toward the camera (reads 219-290), the eye's box slides along
-/// the corridor's walls.
+/// −z ramp, back toward the camera, then the +x corridor and back), fed the original's player rows (open
+/// loop) and what the trace lacks, its heading (obj+0x40, square to the wall in state 122: reads 336-347,
+/// 350, 648-651) and sink (obj+0xCC, −6 from read 638), from the same run's raw dump (`../cameras-clips-g4-
+/// scratch/c34/obj.csv`), against the original's eye through the end of the trace. Walking back toward
+/// the camera (reads 219-290), the eye's box slides along the corridor's walls; at read 643 the sweep
+/// leaves the eye on a ledge at y 79 and the full floor query lifts it to 119 (`CameraWorld::floor_at`).
 #[test]
 fn corridor_camera_matches_the_game() {
     let Some(rom) = std::env::var_os("CONKER_ROM") else {
@@ -1804,13 +1807,25 @@ fn corridor_camera_matches_the_game() {
         0x34,
         &rom.asset(&[0x0C, 0x34, 5]).unwrap(),
     ));
+    let Ok(obj) = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../lab/research/mp-original/cameras-clips-g4-scratch/c34/obj.csv"
+    )) else {
+        return;
+    };
+    let obj: HashMap<u32, (f32, i16)> = (obj.lines().skip(1))
+        .map(|l| {
+            let c: Vec<&str> = l.split(',').collect();
+            let (heading, sink) = (c[1].parse().unwrap(), c[2].parse().unwrap());
+            (c[0].parse().unwrap(), (heading, sink))
+        })
+        .collect();
     let start = rows.iter().position(|r| r.read == START).unwrap();
     let mut cam = camera(&rows[start]);
-    // The camera spawned from a row lacks the game's spring state: it converges by read 113. From read
-    // 336 (the +x walk) the remake's target eye drifts from the game's (conker-camera; the sweeps match).
-    const FROM: u32 = 113;
-    const TO: u32 = 335;
-    let (mut worst, mut later) = ((0.0f32, 0u32), (0.0f32, 0u32));
+    // The camera spawned from a row lacks the game's spring state: it converges by read 113. The
+    // stretches: the walk down and back, the +x walk with its wall pushes, the run back past the ledge.
+    const STRETCHES: [u32; 3] = [113, 336, 643];
+    let mut worst = [(0.0f32, 0u32); 3];
     for pair in rows[start..].windows(2) {
         let (row, next) = (&pair[0], &pair[1]);
         let (buttons, stick_x, stick_y) = row.input;
@@ -1820,18 +1835,25 @@ fn corridor_camera_matches_the_game() {
             buttons,
             camera_yaw: row.yaw,
         };
-        cam.step_view(conker_sim::follow::view(&next.state), &input, &world);
+        let Some(&(heading, sink)) = obj.get(&next.read) else {
+            return;
+        };
+        let view = conker_camera::PlayerView {
+            heading,
+            sink,
+            ..conker_sim::follow::view(&next.state)
+        };
+        cam.step_view(view, &input, &world);
         let (e, w) = (cam.cam.eye, next.eye);
         let d = ((e[0] - w[0]).powi(2) + (e[1] - w[1]).powi(2) + (e[2] - w[2]).powi(2)).sqrt();
-        let max = match next.read {
-            ..FROM => continue,
-            FROM..=TO => &mut worst,
-            _ => &mut later,
+        let Some(k) = STRETCHES.iter().rposition(|&from| from <= next.read) else {
+            continue;
         };
-        if d > max.0 {
-            *max = (d, next.read);
+        if d > worst[k].0 {
+            worst[k] = (d, next.read);
         }
     }
-    eprintln!("corridor camera: worst {worst:?} in reads {FROM}-{TO}, {later:?} after");
-    assert!(worst.0 < 0.01, "{worst:?}");
+    let last = rows.last().unwrap().read;
+    eprintln!("corridor camera: worst (error, read) from reads {STRETCHES:?} to {last}: {worst:?}");
+    assert!(worst.iter().all(|w| w.0 < 0.01), "{worst:?}");
 }

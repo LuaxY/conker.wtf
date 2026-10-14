@@ -16,6 +16,8 @@
 pub mod audio;
 pub mod beach;
 pub mod connection;
+pub mod corpses;
+pub mod effects;
 pub mod faces;
 pub mod flags;
 pub mod guns;
@@ -516,6 +518,8 @@ pub struct FollowCamera {
     pub lives: u16,
     pub drawn: smooth::Drawn,
     pub tank: Option<(Follow, tank::Cam)>,
+    /// The local gunner's gun as drawn, for its scope's eye ([`guns::Recoil`]).
+    pub gun: guns::Recoil,
 }
 
 impl FollowCamera {
@@ -527,6 +531,7 @@ impl FollowCamera {
             lives,
             drawn: smooth::Drawn::default(),
             tank: None,
+            gun: guns::Recoil::default(),
         }
     }
 }
@@ -534,6 +539,7 @@ impl FollowCamera {
 /// A player's animation clock (local: from the predicted state; remote: the interpolated one), and
 /// its speed percentage before the last tick (the armed walks' rates count it, `request_at`).
 #[derive(Component, Clone, Copy, Debug, Default)]
+#[require(corpses::Corpse)]
 pub struct Anim(pub AnimPlayer, pub u8);
 
 /// Every animation id the movement produces (its state byte is the id, V: conker-anim). The local
@@ -764,6 +770,23 @@ pub fn shown_anim(p: &PlayerState, combat: Option<&Combat>, predicted: bool) -> 
     }
 }
 
+/// Clip 0x24, a swimmer's death: a lethal hit in the water (obj+0xAD) is cause 4 (`func_1505E874`),
+/// `func_1507CD64(obj, 4)` → `func_1505E650(obj, 0x24, 1.0, 3.0)`, s126+0x120 = 2 (C). V die1, die2
+/// (`cameras-clips-g4-scratch/sea/`): from the hit's next frame to the respawn 88 frames after the
+/// hit, its 55 ticks looping, the body afloat; no twitch.
+pub const DROWN: u16 = 0x24;
+
+/// The clip a player whose rules show `id` draws: dead ([`Combat::health`] 0) with its body still
+/// [`PlayerState::swimming`] (I: the rules' death moves no swimmer out of the water), [`DROWN`]
+/// instead of the land death's clips.
+pub fn drowned(id: u16, p: &PlayerState, c: &Combat) -> u16 {
+    if c.health == 0 && p.swimming {
+        DROWN
+    } else {
+        id
+    }
+}
+
 /// A weapon's name for the HUD: what the game's model of it in the hand shows (bank 09, `held`).
 pub fn weapon_name(id: u8) -> String {
     match id {
@@ -907,7 +930,9 @@ fn spawn_eye(spawns: &[SpawnPoint], pos: [f32; 3]) -> [f32; 3] {
 /// ([`scene_world`]; headless uses the world, spawns and clip lengths; windowed draws the pack's
 /// glTF models too, and the HUD, [`hud`]), with its sound if it has some ([`audio`]; headless only
 /// logs it). `script`: the lines of `script=PATH`; `raptor`: on 3f, its `raptor.json` ([`raptor`]);
-/// `race`: on 33, its `race.json` ([`race`]).
+/// `race`: on 33, its `race.json` ([`race`]); `gun`: where the map has guns, their fire clip
+/// ([`guns::load`]).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     cfg: Config,
     slice: Slice,
@@ -916,9 +941,11 @@ pub fn run(
     script: Vec<ScriptLine>,
     raptor: Option<conker_assets::raptor::Raptor>,
     race: Option<conker_assets::race::Race>,
+    gun: Option<guns::FireClip>,
 ) {
     let tick = Duration::from_secs_f64(1.0 / TICK_HZ);
     let mut app = App::new();
+    app.insert_resource(gun.unwrap_or_default());
     let scene = map_scene(&cfg.map).expect("a known map");
     app.insert_resource(Collision(scene_world(&slice, scene)));
     let names = character_files(&cfg.map);
@@ -1015,6 +1042,7 @@ pub fn run(
     teams::build(&mut app, !cfg.headless);
     app.insert_resource(cfg);
     connection::build(&mut app);
+    corpses::build(&mut app);
     results::build(&mut app);
     app.add_systems(
         FixedPreUpdate,
@@ -1484,6 +1512,7 @@ fn predict(
     >,
     others: Query<(&Player, &Combat, Option<&ConfirmedHistory<Player>>), Without<Predicted>>,
     mut shows: ResMut<Shows>,
+    clip: Res<guns::FireClip>,
 ) {
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
@@ -1527,8 +1556,11 @@ fn predict(
             if (settings.tank || raptor || settings.race) && cam.tank.is_none() {
                 cam.tank = Some((cam.follow, tank::Cam::default()));
             }
+            let mut view = camera_view(f, m.tick);
+            let firing = f.gun.is_some_and(|g| f.seated() && g.state == gun::FIRING);
+            view.gun_kick = cam.gun.step(firing, &clip);
             let foot = cam.tank.as_mut().map_or(&mut cam.follow, |t| &mut t.0);
-            foot.step_view(camera_view(f, m.tick), &input.0, &world);
+            foot.step_view(view, &input.0, &world);
             f.take_camera(foot);
             match &mut cam.tank {
                 Some((_, state)) if raptor => raptor::camera(&mut cam.follow, state, f, &world),
@@ -1629,13 +1661,17 @@ fn tick_anims(
         Option<&PlayerId>,
         Has<Predicted>,
         &mut Anim,
+        &mut corpses::Corpse,
     )>,
 ) {
-    for (p, combat, fighting, owner, predicted, mut anim) in &mut players {
+    for (p, combat, fighting, owner, predicted, mut anim, mut corpse) in &mut players {
         let id = match fighting {
             Some(f) if predicted => f.state.anim,
             _ => shown_anim(p, combat, predicted),
         };
+        let id = combat.map_or(id, |c| drowned(id, p, c));
+        // The dead pose's twitch and the head pop ([`corpses`]).
+        let id = combat.map_or(id, |c| corpse.shown(id, c));
         // In Race everyone rides (any pick): the board states show their clips (the kick's while it
         // runs: the local racer's predicted board, the others' race table).
         let racing = combat.is_some() && game.iter().any(|m| m.race);
@@ -1656,6 +1692,9 @@ fn tick_anims(
             anim.1
         };
         let mut req = request_at(id, p.xz_speed, p.target_speed, percent);
+        if id == DROWN {
+            req.blend = 3.0; // func_1507CD64's
+        }
         // A tank's clips (idle, fire) play at 1 (I: `func_150ED638` sets no rate).
         if combat.is_some_and(|c| c.class == conker_rules::tank::CLASS) {
             (req.rate, req.blend) = (1.0, 4.0);
@@ -2011,6 +2050,38 @@ mod tests {
         c.anim = 0x7C; // twin guns firing
         assert_eq!(shown_anim(&p, Some(&c), true), 0x7C);
         assert_eq!(shown_anim(&p, None, false), u16::from(state::RUN));
+    }
+
+    #[test]
+    fn a_dead_swimmer_drowns_until_the_respawn() {
+        use conker_anim::combat::{DEAD, DEATH_FALL, HIT_SHOT};
+        let mut p = PlayerState::spawn([0.0; 3], 0);
+        p.swimming = true;
+        let swim = u16::from(state::SWIM);
+        let alive = Combat {
+            health: 6,
+            anim: swim,
+            ..Combat::default()
+        };
+        assert_eq!(drowned(swim, &p, &alive), swim);
+        // The rules' lethal 0x20 (0xD3, 0x58, 0x59: 163 frames to the respawn) shows 0x24 throughout
+        // as the original's does (V die1 461-547), the dead pose's twitch never called.
+        let mut corpse = corpses::Corpse::default();
+        for (anim, frames) in [(HIT_SHOT, 30), (DEATH_FALL, 52), (DEAD, 81)] {
+            let c = Combat {
+                anim,
+                ..Combat::default()
+            };
+            for _ in 0..frames {
+                assert_eq!(corpse.shown(drowned(anim, &p, &c), &c), DROWN);
+            }
+        }
+        p.swimming = false;
+        let dead = Combat {
+            anim: DEATH_FALL,
+            ..Combat::default()
+        };
+        assert_eq!(drowned(DEATH_FALL, &p, &dead), DEATH_FALL);
     }
 
     /// The prediction rides 0x2B's lift 0 (a box, kind 8, to record 4; here record 1) on the tick its

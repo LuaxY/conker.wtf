@@ -97,15 +97,55 @@ pub const COLORS_START_30: [[u8; 8]; 2] =
     [[12, 10, 11, 13, 6, 7, 8, 9], [14, 15, 16, 17, 2, 3, 4, 5]];
 pub const COLORS_MASKS_30: [u32; 2] = [0x3FC0, 0x3_C03C];
 
-/// Scene 0x34 Deathmatch (scenario 4): slot s starts on record (s + 7) % 12 (V on the oracle for
-/// slots 0-15, 1 human + 15 bots and 2 + 3, `../lab/oracle/map34`); masks all ones (V). The map
-/// has no War mode, so the sides take the Deathmatch records by slot parity and respawn anywhere
-/// (I, the remake's choice): with sides alternating by slot this is the Deathmatch table.
-pub const DEATHMATCH_START_34: [u8; 16] = [7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+/// Scene 0x34 Deathmatch (scenario 4): slot s starts on record (first + s) % 12, `first` the level
+/// script's draw at the match's set-up ([`Starts::draw`]). This table is the draw 7 (V on the
+/// oracle for slots 0-15, 1 human + 15 bots and 2 + 3, `../lab/oracle/map34`); masks all ones (V).
+/// The map has no War mode, so the sides take the Deathmatch records by slot parity and respawn
+/// anywhere (I, the remake's choice): with sides alternating by slot this is the Deathmatch table.
+pub const DEATHMATCH_START_34: [u8; 16] = ring(7);
 
-/// Scene 0x3F Deathmatch (scenario 7): the same table, though the map has 16 records: slot s starts
-/// on record (s + 7) % 12 (V on the oracle, 1 human + 15 bots and 2 + 3, `../lab/oracle/map3f`).
+/// Scene 0x3F Deathmatch (scenario 7): the same rule, though the map has 16 records, and this
+/// table the draw 7 (V on the oracle, 1 human + 15 bots and 2 + 3, `../lab/oracle/map3f`).
 pub const DEATHMATCH_START_3F: [u8; 16] = DEATHMATCH_START_34;
+
+/// 0x34's and 0x3F's Deathmatch starts: slot s on record (first + s) % 12 (scripts 0xBD and 0xBE:
+/// the record goes up by one a participant, 11 wrapping to 0; C).
+pub const fn ring(first: u8) -> [u8; 16] {
+    let mut t = [0; 16];
+    let mut s = 0;
+    while s < 16 {
+        t[s] = (first + s as u8) % 12;
+        s += 1;
+    }
+    t
+}
+
+/// A Deathmatch table split by slot parity (0x34's sides).
+const fn parity(t: [u8; 16]) -> [[u8; 8]; 2] {
+    let mut sides = [[0; 8]; 2];
+    let mut k = 0;
+    while k < 16 {
+        sides[k % 2][k / 2] = t[k];
+        k += 1;
+    }
+    sides
+}
+
+/// Beach's starts (script 0xB9, C): the villagers take [0, 1, 2, 11] in turn from the
+/// `villagers`-th, the Tediz [3, 10] from the `tediz`-th; the sides by member, and by slot with the
+/// teams alternating.
+pub const fn beach(villagers: usize, tediz: usize) -> ([[u8; 8]; 2], [u8; 16]) {
+    let (v, t) = ([0, 1, 2, 11], [3, 10]);
+    let (mut sides, mut slots) = ([[0; 8]; 2], [0; 16]);
+    let mut k = 0;
+    while k < 8 {
+        sides[0][k] = v[(villagers + k) % 4];
+        sides[1][k] = t[(tediz + k) % 2];
+        (slots[2 * k], slots[2 * k + 1]) = (sides[0][k], sides[1][k]);
+        k += 1;
+    }
+    (sides, slots)
+}
 
 /// Scene 0x3F War: Raptor (scenario 2): team 0 (the Ugas, class 0xB, east, x > 3,000) starts on
 /// record 8 + k, team 1 (the raptors, class 9, west, by the nest) on record k, by team rank (V for
@@ -116,13 +156,13 @@ pub const RAPTOR_START_3F: [[u8; 8]; 2] =
 pub const RAPTOR_MASKS_3F: [u32; 2] = [0xFFFF_FF00, 0xFFFF_00FF];
 
 /// Scene 0x2B War: Beach (scenario 8; the original has no Deathmatch there): the record of each
-/// participant slot at match start, teams alternating by slot (V on the oracle for slots 0-15, 1
-/// human + 15 bots, `../lab/oracle/map2b`; with 2 humans + 3 bots team 0 started one place on,
-/// `[2, 10, 11, 3, 0]`, untraced). Team 0, the villagers, cycle 1, 2, 11, 0 (west and east of
-/// the north beach, z ≈ 8,000); team 1, the Tediz, 10, 3 (z ≈ −4,260). Masks all ones (V); the
-/// game's Beach respawns are the level script's (onto given records, not ported).
-pub const DEATHMATCH_START_2B: [u8; 16] = [1, 10, 2, 3, 11, 10, 0, 3, 1, 10, 2, 3, 11, 10, 0, 3];
-pub const BEACH_START_2B: [[u8; 8]; 2] = [[1, 2, 11, 0, 1, 2, 11, 0], [10, 3, 10, 3, 10, 3, 10, 3]];
+/// participant slot at match start, teams alternating by slot ([`beach`] with the draws 1 and 1,
+/// [`Starts::draw`]; V on the oracle for slots 0-15, 1 human + 15 bots, `../lab/oracle/map2b`).
+/// Team 0, the villagers, cycle 1, 2, 11, 0 (west and east of the north beach, z ≈ 8,000); team
+/// 1, the Tediz, 10, 3 (z ≈ −4,260). Masks all ones (V); the game's Beach respawns are the level
+/// script's (onto given records, not ported).
+pub const DEATHMATCH_START_2B: [u8; 16] = beach(1, 1).1;
+pub const BEACH_START_2B: [[u8; 8]; 2] = beach(1, 1).0;
 
 /// Scene 0x1A Deathmatch (scenario 6): slots 0-3 start on the four bases' records 0-3, the rest on
 /// the FFA records 0x14-0x1F (script 0xB7's init, C; V dm6: p0-3 at the bases). Masks all ones
@@ -162,7 +202,7 @@ pub const fn starts(scene: u16) -> Option<Starts> {
         }),
         0x34 => Some(Starts {
             deathmatch: DEATHMATCH_START_34,
-            sides: [[7, 9, 11, 1, 3, 5, 7, 9], [8, 10, 0, 2, 4, 6, 8, 10]],
+            sides: parity(DEATHMATCH_START_34),
             side_masks: DEATHMATCH_MASKS,
         }),
         0x3F => Some(Starts {
@@ -195,6 +235,33 @@ pub const fn starts(scene: u16) -> Option<Starts> {
             side_masks: DEATHMATCH_MASKS,
         }),
         _ => None,
+    }
+}
+
+impl Starts {
+    /// The level script's start draws at the match's set-up, `random(n)` (`random_u32 % n`) on the
+    /// match's RNG (C scripts 0xBD, 0xBE, 0xB9; V: the oracle's RNG before the first
+    /// `func_15085410` gives its records in 10 captures, 1 + 3 to 1 + 15, the test below):
+    /// - 0x34 and 0x3F's Deathmatch: `random(8)`, the first slot's record ([`ring`]). 0x3F's War
+    ///   (Raptor) draws nothing: its starts are tables, so don't call this there;
+    /// - 0x2B: `random(2)`, the Tediz' first, then `random(3)`, the villagers' first ([`beach`]).
+    ///
+    /// The other maps' starts are tables (0x2D, 0x30, 0x1A, 0x24, 0x33; C): no draw.
+    pub fn draw(&mut self, scene: u16, rng: &mut Rng) {
+        match scene {
+            0x34 | 0x3F => {
+                self.deathmatch = ring((rng.next_u32() % 8) as u8);
+                if scene == 0x34 {
+                    self.sides = parity(self.deathmatch);
+                }
+            }
+            0x2B => {
+                let tediz = rng.next_u32() % 2;
+                let villagers = rng.next_u32() % 3;
+                (self.sides, self.deathmatch) = beach(villagers as usize, tediz as usize);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -351,6 +418,49 @@ mod tests {
         for (k, &record) in DEATHMATCH_START_34.iter().enumerate() {
             assert_eq!(s.sides[k % 2][k / 2], record, "{k}");
         }
+    }
+
+    /// The draws from the oracle's RNG before the level script's first `func_15085410` (its state
+    /// after the scene load's picks, stepped to one draw before; Beach two, then its `random(15)`),
+    /// and the records the oracle gave slots 0-3 (`lab/oracle/map34`, `map3f`, `map2b` and
+    /// `rules-bots-g4-scratch/out`): 1 + 3 on 0x34 and 0x3F, 1 + 5, 2 + 3, 1 + 15.
+    #[test]
+    fn the_scripts_draw_the_first_records() {
+        let drawn = |scene, state| {
+            let mut s = starts(scene).unwrap();
+            let mut rng = Rng::new(state);
+            s.draw(scene, &mut rng);
+            (s, rng.state)
+        };
+        for (scene, state, first, after) in [
+            (0x34, 0x1_5e47_147c, [0, 1, 2, 3], 0xde64_47d8),
+            (0x3F, 0x1_5e47_147c, [0, 1, 2, 3], 0xde64_47d8),
+            (0x34, 0x1_dce3_a829, [3, 4, 5, 6], 0x1_d4f3_495b),
+            (0x34, 0x1_523c_5a08, [7, 8, 9, 10], 0x6cbe_abcf),
+            (0x3F, 0x1_523c_5a08, [7, 8, 9, 10], 0x6cbe_abcf),
+            (0x34, 0x1_3060_a839, [7, 8, 9, 10], 0x1_92b3_cd37),
+            (0x2B, 0x1_2ee2_3e4f, [1, 3, 2, 10], 0x840c_1a77),
+            (0x2B, 0x1_d680_a7e8, [2, 10, 11, 3], 0x1_9d41_1727),
+            (0x2B, 0x7a3_4cc4, [1, 10, 2, 3], 0x1_c5df_ced4),
+        ] {
+            let (s, state) = drawn(scene, state);
+            assert_eq!(s.deathmatch[..4], first, "{scene:#x} {first:?}");
+            assert_eq!(state, after, "{scene:#x} {first:?}");
+            if scene == 0x34 {
+                assert_eq!(s.sides, parity(s.deathmatch));
+            }
+        }
+        // 1 + 5 on 0x34: records 3-8; 2 + 3 on 0x2B: the villagers 2, 11, 0.
+        assert_eq!(
+            drawn(0x34, 0x1_dce3_a829).0.deathmatch[..6],
+            [3, 4, 5, 6, 7, 8]
+        );
+        assert_eq!(drawn(0x2B, 0x1_d680_a7e8).0.sides[0][..3], [2, 11, 0]);
+        // 0x3F keeps Raptor's sides; the table maps draw nothing.
+        assert_eq!(drawn(0x3F, 1).0.sides, RAPTOR_START_3F);
+        assert_eq!(drawn(0x2D, 1), (starts(0x2D).unwrap(), 1));
+        // The draw 7 is the 16-player table (V `s4_h1b15`).
+        assert_eq!(ring(7), [7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     /// 0x3F's sides are two bases at opposite ends of its 16 records, each respawning only on its

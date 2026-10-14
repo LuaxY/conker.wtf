@@ -2371,7 +2371,15 @@ mod tests {
     /// a triangle 0x90-0xFF by 4 (V w16B 200, 201, 229), no dots or bar; the iris round its centre.
     #[test]
     fn the_dots_turn_0x16_tints_and_the_iris_follows() {
-        let turn = dot_turn([-27.8, -22.937_294]).to_degrees();
+        // The camera's zoom as 0x23's scope opens (one view's angles).
+        let p = conker_camera::PlayerView {
+            weapon: 0x23,
+            in_hand: true,
+            ..conker_camera::PlayerView::new([0.0; 3], 0.0, 0)
+        };
+        let mut cam = conker_camera::CameraState::spawn([0.0, 100.0, 247.0], &p);
+        cam.step(&p, conker_camera::R, |_, _| Some(0.0));
+        let turn = dot_turn(cam.scope.zoom).to_degrees();
         assert!((turn - 177.35).abs() < 0.01, "{turn}");
         assert_eq!(dot_turn([-77.4, -47.0]), 0.0);
         assert_eq!(
@@ -2943,7 +2951,7 @@ mod tests {
             [([260.0, 5.0, 22.0, 12.0], [0.0, 4.0, 22.0, 16.0])]
         );
         assert!(icon(0).is_empty() && icon(0x09).is_empty());
-        let zoom = -38.7 / conker_camera::zoom_limit(0x1F);
+        let zoom = -27.8 / conker_camera::zoom_limit(0x1F); // on opening (V tank_pw2 171)
         let scoped = Shown {
             scope: Some(zoom),
             ..tank(0x02)
