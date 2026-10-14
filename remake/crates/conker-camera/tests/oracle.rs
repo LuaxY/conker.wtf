@@ -711,7 +711,7 @@ fn hints_from_the_rom() {
         return;
     };
     let rom = Rom::new(std::fs::read(path).unwrap()).unwrap();
-    let level = CameraLevel::new(0x2D, &rom.asset(&[0x0C, 0x2D, 5]).unwrap());
+    let level = CameraLevel::new(0x2D, &rom.asset(&[0x0C, 0x2D, 5]).unwrap(), &[]);
     let [hint] = level.hints[..] else {
         panic!("scene 0x2D has one hint, record 82")
     };

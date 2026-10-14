@@ -157,11 +157,6 @@ pub const HINT_CUT: u32 = 30;
 /// [`CameraHint::kind`] of the fixed cameras ([`Fixed`]).
 pub const HINT_FIXED: u8 = 5;
 
-/// [`Fixed::point`]s on scene 0x2B, the first two of `*0x800DC020` (the scene's asset `[0x0C, scene,
-/// 8]`, 0x18-byte records, s16 x, y, z first), as the oracle read them at `cam+0x288` (V swim1 24-100
-/// and 450-482: the sea's east and west sides, hints 0x26 and 0x27). Not in the pack yet; none elsewhere.
-const SEA_POINTS: [[i16; 3]; 2] = [[2024, 277, 9703], [-2290, 728, 10913]];
-
 /// A kind-5 hint's camera, mode 0x40 (`func_1512E8E0` → `func_15129934`, C; V swim1 450-482, east
 /// 24-660): the eye springs toward the line from the hint's point to the look-at, `reach` short of the
 /// look-at ([`crate::CameraState::fixed`]).
@@ -177,8 +172,8 @@ impl Fixed {
     /// A hint record's fixed camera: kind 5, its point `+0x18` (`cam+0x718` → `cam+0x272`) in
     /// `points`, its reach `+0x1C` (`cam+0x71C` → `cam+0x278`).
     ///
-    /// ponytail: command 0 only (0x2B's two). 5 and 0x11 (Heist's ring wires 0x40-0x43, whose points
-    /// the pack lacks) also cut onto the point when it changes, and a command's low nibble keeps the
+    /// ponytail: command 0 only (0x2B's two). 5 and 0x11 (Heist's ring wires 0x40-0x43, on 0x1A's
+    /// four points) also cut onto the point when it changes, and a command's low nibble keeps the
     /// eye at the point's height: not ported.
     fn parse(r: &[u8; 0x34], points: &[[i16; 3]]) -> Option<Self> {
         let word = |o: usize| u32::from_be_bytes(r[o..o + 4].try_into().unwrap());
@@ -236,6 +231,14 @@ pub fn in_volume(volumes: &[CameraVolume], eye: [f32; 3]) -> bool {
         .is_some_and(|v| v.action == 0)
 }
 
+/// The fixed cameras' points of a scene's asset `[0x0C, scene, 8]` (0x18-byte records, s16 x, y,
+/// z first): [`CameraLevel::new`]'s `points` from the ROM (the pack's `cameras.json` holds them).
+pub fn points(asset: &[u8]) -> Vec<[i16; 3]> {
+    (asset.as_chunks::<0x18>().0.iter())
+        .map(|r| std::array::from_fn(|k| i16::from_be_bytes([r[2 * k], r[2 * k + 1]])))
+        .collect()
+}
+
 /// A scene's camera data from its trigger table (`[0x0C, scene, 5]`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CameraLevel {
@@ -258,10 +261,13 @@ pub struct CameraLevel {
 impl CameraLevel {
     /// The zones of scene 0x2D's script: triggers 0x58 and 0x59, around the two raised bases (its other
     /// branch, triggers 0x53/0x54/0x56/0x57 for bit 29, is not ported: no trace enters them).
-    pub fn new(scene: u16, table: &[u8]) -> Self {
+    /// `points`: the scene's fixed cameras' points, `*0x800DC020` (the asset `[0x0C, scene, 8]`,
+    /// 0x18-byte records, s16 x, y, z first; the pack's `cameras.json`), which a kind-5 hint names
+    /// by index (V swim1 24-100 and 450-482: `cam+0x288` holds 0x2B's first two for hints 0x26 and
+    /// 0x27, the sea's east and west sides).
+    pub fn new(scene: u16, table: &[u8], points: &[[i16; 3]]) -> Self {
         let records = table.as_chunks::<0x34>().0;
         let zones: &[usize] = if scene == 0x2D { &[0x58, 0x59] } else { &[] };
-        let points: &[[i16; 3]] = if scene == 0x2B { &SEA_POINTS } else { &[] };
         Self {
             volumes: CameraVolume::parse_table(table),
             skip_objects: zones
@@ -370,7 +376,7 @@ mod tests {
 
     #[test]
     fn the_last_hint_the_player_is_in_decides_the_cut() {
-        let level = |table: Vec<u8>| CameraLevel::new(0x2D, &table);
+        let level = |table: Vec<u8>| CameraLevel::new(0x2D, &table, &[]);
         let (old, new) = ([0.0, 10.0, -10.0], [0.0, 10.0, 10.0]);
         assert!(level(wire(4, HINT_CUT).to_vec()).hint_cut(old, new, 0.0));
         assert!(!level(wire(4, 0).to_vec()).hint_cut(old, new, 0.0));
@@ -393,7 +399,9 @@ mod tests {
             r
         };
         let (old, new) = ([0.0, 10.0, -10.0], [0.0, 10.0, 10.0]);
-        let sea = |table: Vec<u8>| CameraLevel::new(0x2B, &table).fixed(old, new, 0.0);
+        // The pack's first two points on 0x2B (`cameras.json`).
+        let points = [[2024, 277, 9703], [-2290, 728, 10913]];
+        let sea = |table: Vec<u8>| CameraLevel::new(0x2B, &table, &points).fixed(old, new, 0.0);
         let west = Fixed {
             point: [-2290.0, 728.0, 10913.0],
             reach: 707.0,
@@ -403,7 +411,7 @@ mod tests {
         assert_eq!(sea(fixed(1, 5).to_vec()), None); // command 5: not ported
         assert_eq!(sea([fixed(1, 0), wire(4, 0)].concat()), None);
         assert_eq!(sea([wire(4, 0), fixed(1, 0)].concat()), Some(west));
-        let elsewhere = CameraLevel::new(0x2D, &fixed(0, 0));
+        let elsewhere = CameraLevel::new(0x2D, &fixed(0, 0), &[]);
         assert_eq!(elsewhere.fixed(old, new, 0.0), None);
     }
 

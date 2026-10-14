@@ -13,8 +13,7 @@
 //!   two of its edges, where V's arcs are shorter, about 150 long, their ends inside the box):
 //!   ribbons of 9 points ([`split`]) across `arc.png` (0x753)'s first row, tinted by the env colour,
 //!   blended (C, V DLs 300, 330).
-//! - A burning player (a cone's, the flamethrower's): the jets' particles about its body (I: the
-//!   original's burning look is not traced).
+//! - A burning player's flames are `effects::flame`'s, on every map.
 //! - The electric floor's sparks: a glow at both ends of each arc and bolt, `hud/shell.png` (0x1042)
 //!   in the arc's colour (`crate::effects::arc_glow`; V elec, elec2).
 //!
@@ -30,16 +29,12 @@ use bevy::math::Affine2;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
-use conker_anim::combat::{BURN_END, BURNING, FLAME_HIT};
 use conker_camera::volume::CameraVolume;
 use conker_rules::Rng;
 use conker_rules::net::Fighting;
 use conker_rules::traps::{PLATES, Trap};
 use conker_sim::net::MatchView;
 use lightyear::prelude::Predicted;
-
-use crate::Anim;
-use crate::render::Model;
 
 /// The flame quad's texture (C `func_151A6068`, `func_151A6350`; V DL 170, with the tile's 0.5
 /// scale): it repeats every `unit` of the game's S units up the jet, its S spans `span` (+ r ×
@@ -246,7 +241,7 @@ pub fn split(p: &mut [Vec3; 9], lo: usize, hi: usize, r: &mut impl FnMut() -> f3
 pub fn build(app: &mut App, triggers: &[u8]) {
     app.insert_resource(Traps(conker_rules::traps::parse(triggers)));
     app.add_systems(Startup, setup);
-    app.add_systems(Update, (jets, sparks, burning, puffs, ribbons).chain());
+    app.add_systems(Update, (jets, sparks, puffs, ribbons).chain());
     // After the level's nodes are put back at rest (render's `show_pickups`, in Update).
     app.add_systems(PostUpdate, sink_plates.before(TransformSystems::Propagate));
 }
@@ -505,44 +500,6 @@ fn sparks(
             let ends = [on(i, rng.next_f32()), on(j, rng.next_f32())];
             let alpha = 55.0 + 145.0 * rng.next_f32();
             spawn(rng, ends, ARC, alpha, ARC_WIDTH, ARC_LIFE);
-        }
-    }
-}
-
-/// A burning player (the flame hit, burning, its end: as the sounds' `burning`) gives off the
-/// jets' particles about its body, one a frame (I).
-fn burning(
-    time: Res<Time>,
-    look: Res<Look>,
-    players: Query<(&Anim, &Transform), With<Model>>,
-    mut due: Local<f32>,
-    mut rng: Local<Rng>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut commands: Commands,
-) {
-    *due += time.delta_secs() * conker_sim::TICK_HZ as f32;
-    let n = due.floor();
-    *due -= n;
-    for (anim, at) in &players {
-        if ![FLAME_HIT, BURNING, BURN_END].contains(&anim.0.id) {
-            continue;
-        }
-        for _ in 0..n as u32 {
-            let mut r = || rng.next_f32() * 2.0 - 1.0;
-            let at = at.translation + Vec3::new(25.0 * r(), 45.0 + 35.0 * r(), 25.0 * r());
-            let puff = Puff {
-                vel: Vec3::new(r(), 3.0 + r(), r()),
-                fall: 0.0,
-                age: 0.0,
-                life: 20.0 + 5.0 * r(),
-                alpha: 0.6,
-            };
-            commands.spawn((
-                Mesh3d(look.sprite.clone()),
-                MeshMaterial3d(materials.add(material(&look.puff, [255; 3], puff.alpha))),
-                Transform::from_translation(at).with_scale(Vec3::splat(24.0 + 8.0 * r())),
-                puff,
-            ));
         }
     }
 }

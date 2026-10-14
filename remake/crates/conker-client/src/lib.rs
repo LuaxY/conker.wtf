@@ -24,6 +24,7 @@ pub mod guns;
 pub mod heist;
 pub mod held;
 pub mod hud;
+pub mod laser;
 pub mod lights;
 pub mod outro;
 pub mod projectiles;
@@ -971,6 +972,7 @@ pub fn run(
     app.insert_resource(arena);
     app.insert_resource(Shown::default());
     app.insert_resource(Shows::default());
+    app.init_resource::<laser::Own>();
     app.insert_resource(Script(script));
     outro::build(&mut app, slice.outros.clone());
     heist::build(&mut app, !cfg.headless, bag);
@@ -1523,6 +1525,7 @@ fn predict(
     others: Query<(&Player, &Combat, Option<&ConfirmedHistory<Player>>), Without<Predicted>>,
     mut shows: ResMut<Shows>,
     clip: Res<guns::FireClip>,
+    mut laser: ResMut<laser::Own>,
 ) {
     let tick = timeline.tick().0;
     let over = game.iter().any(|m| m.phase >= 2 || race::warm_up(m, tick))
@@ -1533,6 +1536,7 @@ fn predict(
     let others = known(&others, slot, tick);
     // Where this screen shows the others this tick: what the server rewinds this tick's strikes to.
     let shown: Positions = others.iter().map(|o| (o.0, o.2)).collect();
+    laser.0 = None;
     for (mut player, mut fighting, input, camera, before) in &mut own {
         let mut old = before.as_deref().and_then(|b| b.0);
         let (mut m, i, events) = own_tick(
@@ -1542,6 +1546,7 @@ fn predict(
         if let Some(mut b) = before {
             b.set_if_neq(Before(old));
         }
+        laser.0 = m.laser(i, &world.0);
         let f = &mut m.players[i];
         if let Some(mut camera) = camera {
             // What was drawn as this tick started, for the frames until the next (not across a cut).

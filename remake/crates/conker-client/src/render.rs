@@ -231,6 +231,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
     let lob = (app.world().get_resource::<crate::MatchArena>()).is_some_and(|a| a.0.lob);
     let lob = lob.then(|| usize::from(conker_sim::net::map_scene(&cfg.map) == Some(0x3F)));
     crate::held::build(app, slice.held, carried, lob);
+    crate::laser::build(app);
     crate::flags::build(app);
     crate::guns::build(app);
     crate::tank::build(app, &slice.characters, &cfg.map);
@@ -262,6 +263,11 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
         }),
         ..default()
     };
+    // The pack's vertex lighting flag ([`crate::lights::ATTRIBUTE_UNLIT`]).
+    let gltf = || {
+        bevy::gltf::GltfPlugin::default()
+            .add_custom_vertex_attribute("_UNLIT", crate::lights::ATTRIBUTE_UNLIT)
+    };
     if offscreen {
         // No window: the camera draws into an image, ticked like a headless client.
         let tick = core::time::Duration::from_secs_f64(1.0 / conker_sim::TICK_HZ);
@@ -269,6 +275,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             DefaultPlugins
                 .set(crate::log_plugin(cfg))
                 .set(assets)
+                .set(gltf())
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: bevy::window::ExitCondition::DontExit,
@@ -284,6 +291,7 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             DefaultPlugins
                 .set(crate::log_plugin(cfg))
                 .set(assets)
+                .set(gltf())
                 .set(window),
             FreeCameraPlugin,
         ));
@@ -806,8 +814,14 @@ fn retarget(rigs: Query<&Retarget>, mut joints: Query<&mut Transform>) {
     }
 }
 
-/// Each player where its state is; the local player where and as its correction draws it
-/// ([`crate::smooth::Drawn`]), between its last two ticks by the fixed clock's overstep.
+/// Where a player's model stands: its position lowered by its floor's sink (obj+0xCC), as its
+/// joints, and so its hit parts (conker-rules' `parts`), are (V n34s2: 6 lower on kind 0xA).
+pub fn stands(pos: Vec3, sink: i16) -> Vec3 {
+    pos + Vec3::Y * f32::from(sink)
+}
+
+/// Each player where its state is ([`stands`]); the local player where and as its correction draws
+/// it ([`crate::smooth::Drawn`]), between its last two ticks by the fixed clock's overstep.
 // ponytail: the others move in 30 Hz steps (their interpolation's whole ticks).
 fn place_players(
     time: Res<Time<Fixed>>,
@@ -819,7 +833,7 @@ fn place_players(
             let d = c.drawn.between(c.drawn.frame(p, &c.follow), f);
             (d.body, d.facing)
         });
-        transform.translation = pos;
+        transform.translation = stands(pos, p.sink);
         transform.rotation = Quat::from_rotation_y(model_yaw(facing));
     }
 }
@@ -1168,6 +1182,15 @@ fn shot(world: &World) -> Screenshot {
 mod tests {
     use super::*;
     use conker_sim::movement::Side;
+
+    /// A body on a sinking floor stands as low as conker-rules' parts put its joints: the sink
+    /// below its position (V n34s2: kind 0xA's −6, the head 6 lower than on kind 5).
+    #[test]
+    fn a_body_stands_in_its_floors_sink() {
+        let pos = Vec3::new(-342.0, -399.0, 3011.0);
+        assert_eq!(stands(pos, -6), Vec3::new(-342.0, -405.0, 3011.0));
+        assert_eq!(stands(pos, 0), pos);
+    }
 
     /// A pick is drawn as its own model once that is loaded, as its side's till then, and as its
     /// side's where the map's list has no model for it (no index past a list: M14b's crash).

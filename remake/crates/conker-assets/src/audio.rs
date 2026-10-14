@@ -312,9 +312,9 @@ pub enum On {
     /// Tank: a driving tank's rumble, a loop at it from 150 frames (300 VIs) after its drive loop
     /// ([`On::TankEngine`] `moving`) starts: its level rises 8/256 a frame from 8/256 to full, holds
     /// 150 or 406 frames ((rand & 0x200) + 300 VIs), then falls 8/256 a frame to 0 and it stops; it
-    /// stops at once when the tank idles. From 450 or 706 frames after it starts ((rand & 0x200) +
-    /// 900 VIs) the drive loop fades 8/256 a frame (C `func_151BB0E0`; V Colors cs5b 589). Colors
-    /// cs5's outro tanks play it too.
+    /// stops at once when the tank idles. Another starts 450 or 706 frames after each ((rand &
+    /// 0x200) + 900 VIs; the drive loop itself never fades: C `func_151BB0E0`; V Colors cs5b 589,
+    /// t5: 182, 632, 1338). Colors cs5's outro tanks play it too.
     TankRumble,
     /// Tank: a shell's blast, at it: on a tank (`ground` false) or on the ground.
     TankBlast { ground: bool },

@@ -97,7 +97,8 @@ use serde::{Deserialize, Serialize};
 /// 37: e1's knock slide (every airborne knock) and the Race bots' start kick (shared).
 /// 38: `Combat::popped`, `Fighter::popped` and `Mount::recoil`; the drown, the dead-pose rows, the parts' sink, the pickup
 /// reach, Tank's barrel and Heist's take (shared).
-pub const PROTOCOL_ID: u64 = 38;
+/// 39: the fixed cameras' points from the pack (`cameras.json`; the tunnel hints on 0x2B now have cameras).
+pub const PROTOCOL_ID: u64 = 39;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -524,7 +525,7 @@ pub struct Collision(pub CollisionWorld);
 /// A map's world (`scene`: [`map_scene`]) as the server and every client build it from the asset pack (its characters
 /// in [`Side`] order, `conker_assets::PACK_CHARACTERS`): the collision in its order with its wall
 /// layers (`floor.tri` indexes it, so both sides must agree), the game's arctangent table, the
-/// level's camera data (its trigger table), the players' root-motion clips (the Tedi's: both sides
+/// level's camera data (its trigger table and fixed cameras' points), the players' root-motion clips (the Tedi's: both sides
 /// play the same clips, V) and the sink table.
 pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
     let mut world = CollisionWorld::layered(pack.collision.iter().map(|t| {
@@ -537,7 +538,8 @@ pub fn scene_world(pack: &conker_assets::Slice, scene: u16) -> CollisionWorld {
         (t.points, t.surface.unwrap_or(0), layer)
     }));
     world.acos = AcosTable::new(pack.acos.clone());
-    world.camera = Some(CameraLevel::new(scene, &pack.triggers));
+    let points: Vec<_> = pack.cameras.iter().map(|c| c.at).collect();
+    world.camera = Some(CameraLevel::new(scene, &pack.triggers, &points));
     // Weapon 0x16's Z, the shot death's drift.
     world.roots = (pack.characters[Side::Tediz as usize].root_clips.iter())
         .map(|c| RootTrack {
@@ -678,5 +680,36 @@ mod tests {
             assert_ne!(hash(Some(f)).unwrap(), base, "{f}");
         }
         assert_eq!(pack_hash("2d", |_| None), None);
+    }
+
+    /// War: Beach's fixed-camera hints hold their cameras at the pack's points (`cameras.json`):
+    /// the sea's 0x26 and 0x27 at points 0 and 1, as the oracle read them at cam+0x288 (V swim1
+    /// 24-100, 450-482), reaches 751 and 707; then the tunnels' 0x45, 0x47 and 0x48 at points 3-5
+    /// (C: the same kind-5, command-0 hints; SEA_POINTS lacked them). Needs the asset pack
+    /// (`CONKER_ASSETS`, else `<repo>/assets`).
+    #[test]
+    fn the_beach_hints_take_the_packs_camera_points() {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let read = |p: &str| std::fs::read(std::path::Path::new(&dir).join(p));
+        let (characters, weapons) = (conker_assets::PACK_CHARACTERS, conker_assets::PACK_WEAPONS);
+        let Ok(slice) = conker_assets::Slice::load("2b", &characters, weapons, read) else {
+            eprintln!("no asset pack in {dir}: skipping");
+            return;
+        };
+        let world = scene_world(&slice, 0x2B);
+        let fixed: Vec<_> = (world.camera.unwrap().fixed.into_iter().flatten())
+            .map(|f| (f.point, f.reach))
+            .collect();
+        assert_eq!(
+            fixed,
+            [
+                ([2024.0, 277.0, 9703.0], 751.0),
+                ([-2290.0, 728.0, 10913.0], 707.0),
+                ([-1193.0, -501.0, -956.0], 838.0),
+                ([-1028.0, -695.0, -2565.0], 685.0),
+                ([458.0, -695.0, -2614.0], 685.0),
+            ]
+        );
     }
 }

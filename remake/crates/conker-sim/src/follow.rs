@@ -327,7 +327,7 @@ mod tests {
         let mut hint = [0u8; 0x34];
         hint[6..12].copy_from_slice(&[3, 232, 1, 244, 3, 232]); // 1000 wide, 500 high
         (hint[0x15], hint[0x17], hint[0x23]) = (3, 4, 30);
-        world.camera = Some(conker_camera::volume::CameraLevel::new(0, &hint));
+        world.camera = Some(conker_camera::volume::CameraLevel::new(0, &hint, &[]));
         let mut p = PlayerState::spawn([0.0, 0.0, -30.0], 0xC000);
         let mut f = Follow::spawn([0.0, 100.0, -277.0], &p);
         let mut cuts = vec![];
@@ -357,7 +357,11 @@ mod tests {
         }
         (hint[0x15], hint[0x17]) = (2, 5);
         hint[0x1C..0x20].copy_from_slice(&751u32.to_be_bytes());
-        world.camera = Some(conker_camera::volume::CameraLevel::new(0x2B, &hint));
+        world.camera = Some(conker_camera::volume::CameraLevel::new(
+            0x2B,
+            &hint,
+            &[[2024, 277, 9703]],
+        ));
         let mut p = PlayerState::spawn([2471.0, -463.0, 7827.0], 27392);
         let mut f = Follow::spawn([2922.0, -261.0, 8004.0], &p);
         f.step(&p, 0, &world);

@@ -21,7 +21,8 @@ conker-bots = { path = "../conker-bots" }
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
-gltf-json.workspace = true
+# `extras`: the levels' `_UNLIT` attribute (glTF's application-specific semantics) validates.
+gltf-json = { workspace = true, features = ["extras"] }
 # The pack test compares with what the runtime builds from the ROM.
 conker-sim = { path = "../conker-sim" }
 # The pack test reads its PNGs back.

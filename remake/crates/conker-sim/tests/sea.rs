@@ -55,9 +55,11 @@ fn world() -> Option<&'static CollisionWorld> {
                 (t.points, t.surface.unwrap_or(0), layer)
             }));
             world.acos = AcosTable::from_game_data(&rom.game_data().unwrap());
+            let points = conker_camera::volume::points(&rom.asset(&[0x0C, 0x2B, 8]).unwrap());
             world.camera = Some(CameraLevel::new(
                 0x2B,
                 &rom.asset(&[0x0C, 0x2B, 5]).unwrap(),
+                &points,
             ));
             world.current = extract_scene::scene_path(&rom, 0x2B, 1).unwrap();
             Some(world)

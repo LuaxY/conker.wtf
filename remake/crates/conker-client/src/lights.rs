@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::color::Srgba;
-use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::{MeshVertexAttribute, VertexAttributeValues, VertexFormat};
 use bevy::prelude::*;
 use conker_assets::{Light, Lights, When};
 use conker_camera::volume::CameraVolume;
@@ -492,7 +492,7 @@ fn tint_room(
             };
             for (i, (p, c)) in ps.iter().zip(cs).enumerate() {
                 let p = at.transform_point(Vec3::from(*p));
-                if zone.contains(p.to_array()) {
+                if zone.contains(p.to_array()) && !passed_by(mesh_data, i) {
                     let c = [c[0], c[1], c[2]].map(Srgba::gamma_function_inverse);
                     out.push((mesh.id(), i, p, c));
                 }
@@ -552,8 +552,20 @@ fn tint_room(
 /// switching light not counted).
 const VIEW_LIGHTS: usize = 10;
 
-/// A relit shape: its mesh, its vertices' positions in its own frame and their display colours.
-type Shape = (AssetId<Mesh>, Vec<Vec3>, Vec<[f32; 3]>);
+/// A relit shape: its mesh, and the vertices the lights reach: index, position in its own frame
+/// and display colour.
+type Shape = (AssetId<Mesh>, Vec<(usize, Vec3, [f32; 3])>);
+
+/// The pack's `_UNLIT` vertex attribute (1: the vertex's lighting flag, bit 15, set): the lights
+/// pass it by and it keeps its colour (the oracle's `lightVerticesCBFD`, C; V 2b: 97 terrain
+/// vertices, the bulbs' among them).
+pub const ATTRIBUTE_UNLIT: MeshVertexAttribute =
+    MeshVertexAttribute::new("Unlit", 0x1A0B_15F0, VertexFormat::Float32);
+
+/// Whether the lights pass vertex `i` of `mesh` by ([`ATTRIBUTE_UNLIT`]).
+fn passed_by(mesh: &Mesh, i: usize) -> bool {
+    matches!(mesh.attribute(ATTRIBUTE_UNLIT), Some(VertexAttributeValues::Float32(u)) if u[i] > 0.5)
+}
 
 /// War: Beach's level as the original lights it (V `beach-environment-scratch/relight/`: every terrain
 /// draw has G_LIGHTING, the pack's colours are the drawn ones, a far vertex is ambient × colour): each
@@ -618,11 +630,13 @@ fn relight(
             data.attribute(Mesh::ATTRIBUTE_POSITION),
             data.attribute(Mesh::ATTRIBUTE_COLOR),
         ) {
-            let ps = ps.iter().map(|p| Vec3::from(*p)).collect();
-            let cs = (cs.iter())
-                .map(|c| [c[0], c[1], c[2]].map(Srgba::gamma_function_inverse))
-                .collect();
-            shapes.insert(e, (mesh.id(), ps, cs));
+            let reached = (ps.iter().zip(cs).enumerate())
+                .filter(|(i, _)| !passed_by(data, *i))
+                .map(|(i, (p, c))| {
+                    let c = [c[0], c[1], c[2]].map(Srgba::gamma_function_inverse);
+                    (i, Vec3::from(*p), c)
+                });
+            shapes.insert(e, (mesh.id(), reached.collect()));
         }
     }
     // The lights this frame, the nearest to the view's point first.
@@ -654,7 +668,7 @@ fn relight(
     }
     let ambient = rgb(room.lights.ambient);
     let mut near = Vec::with_capacity(lights.len());
-    for (e, (id, ps, base)) in shapes.iter() {
+    for (e, (id, vertices)) in shapes.iter() {
         let (Ok((_, at, _)), Some(mut mesh)) = (parts.get(*e), meshes.get_mut(*id)) else {
             continue;
         };
@@ -662,14 +676,14 @@ fn relight(
         else {
             continue;
         };
-        for ((c, p), base) in cs.iter_mut().zip(ps).zip(base) {
-            let p = at.transform_point(*p);
+        for &(i, p, base) in vertices {
+            let p = at.transform_point(p);
             let lights = match vault {
                 true => nearest(&lights, p, &mut near),
                 false => &lights[..],
             };
-            let lit = lit(*base, p, ambient, lights);
-            c[..3].copy_from_slice(&lit.map(Srgba::gamma_function));
+            let lit = lit(base, p, ambient, lights);
+            cs[i][..3].copy_from_slice(&lit.map(Srgba::gamma_function));
         }
     }
 }
@@ -712,6 +726,15 @@ pub fn lit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pack's `_UNLIT` (1.0) keeps a vertex out of the relight; a mesh without it is all lit.
+    #[test]
+    fn flagged_vertices_are_passed_by() {
+        let mut mesh = Mesh::new(Default::default(), Default::default());
+        assert!(!passed_by(&mesh, 0));
+        mesh.insert_attribute(ATTRIBUTE_UNLIT, vec![0.0f32, 1.0]);
+        assert_eq!((passed_by(&mesh, 0), passed_by(&mesh, 1)), (false, true));
+    }
 
     /// A light is full within 45·√size, gone from 362·√size; each kind shines when it should.
     #[test]

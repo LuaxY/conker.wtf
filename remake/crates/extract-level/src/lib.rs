@@ -239,6 +239,9 @@ pub struct Primitive {
     // ponytail: no per-face fallback for zero normals (DOS splits vertices for one); the draw
     // just goes unlit. None in scene 0x2D.
     pub normals: Vec<[f32; 3]>,
+    /// The vertices' lighting flag (bit 15 of their flag word): set, the lights pass them by and
+    /// they keep their colour (the oracle's `lightVerticesCBFD`, C).
+    pub unlit: Vec<bool>,
     pub indices: Vec<u32>,
 }
 
@@ -259,6 +262,7 @@ pub fn primitive(ir: &Ir, draw: &Draw) -> Primitive {
                 .or_insert_with(|| {
                     out.positions.push(v.position.map(f32::from));
                     out.colors.push(v.color);
+                    out.unlit.push(v.flag & 0x8000 != 0);
                     if let Some(t) = texture {
                         out.uvs.push(t.uv(v.uv));
                     }
@@ -571,6 +575,15 @@ pub fn to_gltf(level: &Level, textures: &Textures, bin_uri: &str) -> Result<Gltf
                     json!({ "componentType": 5126, "count": n, "type": "VEC2" }),
                 ));
             }
+            if p.unlit.contains(&true) {
+                let unlit: Vec<[f32; 1]> =
+                    p.unlit.iter().map(|&u| [f32::from(u8::from(u))]).collect();
+                attributes["_UNLIT"] = json!(buf.accessor(
+                    &f32_bytes(&unlit),
+                    34962,
+                    json!({ "componentType": 5126, "count": n, "type": "SCALAR" }),
+                ));
+            }
             if lit {
                 attributes["NORMAL"] = json!(buf.accessor(
                     &f32_bytes(&p.normals),
@@ -753,9 +766,11 @@ mod tests {
                 END,
             ],
         );
-        let ir = Model::parse(&m).unwrap().walk().unwrap();
+        let mut ir = Model::parse(&m).unwrap().walk().unwrap();
+        ir.vertices[1].flag |= 0x8000; // the lighting flag: the lights pass it by
         let p = primitive(&ir, &ir.draws[0]);
         assert_eq!(p.indices, [0, 1, 2, 2, 1, 0]);
+        assert_eq!(p.unlit, [false, true, false]);
         assert_eq!(
             p.positions,
             [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0]]

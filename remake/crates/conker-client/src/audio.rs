@@ -279,7 +279,7 @@ pub fn build(
 /// Whose a sound is: a player's (channels a and b are per player, by [`Combat::slot`]), a grenade's
 /// (birth tick, thrower), one of weapon 0x14's shots in flight (its index), a mounted gun's (its
 /// index), or nobody's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Owner {
     Player(u16),
     Grenade(u32, usize),
@@ -390,6 +390,9 @@ struct Seen {
     above: f32,
     /// Tank: the hull's pitch in degrees (the engine's pitch; else 0).
     pitch: f32,
+    /// The crossbow's aim laser on ([`crate::laser`]: the local player's prediction, the others'
+    /// [`Combat::laser`]).
+    laser: bool,
 }
 
 /// A player as the last tick saw it.
@@ -572,6 +575,8 @@ struct Sounds {
     /// Total War's gas out last tick ([`On::Gas`]).
     gas: bool,
     primed: bool,
+    /// Last tick's match phase ([`Self::prime`]).
+    phase: u8,
     background: bool,
     /// This tick's players (last tick's, this tick's), reused.
     players: Vec<(Seen, Seen)>,
@@ -610,6 +615,9 @@ struct Sounds {
     /// Tank: each tank's engine ([`engine`]; absent while dead), last tick's shells, the bomb's
     /// carrier and the bomb's countdown (None before the first tick with a match).
     engines: HashMap<u16, u8>,
+    /// Tank: each driving tank's rumbles ([`Self::rumble`]): frames to the next, those playing
+    /// (start tick, hold).
+    rumbles: HashMap<Owner, (u32, Vec<(u32, u32)>)>,
     tank_shells: Vec<[f32; 3]>,
     bomb: Option<(Option<u16>, i32)>,
     /// Race: last tick's countdown stage and racers (None before the first tick with a match), the
@@ -697,6 +705,18 @@ pub fn engine(speed: f32, target: f32) -> u8 {
         (v, _) if v > 5.0 => 2,
         _ => 0,
     }
+}
+
+/// A tank rumble's share of its volume `age` frames in, held `hold` frames at full (C
+/// `func_151BB0E0`, V t5): from 8/256 up 8/256 a frame (31 frames), full, then from 255/256 down
+/// 8/256 a frame to 7/256 (32 frames); none once over.
+pub fn swell(age: u32, hold: u32) -> Option<f32> {
+    let level = match age.checked_sub(31) {
+        None => 8 + 8 * age as i32,
+        Some(a) if a < hold => 256,
+        Some(a) => 255 - 8 * (a - hold).min(32) as i32,
+    };
+    (level > 0).then(|| level as f32 / 256.0)
 }
 
 /// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
@@ -1046,6 +1066,8 @@ impl Sounds {
                     );
                 }
                 On::Burning => self.hold(cx, i, cue, burning(was), burning(is), is),
+                // The aim laser's hum, for the aimer alone (2D: `own`).
+                On::Laser if is.local => self.hold(cx, i, cue, was.laser, is.laser, is),
                 On::Shot { weapon } if fire(weapon, is) && !fire(weapon, was) => {
                     self.start(cx, &cue.play, &cue.play.sounds, 1.0, me);
                 }
@@ -1320,6 +1342,31 @@ impl Sounds {
         self.grenades = old;
         self.grenades.clear();
         self.grenades.extend_from_slice(now);
+    }
+
+    /// Takes the match's lists as they are, so nothing in them goes off: on the first tick with a
+    /// match, and across its end or a restart ([`crate::effects::live`]: the rules freeze when it is
+    /// over and the restart empties the lists at once, which would blast every frozen rocket,
+    /// grenade, shot and shell).
+    fn prime(&mut self, m: &MatchView, grenades: &[(u32, Grenade)]) {
+        let live = crate::effects::live(std::mem::replace(&mut self.phase, m.phase), m.phase);
+        if self.primed && live {
+            return;
+        }
+        self.primed = true;
+        (self.rockets, self.shots, self.taken) = (m.rockets.clone(), m.shots.clone(), m.taken);
+        self.bolts = vec![(false, true); m.shots.len()];
+        self.grenades = grenades.to_vec();
+        self.guns.clone_from(&m.guns);
+        self.tank_shells = m.tanks.shells.iter().map(|s| s.0).collect();
+    }
+
+    /// A rocket gone since last tick blasts where it was.
+    fn rockets(&mut self, cx: &Cx, now: &[[f32; 3]]) {
+        let old = std::mem::replace(&mut self.rockets, now.to_vec());
+        for pos in gone(&old, now, 2.0 * ROCKET_SPEED) {
+            self.world(cx, pos, |on| *on == On::Explosion { weapon: ROCKETS });
+        }
     }
 
     /// The mounted guns' sounds (`On::Gun`, at the gun on its own channels: a state change stops
@@ -1876,6 +1923,7 @@ impl Sounds {
             {
                 v.bend.step(engine_cents(is.speed, is.pitch), None);
             }
+            self.rumble(cx, me, moving(state) == Some(true));
             if was.health > 0 && is.health == 0 {
                 let bomb = is.reaction == u16::from(conker_rules::tank::CLIP_BOMB);
                 let on = On::TankDeath { bomb };
@@ -2401,6 +2449,51 @@ impl Sounds {
         }
     }
 
+    /// Tank: `src`'s rumbles while it drives ([`On::TankRumble`], C `func_151BB0E0`, V t5): the
+    /// first 150 frames into the drive loop, another 450 or 706 frames ((rand & 0x200) + 900 VIs)
+    /// after each, each at its [`swell`] held 150 or 406 frames; idling stops them at once.
+    fn rumble(&mut self, cx: &Cx, src: Src, driving: bool) {
+        let cues = &cx.pack.audio.events.cues;
+        let Some(i) = cues.iter().position(|c| c.on == On::TankRumble) else {
+            return;
+        };
+        let (owner, play) = (src.owner, &cues[i].play);
+        let mine = move |v: &Voice| v.owner == owner && v.tag == Some(i);
+        if !driving {
+            if self.rumbles.remove(&owner).is_some() {
+                self.stop(mine);
+            }
+            return;
+        }
+        let (mut next, mut swells) = (self.rumbles.remove(&owner))
+            .map_or((150, Vec::new()), |(n, s)| (n.saturating_sub(1), s));
+        if next == 0 {
+            let mut odd = || 256 * (self.rng.next_u32() & 1);
+            next = 450 + odd();
+            swells.push((cx.tick, 150 + odd()));
+            self.start(
+                cx,
+                play,
+                &play.sounds,
+                1.0,
+                Src {
+                    tag: Some(i),
+                    ..src
+                },
+            );
+        }
+        for &(t, hold) in &swells {
+            let this = move |v: &Voice| mine(v) && v.started == t;
+            match swell(cx.tick - t, hold) {
+                Some(share) => (self.voices.iter_mut().filter(|v| this(v)))
+                    .for_each(|v| v.volume = f32::from(play.volume) * share),
+                None => self.stop(this),
+            }
+        }
+        swells.retain(|&(t, hold)| swell(cx.tick - t, hold).is_some());
+        self.rumbles.insert(owner, (next, swells));
+    }
+
     /// An outro's tanks' own engines at frame `k` (model 40's class, the Tank mode's: [`engine`],
     /// [`On::TankEngine`], [`On::TankGear`]; C `func_151BB044`, `func_151BB0E0`), besides the
     /// script's sounds: idling (0x4A7, from its creation before frame 0), coasting (0x4A8) from the
@@ -2434,6 +2527,7 @@ impl Sounds {
                     self.start(cx, &c.play, &c.play.sounds, 1.0, src);
                 }
             }
+            self.rumble(cx, src, is != 0);
             if !(self.voices.iter()).any(|v| v.owner == owner && !v.stopped && v.tag.is_some()) {
                 let on = On::TankEngine { moving: is != 0 };
                 for (i, c) in cues.iter().enumerate().filter(|c| c.1.on == on) {
@@ -2517,11 +2611,12 @@ fn hear(
     )>,
     listener: Query<(&Player, &Combat, &FollowCamera)>,
     (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
-    (flickers, bag, nest, world): (
+    (flickers, bag, nest, world, laser): (
         Option<Res<crate::lights::Flickers>>,
         Res<crate::heist::Bag>,
         Option<Res<crate::raptor::Nest>>,
         Option<Res<conker_sim::net::Collision>>,
+        Res<crate::laser::Own>,
     ),
     mut commands: Commands,
 ) {
@@ -2590,6 +2685,11 @@ fn hear(
                 Some(w) if tank => conker_rules::tank::hull_pitch(&p.0, &w.0),
                 _ => 0.0,
             },
+            laser: if predicted {
+                laser.0.is_some()
+            } else {
+                c.laser.is_some()
+            },
         };
         match heard {
             Some(mut h) => {
@@ -2630,19 +2730,8 @@ fn hear(
         read,
         ear,
     };
-    if !s.primed {
-        s.primed = true;
-        (s.rockets, s.shots, s.taken) = (m.rockets.clone(), m.shots.clone(), m.taken);
-        s.bolts = vec![(false, true); m.shots.len()];
-        s.grenades = grenades.to_vec();
-        s.guns.clone_from(&m.guns);
-    }
-    let old = std::mem::take(&mut s.rockets);
-    for pos in gone(&old, &m.rockets, 2.0 * ROCKET_SPEED) {
-        s.world(&cx, pos, |on| *on == On::Explosion { weapon: ROCKETS });
-    }
-    s.rockets = old;
-    s.rockets.clone_from(&m.rockets);
+    s.prime(m, grenades);
+    s.rockets(&cx, &m.rockets);
     s.due(&cx);
     for (was, is) in &all {
         s.player(&cx, was, is);
@@ -3323,6 +3412,7 @@ mod tests {
             masked: false,
             above: 0.0,
             pitch: 0.0,
+            laser: false,
         }
     }
 
@@ -3467,12 +3557,12 @@ mod tests {
         let ids = heard(&mut s, &pack, 0..403, |s, cx| s.outro_tanks(cx, o, cx.tick));
         let at = |k: u32| -> Vec<u16> { ids.iter().filter(|i| i.0 == k).map(|i| i.1).collect() };
         assert_eq!(
-            (at(0), at(1)),
-            (vec![1191; 2], vec![1189, 1192, 1189, 1192])
+            (at(0), at(1), at(151)),
+            (vec![1191; 2], vec![1189, 1192, 1189, 1192], vec![1193; 2])
         );
         assert!(matches!(at(402)[..], [1187..=1190, 1191]), "{ids:?}");
         let engine = |n| {
-            let live = |v: &&Voice| v.owner == Owner::OutroTank(n) && !v.stopped && v.tag.is_some();
+            let live = |v: &&Voice| v.owner == Owner::OutroTank(n) && !v.stopped && v.id != 1193;
             s.voices
                 .iter()
                 .filter(live)
@@ -3486,6 +3576,50 @@ mod tests {
                 .iter()
                 .all(|v| v.stopped || !matches!(v.owner, Owner::OutroTank(_)))
         );
+    }
+
+    /// A driving tank rumbles as t5's (V): the drive loop at read 32, a rumble at 182 (150 frames
+    /// on: 31 frames up from 8/256, 150 held, 32 down to 7/256, gone at 395), the next 450 frames
+    /// after it (632, held 406: its last read 1100), the next 706 on (1338); idling stops it at
+    /// once.
+    #[test]
+    fn the_rumble_swells_as_t5() {
+        let levels = [0, 30, 31, 180, 181, 212, 213].map(|a| swell(a, 150).map(|s| s * 256.0));
+        let full = Some(256.0);
+        assert_eq!(
+            levels,
+            [
+                Some(8.0),
+                Some(248.0),
+                full,
+                full,
+                Some(255.0),
+                Some(7.0),
+                None
+            ]
+        );
+        assert_eq!(
+            (swell(468, 406), swell(469, 406)),
+            (Some(7.0 / 256.0), None)
+        );
+        let Some(pack) = map_pack("24") else { return };
+        let mut s = Sounds::default();
+        let src = Src::player(&at(1, 0.0, 0));
+        let ids = heard(&mut s, &pack, 32..2000, |s, cx| s.rumble(cx, src, true));
+        let starts: Vec<u32> = ids.iter().filter(|i| i.1 == 1193).map(|i| i.0).collect();
+        assert_eq!(starts[0], 182);
+        assert!(
+            starts
+                .windows(2)
+                .all(|w| [450, 706].contains(&(w[1] - w[0]))),
+            "{starts:?}"
+        );
+        let live = |s: &Sounds| s.voices.iter().filter(|v| !v.stopped).count();
+        let mut s = Sounds::default();
+        heard(&mut s, &pack, 32..200, |s, cx| s.rumble(cx, src, true));
+        assert_eq!(live(&s), 1);
+        s.rumble(&cx(&pack, 200), src, false);
+        assert_eq!(live(&s), 0);
     }
 
     /// A line (no bank sound) plays once unless it is the background; an effect's muffle is a
@@ -4037,6 +4171,74 @@ mod tests {
         s.player(&cx(&pack, 100), &was, &is);
         s.player(&cx(&pack, 101), &is, &was);
         assert_eq!(fuse(&s), None, "the pull left");
+    }
+
+    /// A restart empties the match's lists at once: the frozen rockets and grenades go silently
+    /// ([`Sounds::prime`]); in play, one gone blasts where it was.
+    #[test]
+    fn a_restart_blasts_nothing() {
+        let Some(pack) = map_pack("2d") else { return };
+        let g = Grenade {
+            pos: [300.0, 0.0, 0.0],
+            y_vel: 0.0,
+            speed: 0.0,
+            angle: 0,
+            state: 0,
+            floor: None,
+            owner: 1,
+            fuse: 400,
+        };
+        let m = |phase, n| MatchView {
+            phase,
+            rockets: vec![[0.0; 3]; n],
+            ..default()
+        };
+        let mut s = Sounds::default();
+        let gs = [(90, g)];
+        let ids = heard(&mut s, &pack, 100..104, |s, cx| {
+            let (m, gs) = match cx.tick {
+                100 => (m(1, 1), &gs[..]),
+                101 => (m(2, 1), &gs[..]),
+                102 => (m(3, 1), &gs[..]),
+                _ => (m(0, 0), &[][..]),
+            };
+            s.prime(&m, gs);
+            s.rockets(cx, &m.rockets);
+            s.grenades(cx, gs);
+        });
+        assert_eq!(ids, []);
+        let ids = heard(&mut s, &pack, 104..106, |s, cx| {
+            let m = m(1, usize::from(cx.tick == 104));
+            s.prime(&m, &[]);
+            s.rockets(cx, &m.rockets);
+        });
+        assert!(ids.iter().all(|i| i.0 == 105) && !ids.is_empty(), "{ids:?}");
+    }
+
+    /// The aim laser's hum 1232 (cue `laser`) loops for its aimer alone, from the laser's making
+    /// to its end (C `func_151026BC`; V las2): another player's laser is silent.
+    #[test]
+    fn the_laser_hums_for_its_aimer() {
+        let Some(pack) = map_pack("2d") else { return };
+        let hum = |s: &Sounds| s.voices.iter().any(|v| v.id == 1232 && !v.stopped);
+        let was = Seen {
+            local: true,
+            ..at(1, 0.0, 0x18)
+        };
+        let is = Seen { laser: true, ..was };
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &was, &is);
+        assert!(hum(&s));
+        heard(&mut s, &pack, 101..103, |s, cx| {
+            if cx.tick == 101 {
+                s.player(cx, &is, &was);
+            }
+        });
+        assert!(!hum(&s));
+        let other = |p: Seen| Seen { local: false, ..p };
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &other(was), &other(is));
+        assert!(!hum(&s));
     }
 
     #[test]

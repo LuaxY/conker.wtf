@@ -212,6 +212,7 @@ pub struct Blasts {
     cooldown: Option<u16>,
     deadlines: BTreeMap<u16, u16>,
     rockets: Option<Vec<[f32; 3]>>,
+    phase: u8,
 }
 
 /// A shake on every view: its wave from tick `from`, and its point, near and range
@@ -555,7 +556,7 @@ fn watch(
 ) {
     let tick = timeline.tick().0;
     if let Ok(m) = game.single() {
-        rocket_shakes(&mut blasts, &m.rockets, tick);
+        rocket_shakes(&mut blasts, &m.rockets, m.phase, tick);
     }
     let (Some(m), Some(sprites)) = (game.single().ok().filter(|m| m.beach), sprites) else {
         return;
@@ -611,7 +612,8 @@ fn watch(
         for s in b.strikes.iter_mut().filter(|s| s.slot == c.slot) {
             if s.blast.is_none() && (c.anim == BLOWN_UP || tick >= s.call + STRIKE) {
                 s.blast = Some(tick);
-                burst(Vec3::from_array(s.at), 16, 120.0, 3);
+                // Its debris is the explosive death's sparks (`effects::sparks`).
+                burst(Vec3::from_array(s.at), 16, 120.0, 0);
                 b.shakes.push(shake(&BLAST, s.at, 506.0, 1013.0));
             }
         }
@@ -674,9 +676,11 @@ fn watch(
 
 /// On every map, a rocket gone since last tick shakes the views near where it went ([`BLAST`] at
 /// 800/2000: the rocket pool's `func_151C05A4`, C, which every map's rockets run); shakes that are
-/// over are dropped.
-fn rocket_shakes(b: &mut Blasts, rockets: &[[f32; 3]], tick: u32) {
+/// over are dropped. Not across the match's end or restart (`effects::live`).
+fn rocket_shakes(b: &mut Blasts, rockets: &[[f32; 3]], phase: u8, tick: u32) {
     let old = b.rockets.replace(rockets.to_vec());
+    let live = crate::effects::live(std::mem::replace(&mut b.phase, phase), phase);
+    let old = old.filter(|_| live);
     for at in (old.iter()).flat_map(|old| crate::audio::gone(old, rockets, 2.0 * ROCKET_SPEED)) {
         b.shakes.push(Shake {
             wave: &BLAST,
@@ -1037,17 +1041,21 @@ mod tests {
     #[test]
     fn a_rocket_shakes_every_map() {
         let mut b = Blasts::default();
-        rocket_shakes(&mut b, &[[0.0, 0.0, 0.0]], 10);
-        rocket_shakes(&mut b, &[[0.0, 0.0, 200.0]], 11);
+        rocket_shakes(&mut b, &[[0.0, 0.0, 0.0]], 0, 10);
+        rocket_shakes(&mut b, &[[0.0, 0.0, 200.0]], 0, 11);
         assert!(b.shakes.is_empty(), "a rocket in flight");
-        rocket_shakes(&mut b, &[], 12);
+        rocket_shakes(&mut b, &[], 0, 12);
         let s = b.shakes[0];
         assert_eq!(
             (s.from, s.at, s.near, s.range),
             (12, Vec3::new(0.0, 0.0, 200.0), 800.0, 2000.0)
         );
         assert_eq!(s.wave.amp, BLAST.amp);
-        rocket_shakes(&mut b, &[], 12 + 182);
+        rocket_shakes(&mut b, &[], 0, 12 + 182);
+        assert!(b.shakes.is_empty());
+        // The restart empties the frozen list: no shake.
+        rocket_shakes(&mut b, &[[0.0, 0.0, 200.0]], 2, 300);
+        rocket_shakes(&mut b, &[], 0, 301);
         assert!(b.shakes.is_empty());
     }
 

@@ -66,6 +66,7 @@ fn world() -> Option<&'static CollisionWorld> {
             world.camera = Some(CameraLevel::new(
                 0x2D,
                 &rom.asset(&[0x0C, 0x2D, 5]).unwrap(),
+                &[],
             ));
             let player =
                 extract_character::Character::load(&rom, extract_character::DEATHMATCH_PLAYER)
@@ -1540,7 +1541,7 @@ fn floor_zones_switch_the_fast_path_off() {
             return;
         };
         let mut world = scene_world(&rom, scene);
-        let level = CameraLevel::new(scene as u16, &rom.asset(&[0x0C, scene, 5]).unwrap());
+        let level = CameraLevel::new(scene as u16, &rom.asset(&[0x0C, scene, 5]).unwrap(), &[]);
         assert_eq!(level.floor_zones.len(), zones);
         world.camera = Some(level);
         let mut lines = text.lines();
@@ -1622,6 +1623,7 @@ fn high_jump_matches_the_game() {
     world.camera = Some(CameraLevel::new(
         0x30,
         &rom.asset(&[0x0C, 0x30, 5]).unwrap(),
+        &[],
     ));
     let za = movement::BUTTON_Z | movement::BUTTON_A;
     for (name, player, first, last, stick, yaw) in [
@@ -1806,6 +1808,7 @@ fn corridor_camera_matches_the_game() {
     world.camera = Some(CameraLevel::new(
         0x34,
         &rom.asset(&[0x0C, 0x34, 5]).unwrap(),
+        &[],
     ));
     let Ok(obj) = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

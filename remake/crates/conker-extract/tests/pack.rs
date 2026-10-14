@@ -533,6 +533,27 @@ fn pack_reads_back_as_the_rom_path() {
             assert!(files[format!("maps/1a/{f}").as_str()].starts_with(b"\x89PNG"));
         }
     }
+    // The vertices the lights pass by (`_UNLIT`, 1.0: their flag's bit 15, the oracle's
+    // `lightVerticesCBFD`): V 2b, 97 terrain vertices keep their colour (83 black, 2 grey, the
+    // bulbs' 12 white); 0x1A's 58.
+    let unlit = |name: &str| -> usize {
+        let level: Value =
+            serde_json::from_slice(files[conker_assets::level_gltf(name).as_str()]).unwrap();
+        let bin = files[format!("maps/{name}/level.bin").as_str()];
+        let meshes = level["meshes"].as_array().unwrap().iter();
+        let flags = meshes.flat_map(|m| m["primitives"].as_array().unwrap());
+        (flags.filter_map(|p| p["attributes"]["_UNLIT"].as_u64()))
+            .map(|a| {
+                let a = &level["accessors"][a as usize];
+                let v = &level["bufferViews"][a["bufferView"].as_u64().unwrap() as usize];
+                let start = v["byteOffset"].as_u64().unwrap_or(0) as usize;
+                let n = a["count"].as_u64().unwrap() as usize;
+                let words = bin[start..start + 4 * n].as_chunks::<4>().0.iter();
+                words.filter(|w| f32::from_le_bytes(**w) == 1.0).count()
+            })
+            .sum()
+    };
+    assert_eq!((unlit("2b"), unlit("1a")), (97, 58));
     // No packed level leaves a material on a runtime segment unbound (the `-seg` ones draw their
     // first frame); `segments.json` is empty off 0x1A.
     for name in ["2d", "30", "34", "3f", "2b", "1a", "24", "33"] {

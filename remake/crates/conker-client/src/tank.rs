@@ -3,17 +3,19 @@
 //! - its turret (joint 2) turned by `PlayerState::turret` about y and its gun (joint 3) pitched by
 //!   `PlayerState::pitch` about x, over its clip (C `func_150344A0`; V j1: DL 60 moves joints 2 and 3
 //!   only), so the gun points where the rules fire ([`pose`]);
-//! - its treads' texture scrolling −7 S units a frame per unit of speed, wrapping at 0x800
-//!   (`func_150ED638`, C; [`scroll`]) and its brake lights lit while it brakes (obj+0x6C 22/25, C;
-//!   V snd: [`braking`]); its flag by slot is [`crate::render`]'s team look ([`flag`]);
+//! - its treads' texture scrolling, each side by its own speed: −7 S units a frame per unit of
+//!   the hull's speed ± its turn, wrapping at 0x800 (`func_150ED638`, C; [`tread`]), and its brake
+//!   lights lit while it brakes (obj+0x6C 22/25, C; V snd: [`braking`]); its flag by slot is
+//!   [`crate::render`]'s team look ([`flag`]);
 //! - hidden from the frame after its death to its respawn: its wreck stands in (V c1: obj+0x6A,
 //!   +0x6B set at 424, the death at 423, cleared at the respawn, 510);
 //! - its follow camera behind the hull and the scope's view from the turret ([`camera`]);
 //! - the shells (`projectiles.gltf#Scene4` at 1.5, V sh1) and their blasts (Beach's puffs: the
 //!   same white, grey, black and dark red sprites, V bm1 DL 363);
 //! - the props (`maps/24/props.gltf` and the level's doors): the doors sliding apart along their
-//!   own z by [`MatchView::lifts`], the bomb on its post or over its carrier, the wrecks (prop 18
-//!   plus the slot) where a tank died; the unused ones hidden ([`owns`]).
+//!   own z by [`MatchView::lifts`], the bomb on its post, the wrecks (prop 18 plus the slot) where a
+//!   tank died; the unused ones hidden ([`owns`]); the carried bomb (`props.gltf` scene 1) on its
+//!   carrier's turret joint.
 //!
 //! The HUD's power-up icon and scope are [`crate::hud`]'s, the sounds [`crate::audio`]'s.
 
@@ -23,9 +25,9 @@ use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::WorldAssetRoot;
-use conker_assets::{Character, PACK_WEAPONS, Tank, projectiles_gltf};
+use conker_assets::{Character, PACK_WEAPONS, Tank, projectiles_gltf, props_gltf};
 use conker_rules::Fighter;
-use conker_rules::tank::{BOMB, POST, SCOPE, SHELL_SPEED, hull_pitch};
+use conker_rules::tank::{BOMB, POST, SCOPE, hull_pitch};
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, PlayerState, cos_sin};
@@ -39,10 +41,13 @@ pub const MODEL: &str = "119";
 /// The shell's model: `projectiles.gltf` scene 4 at 1.5 (V sh1 DL 42).
 const SHELL_SCENE: usize = 4;
 const SHELL_SCALE: f32 = 1.5;
-/// The treads' scroll: S units a frame per unit of speed, its wrap (C `func_150ED638`), and S units
-/// a texel (the vertices' s10.5).
+/// The treads' scroll: S units a frame per unit of speed, its wrap, a side's speed's bound and the
+/// facing's units (65536 a turn) a frame that add one unit of speed (C `func_150ED638`), and S
+/// units a texel (the vertices' s10.5).
 const TREAD_S: f32 = -7.0;
 const TREAD_WRAP: f32 = 2048.0;
+const TREAD_MAX: f32 = 45.0;
+const TREAD_TURN: f32 = 70.0;
 const S_PER_TEXEL: f32 = 32.0;
 /// The brake lights: lit while the speed is past 5 and the target behind it (C: obj+0x6C 22 with
 /// speed > 5 and accel ≤ 0, or < −5 and accel ≥ 0).
@@ -72,12 +77,9 @@ const CAM_WALL: f32 = 10.0;
 const SCOPE_EYE: [f32; 2] = [27.5, 111.6];
 const SCOPE_ITEM: u8 = 0x1F;
 const SCOPE_ZOOM: [f32; 2] = [-27.8, -22.937_294]; // V tank_pw2 171 (one view)
-/// The bomb over its carrier (I: item 0x18's look is not found): this high over the tank, at this
-/// share of the post's scale.
-const CARRIED: (f32, f32) = (190.0, 0.3);
-/// The shells' blast (I: the impact `func_15137610` unread; V bm1 DL 363: the death's puffs in the
-/// strike's colours): War: Beach's strike's puffs, as many and as wide, without its debris.
-const BLAST: (u32, f32, u32) = (16, 120.0, 0);
+/// The carried gas bomb: `props.gltf`'s scene (action 0x18's one record, bank 09 #0x3F on matrix
+/// slot 2: the turret joint, C; V k1 DL 45), in the joint's frame in model units.
+const CARRIED: usize = 1;
 
 /// Degrees in game angle units.
 const DEG: f32 = 65536.0 / 360.0;
@@ -112,9 +114,13 @@ pub fn braking(speed: f32, target: f32) -> bool {
     (speed > BRAKE_SPEED && target < speed) || (speed < -BRAKE_SPEED && target > speed)
 }
 
-/// The treads' scroll in S units after `frames` frames at `speed` from `s`, wrapped.
-pub fn scroll(s: f32, speed: f32, frames: f32) -> f32 {
-    (s + TREAD_S * speed * frames).rem_euclid(TREAD_WRAP)
+/// Tread `side`'s scroll in S units after `frames` frames from `s`, the hull at `speed` turning
+/// `turn` facing units a frame: the side's speed clamp(speed ± turn / 70, ±45), side 0 (`treads[0]`,
+/// on `joint_13`, the right: a left turn raises the facing) +, wrapped (`func_150ED638`, C).
+pub fn tread(s: f32, speed: f32, turn: f32, side: usize, frames: f32) -> f32 {
+    let turn = if side == 0 { turn } else { -turn };
+    let v = (speed + turn / TREAD_TURN).clamp(-TREAD_MAX, TREAD_MAX);
+    (s + TREAD_S * v * frames).rem_euclid(TREAD_WRAP)
 }
 
 /// The turret's and the gun's turn over their clip's pose: the turret about y by its yaw (left of
@@ -208,24 +214,24 @@ pub fn behind(
 }
 
 /// A tank's parts, once its model is in: its turret and gun joints, its brake lights' part with its
-/// two materials (off, lit), and its treads' parts (one a side) with their own materials and
-/// scroll (S units).
+/// two materials (off, lit), its treads' parts (one a side, in `treads`' order) with their own
+/// materials and scroll (S units), the tick and facing they last scrolled at, and its carried bomb.
 #[derive(Component)]
 struct Parts {
     turret: Entity,
     gun: Entity,
     brake: Option<(Entity, [Handle<StandardMaterial>; 2])>,
     treads: Vec<(Entity, Handle<StandardMaterial>)>,
-    scroll: f32,
+    scroll: [f32; 2],
+    last: Option<(u32, u16)>,
+    bomb: Entity,
 }
 
-/// The shells' models and the blasts' state, by this client's ticks.
+/// The shells' models (their glows and blasts are `effects`').
 #[derive(Resource, Default)]
 struct Shells {
     scene: Option<Handle<WorldAsset>>,
     models: Vec<Entity>,
-    last: Vec<[f32; 3]>,
-    seed: u32,
 }
 
 /// The props' nodes: placement, entity, and its pose at home (translation, rotation, scale).
@@ -237,7 +243,8 @@ pub fn build(app: &mut App, characters: &[Character], map: &str) {
         .into_iter()
         .map(|n| format!("characters/{n}"));
     let looks = (characters.iter().zip(folders)).map(|(c, f)| Some((c.tank.clone()?, f)));
-    app.insert_resource(Looks(looks.collect()));
+    let bomb = format!("{}#Scene{CARRIED}", props_gltf(map));
+    app.insert_resource(Looks(looks.collect(), bomb));
     app.init_resource::<Shells>();
     app.add_systems(Update, (find_parts, lights, shells, props));
     app.add_systems(
@@ -248,9 +255,9 @@ pub fn build(app: &mut App, characters: &[Character], map: &str) {
 }
 
 /// Each body's tank parts and its character's folder (model 119's; None for the others), by body
-/// ([`crate::characters`]).
+/// ([`crate::characters`]), and the carried bomb's scene.
 #[derive(Resource)]
-struct Looks(Vec<Option<(Tank, String)>>);
+struct Looks(Vec<Option<(Tank, String)>>, String);
 
 /// A tank model whose rig is in gets its [`Parts`]: the pack's joints by name, its own copies of the
 /// brake lights' and treads' materials.
@@ -306,25 +313,40 @@ fn find_parts(
         for (e, m) in own {
             commands.entity(e).insert(MeshMaterial3d(m.clone()));
         }
+        let bomb = (WorldAssetRoot(assets.load(&looks.1)), Visibility::Hidden);
+        let bomb = commands
+            .spawn((bomb, Transform::IDENTITY, ChildOf(turret)))
+            .id();
         commands.entity(entity).insert(Parts {
             turret,
             gun,
             brake,
             treads,
-            scroll: 0.0,
+            scroll: [0.0; 2],
+            last: None,
+            bomb,
         });
     }
 }
 
 /// The hull pitched along its floor (the rules' [`hull_pitch`], obj+0xB8: so the gun's pitch over
-/// it is the rules' too), the turret and gun over the clip's pose, and the model hidden while dead.
+/// it is the rules' too), the turret and gun over the clip's pose, the model hidden while dead, and
+/// the bomb on its carrier (`command(p, 0x4B, 0x18)` to 0x4C).
 fn pose(
     tanks: Query<(Entity, &Player, &Combat, &Parts, &Model)>,
+    game: Query<&MatchView>,
     mut joints: Query<&mut Transform>,
     mut shown: Query<&mut Visibility>,
     world: Option<Res<Collision>>,
 ) {
+    let carrier = game.iter().find(|m| m.tank).and_then(|m| m.tanks.carrier);
     for (entity, p, c, parts, model) in &tanks {
+        if let Ok(mut v) = shown.get_mut(parts.bomb) {
+            v.set_if_neq(match carrier == Some(c.slot) {
+                true => Visibility::Inherited,
+                false => Visibility::Hidden,
+            });
+        }
         if let (Ok(mut t), Some(w)) = (joints.get_mut(entity), &world) {
             t.rotation *= Quat::from_rotation_x(-hull_pitch(&p.0, &w.0).to_radians());
         }
@@ -344,15 +366,16 @@ fn pose(
     }
 }
 
-/// The brake lights and the treads' scroll (by the frames this render frame spans).
+/// The brake lights and the treads' scroll, a step a tick (the hull's turn: its facing's since the
+/// last tick seen).
 fn lights(
-    time: Res<Time>,
+    timeline: Res<LocalTimeline>,
     images: Res<Assets<Image>>,
     mut tanks: Query<(&Player, &mut Parts)>,
     mut parts: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let frames = time.delta_secs() * conker_sim::TICK_HZ as f32;
+    let tick = timeline.tick().0;
     for (p, mut tank) in &mut tanks {
         if let Some((e, [off, lit])) = &tank.brake
             && let Ok(mut m) = parts.get_mut(*e)
@@ -366,17 +389,24 @@ fn lights(
                 m.0 = want.clone();
             }
         }
-        tank.scroll = scroll(tank.scroll, p.xz_speed, frames);
-        // ponytail: both treads by the speed; the original's sides differ by the turn (±Δfacing/70).
-        for (_, own) in &tank.treads {
+        let (was, facing) = tank.last.unwrap_or((tick, p.facing));
+        let frames = tick.saturating_sub(was).min(4);
+        if frames == 0 && tank.last.is_some() {
+            continue;
+        }
+        tank.last = Some((tick, p.facing));
+        let turn = f32::from(p.facing.wrapping_sub(facing) as i16) / frames.max(1) as f32;
+        let scroll =
+            std::array::from_fn(|k| tread(tank.scroll[k], p.xz_speed, turn, k, frames as f32));
+        tank.scroll = scroll;
+        for ((_, own), s) in tank.treads.iter().zip(scroll) {
             let Some(mut m) = materials.get_mut(own) else {
                 continue;
             };
             let width = (m.base_color_texture.as_ref())
                 .and_then(|t| images.get(t))
                 .map_or(16.0, |i| i.width() as f32);
-            m.uv_transform =
-                Affine2::from_translation(Vec2::new(tank.scroll / S_PER_TEXEL / width, 0.0));
+            m.uv_transform = Affine2::from_translation(Vec2::new(s / S_PER_TEXEL / width, 0.0));
         }
     }
 }
@@ -388,23 +418,17 @@ pub fn shell_pose(yaw: u16, tan: f32) -> Quat {
     Transform::IDENTITY.looking_to(-dir, Vec3::Y).rotation
 }
 
-/// The match's shells, one model each, and a blast where one went since last tick.
-#[allow(clippy::too_many_arguments)]
+/// The match's shells, one model each.
 fn shells(
     game: Query<&MatchView>,
-    timeline: Res<LocalTimeline>,
     assets: Res<AssetServer>,
-    sprites: Option<Res<crate::beach::Sprites>>,
     mut state: ResMut<Shells>,
     mut models: Query<(&mut Transform, &mut Visibility)>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut last_tick: Local<u32>,
     mut commands: Commands,
 ) {
     let Some(m) = game.iter().find(|m| m.tank) else {
         return;
     };
-    let tick = timeline.tick().0;
     let s = &mut *state;
     let scene = (s.scene)
         .get_or_insert_with(|| {
@@ -439,38 +463,13 @@ fn shells(
             }
         }
     }
-    if tick == *last_tick {
-        return;
-    }
-    let frames = tick.saturating_sub(*last_tick).clamp(1, 4) as f32;
-    *last_tick = tick;
-    let now: Vec<_> = shells.iter().map(|s| s.0).collect();
-    let reach = 2.0 * SHELL_SPEED * frames;
-    let blasts: Vec<_> = crate::audio::gone(&s.last, &now, reach).collect();
-    s.last = now;
-    let Some(sprites) = sprites else {
-        return;
-    };
-    for at in blasts {
-        let at = Vec3::from_array(at);
-        crate::beach::burst(
-            &mut commands,
-            &mut materials,
-            &sprites,
-            &mut s.seed,
-            at,
-            BLAST,
-        );
-    }
 }
 
-/// Tank's props: the doors slide apart along their own z, the bomb stands on its post (or over its
-/// carrier), each wreck where its tank died, facing its way; the others stay hidden.
-#[allow(clippy::type_complexity)]
+/// Tank's props: the doors slide apart along their own z, the bomb stands on its post (its carrier
+/// has its own, [`pose`]), each wreck where its tank died, facing its way; the others stay hidden.
 fn props(
     game: Query<&MatchView>,
     added: Query<(Entity, &Name), Added<Name>>,
-    players: Query<(&Transform, &Combat), (With<Model>, Without<Name>)>,
     mut nodes: Local<Nodes>,
     mut shown: Query<(&mut Transform, &mut Visibility), With<Name>>,
 ) {
@@ -493,16 +492,8 @@ fn props(
                 let lift = f32::from(m.lifts[n as usize]);
                 Some(home.with_translation(home.translation + home.rotation * Vec3::Z * lift))
             }
-            p if p == u32::from(BOMB) => match tanks.carrier {
-                Some(slot) => (players.iter().find(|(_, c)| c.slot == slot)).map(|(at, _)| {
-                    Transform::from_translation(at.translation + Vec3::Y * CARRIED.0)
-                        .with_rotation(at.rotation)
-                        .with_scale(home.scale * CARRIED.1)
-                }),
-                None => tanks
-                    .bomb
-                    .then(|| home.with_translation(Vec3::from_array(POST))),
-            },
+            p if p == u32::from(BOMB) => (tanks.bomb && tanks.carrier.is_none())
+                .then(|| home.with_translation(Vec3::from_array(POST))),
             p @ 18..26 => (tanks.wrecks.iter().find(|w| u32::from(w.0) + 18 == p)).map(|w| {
                 Transform::from_translation(Vec3::from_array(w.1))
                     .with_rotation(Quat::from_rotation_y(model_yaw(w.2)))
@@ -547,12 +538,19 @@ mod tests {
         assert!((world - Vec3::new(c, 0.0, -s)).length() < 1e-4, "{world}");
     }
 
-    /// The treads scroll −7 a frame per unit of speed, wrapping at 0x800; the brake lights light
-    /// slowing past 5, either way; the flags by slot, yellow from 3 up; Tank's own placements.
+    /// The treads scroll −7 a frame per unit of their side's speed, wrapping at 0x800: the hull's
+    /// ± its turn / 70, within ±45 (`func_150ED638`); the brake lights light slowing past 5,
+    /// either way; the flags by slot, yellow from 3 up; Tank's own placements.
     #[test]
     fn treads_brakes_flags_and_props() {
-        assert_eq!(scroll(0.0, 48.0, 1.0), 2048.0 - 336.0);
-        assert_eq!(scroll(100.0, -10.0, 2.0), 240.0);
+        assert_eq!(tread(0.0, 40.0, 0.0, 0, 1.0), 2048.0 - 280.0);
+        assert_eq!(tread(100.0, -10.0, 0.0, 1, 2.0), 240.0);
+        // Turning left 0x230 a frame at 40: the right side (0) runs at 45 (48 clamped), the left
+        // at 32; in place, ±8 each way.
+        assert_eq!(tread(0.0, 40.0, 560.0, 0, 1.0), 2048.0 - 315.0);
+        assert_eq!(tread(0.0, 40.0, 560.0, 1, 1.0), 2048.0 - 224.0);
+        assert_eq!(tread(0.0, 0.0, 560.0, 0, 1.0), 2048.0 - 56.0);
+        assert_eq!(tread(0.0, 0.0, 560.0, 1, 1.0), 56.0);
         assert!(braking(30.0, 0.0) && braking(-30.0, 0.0));
         assert!(!braking(47.96, 48.0) && !braking(4.0, 0.0) && !braking(-30.0, -48.0));
         assert_eq!([0, 1, 2, 3, 4, 7].map(flag), [0, 1, 2, 3, 3, 3]);
@@ -621,6 +619,44 @@ mod tests {
             "{:?}",
             follow.cam.eye
         );
+    }
+
+    /// The carried bomb (`maps/24/props.gltf` scene 1) in the turret joint's frame at the model's
+    /// 0.5 lies as V k1 DL 45 draws it: centre 109 over the feet and 51 behind the turret's pivot
+    /// (88 up), its long axis across the hull, 126 long. Needs the asset pack (`CONKER_ASSETS`,
+    /// else `<repo>/assets`); skips without it.
+    #[test]
+    fn the_carried_bomb_rides_the_turret_as_k1() {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let read = |p: &str| std::fs::read(std::path::Path::new(&dir).join(p));
+        let (Ok(gltf), Ok(bin), Ok(props)) = (
+            read("characters/119/character.gltf"),
+            read("characters/119/character.bin"),
+            read(&props_gltf("24")),
+        ) else {
+            eprintln!("no asset pack in {dir}: skipping");
+            return;
+        };
+        let sk = conker_assets::pose::Skeleton::parse(&gltf, &bin).unwrap();
+        let turret = sk.model(&sk.rest)[2];
+        let g: serde_json::Value = serde_json::from_slice(&props).unwrap();
+        let node = &g["nodes"][g["scenes"][CARRIED]["nodes"][0].as_u64().unwrap() as usize];
+        let mesh = &g["meshes"][node["mesh"].as_u64().unwrap() as usize];
+        let at = mesh["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .unwrap() as usize;
+        let bound = |k: &str| -> Vec3 {
+            let v = &g["accessors"][at][k];
+            Vec3::from_array(std::array::from_fn(|i| v[i].as_f64().unwrap() as f32))
+        };
+        let (lo, hi) = (bound("min"), bound("max"));
+        let world = |p: Vec3| Vec3::from(turret.apply(p.to_array())) * crate::render::MODEL_SCALE;
+        let (centre, pivot) = (world((lo + hi) / 2.0), world(Vec3::ZERO));
+        assert!((pivot.y - 88.0).abs() < 3.0, "{pivot}");
+        assert!((centre.y - 109.0).abs() < 3.0, "{centre}");
+        assert!((pivot.z - centre.z - 51.0).abs() < 1.0, "{pivot} {centre}");
+        assert!(((hi.x - lo.x) * crate::render::MODEL_SCALE - 126.0).abs() < 0.5);
     }
 
     /// The shell's nose along its flight: level along the yaw, up by its tangent.

@@ -18,6 +18,8 @@
 //! the frames since its pull ([`lob_pose`]) at its own scale 1.0, in the hand's frame without the
 //! hand's scale (V `held-client-scratch` p1a DLs 110, 126: its root in the normalised hand frame is
 //! its clip's root; the crossbow's joint 0 is at the hand's scale, cbs DLs 100-233).
+//! The models the game's code hangs with no event ([`worn`]): a shotgun's or chainsaw's victim's
+//! stump ([`crate::corpses`]' cut) and the racer classes' helmets in any mode.
 
 use crate::render::MODEL_SCALE;
 use crate::{Anim, Config};
@@ -281,7 +283,7 @@ fn unscale_lobs(
 
 /// A player's upper body (`joint_01`) and head (`joint_12`), which the twist turns.
 #[derive(Component)]
-pub(crate) struct Twisted(Entity, pub(crate) Option<Entity>);
+pub(crate) struct Twisted(pub(crate) Entity, pub(crate) Option<Entity>);
 
 /// The twist as a turn about the body's up axis: the upper body aims along `facing − twist`, as
 /// the camera does (V twin: `joint_01`'s yaw on the root's 5.3° at twist 0, 54.9° at 9000 (49.4°),
@@ -368,6 +370,22 @@ pub fn mask_shows(h: &Held, masked: bool, clock: &AnimPlayer) -> bool {
     }
 }
 
+/// Whether held model `h` shows on a player of class `class`, cut in two or not (`halved`), if it
+/// is one the game's code hangs with no event: a head stump on its model's cut body (#0x59 on 117,
+/// #0x58 on 128: `func_15194AB4`, C; V sg_e1, e_w22) to the respawn, a racer class's helmet
+/// (#0x5A, #0x5C, #0x5B on 0xD, 0xE, 0xF: `func_15083384`, C) in any mode; None for the others.
+pub fn worn(h: &Held, class: u8, halved: bool) -> Option<bool> {
+    let model = conker_rules::characters::model(class);
+    Some(match h.entry {
+        0x59 => halved && model == Some(117),
+        0x58 => halved && model == Some(128),
+        0x5A => class == 0xD,
+        0x5C => class == 0xE,
+        0x5B => class == 0xF,
+        _ => return None,
+    })
+}
+
 /// The [`RIGS`] entry and list of held model `h`, if it is a child object with its own rig.
 fn rig_of(h: &Held) -> Option<(usize, usize)> {
     (RIGS.iter().enumerate())
@@ -411,8 +429,15 @@ fn hang(
         };
         let hands = (held.0.iter().enumerate())
             .filter_map(|(i, h)| {
+                // A stump on a joint the cut collapses undoes it ([`crate::corpses::CUT`]).
+                let cut = [0x58, 0x59].contains(&h.entry) && (1..16).contains(&h.joint);
+                let scale = if cut {
+                    crate::corpses::CUT.recip()
+                } else {
+                    1.0
+                };
                 let at = (
-                    Transform::IDENTITY,
+                    Transform::from_scale(Vec3::splat(scale)),
                     Visibility::Hidden,
                     ChildOf(joint(h.joint)?),
                 );
@@ -510,6 +535,7 @@ fn show(
     players: Query<(
         &Anim,
         &Hands,
+        &crate::corpses::Corpse,
         Option<&Combat>,
         Option<&Fighting>,
         Has<Predicted>,
@@ -519,7 +545,7 @@ fn show(
     mut visibility: Query<&mut Visibility>,
 ) {
     let race = game.iter().any(|m| m.race);
-    for (anim, hands, combat, fighting, predicted) in &players {
+    for (anim, hands, corpse, combat, fighting, predicted) in &players {
         let (weapon_id, drawn, masked) = match (fighting, combat) {
             (Some(f), _) if predicted => {
                 (f.state.weapon.unwrap_or(0), f.state.drawn, f.state.masked)
@@ -538,10 +564,12 @@ fn show(
             // the pull's first frame to the throw's first (V p1a: s126+0x75 0xBA, the object a
             // child until 0x1FC).
             let lob = rig_of(h).is_some_and(|r| r.0 == LOB);
+            let worn = worn(h, class, corpse.halved);
             let shown = !raptor
                 && match h.create.iter().any(|c| c.0 == MASK_ON) {
                     _ if racer => clip_shows(h, &anim.0),
                     _ if lob => [LOB_PULL, LOB_HOLD].contains(&anim.0.id),
+                    _ if worn.is_some() => worn == Some(true),
                     true => mask_shows(h, masked, &anim.0),
                     false => shows(h, weapon_id, drawn, &anim.0, class),
                 };
@@ -822,6 +850,33 @@ mod tests {
                 "{clip:#x}: {frames}"
             );
         }
+    }
+
+    /// The pack's eventless tail (`held.json` 24-28): the stumps on their own model's cut body
+    /// only (#0x59 on 117, class 3; #0x58 on 128, class 4; none on Conker's 0), the helmets on
+    /// their racer class anywhere (#0x5A, #0x5C, #0x5B on 0xD-0xF; none on the human's 0xB or the
+    /// bare 0xC); in Race the racers' own clips decide, and these have none (`race.rs` hangs the
+    /// helmets there). The other models are the events'.
+    #[test]
+    fn stumps_and_helmets_hang_by_model_and_class() {
+        let at = |entry, joint| Held {
+            entry,
+            joint,
+            create: vec![],
+            remove: vec![],
+        };
+        let [s117, s128] = [at(0x59, 0), at(0x58, 1)];
+        let helmets = [at(0x5A, 12), at(0x5C, 12), at(0x5B, 12)];
+        let shown = |h: &Held, class, halved| worn(h, class, halved).unwrap();
+        assert!(shown(&s117, 3, true) && !shown(&s117, 3, false) && !shown(&s117, 4, true));
+        assert!(shown(&s128, 4, true) && !shown(&s128, 4, false) && !shown(&s128, 3, true));
+        assert!(!shown(&s117, 0, true) && !shown(&s128, 0, true));
+        for (k, h) in helmets.iter().enumerate() {
+            let on: Vec<u8> = (0..0x29).filter(|&c| shown(h, c, false)).collect();
+            assert_eq!(on, [0xD + k as u8]);
+            assert!(!clip_shows(h, &clock(conker_anim::id::RUN, 3.0, 1.0)));
+        }
+        assert_eq!(worn(&at(27, 9), 0xD, true), None);
     }
 
     /// The twisted upper body faces `facing − twist` (the camera's aim), 49.4° at the limit; the

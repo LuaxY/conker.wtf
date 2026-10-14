@@ -91,7 +91,7 @@ pub struct CollisionWorld {
     /// of a wall (state 122's heading) and the stick's direction use it; without it, a close arctangent
     /// (a few units off).
     pub acos: Option<AcosTable>,
-    /// The scene's camera data (`CameraLevel::new(scene, &rom.asset(&[0x0C, scene, 5])?)`): the volumes
+    /// The scene's camera data (`CameraLevel::new(scene, &rom.asset(&[0x0C, scene, 5])?, points)`): the volumes
     /// that turn the camera's wall checks off, and the zones where its sweep skips the placements.
     /// Without it the camera behaves as inside a volume everywhere (wave 2: no wall ray, no sweep).
     pub camera: Option<CameraLevel>,

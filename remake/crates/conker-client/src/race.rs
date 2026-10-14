@@ -8,7 +8,7 @@
 //! - the racers: every player, the human (class 0xB) 136 or its pick, the bots (0xC-0xF) 144 in
 //!   their helmets; the board (`props.gltf` scene `board.scene`) on joint 23 and a helmet (classes
 //!   0xD-0xF) on joint 12, all three
-//!   hidden from the death to the respawn, with the blast where it died ([`gear`]);
+//!   hidden from the death to the respawn ([`gear`]; the blast is `effects`');
 //!   their clips ([`clip`], [`rate`]); the exhaust glow and the canister's boost flare
 //!   ([`flares`]);
 //! - the effects the pack has (`hud/race_*.png`): the countdown lamps after the go ([`lamps`]),
@@ -38,7 +38,7 @@ use conker_rules::race::{DEAD, Track};
 use conker_sim::board::KICK;
 use conker_sim::follow::Follow;
 use conker_sim::movement::PlayerState;
-use conker_sim::net::{Collision, Combat, MatchView, Player};
+use conker_sim::net::{Collision, Combat, MatchView};
 use lightyear::prelude::{LocalTimeline, Predicted};
 
 use crate::MatchArena;
@@ -67,10 +67,6 @@ const GROW: [f32; 6] = [0.26, 0.52, 0.78, 1.0, 1.0229, 1.0014];
 /// The missile: `projectiles.gltf` scene 4 at 1.0 (#0x33, V m1 DL 224).
 const MISSILE_SCENE: usize = 4;
 const MISSILE_SCALE: f32 = 1.0;
-/// The death's blast, 55 over the racer (V idle 377): the smoke and fire shells (smoke 200 wide at
-/// 1.94 to 5.83) and the 9 debris, as [`crate::beach::burst`]'s puffs and chunks (I).
-const BLAST_UP: f32 = 55.0;
-const BLAST: (u32, f32, u32) = (10, 300.0, 9);
 /// The canister's boost flare (V w3c DLs 480-510: `hud/race_boost.png`, white × its alpha × 0x6B-0x71,
 /// 348-399 wide, 74-76 tall, over the racer 33-90 up, −6…19 ahead and 24-26 to its right: the
 /// racer's frame faces +z, so its right is −x), facing the camera (I).
@@ -81,7 +77,7 @@ const FLARE_ALPHA: f32 = 0x6E as f32 / 255.0;
 /// 84-91 × 78-85, 7-35 behind, 22-25 to the right, 42-99 up while boosting), facing the camera. I:
 /// that size always (17-178 wide without a boost, its law not decoded).
 const EXHAUST: [f32; 2] = [88.0, 82.0];
-const EXHAUST_AT: [f32; 3] = [-24.0, 60.0, -25.0];
+pub(crate) const EXHAUST_AT: [f32; 3] = [-24.0, 60.0, -25.0];
 const EXHAUST_ALPHA: f32 = 0xF5 as f32 / 255.0;
 /// The countdown lamps' lower two (V cd 142-285, it 206-270: `hud/race_lamp.png` green × its alpha,
 /// 845-857 square, facing the camera). The top one and every red stage stay at alpha 0, so only
@@ -292,26 +288,20 @@ fn hang(
 }
 
 /// The death on the board (V idle DLs 377-463): the racer, board and helmet hidden from the death
-/// to the respawn, and where it died, 55 up, the blast (I: [`crate::beach::burst`]'s puffs for the
-/// smoke and fire shells, its chunks for the 9 debris). The local racer's death is its
+/// to the respawn (its blast is `effects::race_blast`'s). The local racer's death is its
 /// prediction's.
 #[allow(clippy::type_complexity)]
 fn gear(
     mut racers: Query<(
         &Combat,
-        &Player,
         &Model,
         &mut Gear,
         Option<&Fighting>,
         Has<Predicted>,
     )>,
-    sprites: Option<Res<crate::beach::Sprites>>,
     mut shown: Query<&mut Visibility>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut seed: Local<u32>,
-    mut commands: Commands,
 ) {
-    for (c, p, model, mut gear, fighting, predicted) in &mut racers {
+    for (c, model, mut gear, fighting, predicted) in &mut racers {
         let dead = match fighting {
             Some(f) if predicted => f.state.health == 0,
             _ => c.health == 0,
@@ -321,13 +311,6 @@ fn gear(
                 true => Visibility::Hidden,
                 false => Visibility::Inherited,
             });
-        }
-        if dead
-            && !gear.0
-            && let Some(sprites) = &sprites
-        {
-            let at = Vec3::from_array(p.pos) + Vec3::Y * BLAST_UP;
-            crate::beach::burst(&mut commands, &mut materials, sprites, &mut seed, at, BLAST);
         }
         gear.0 = dead;
     }

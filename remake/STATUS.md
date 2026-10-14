@@ -1,5 +1,172 @@
 # Status after wave 6 (2026-10-10)
 
+## Tank, Beach, the held models and the laser drawn (2026-10-14)
+**Lane G5b-world.** The client draws G5a's non-effect exports. The oracle runs are on the private copy
+(`ConkerRecomp.g5w`; `../lab/research/mp-original/world-g5-scratch/`: `las`, t5). Tags: V (oracle), C (code), I (inferred).
+No wire change and `PROTOCOL_ID` untouched. Shared simulation: only where conker-camera's fixed cameras get their
+points (below). Pack re-exported: `verify-pack.sh` says "pack equal", 2,160 files.
+
+**The crossbow's aim laser** (`laser.rs`, new)
+- The dot (`strike_glow`) lies on the struck surface (the collision triangle's normal; a body part faces the beam), in
+  every view. The beam (`strike_streak`, S wrapping every 164 units and swinging about one wrap) runs from
+  `joint_09` × (−6, −25, 119) to the dot, in the other players' views only. One's own laser comes from the
+  prediction's `Match::laser` (lib's `predict` → `laser::Own`), the others' from `Combat::laser`.
+- They step every other frame and ease 0.2 of the gap a step: the alpha 0xFA → 0xC4, the beam's width 4 → 40, the dot's
+  1 → 20 (V las DLs 259-300).
+- The colour comes from the holder's model (C `func_151026BC`): 128 green (0x32, 0xFF, 0), else red. The switch's default
+  is green unless record +0x78 is 0x3B (I); V las drew red.
+- Against las: the dot at (−2308, −454, 4771) vs (−2306, −454, 4789), and the beam's start at (−2241, −473, 5961) vs
+  (−2232, −472, 5961).
+- The hum 1232 (`laser` cue) loops for the aimer alone (`Seen::laser`, `On::Laser`).
+- ponytail: the original's alpha wander (0xA5-0xE3) and the dot's ±3 jitter settle at their means here.
+
+**Tank**
+- **Treads.** Each side scrolls on its own: `clamp(speed ± Δfacing/70, ±45) × −7` a frame (C `func_150ED638`).
+- **The carried bomb.** It is now `maps/24/props.gltf` scene 1 on the turret joint (V k1 DL 45: centre 109 up and 51
+  behind the pivot). It replaces the upright guess.
+- **The rumble** (1193, `Sounds::rumble`, C `func_151BB0E0`, V t5):
+  - the first starts 150 frames into the drive loop, then another every 450 or 706 frames;
+  - each rises 8/256 a frame from 8/256, holds 150 or 406 frames, then falls from 255/256 to 7/256;
+  - idling stops it at once. cs5's outro tanks rumble too.
+  - **Correction:** the drive loop never fades (t5: 1,400 frames). The old docs said it did (conker-assets,
+    events.json's note, the README, this file's G4 row on sound 0x4A9).
+  - Remake log (`world-g5/tank.sh r`): the drive loop at read 30, rumbles at 180, 886 and 1592.
+
+**Beach's cameras.**
+- conker-camera takes the fixed cameras' points from the pack (`Slice::cameras`, `CameraLevel::new`'s new `points`);
+  `SEA_POINTS` is gone. The sea's two are unchanged.
+- 0x2B's tunnel hints 0x45, 0x47 and 0x48 now have their cameras too: points 3-5, reaches 838, 685 and 685 (C: the
+  table names them; the README's "four no hint names" was wrong).
+
+**Characters**
+- **Head stumps.** A shotgun or chainsaw kill (reaction 0x2F, weapon 0x37 or 0x22) cuts the body until the respawn:
+  joints 1-15 go to scale 1e-4 (I: 0 in the original), and the stump shows (#0x59 on 117, #0x58 on 128; V sg_e1
+  791 → 969).
+- **The racer helmets** (#0x5A, #0x5C, #0x5B) show on classes 0xD-0xF on any map. Race keeps hanging its own.
+- **Sinking floors.** Bodies are drawn at their floor's sink (`render::stands`).
+
+**Unlit vertices.**
+- The level glTFs carry `_UNLIT` (the vertex flag's bit 15: the oracle's `lightVerticesCBFD` skips those vertices).
+- The client registers it (`lights::ATTRIBUTE_UNLIT`), and `relight` (0x2B, 0x1A) and `tint_room` leave those vertices
+  their colour.
+- Counts: 97 on 0x2B (V: exactly the 97 that keep their colour, the bulbs' 12 among them), 58 on 0x1A, also 2d, 30, 24,
+  33 and 24's props.
+- conker-extract's dev `gltf-json` takes `extras` so the attribute validates.
+
+**Restart.** The blast sounds now take the effects lane's guard (`effects::live`, `Sounds::prime`): a match's end or
+restart re-primes the lists, so no frozen rocket, grenade, shot or shell goes off.
+
+**Heist's outro check.** `heist/shots.sh` d/e was wrong, not the outro pick. A joining human now takes a waiting bot's
+slot, so slot 0 was a human, the delivery a human win and the outro cs2. The script now warps bot 2 into GREENS' zone
+(2481, 0, 4211): cs3 again (`world-g5/heist.sh d`).
+
+| Check | Result |
+|---|---|
+| New tests | conker-client: `the_laser_eases_in_as_las`, `the_laser_is_green_on_model_128`, `the_laser_hums_for_its_aimer`, `the_rumble_swells_as_t5`, `a_restart_blasts_nothing`, `flagged_vertices_are_passed_by`, `a_shotgun_or_chainsaw_kill_cuts_to_the_respawn`, `stumps_and_helmets_hang_by_model_and_class`, `a_body_stands_in_its_floors_sink`, `the_carried_bomb_rides_the_turret_as_k1`; updated `treads_brakes_flags_and_props` and `the_outro_tanks_run_their_engines` (rumbles at 151). conker-sim (`net`): `the_beach_hints_take_the_packs_camera_points`. extract-level: the flag in `primitives_dedupe_and_drop_zero_area`. conker-extract `pack.rs`: `_UNLIT` 97 on 2b, 58 on 1a |
+| Screens (`../lab/screens/world-g5/`, ports 5976-5982) | `laser.sh`: `laser-side.png`, `laser-early.png` (the beam at 268, thinner), `laser-dot.png` (the dot lying on the ramp), `laser-own.png` (the dot nearly edge-on from the eye's height). `tank.sh a r`: `bomb-carried.png`, `circling-own.png`. `tunnel.sh`: `tunnel-own.png`, `tunnel-free.png` (hint 0x47's point). `characters.sh lineup-b`: the helmets on 0xD-0xF. `weapons.sh` (sg_e1): `stump-p2.png` (the cut body, the stuffing on top). `heist.sh d`: cs3 |
+| Pack | `bun run pack --force`, then `verify-pack.sh`: pack equal, 2,160 files (level glTFs with `_UNLIT`, README, events.json's tank notes) |
+
+**Left.**
+- The laser's default-model colour test (+0x78 == 0x3B, I), its alpha wander and the dot's jitter.
+- No screen of a sinking floor, and none of the treads' scroll (unit tests only).
+- The tunnel cameras weren't compared with an oracle frame.
+- **The splash drops' model (I).** The table does say id 0x35 → #0xBE (V RAM `0x800A3880 + 4·0x35`, with 0x1B → 0xE5,
+  0x39 → 0x132 and 0x54 → 0x157), but #0xBE is an eyeball (texture 0x2782). Two candidates: type 0x22 reads +0xE as a
+  sprite kind (kind 0x35: blob 0x183, 64 × 16), or the draw re-textures it. `func_15147C4C`'s path wasn't traced, so
+  the export is unchanged.
+- Not done: flag 169's translucent frames; the crossfade at 0x34's and 0x3F's loop seams.
+
+## Effects: the exports drawn (2026-10-14)
+**Lane G5b-effects.** The client draws G5a's exports: `hud/*.png`'s effect sprites and `weapons/deathmatch/effects.gltf`
+on every map, from the recipes in `../lab/research/mp-original/effects-g4.md`. New oracle checks are in
+`effects-g5-scratch/NOTES.md` (twin2 and rifle DLs on the private copy). No wire change, no shared-simulation change,
+`PROTOCOL_ID` untouched, no pack re-export.
+
+`conker-client/src/effects.rs` now has three kinds of drawable:
+- `Particle`: a 2D sprite, now also flat, tall, animated or riding a joint;
+- `Streak`: a 3D sprite, a camera-facing quad between two points with an alpha at each end;
+- `Chunk`: an `effects.gltf` scene thrown, spun and faded on its own material copies.
+
+Their triggers are `watch` (shots and the match's lists), `bodies` (clips and deaths), `sea` (Beach) and `boards`
+(Race). Tags are V (oracle), C (code) and I (inferred).
+
+**Shots**
+- **The twin guns' 3D flash** (`gun_flash_3d`). It runs from the 2D flash's point along the hand joint's −y
+  (joint 9 or 4, with the facing as fallback). It is 41.5 × (0.604-1.605) long, 14.1-20 half-wide, and lives 6-9 VIs
+  (C; V 29.6-65.3 long, 14.7-17.2 half-wide).
+- **The other bullet guns' star**: six rays 73° off the barrel, 39-51 long (V rifle; I for the other guns).
+- **Tracers** (`tracer`). Each bullet in `MatchView::bullets` draws one, from a pool. Alpha is at the head and 0 at
+  the tail. The tail sits 0.62 of the bullet's motion back on its first list, then 1.22 (V 183-190, then 357-371). It
+  moves with the bullet between ticks.
+- **The local player's shots are predicted.** The flash watermark is the max of `Combat::shots` and the predicted
+  `Fighting.state.shots`.
+- **Tank**:
+  - each shot draws the 3D flash on `joint_04`, from (0, 12, 120) to (0, 27, 215) × 3.59-6.1, plus the 2D flash at
+    its start;
+  - the shell's glow rides each shell;
+  - a scope shot (power 0x02 and no new shell) draws a tracer from `SCOPE_EYE`, level along the gun, to the wall the
+    ray meets. `Tank::bullets` is not on the wire, so it is derived from the shot. I: a hull it hits does not stop it.
+
+**Blasts.** A rocket, grenade or shell leaving the lists sets off:
+- the columns;
+- the ring (`effects.gltf` scene 0, every map: L 14-18, 1.182·√t, alpha a − a·t²/L²; I the law Race's smoke shell's).
+
+A rocket or shell (C: not the grenade) that struck a face within two frames of its motion (I) also leaves:
+- the scorch, a black `scorch.png` decal on that face, 150-300 wide, 319-523 VIs, with random flips;
+- the smoke left (now only then, as C).
+
+Tank's shell blast moved here from `tank.rs`'s burst (I: the rocket's).
+
+**Restarts.** Nothing goes off across the end or a restart (`live`: both phases < 2). The restart used to empty the
+frozen lists and set every rocket and grenade off at once (G4's note). The same guard is on Beach's rocket shake.
+
+**Bodies**
+- **Flame tongues** (`flame_tongue`): 0.2-0.6 a frame from the nozzle. Life 50-71 VIs. They rise faster each frame.
+  I: one quad from 3 frames back.
+- **The burning player**, now on every map. Its flames are `flame_a`/`flame_b`:
+  - about one a frame, at most 25, each riding a random joint 0-15;
+  - alpha 80-160, life 12-60 VIs;
+  - I: 6-34 wide, twice as tall, 0.23 frames a VI.
+
+  `traps.rs`' stand-in is gone.
+- **The explosive death's sparks** (scene 1). When a player's clip turns 0xF3 at 0 health: 8-12 sparks, 33 up,
+  32°-77°. Beach's strike drops its old debris for them.
+- **The sea**: at the stroke clip's 10.8 (right hand) and 26.4 (left), where the water is within 300:
+  - a ripple: flat, 80 wide, `ripple_00..09` at 2 frames each, alpha 150, 40 VIs;
+  - the 3-6 drops are not drawn (`effects::drops` is ready). The pack's scene 3 (#0xBE) is an eyeball: texture
+    0x2782, seen in `swimmer-own.png`'s first take. §9's model id 0x35 → #0xBE needs a recheck (pack/G5a).
+- **Item 0x3A's fuse sparks.** Bursts of 8-13 `fuse_spark` streaks plus a `shell.png` flash. They come from the left
+  hand (`joint_04`) during the pull and hold, and from the lob (+28) in flight. Lob maps only.
+- **Race's death**, `race_blast`, per the pack-readme:
+  - the board's three pieces and the racer's six;
+  - the fire shell and the smoke shell;
+  - N from the last move's crossed face.
+
+  It replaces `race.rs`' burst.
+
+**The rest**
+- **Race's board trail**: a point a frame at `race::EXHAUST_AT`, at most 25. Its length is 10 × (speed − 10), 0-600.
+  Its width eases toward 50 (I: × 0.35 a frame) and tapers to 0. It uses `race_trail.png`, U across.
+- **War: Beach**:
+  - flak: the `smoke_grey` flash × 1.028 a VI in prim 0xFF8E13 (I), plus 5-12 blended `flak` puffs over the sea;
+  - the three bunkers' tracer bursts, 191 a frame (I: the first burst at once).
+- **Heist cs3's bubbles** go through `effects::bubble`: `bubble_particle` blended (not added), emitters A and B in turn
+  (I), rising to their caps 3.5 and 4.0.
+
+| Check | Result |
+|---|---|
+| `effects::tests` (13) | `the_3d_flashes_as_the_original` (lengths bracket V's 29.6/65.3, Tank's 228; widths; the star's 0.26-0.32 forward), `the_tracers_as_the_original` (186 then 366, the scope's 3 frames to 900, the bunkers' rate and aim), `a_restart_sets_nothing_off`, `the_ring_and_scorch_as_the_original`, `the_tongues_and_flames_as_the_original` (rates 0.41 and 1.0), `the_sparks_and_flak_as_the_original` (V 3153 → 3922 in 4 frames; y += vy + g/2), `the_ripples_and_bubbles_as_the_original` (the 20-frame sequence), `the_race_blast_and_trail_as_the_original`, `the_fuse_as_the_original`; G4's four kept. `beach::a_rocket_shakes_every_map` adds the restart |
+| Screens `../lab/screens/effects-g5/shots.sh` (5970/5972/5974) | `twin-side.png` (the 3D flashes along the barrels), `twin-broad.png` (a tracer at full length, broadside), `blast-side.png` (the ring, columns and the scorch on the trapdoor), `blast-scorch.png`, `flame-side.png` (tongues at the nozzle), `ripples-close.png` (a ripple under the swimmer), `race-death.png` (both shells and pieces), `race-trail.png` (a board's trail). The oracle side is numeric: NOTES' DL quads and the recipes' V values (the headless oracle draws no frames) |
+
+**Left:**
+- not ported (their recipes were not read): the tanks' exhaust, the cone's smoke, cs5's smoke and clods;
+- not ported: Beach's real fire (no spawner), the blasts' light, the bullets' impact sparks, the bubbles' sway;
+- not drawn: the swim's drops (the pack's model is wrong, above);
+- inferred, not verified: the race trail's 20/10 widths, a flame's joint table and size law.
+
+**Handoff (G5b-world):** `audio.rs`' `gone` (the blast sounds) has the same restart hazard; `effects::live` is the
+guard.
+
 ## Rules and bots: G4's leftovers (2026-10-14)
 **Lane G5a-rules.** Notes: `lab/research/mp-original/rules-bots-g5.md` (+ `-scratch/`). Wire changed (`Combat::popped`;
 `Fighter::popped` and `gun::Mount::recoil` in `Fighting`); the shared simulation changed (the drown, the knock's drift,

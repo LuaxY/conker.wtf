@@ -1452,16 +1452,15 @@ fn tank_cues() -> Vec<Cue> {
         tank(
             On::TankEngine { moving: true },
             record([1192], 0x2EE0, 200, 800),
-            "driving (speeding up, or faster than 5 and coasting): 0x4A8, its volume scaled by a fade of 8/256 \
-             a frame, fading 8/256 a frame from 450 or 706 frames after the rumble (0x4A9) starts (C \
-             func_151BB0E0; V s1 44, 351)",
+            "driving (speeding up, or faster than 5 and coasting): 0x4A8 at its full volume while it drives \
+             (C func_151BB0E0; V s1 44, 351; t5: no fade over 1400 frames)",
         ),
         tank(
             On::TankRumble,
             record([1193], 0x2EE0, 200, 800),
-            "the rumble: 0x4A9 at 0x2EE0, 150 frames into the drive loop, its level ramped 8/256 a frame up, \
-             held 150 or 406 frames, down; stopped when the tank idles (C func_151BB0E0; V Colors cs5b 589: \
-             t 302, 150 frames after 0x4A8)",
+            "the rumble: 0x4A9 at 0x2EE0, 150 frames into the drive loop and again 450 or 706 frames after \
+             each, its level ramped 8/256 a frame up, held 150 or 406 frames, down; stopped when the tank \
+             idles (C func_151BB0E0; V Colors cs5b 589: t 302, 150 frames after 0x4A8; t5: 182, 632, 1338)",
         ),
         tank(
             On::TankGear { coast: false },

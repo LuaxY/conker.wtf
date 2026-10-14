@@ -503,21 +503,15 @@ fn wear(
 }
 
 /// An outro's particles ([`script::Particles`]: Heist cs3's bubbles off the sinking Wise Guy):
-/// while an emitter runs, a bubble a frame (I) about its actor, `hud/bubble_particle.png` 3.1-11.8
-/// units big (I: its sizes 31-118, V, over 10), rising 1-2 a frame (I) for 50-156 frames (V),
-/// fading out ([`crate::traps::puffs`]), added to the view (I).
-#[allow(clippy::too_many_arguments)]
+/// while an emitter runs, a bubble a frame (I) about its actor, `crate::effects::bubble`'s
+/// (emitters A and B in turn, I; `hud/bubble_particle.png`, blob 0x4B3, blended).
 fn bubbles(
     playing: Res<Playing>,
     outros: Res<Outros>,
     actors: Query<(&Actor, &Transform)>,
-    assets: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut look: Local<Option<(Handle<Mesh>, Handle<Image>)>>,
+    mut queue: ResMut<crate::effects::Queue>,
     mut last: Local<Option<u32>>,
     mut rng: Local<Rng>,
-    mut commands: Commands,
 ) {
     let Some((i, k)) = playing.0.filter(|p| *last != Some(p.1)) else {
         *last = playing.0.map(|p| p.1);
@@ -531,35 +525,11 @@ fn bubbles(
         let Some((_, at)) = actors.iter().find(|(a, _)| a.outro == i && a.n == n) else {
             continue;
         };
-        let (mesh, texture) = look
-            .get_or_insert_with(|| {
-                let quad = meshes.add(Rectangle::new(1.0, 1.0));
-                (quad, assets.load("hud/bubble_particle.png"))
-            })
-            .clone();
         let mut r = || rng.next_f32();
-        let size = (31.0 + 87.0 * r()) / 10.0;
         let at = at.translation + Vec3::new(20.0 * r() - 10.0, 40.0 * r(), 20.0 * r() - 10.0);
-        let puff = crate::traps::Puff {
-            vel: Vec3::Y * (1.0 + r()),
-            fall: 0.0,
-            age: 0.0,
-            life: 50.0 + 106.0 * r(),
-            alpha: 1.0,
-        };
-        // The texture has no alpha (CI4 over an RGBA16 grey ramp, every entry's alpha bit set;
-        // read as IA16 its alphas would be noise): only an additive blend drops its dark rim (I:
-        // no display list of a bubble seen).
-        let material = StandardMaterial {
-            alpha_mode: AlphaMode::Add,
-            ..crate::traps::material(&texture, [255; 3], 1.0)
-        };
-        commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(materials.add(material)),
-            Transform::from_translation(at).with_scale(Vec3::splat(size)),
-            puff,
-        ));
+        queue
+            .0
+            .push(crate::effects::bubble(&mut rng, at, k % 2 == 1));
     }
 }
 

@@ -377,7 +377,7 @@ mod tests {
         let mut hint = [0u8; 0x34];
         hint[6..12].copy_from_slice(&[3, 232, 1, 244, 3, 232]);
         (hint[0x15], hint[0x17], hint[0x23]) = (3, 4, 30);
-        world.camera = Some(conker_camera::volume::CameraLevel::new(0, &hint));
+        world.camera = Some(conker_camera::volume::CameraLevel::new(0, &hint, &[]));
         let place = conker_rules::spawn::Placement {
             index: 0,
             pos: [0.0, 0.0, -50.0],

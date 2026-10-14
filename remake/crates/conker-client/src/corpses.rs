@@ -1,5 +1,5 @@
 //! What a player's death shows that the client derives from the rules' clip and [`Combat`]: the
-//! dead pose's twitch (clip 0x18A) and the head pop.
+//! dead pose's twitch (clip 0x18A), the head pop and the shotgun's and chainsaw's cut.
 //!
 //! **The twitch** (`func_15072A7C`, C). A clip's clock calls its callback (clock+0) each frame its
 //! time reaches the loop's last tick (`func_1507BDB0`), and 0x59's (route runtime 0x39, table
@@ -23,9 +23,13 @@
 //! (`func_15081E78`, s126+0x1AD). V: set on the lethal read, the clip 0x17E: combat4_w24 1004 (the
 //! sniper), combat5_cb_e1 987 (a bolt), combat_bots3 1515, 1550 (twin guns); on a corpse:
 //! combat_e_w39 971, combat_e_w09 1005 (in 0x58), bot_long2 5756 (in 0x11D); 0 again at the
-//! respawn (cb_e1 1165). The rules send no hit on a corpse, so here only the lethal head hit pops:
-//! its death spin (0x17E, the rules' reaction 0x2E), but the shotgun's and the chainsaw's (0x2F),
-//! which cut the body in two instead ([`HALVED_BY`]).
+//! respawn (cb_e1 1165). The server's `Combat::popped` carries it (a corpse's pop too); the lethal
+//! death spin (0x17E, the rules' reaction 0x2E) pops here as well, but the shotgun's and the
+//! chainsaw's (0x2F), which cut the body in two instead ([`HALVED_BY`]).
+//!
+//! **The cut** (`func_15194AB4`, C; V combat5_sg_e1 791 to the respawn 969, sg_e3 801, combat7_sgpb
+//! 791, combat_e_w22 849): obj+0x9C |= 0xFFFE, joints 1-15 (`joint_01`, the upper body, and all
+//! under it) collapse, and the model's stump shows ([`crate::held::worn`]).
 
 use bevy::app::AnimationSystems;
 use bevy::prelude::*;
@@ -46,26 +50,37 @@ pub const POP: u32 = 0xF000;
 /// The weapons whose death spin (reaction 0x2F: the shotgun's kill sphere, the chainsaw's swing)
 /// is no head pop: `func_15194AB4` sets obj+0x9C |= 0xFFFE (joints 1-15) and hangs a stump (action
 /// 0x73: bank-09 #0x59 on joint 0 for model 117; 0x72: #0x58 on joint 1 for 128), C; V
-/// combat5_sg_e1 791, combat_e_w22 849. Not ported: the pack has no stumps.
+/// combat5_sg_e1 791, combat_e_w22 849.
 pub const HALVED_BY: [u8; 2] = [0x37, 0x22];
 
+/// The scale the cut draws joints 1-15 at: next to nothing, not 0, so the stump hung on `joint_01`
+/// (model 128's) can undo it ([`crate::held`] hangs it at the reciprocal).
+// ponytail: the original zeroes each joint's 3×3 at the draw (`func_15034728`); whether 128's stump,
+// drawn with joint 1's matrix, survives that is not traced (I: drawn, the pack has it to be seen).
+pub const CUT: f32 = 1e-4;
+
 /// A player's death as it shows: frames in the dead pose (the rules' [`DEAD`] or its fixed
-/// [`DEAD_MELEE_END`] rows), whether it twitches, whether its head popped.
+/// [`DEAD_MELEE_END`] rows), whether it twitches, whether its head popped, whether it was cut in two.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Corpse {
     pub frames: u32,
     pub twitching: bool,
     pub popped: bool,
+    pub halved: bool,
 }
 
 impl Corpse {
     /// One tick of player `c` whose rules show clip `id`: the clip to draw. In the dead pose, 0x59
     /// until a call twitches, 0x18A from then on (the rules' fixed 0x18A rows too: the draw
-    /// decides). The pop from the lethal death spin to the respawn.
+    /// decides). The pop from the lethal death spin to the respawn, the cut from the shotgun's or
+    /// the chainsaw's.
     pub fn shown(&mut self, id: u16, c: &Combat) -> u16 {
+        let cut = c.anim == DEATH_SHOT && HALVED_BY.contains(&c.hit);
         if c.health > 0 {
-            self.popped = false;
-        } else if c.popped || (c.anim == DEATH_SHOT && !HALVED_BY.contains(&c.hit)) {
+            (self.popped, self.halved) = (false, false);
+        } else if cut {
+            self.halved = true;
+        } else if c.popped || c.anim == DEATH_SHOT {
             self.popped = true;
         }
         if id != DEAD && id != DEAD_MELEE_END {
@@ -92,7 +107,7 @@ pub fn twitches(slot: u16, deaths: u16, k: u32) -> bool {
     (z ^ (z >> 31)) & 7 < u64::from(k)
 }
 
-/// The popped heads hide once the clips have posed them.
+/// The popped heads and the cut bodies hide once the clips have posed them.
 pub fn build(app: &mut App) {
     app.add_systems(
         PostUpdate,
@@ -103,17 +118,23 @@ pub fn build(app: &mut App) {
 }
 
 /// A popped player's head (`joint_12`, [`Twisted`]'s) at scale 0, the three joints under it with
-/// it ([`POP`]); its scale back once it no longer is. The original collapses each joint on its own
-/// origin, here on the head's: the same nothing drawn (I).
+/// it ([`POP`]); a cut body's `joint_01` at [`CUT`], joints 2-15 with it; each scale back once it
+/// no longer is. The original collapses each joint on its own origin, here on the head's (the upper
+/// body's): the same nothing drawn (I).
 fn hide_heads(players: Query<(&Corpse, &Twisted)>, mut joints: Query<&mut Transform>) {
     for (corpse, twisted) in &players {
-        let Some(Ok(mut head)) = twisted.1.map(|h| joints.get_mut(h)) else {
-            continue;
-        };
-        if corpse.popped {
-            head.scale = Vec3::ZERO;
-        } else if head.scale == Vec3::ZERO {
-            head.scale = Vec3::ONE;
+        for (joint, hidden, gone) in [
+            (Some(twisted.0), corpse.halved, CUT),
+            (twisted.1, corpse.popped, 0.0),
+        ] {
+            let Some(Ok(mut t)) = joint.map(|j| joints.get_mut(j)) else {
+                continue;
+            };
+            if hidden {
+                t.scale = Vec3::splat(gone);
+            } else if t.scale == Vec3::splat(gone) {
+                t.scale = Vec3::ONE;
+            }
         }
     }
 }
@@ -252,6 +273,40 @@ mod tests {
             (0, DEAD, 0x39),
         ];
         assert!(!popped(&body).contains(&true));
+    }
+
+    /// The shotgun's and the chainsaw's kill (their 0x17E, reaction 0x2F) cuts the body from the
+    /// lethal tick to the respawn (V combat5_sg_e1: 0xFFFE from read 791, its spin, to the respawn
+    /// read 969), with no pop; any other kill never cuts.
+    #[test]
+    fn a_shotgun_or_chainsaw_kill_cuts_to_the_respawn() {
+        let shown = |rows: &[(u8, u16, u8)]| {
+            let mut corpse = Corpse::default();
+            let rows = rows.iter().map(|&(health, anim, hit)| {
+                let c = Combat {
+                    health,
+                    anim,
+                    hit,
+                    ..Default::default()
+                };
+                corpse.shown(anim, &c);
+                (corpse.halved, corpse.popped)
+            });
+            rows.collect::<Vec<_>>()
+        };
+        for w in HALVED_BY {
+            let sg_e1 = [
+                (6, IDLE, 0),
+                (0, DEATH_SHOT, w),
+                (0, DEATH_SHOT_FALL, w),
+                (0, DEAD, w),
+                (6, IDLE, w),
+            ];
+            let cut = [(false, false), (true, false), (true, false), (true, false)];
+            assert_eq!(shown(&sg_e1), [&cut[..], &[(false, false)]].concat());
+        }
+        let sniper = [(0, DEATH_SHOT, 0x24), (0, DEAD, 0x24)];
+        assert!(shown(&sniper).iter().all(|&(cut, pop)| !cut && pop));
     }
 
     /// In every player model's rig of the pack, `joint_12` and the joints under it are [`POP`]'s.

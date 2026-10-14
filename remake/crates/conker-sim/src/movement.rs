@@ -2273,7 +2273,7 @@ mod tests {
         r[6..12].copy_from_slice(&[0, 100, 1, 44, 0, 100]);
         r[0x15] = 1 << 2 | 2;
         let mut w = flat();
-        w.camera = Some(conker_camera::volume::CameraLevel::new(0, &r));
+        w.camera = Some(conker_camera::volume::CameraLevel::new(0, &r, &[]));
         let mut p = PlayerState::spawn([0.0, 1.0, 0.0], NORTH);
         assert!(!walls_on(&p, &w));
         p.pos[0] = 150.0;

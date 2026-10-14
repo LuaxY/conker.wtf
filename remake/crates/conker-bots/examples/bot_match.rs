@@ -64,6 +64,7 @@ fn main() {
     world.camera = Some(CameraLevel::new(
         scene as u16,
         &rom.asset(&[0x0C, scene, 5]).unwrap(),
+        &conker_camera::volume::points(&rom.asset(&[0x0C, scene, 8]).unwrap()),
     ));
     let spawns = extract_scene::scene_spawns(&rom, scene)
         .unwrap()
