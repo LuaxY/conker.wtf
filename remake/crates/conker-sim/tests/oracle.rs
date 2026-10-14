@@ -426,6 +426,7 @@ fn replay_fed(name: &str, closed_loop: bool, feed: &Feed) -> Option<Report> {
             stick_y: sy,
             buttons,
             camera_yaw,
+            ..Default::default()
         };
         // The rules' lock and hold while an action plays, and as it ends (the movement keeps its own:
         // skids, landings).
@@ -1664,6 +1665,7 @@ fn high_jump_matches_the_game() {
                 stick_y: stick,
                 buttons,
                 camera_yaw: yaw,
+                ..Default::default()
             };
             movement::step(&mut p, &input, &world);
             let want = rows[&(read + 1)].1;
@@ -1837,6 +1839,7 @@ fn corridor_camera_matches_the_game() {
             stick_y,
             buttons,
             camera_yaw: row.yaw,
+            ..Default::default()
         };
         let Some(&(heading, sink)) = obj.get(&next.read) else {
             return;

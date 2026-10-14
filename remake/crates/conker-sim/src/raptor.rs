@@ -234,6 +234,7 @@ mod tests {
             stick_y: y,
             buttons,
             camera_yaw: 0xC000,
+            ..Default::default()
         }
     }
 

@@ -24,8 +24,9 @@ getrandom = "0.3"
 # Sound (`audio`): rodio's mixer on cpal (CoreAudio, WASAPI, ALSA; Web Audio in the browser),
 # without bevy_audio, whose sinks can't hold the pack's loop points or open the device late.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-# pack.json's `audio` list (whether the pack has sound).
+# pack.json's `audio` list (whether the pack has sound); the player's settings (`settings`).
 serde_json.workspace = true
+serde.workspace = true
 
 # The HUD: Bevy text natively; the page's own `#hud` element in the browser (1.5 MB gzip less wasm).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
@@ -39,7 +40,8 @@ ctrlc = { version = "3.4", features = ["termination"] }
 
 # On wasm, lightyear enables getrandom's `wasm_js` backend (0.2, 0.3 and 0.4) for the whole tree.
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element", "Node", "Response"] }
+# Storage: the settings (localStorage); EventTarget, Event, MouseEvent: the pointer lock's listeners.
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element", "Node", "Response", "Storage", "EventTarget", "Event", "MouseEvent"] }
 wasm-bindgen.workspace = true
 # Fetching the pack's data files and the connect token (both already in the tree through lightyear).
 wasm-bindgen-futures = "0.4"

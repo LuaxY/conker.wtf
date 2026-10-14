@@ -148,6 +148,10 @@ fn high_jump_gravity(n: u16) -> f32 {
 /// 256-steps of the difference, so the spawn camera's 511 makes forward aim at 16895 and the move angle,
 /// at 16896, step down to 16640 (the "−256" of the oracle README). Wave 2 carried the eye → look-at angle
 /// + 90° here and used only its top byte.
+///
+/// The modern controls ([`action::MODERN`]) add `actions` and `aim_pitch`; `camera_yaw` then doubles
+/// as the aim's yaw: the aim looks along the facing `camera_yaw + 0x4000`, where a forward stick moves
+/// ([`aim_yaw`]). Bots and the oracle traces leave both at 0, which changes nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "net",
@@ -158,6 +162,86 @@ pub struct Input {
     pub stick_y: i8,
     pub buttons: u16,
     pub camera_yaw: u16,
+    /// [`action`] bits, held this frame.
+    pub actions: u8,
+    /// Under [`action::MODERN`]: the aim's pitch in the game's angle units (0x4000 = 90°), up positive,
+    /// read within ±[`AIM_PITCH_MAX`] ([`aim_pitch`]).
+    pub aim_pitch: i16,
+}
+
+/// [`Input::actions`]: the modern controls, one bit each while held. conker-rules' `pad()` turns them
+/// into the N64 bits by the player's own state. Never in spare `buttons` bits: the recorded oracle
+/// traces set L and the D-pad. Holster rides B (its meaning everywhere: draw/holster, the flag's
+/// put-down, the bag's throw) and walk the stick (the client's half stick), so neither needs a bit.
+pub mod action {
+    pub const JUMP: u8 = 0x01;
+    pub const CROUCH: u8 = 0x02;
+    pub const FIRE: u8 = 0x04;
+    pub const RELOAD: u8 = 0x08;
+    /// The aim over the left shoulder (clear: the right); it moves the aim ray's start ([`super::aim_ray`]).
+    pub const SHOULDER: u8 = 0x10;
+    /// Reserved for the weapon handling (C2c): the manual pickup, and the grenade (armed: holster first).
+    pub const INTERACT: u8 = 0x20;
+    pub const GRENADE: u8 = 0x40;
+    /// The modern scheme, which gates everything new: `pad()`, the aim ray, [`super::aim_facing`] and the
+    /// move-while-aiming speeds. Clear: the N64 controls, bit for bit.
+    pub const MODERN: u8 = 0x80;
+}
+
+/// The modern aim's camera arm, which the client's orbit camera mirrors: it pivots `AIM_PIVOT_HEIGHT`
+/// above the feet (the eye the bots' aim rays start from), the camera sits `AIM_ARM` behind the pivot
+/// along the look and `AIM_SHOULDER` to its right (left with [`action::SHOULDER`]), looking along the
+/// aim's yaw and pitch. Its collision only slides the camera along that look line, so the line never
+/// moves and the server rebuilds the ray without the client's camera ([`aim_ray`]). `right` is
+/// forward × up, `(sin yaw, 0, cos yaw)` for the facing's `(cos yaw, 0, −sin yaw)`.
+pub const AIM_PIVOT_HEIGHT: f32 = 67.5;
+pub const AIM_ARM: f32 = 160.0;
+pub const AIM_SHOULDER: f32 = 20.0;
+/// The aim's pitch within ±80° (14563 units), the bots' scope's (`conker_camera::Scope::steer`).
+pub const AIM_PITCH_MAX: i16 = 14563;
+/// Modern speeds: R's aim moves at 0.75 of the stick's target, the scope at 0.5; hip-fire at full.
+pub const AIM_SHARE: f32 = 0.75;
+pub const SCOPE_SHARE: f32 = 0.5;
+
+/// The facing the modern aim looks along: `camera_yaw + 0x4000`, where a forward stick moves.
+pub fn aim_yaw(input: &Input) -> u16 {
+    input.camera_yaw.wrapping_add(0x4000)
+}
+
+/// [`Input::aim_pitch`] within ±[`AIM_PITCH_MAX`].
+pub fn aim_pitch(input: &Input) -> i16 {
+    input.aim_pitch.clamp(-AIM_PITCH_MAX, AIM_PITCH_MAX)
+}
+
+/// The modern aim ray of a player standing at `pos`: its start and unit direction. It runs along the
+/// camera's look line from the point of it nearest the weapon (Lyra's `CameraTowardsFocus`), so walls
+/// between the camera and the player are never hit. The pivot stands in for the weapon (Lyra takes the
+/// pawn's location): with the camera at `pivot − AIM_ARM·dir + side·right` and `right` ⟂ `dir`, that
+/// point is `pivot + side·right`, whatever the arm's length. It may start inside the shooter's own body,
+/// which every hit test along it leaves out.
+pub fn aim_ray(pos: [f32; 3], input: &Input) -> ([f32; 3], [f32; 3]) {
+    let (c, s) = cos_sin(aim_yaw(input));
+    let (pc, ps) = cos_sin(aim_pitch(input) as u16);
+    let side = match input.actions & action::SHOULDER {
+        0 => AIM_SHOULDER,
+        _ => -AIM_SHOULDER,
+    };
+    let start = [
+        pos[0] + side * s,
+        pos[1] + AIM_PIVOT_HEIGHT,
+        pos[2] + side * c,
+    ];
+    (start, [c * pc, ps, -s * pc])
+}
+
+/// Under [`action::MODERN`], the facing the aim holds this frame ([`aim_yaw`]), if it does: while R
+/// aims, through the scope, or while FIRE is held with a weapon drawn; not swimming. The stick then
+/// moves the player under it (R's aim no longer centres the stick).
+pub fn aim_facing(p: &PlayerState, input: &Input) -> Option<u16> {
+    let aims = input.buttons & conker_camera::R != 0
+        || p.scope_yaw.is_some()
+        || (input.actions & action::FIRE != 0 && p.armed != 0 && p.armed != GRENADE);
+    (input.actions & action::MODERN != 0 && aims && !p.swimming).then(|| aim_yaw(input))
 }
 
 /// Everything the movement step reads and writes, named after the game's player object.
@@ -812,7 +896,8 @@ pub fn step_among(
     me: Other,
     others: &[Other],
 ) {
-    let (x, y) = if p.aiming {
+    let modern = input.actions & action::MODERN != 0;
+    let (x, y) = if p.aiming && !modern {
         (0, 0)
     } else {
         (deadzone(input.stick_x), deadzone(input.stick_y))
@@ -832,6 +917,17 @@ pub fn step_among(
     } else {
         0.0
     };
+    // Modern: the scope moves at 0.5 of the stick's target, R's aim at 0.75 (R held, not the aim
+    // camera, which shuts in the air and waits for a new press).
+    if modern && p.scope_yaw.is_some() {
+        p.target_speed *= SCOPE_SHARE;
+    } else if modern && input.buttons & conker_camera::R != 0 {
+        p.target_speed *= AIM_SHARE;
+    }
+    let face = aim_facing(p, input);
+    if let Some(f) = face {
+        p.facing = f;
+    }
     // The speed aims at the floor's percentage of the target (0x1504E358; obj+0x44 keeps the target).
     stick.speed = if p.speed_percent == 0 {
         p.target_speed
@@ -868,6 +964,7 @@ pub fn step_among(
     // grenade in hand, and Z's share of the 0x2010 mask).
     let twist_x = (!p.airborne
         && !p.swimming
+        && !modern
         && input.buttons & conker_camera::R != 0
         && conker_camera::aims_with_body(p.armed))
     .then(|| deadzone(input.stick_x));
@@ -902,6 +999,10 @@ pub fn step_among(
         // the speed percentage kept: w24 503-552). I: 0x23's hold lapses for a frame about every 30
         // (its aim clip restarting: the move angle snaps onto the facing, the percentage clears).
         p.timer = 10;
+    }
+    // The modern aim keeps the facing through the frame (the air turns it toward the stick).
+    if let Some(f) = face {
+        (p.facing, p.heading) = (f, heading_from_facing(f));
     }
     end_frame(p);
     if p.timer == 0 && (!p.airborne || matches!(choice, Choice::Out)) && !entered {
@@ -979,7 +1080,10 @@ fn ground(
         // (V: wall_jump 350-361).
         p.move_angle = p.facing;
     }
-    if let Some(yaw) = p.scope_yaw {
+    // Modern: the aim holds the facing ([`aim_facing`]) and the stick moves the player under it.
+    let modern = input.actions & action::MODERN != 0;
+    let aimed = aim_facing(p, input).is_some();
+    if let Some(yaw) = p.scope_yaw.filter(|_| !modern) {
         // Through the scope (func_1504CB98 at 0x1504D4B4, C; V camera4 w14, w16, w23, w24: 771 of 784
         // rows exact, the rest one unit off): the facing takes the look's yaw, `trunc(yaw · 182.04445)`,
         // the move angle turns toward it at a drive of 0.1 (no step below speed 1) and the facing turns
@@ -1014,14 +1118,23 @@ fn ground(
     // (func_1504CB98 at 0x1504EC94, C).
     let crouch = p.state == state::CROUCH;
     let speed = if locked { 0.0 } else { scaled(p) };
-    let drive = locomotion(p, target, speed, cap, !p.prev_strafe, crouch, crouch && z);
+    let drive = locomotion(
+        p,
+        target,
+        speed,
+        cap,
+        !p.prev_strafe && !aimed,
+        crouch,
+        crouch && z,
+    );
     if let Some(x) = twist_x {
         twist(p, x);
     }
     // func_15059C84 (C): by the root's advance along the facing when the last render measured one
     // ([`animate`]), else by the speed along the move angle, and below speed 1 not at all (V: 0.77 does
-    // not move, 1.0 does).
+    // not move, 1.0 does). Under the modern aim the root goes along the move angle (a strafe).
     let (root, dist, angle) = root_or_speed(p);
+    let angle = if aimed { p.move_angle } else { angle };
     if p.drift != [0.0; 2] {
         // The current's drift adds to the step, even standing (V sea 351-356).
         let normal = p.floor.map(|f| world.tris[f.tri as usize].normal);
@@ -1038,7 +1151,7 @@ fn ground(
         p.pos[1] += d * rise;
         p.pos[2] -= d * s;
     }
-    if crouched {
+    if crouched && !aimed {
         // Crouching and crouch-walking the move angle takes the facing after the step (V: move_crouch
         // 95-99, anim_crouch 384, camera_buttons 655-660 step along the turned move angle).
         p.move_angle = p.facing;
@@ -2240,6 +2353,89 @@ mod tests {
         step(&mut p, &Input::default(), &w);
         assert_eq!((p.move_angle, p.facing), (30977, 30978));
         assert_eq!((p.target_speed, p.timer), (SCOPE_DRIVE, 9)); // 0x23's scope holds the state
+    }
+
+    #[test]
+    fn the_modern_aim_strafes_at_three_quarters_and_the_scope_at_half() {
+        // MODERN: R's aim no longer centres the stick; the aim holds the facing on camera_yaw + 0x4000
+        // and a right stick strafes under it, at 0.75 of the run while R aims, 0.5 through the scope.
+        let w = flat();
+        let right = Input {
+            stick_x: 82,
+            buttons: conker_camera::R,
+            camera_yaw: CAM,
+            actions: action::MODERN,
+            ..Default::default()
+        };
+        let (c, s) = cos_sin(aim_yaw(&right));
+        for (armed, scope, share) in [(0x09, None, AIM_SHARE), (0x14, Some(0.0), SCOPE_SHARE)] {
+            let mut p = PlayerState::spawn([0.0; 3], NORTH);
+            (p.armed, p.aiming, p.scope_yaw) = (armed, true, scope);
+            run(&mut p, right, 60, &w);
+            assert_eq!(
+                (p.facing, p.target_speed),
+                (aim_yaw(&right), RUN_SPEED * share)
+            );
+            assert!(
+                angle_diff(p.move_angle, CAM).abs() < 256,
+                "{}",
+                p.move_angle
+            );
+            assert!(
+                (p.xz_speed - RUN_SPEED * share).abs() < 0.2,
+                "{armed:#x}: {}",
+                p.xz_speed
+            );
+            // Sideways: hardly anything along the aim.
+            let along = p.pos[0] * c - p.pos[2] * s;
+            assert!(along.abs() < 0.05 * p.pos[0].hypot(p.pos[2]), "{:?}", p.pos);
+        }
+        // Without MODERN, R's aim still centres the stick.
+        let mut p = PlayerState::spawn([0.0; 3], NORTH);
+        (p.armed, p.aiming) = (0x09, true);
+        run(
+            &mut p,
+            Input {
+                actions: 0,
+                ..right
+            },
+            20,
+            &w,
+        );
+        assert_eq!(p.xz_speed, 0.0);
+    }
+
+    #[test]
+    fn modern_hip_fire_faces_the_aim_at_full_speed() {
+        // FIRE held with a weapon drawn keeps the facing on the aim while the stick runs sideways at
+        // the full run; let go, the facing turns back to the run.
+        let w = flat();
+        let fire = Input {
+            stick_x: 82,
+            camera_yaw: CAM,
+            actions: action::MODERN | action::FIRE,
+            ..Default::default()
+        };
+        let mut p = PlayerState::spawn([0.0; 3], NORTH);
+        p.armed = 0x09;
+        run(&mut p, fire, 60, &w);
+        assert_eq!((p.facing, p.target_speed), (aim_yaw(&fire), RUN_SPEED));
+        assert!((p.xz_speed - RUN_SPEED).abs() < 0.2, "{}", p.xz_speed);
+        assert!(
+            angle_diff(p.move_angle, CAM).abs() < 256,
+            "{}",
+            p.move_angle
+        );
+        let run_only = Input {
+            actions: action::MODERN,
+            ..fire
+        };
+        run(&mut p, run_only, 10, &w);
+        assert!(
+            angle_diff(p.facing, p.move_angle).abs() < 256,
+            "{}",
+            p.facing
+        );
     }
 
     #[test]

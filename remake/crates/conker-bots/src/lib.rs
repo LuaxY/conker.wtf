@@ -1027,6 +1027,7 @@ fn drive(b: Body, toward: [f32; 3], speed: f32, aiming: bool, world: &CollisionW
         stick_y: raw,
         buttons: 0,
         camera_yaw: angle.wrapping_sub(forward),
+        ..Default::default()
     }
 }
 
@@ -1053,6 +1054,7 @@ fn tank_drive(b: Body, toward: [f32; 3], speed: f32, aim: Option<[f32; 3]>) -> I
         stick_y: raw(y),
         buttons: 0,
         camera_yaw: yaw,
+        ..Default::default()
     }
 }
 

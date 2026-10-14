@@ -205,6 +205,7 @@ fn replay(
             stick_y,
             buttons,
             camera_yaw: row.yaw,
+            ..Default::default()
         };
         movement::step_among(
             &mut p,

@@ -38,7 +38,7 @@
 //!   envelope and pitch, at the two ear volumes the tick sets ([`MIX`] for effects, the background
 //!   recording at 1.0, equal-power pan), the effects through the muffle while [`MUFFLED`]. The device opens at once natively and on the first key
 //!   press or click in the browser (a page may start audio only after a gesture), then every WAV
-//!   loads ([`WavLoader`]). M mutes ([`MUTE_KEY`]).
+//!   loads ([`WavLoader`]). The Mute action (M) mutes.
 
 use crate::{Anim, FollowCamera, held};
 use bevy::asset::io::Reader;
@@ -80,8 +80,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 pub const MIX: f32 = 0.6;
 /// A positional sound below this volume (out of 32767) is silent (`func_1000A420`).
 pub const QUIET: f32 = 401.0;
-/// Toggles the sound.
-pub const MUTE_KEY: KeyCode = KeyCode::KeyM;
 /// Every [`Playing`] is stereo.
 const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
 /// The background's voice id (the game's sound ids start at 1).
@@ -2906,9 +2904,9 @@ fn running(mut said: Local<bool>) {
     }
 }
 
-/// M mutes and unmutes (the page's `#sound` line says so in the browser).
-fn mute(keys: Res<ButtonInput<KeyCode>>, mut sounds: ResMut<Sounds>) {
-    if keys.just_pressed(MUTE_KEY) {
+/// The Mute action (M) mutes and unmutes (the page's `#sound` line says so in the browser).
+fn mute(controls: crate::bindings::Controls, mut sounds: ResMut<Sounds>) {
+    if controls.just_pressed(crate::bindings::Action::Mute) {
         sounds.muted = !sounds.muted;
         info!("sound {}", if sounds.muted { "muted" } else { "on" });
         #[cfg(target_family = "wasm")]

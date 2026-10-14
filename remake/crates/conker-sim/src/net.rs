@@ -98,7 +98,8 @@ use serde::{Deserialize, Serialize};
 /// 38: `Combat::popped`, `Fighter::popped` and `Mount::recoil`; the drown, the dead-pose rows, the parts' sink, the pickup
 /// reach, Tank's barrel and Heist's take (shared).
 /// 39: the fixed cameras' points from the pack (`cameras.json`; the tunnel hints on 0x2B now have cameras).
-pub const PROTOCOL_ID: u64 = 39;
+/// 40: `Input`'s `actions` (the modern controls, MODERN-gated) and `aim_pitch`.
+pub const PROTOCOL_ID: u64 = 40;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

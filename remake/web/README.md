@@ -252,24 +252,31 @@ The original shows no ammo count and no countdown, so neither does this HUD. H s
 weapon, drawn or not and rounds, grenades, kills, the clock, the respawn countdown) in the page's `#hud` element
 (natively, as Bevy text).
 
+The keys are named actions with defaults (CONTROLS_RESEARCH.md §7; `conker-client/src/bindings.rs`), rebindable in the
+saved settings (`settings.rs`: localStorage, natively `$CONKER_SETTINGS` or `<config dir>/conker/settings.json`; no
+menu yet). Until the modern scheme, each action sends the N64 button below.
+
 | N64 | Keyboard / mouse | Gamepad | What it does (Deathmatch) |
 |---|---|---|---|
-| stick | WASD or arrows (hold Alt/Option to walk); the mouse while R is held and no key moves | left stick | move, camera-relative. While R aims a gun (twin guns, rifle, flamethrower, a grenade in hand) the stick's x twists the upper body, up to about 49°, then turns the body. Through a scope (sniper rifle, 0x14) it moves the look |
-| A | Space | South (A) | jump; reloads a drawn gun |
-| B | B | West (X) | draw or put away the weapon you picked up |
-| Z | left mouse button, F, Shift | either trigger, left bumper | fire a drawn weapon (through a scope, along the look); a melee swing locks onto the nearest player within 200; crouch when unarmed |
-| R | right mouse button, R | right bumper | aim: the zoom camera, the gun's twist, the scope of the sniper rifle and of 0x14. The rocket launcher and the scoped revolver (0x23) do not fire while it is held |
-| C-up | T | right stick up | on the mounted gun: zoom in (C-down zooms out) |
-| C-down | G | right stick down | throw a grenade; hold to cook it (held too long it goes off in the hand) |
-| C-left / C-right | Q / E | right stick left / right | strafe, standing or with the stick held, armed or not |
+| stick | WASD or arrows (hold Left Shift to walk); the mouse while R is held and no key moves | left stick (L3 walks) | move, camera-relative. While R aims a gun (twin guns, rifle, flamethrower, a grenade in hand) the stick's x twists the upper body, up to about 49°, then turns the body. Through a scope (sniper rifle, 0x14) it moves the look |
+| A | Space, R (Reload) | South (A), West (X) | jump; reloads a drawn gun |
+| B | Q (Holster) | North (Y) | draw or put away the weapon you picked up |
+| Z | left mouse button (Fire), C (Crouch) | right trigger, East (B) | fire a drawn weapon (through a scope, along the look); a melee swing locks onto the nearest player within 200; crouch when unarmed |
+| R | right mouse button (Aim) | left trigger | aim: the zoom camera, the gun's twist, the scope of the sniper rifle and of 0x14. The rocket launcher and the scoped revolver (0x23) do not fire while it is held |
+| C-up | the wheel up while R is held | D-pad up while R is held, right stick up | on the mounted gun: zoom in (C-down zooms out) |
+| C-down | G; the wheel down while R is held | left bumper; D-pad down while R is held, right stick down | throw a grenade; hold to cook it (held too long it goes off in the hand) |
+| C-left / C-right | none until the modern camera | right stick left / right | strafe, standing or with the stick held, armed or not |
 
 The twist, the scope's look and the strafe with the stick held are wave 4's: they ride the stick, R and the C
 buttons the table already had. The mouse moves the stick only while R is held (2 stick units per pixel the mouse moves
 in a frame), so a keyboard player can aim finer than the keys' full stick.
 
-C toggles the free debug camera (its own keys fly it). M mutes and unmutes the sound. Ctrl is not used: browsers keep Ctrl+W. The right mouse
+F8 toggles the free debug camera (its own keys fly it). M mutes and unmutes the sound. Ctrl is not used: browsers keep
+Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and the input
+pauses (the player stands, the camera keeps its yaw) until the next press. Natively a click grabs the cursor, and Esc or
+the window losing the focus frees it. The right mouse
 button opens no context menu: winit cancels `contextmenu` on the canvas (V: Chrome 153, R reaches the server).
-Weapons come from the level's pickups: walk over one (it disappears for 4 s), then press B to draw it.
+Weapons come from the level's pickups: walk over one (it disappears for 4 s), then press Q to draw it.
 
 The client reads the gamepad only while its window has focus (in the browser: the canvas). Before wave 5 one Xbox
 pad moved the players of two windows at once (V, DevTools-driven Chrome, which reports every page focused, so the

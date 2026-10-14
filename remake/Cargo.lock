@@ -2521,6 +2521,7 @@ dependencies = [
  "lightyear",
  "lightyear_aeronet",
  "rodio",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

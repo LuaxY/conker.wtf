@@ -1,12 +1,13 @@
 //! The team screen (the team modes: [`MatchView::teams`]), over the match as the original's before
-//! one: Tab or a gamepad's Select opens and closes it. While it is open the player stands
-//! (`buffer_input` sends no pad): the stick pushed left or right moves it to the team before or
-//! after (conker-sim's [`Teams::Switch`], wrapping: it respawns there; the server refuses a team
-//! with no room for a human), C-left / C-right (Q / E) move the BALANCE (2 teams; the first
-//! human's: bots to team 0, or to team 1), A or B closes it. `team=T` asks for team T once the
-//! player is in (the lobby's pick, headless tests).
+//! one: the Scoreboard action (Tab, a gamepad's Select) opens and closes it. While it is open the
+//! player stands (`buffer_input` sends no pad): the stick pushed left or right moves it to the team
+//! before or after (conker-sim's [`Teams::Switch`], wrapping: it respawns there; the server refuses
+//! a team with no room for a human), pushed up or down (W / S) or C-left / C-right move the BALANCE
+//! (2 teams; the first human's: bots to team 0, or to team 1), A or B closes it. `team=T` asks for
+//! team T once the player is in (the lobby's pick, headless tests).
 
-use crate::{BUTTON_B, C_LEFT, C_RIGHT, Config, FollowCamera, device_input};
+use crate::bindings::{Action, Controls, device_input};
+use crate::{BUTTON_B, C_LEFT, C_RIGHT, Config, FollowCamera};
 use bevy::prelude::*;
 use conker_sim::movement::BUTTON_A;
 use conker_sim::net::{Combat, JoinChannel, MatchView, PlayerId, Teams};
@@ -92,7 +93,7 @@ pub fn text(m: &MatchView, own: &Combat, players: &[(u16, u8, bool)]) -> String 
         out += &format!("{mark}{name:<9} {}\n", who.join(" "));
     }
     if m.teams == 2 {
-        out += &format!("BALANCE {:+} (Q/E)\n", m.balance);
+        out += &format!("BALANCE {:+} (W/S)\n", m.balance);
     }
     out + "stick: change team, A: close"
 }
@@ -132,13 +133,9 @@ pub fn build(app: &mut App, draw: bool) {
 struct TeamText;
 
 /// The local pad on the screen, and `team=`'s ask once the player is in.
-#[allow(clippy::too_many_arguments)]
 fn ask(
     cfg: Res<Config>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
-    mouse: Option<Res<ButtonInput<MouseButton>>>,
-    gamepads: Query<&Gamepad>,
-    windows: Query<&Window>,
+    controls: Controls,
     game: Query<&MatchView>,
     own: Query<&Combat, With<FollowCamera>>,
     mut screen: ResMut<Screen>,
@@ -155,11 +152,16 @@ fn ask(
     if m.teams == 0 {
         screen.open = false;
     } else if cfg.script.is_none() {
-        let pad = (gamepads.iter().next()).filter(|_| windows.iter().any(|w| w.focused));
-        let (buttons, stick_x, _) = device_input(keys.as_deref(), mouse.as_deref(), pad);
-        let toggle = keys.is_some_and(|k| k.pressed(KeyCode::Tab))
-            || pad.is_some_and(|p| p.pressed(GamepadButton::Select));
-        asks.extend(screen.step((buttons, stick_x, toggle), c.team, m.teams, m.balance));
+        let pad = device_input(&controls.bindings, &controls.devices(0.0, Vec2::ZERO)).input;
+        // Up / down move the BALANCE as C-left / C-right (Q and E are Holster and Interact now).
+        let balance = match pad.stick_y {
+            y if y > PUSH => C_LEFT,
+            y if y < -PUSH => C_RIGHT,
+            _ => 0,
+        };
+        let toggle = controls.pressed(Action::Scoreboard);
+        let step = (pad.buttons | balance, pad.stick_x, toggle);
+        asks.extend(screen.step(step, c.team, m.teams, m.balance));
     }
     for ask in asks {
         info!("teams: {ask:?}");
@@ -265,7 +267,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "TEAMS (Tab: close)\n UGAS      P1 BOT\n>RAPTORS   YOU BOT\nBALANCE -1 (Q/E)\nstick: change team, A: close"
+            "TEAMS (Tab: close)\n UGAS      P1 BOT\n>RAPTORS   YOU BOT\nBALANCE -1 (W/S)\nstick: change team, A: close"
         );
     }
 }

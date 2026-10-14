@@ -1,5 +1,197 @@
 # Status after wave 6 (2026-10-10)
 
+## Controls C2a: modern rules and the aim on the wire (2026-10-14)
+**Lane C2a** of `../CONTROLS_RESEARCH.md` (§3 "Aim on the wire", §4, §10). Shared simulation (conker-sim, conker-rules)
+and the wire; the client is not wired to MODERN yet (round 2). Everything new is gated on the MODERN bit: **with
+`actions == 0` nothing changes**, and every replay, rules and bot test passes with no expected value edited.
+
+**`Input`** (`conker-sim/src/movement.rs`): two new fields, `actions: u8` and `aim_pitch: i16` (`Default` as before).
+- `buttons` bits read anywhere, re-verified: A, B, Z, R and the C buttons only. The new actions stay out of `buttons`
+  (the oracle traces set L and the D-pad).
+- `movement::action` bits:
+
+  | Bit | Action | Bit | Action |
+  |---|---|---|---|
+  | 0x01 | JUMP | 0x10 | SHOULDER (left shoulder; clear = right) |
+  | 0x02 | CROUCH | 0x20 | INTERACT (reserved, C2c) |
+  | 0x04 | FIRE | 0x40 | GRENADE (reserved, C2c) |
+  | 0x08 | RELOAD | 0x80 | MODERN (gates everything new) |
+
+  - Ten candidates don't fit a byte. **HOLSTER rides the N64 B bit** (its meaning in every context: draw/holster, the
+    flag's put-down, the bag's throw; C1 already sends B for it); the seat's dismount on Q can be a `pad()` rule in C2c.
+    **WALK needs no bit**: the client halves the stick, as today.
+- `aim_pitch`: the game's angle units (0x4000 = 90°), **up positive**, read within ±`AIM_PITCH_MAX` (14563 = 80°, the
+  bots' scope's limit). **The aim's yaw is `camera_yaw`'s: the aim looks along the facing `camera_yaw + 0x4000`**
+  (`aim_yaw`), where a forward stick moves. Round 2's client sends `camera_yaw = aim facing − 0x4000`.
+
+**`pad(&Fighter, &Settings, &Input) -> Input`** (`conker-rules/src/game.rs`), at the top of `Match::player` (after the
+death's weapon swap, before the Tank / Race / Raptor dispatch), so the server and the prediction run it alike. Its first
+line returns the input unchanged when `actions == 0`. It only adds bits: R, the C buttons and B pass through.
+
+| Action | On foot, a weapon drawn | On foot, none drawn | Mounted gun, raptor, Tank, Race |
+|---|---|---|---|
+| JUMP | A if the weapon jumps (else A reloads) | A | A (off the gun, the jump, Tank's boost) |
+| CROUCH | – (Z fires) | Z, not during a draw | – |
+| FIRE | Z | – (C2c: B draws) | Z |
+| RELOAD | A if the weapon reloads | – | – |
+
+No weapon both jumps and reloads, so JUMP and RELOAD never share A. CROUCH stays off a draw: a Z held as it ends fires.
+
+**The aim ray** (`movement::aim_ray`, filled by `Match::modern_aim` into `m.aims[i]` each MODERN frame, after the
+server's `bots.scopes()`; never cleared without MODERN, since that slot may be a bot's). The existing bot-ray code then
+sends the twin guns' bullets from the muzzle to the first body part or wall on it, and the pistol's, 0x23's and the
+tommy gun's along its pitch.
+- The camera arm, which round 2's orbit camera mirrors:
+  - `AIM_PIVOT_HEIGHT` = 67.5 above the feet (the eye the bots' rays start from).
+  - `AIM_ARM` = 160 behind the pivot along the look.
+  - `AIM_SHOULDER` = 20 to the right (`right` = forward × up = `(sin yaw, 0, cos yaw)`), to the left with SHOULDER.
+  - Collision only slides the camera along its look line.
+- The ray starts at the point of the camera's look line nearest the weapon (Lyra's `CameraTowardsFocus`). The pivot
+  stands in for the weapon (Lyra takes the pawn's location), so the start is `pivot ± 20·right`, whatever the arm's
+  length. That start lies inside the shooter's own body: every hit test along the ray already leaves the owner out.
+- `cos_sin` only: native and wasm agree bit for bit.
+
+**The MODERN gate in the movement** (`step_among`, `ground`):
+- R's aim no longer centres the stick. While R is held the stick's target is ×0.75 (`AIM_SHARE`), through the scope
+  ×0.5 (`SCOPE_SHARE`) instead of the 0.1 scope drive. It keys on R held, not the aim camera, which shuts in the air
+  and only restarts on a new press.
+- `aim_facing`: while R is held, through the scope, or while FIRE is held with a weapon drawn (not swimming), the
+  facing is the aim's. The facing no longer chases the move angle, the stick moves the player under it (a strafe),
+  the twist is off, a root-motion step and a crouch-walk go along the move angle, and the air's turn is undone.
+- Hip-fire runs at full speed (the shotgun's shot still holds the player, as the original's).
+- The rules snap the facing too at the frame's start (not hurt, not on a mounted gun), so the press frame's shot, the
+  lock-on and the muzzles already use it.
+- The scope's yaw and pitch come from the aim (`modern_aim`, on foot; a mounted gun keeps its own turn, C2c).
+
+**Tests** (headless; 7 new):
+- `pad_maps_the_actions_and_is_the_identity_without`: 2,000 random inputs with `actions == 0` × 42 fighter states × 3
+  modes give the identity; then the table above.
+- `the_modern_aim_strafes_at_three_quarters_and_the_scope_at_half` (sim): a right stick with R aims strafes at 26.25
+  (0.75 × 35), through 0x14's scope at 17.5, facing the aim, moving sideways. Without MODERN, R still stops the player.
+- `modern_hip_fire_faces_the_aim_at_full_speed` (sim): FIRE held runs sideways at 35 facing the aim; let go, the facing
+  turns back to the run.
+- `modern_bullets_follow_the_aim_pitch`: the twin guns hit a Tedi on a ledge 415 above, and one 415 below the shooter's
+  ledge, through `aim_pitch`. Level shots miss both.
+- `the_shoulder_moves_the_modern_aim_ray`: the start at +20 z, or −20 with SHOULDER, for an aim along +x. Nothing is
+  aimed without MODERN.
+- `the_modern_aim_ray_leaves_out_the_shooters_own_body`: aimed 80° down the ray crosses the shooter's own torso
+  sphere, `first_part` leaves it out, and the twin guns fired along it hurt nobody.
+- `the_modern_scope_looks_along_the_aim`: the scope's 45° and −22.5° come from the aim, not the camera's.
+- The full `bun run test` passes with zero edits to existing expected values. The only edits to existing tests add
+  `..Default::default()` to `Input` literals that listed every field.
+- `bots.sh` (Deathmatch 0x2D, 2 bots, 1 idle human, 150 s), this tree on ports 5974 and 5976 and an export of HEAD
+  (`git archive`, its own target) on 5978, give the same result:
+  - Bot 1: 17 hits and no death, the known FAIL line (a bot that never dies). Bot 2: 10 hits, 1 death and respawn.
+  - Every other check is ok.
+  - The servers' high jumps and lifts are the same events at the same positions, 23 ticks later at HEAD (the
+    client joined later).
+
+**Wire and shared simulation:** `Input` gains `actions` and `aim_pitch` (lightyear's native input), so the protocol
+needs its bump (`PROTOCOL_ID` untouched here). The new movement and rules paths run only under MODERN.
+
+**Left for round 2:**
+- The pistol's, 0x23's and the tommy gun's bullets keep the facing's yaw and take only the ray's pitch, so they run
+  parallel to the crosshair, offset by muzzle − start (about 20 sideways). The twin guns converge on the hit point.
+- The C buttons still strafe under MODERN. They are kept for the cameras; the modern client should not send
+  C-left / C-right.
+- A mounted gun under MODERN still turns with the stick through the N64 scope camera.
+
+## Controls C1: bindings, settings and pointer lock (2026-10-14)
+**Lane C1** of `../CONTROLS_RESEARCH.md` (§5, §8, §10). Client only (and the play page's help). No wire change,
+`PROTOCOL_ID` untouched, no shared simulation touched. The client still sends the N64 `Input`, built with
+`..Default::default()` so C2a's new fields stay zero.
+
+**Bindings as data** (`bindings.rs`, new)
+- `device_input`'s hard-coded tables are now a `Bindings` resource: 20 named actions (MoveForward/Back/Left/Right, Fire,
+  Aim, ScopeZoomIn/Out, Jump, Crouch, Reload, Holster, Interact, Grenade, ShoulderSwap, Walk, Scoreboard, Mute, TextHud,
+  DebugCamera). Each has two keyboard/mouse slots (keys, mouse buttons 1-5, wheel up/down) and one pad slot.
+  - Move is four actions because a slot holds one key. The sticks and the mouse look are not slots.
+  - Esc, mouse buttons past 5 and the pad's Start (Menu) never bind.
+  - Inputs are stored by name (`KeyW`, `MouseBack`, `WheelUp`, `RightTrigger2`), through Bevy's reflection: bevy's
+    `serialize` feature stays off.
+- The defaults are §7's: Crouch on C, Walk on Left Shift, the debug camera on **F8**.
+- Until round 2's MODERN, each action sends today's N64 bit:
+  - Fire and Crouch → Z, Jump and Reload → A, Holster → B, Aim → R, Grenade → C-down.
+  - The zoom actions → C-up / C-down, **only while Aim is held**: unaimed, wheel-down would throw a grenade.
+  - Interact, ShoulderSwap and the screens' actions send nothing; Walk halves the stick.
+  - The pad's right stick still pushes the C buttons, as before.
+- So the keys changed even though the bits didn't:
+  - Shift walks instead of crouching. Alt, F, B and T do nothing now.
+  - R reloads (A) instead of aiming: the right mouse button aims, and the R-held mouse aim works through it.
+  - Q holsters.
+  - **Keyboard C-left / C-right strafe is gone** until C2b's camera (Q / E are Holster and Interact). The pad keeps it.
+  - On the pad, RT fires, LT aims, Y draws, B crouches, X reloads, LB throws a grenade and L3 walks.
+- `device_input(&Bindings, &Devices)` returns the N64 `Input` plus the frame's look for round 2: the mouse counts and
+  the right stick.
+- The wheel is latched between ticks (`Wheel`): the input is read at 30 Hz, so a frame's turn would be lost.
+- `Controls` (a system param) gives the screens their actions. Mute (M), TextHud (H), DebugCamera (F8) and Scoreboard
+  (Tab / Select) go through the table; `MUTE_KEY`, `TEXT_HUD_KEY` and `DEBUG_CAMERA_KEY` are gone.
+- **The team screen's BALANCE** moves with the stick up / down (W / S) or C-left / C-right (the pad's right stick).
+  Q now closes it (B). Its text says `(W/S)`.
+- AZERTY: `KeyLabels` caches `KeyCode → logical key` from every key press, for later prompts. No UI yet.
+
+**Settings** (`settings.rs`, new)
+- One serde `Settings`: a `version`, the binding overrides by action name (`[primary, alternate, pad]`), and the §5 v1
+  values with their defaults (mouse, pad, crosshair; hold/toggle per device).
+  - Only the bindings that differ from the defaults are stored, so a new action gets its default.
+  - A missing value takes its default (`serde(default)`). An unknown action or input name keeps that action's
+    default, with a warning.
+  - The ranges are clamped on load.
+  - A file that doesn't parse gives the defaults and is kept as `.bak`.
+- Saved in localStorage `conker-settings` (web; web-sys `Storage`). Natively in `$CONKER_SETTINGS` if set, else
+  `<config dir>/conker/settings.json`; the config dir is computed by hand: no `dirs` crate.
+- Only a window loads them; headless and offscreen runs keep the defaults and never touch the disk.
+- Nothing applies the values but the bindings yet, and nothing saves (`save` is for C3's Apply).
+
+**Pointer lock** (`pointer.rs`, new)
+- **Web:**
+  - A press on `#game` calls `requestPointerLock({ unadjustedMovement: true })` through `Reflect`, because web-sys's
+    takes no options. If that rejects with `NotSupportedError`, it calls the plain `requestPointerLock()`.
+  - It uses `pointerdown`, not `click`, so the right button also locks. winit cancels `pointerdown`, which suppresses
+    the compat `mousedown`.
+  - A `pointerlockchange` listener sets `Paused` when the lock is lost (Esc). `buffer_input` then sends a neutral
+    stick and no buttons, keeping the camera's yaw, until a press locks again.
+  - On that loss, Bevy's `CursorOptions` is reset to none and visible (the debug camera's own lock would still read as
+    locked).
+  - `mouseup` and `pointerup` listeners `preventDefault` buttons 3 and 4 (back / forward).
+  - Bevy's grab mode is never set to Locked on the web: winit would call the plain lock and lose the raw counts.
+- **Native:**
+  - A click while playing locks and hides the cursor. Losing the focus, or Esc, frees it. Esc was added so the cursor
+    isn't trapped until an app switch.
+  - No pause natively: losing the focus already drops the keys, and a pad player would need a click.
+  - It stays out of the way while the debug camera is on, which grabs on its own.
+- **Choice:** the lock is requested from the first press. The screens are keyboard or pad driven, the page's overlays
+  have `pointer-events: none`, and the mouse counts come the same locked or not, so the R-held mouse aim is unchanged.
+- The mouse counts are the device's, as before: no acceleration or smoothing added.
+- New web-sys features: `Storage`, `EventTarget`, `Event`, `MouseEvent`. The client also gets `serde` (already in the
+  tree). No new crates.
+
+**Tests** (`cargo test -p conker-client`, 189, with `CONKER_SETTINGS` under `/tmp`)
+- Inputs round-trip by name; Esc and Start never bind.
+- Only overrides are stored, and a bad or unknown override keeps the default.
+- The defaults send today's bits, including the wheel's zoom only while aiming.
+- A rebound action sends its bit, and the mouse counts pass through.
+- Settings round-trip with only their overrides; missing actions and values take their defaults.
+- Values are clamped.
+- A corrupt file gives the defaults and a byte-exact `.bak`.
+- The test with disk access writes next to `$CONKER_SETTINGS` (else the temp dir), never the config dir.
+- The old `keyboard_maps_to_the_n64_pad` and `combat_keys_and_mouse_map_to_the_n64_buttons` are replaced by these.
+
+**Unverified** (no browser in this lane; checked only by the wasm clippy and by review)
+- The pointer lock, `unadjustedMovement` and its fallback.
+- The lock-loss listener and the pause.
+- Mouse 4/5's `preventDefault`: whether `mouseup` still comes after winit's cancelled `pointerdown`, and whether
+  `pointerup` stops the navigation.
+- localStorage and Esc in the browser.
+- The native grab needs a real click, and no click was sent. A windowed native run (server on 5970, `--screenshot`,
+  `CONKER_SETTINGS` under `/tmp`) only shows:
+  - the settings were read from that path, and the `Escape` override was refused with a warning;
+  - the client connected, synced and played 20 s, then left cleanly;
+  - with no click, nothing grabbed the cursor.
+  - Its screenshot came out black, though the HUD log shows a live player. No rendering code changed; the display was
+    probably asleep.
+- Pre-existing: Bevy's free camera toggles its own cursor grab on M, the Mute key, while the debug camera is on.
+
 ## Tank, Beach, the held models and the laser drawn (2026-10-14)
 **Lane G5b-world.** The client draws G5a's non-effect exports. The oracle runs are on the private copy
 (`ConkerRecomp.g5w`; `../lab/research/mp-original/world-g5-scratch/`: `las`, t5). Tags: V (oracle), C (code), I (inferred).

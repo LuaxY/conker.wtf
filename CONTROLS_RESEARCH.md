@@ -375,8 +375,8 @@ Ctrl and Alt, unlike round 1.
 
 | Wave | Content | Touches | Protocol |
 |---|---|---|---|
-| C1 input plumbing | `Bindings` + `Settings` data with persistence (defaults = today's bits, crouch on C, walk on Shift); pointer lock (raw input, lock-loss listener); debug camera off C. No orbit camera yet: it only makes sense once aim follows it | client, web | no |
-| C2a modern rules | `actions` field + `pad()` mapping; `aim_pitch` + shoulder bit + humans' `m.aims`; MODERN gate (move while aiming/firing, facing on the aim, scope from the aim, speeds 0.75 / 0.5). Testable headless with bots | sim, rules, server | **bump** |
+| C1 input plumbing (**done 2026-10-14**, `remake/STATUS.md`; the browser parts unverified) | `Bindings` + `Settings` data with persistence (defaults = today's bits, crouch on C, walk on Shift); pointer lock (raw input, lock-loss listener); debug camera off C (now F8). No orbit camera yet: it only makes sense once aim follows it | client, web | no |
+| C2a modern rules (**done 2026-10-14**, `remake/STATUS.md`; `actions` is a u8: holster rides B, walk the stick; the server needed no change) | `actions` field + `pad()` mapping; `aim_pitch` + shoulder bit + humans' `m.aims`; MODERN gate (move while aiming/firing, facing on the aim, scope from the aim, speeds 0.75 / 0.5). Testable headless with bots | sim, rules, server | **bump** |
 | C2b modern client | Orbit camera feeding `camera_yaw` / `aim_pitch`; prediction with the new fields; centre crosshair; server-confirmed hit markers | client | (same bump) |
 | C2c weapon handling | Interact pickup (weapons only), draw on pickup, Fire draws, jump/crouch armed, grenade armed then redraw, move while drawing, mounted guns on F / off Q (§4b); the "PRESS F" prompt | rules, sim, client HUD | **bump** |
 | C3 Esc menu | Resume / Settings / Leave; rebinding capture with conflicts; mouse and pad settings; input zeroed while open | client | no |

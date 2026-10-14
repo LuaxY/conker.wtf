@@ -998,6 +998,7 @@ fn replay(c: &Case) -> Option<Report> {
                     stick_y,
                     buttons,
                     camera_yaw: rows[&(t, p)].yaw,
+                    ..Default::default()
                 }
             })
             .collect();

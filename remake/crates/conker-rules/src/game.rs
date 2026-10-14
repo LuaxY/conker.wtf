@@ -945,7 +945,8 @@ pub struct Match {
     /// Per slot, a bot's aim ray while it aims (s126+0x13C, its eye, and +0x130, the unit direction
     /// of its aim's yaw +0x16C and pitch +0x170); `None` for a slot not listed. The twin guns'
     /// bullets head from the muzzle to the first body part or wall on it, the pistol's and 0x23's
-    /// take its pitch ([`Self::strike`]).
+    /// take its pitch ([`Self::strike`]). A MODERN human's is its aim ray, which its frame fills
+    /// ([`Self::modern_aim`]).
     pub aims: Vec<Option<([f32; 3], [f32; 3])>>,
     /// Per slot, its body parts where the last frame drew them (the game tests the joint matrices
     /// of the last draw), for the parts-tested hits: the twin guns' and the pistol's bullets, the
@@ -2026,6 +2027,23 @@ impl Match {
         Some(core::array::from_fn(|j| eye[j] + dir[j] * d))
     }
 
+    /// The modern aim (`movement::action::MODERN`): the player's aim ray (conker-sim's `aim_ray`, from
+    /// the frame's position) in [`Self::aims`], where the bots' bullets code sends its shots along it;
+    /// and on foot, through the scope, the scope's look from the aim instead of the N64 scope
+    /// camera's (a mounted gun keeps its own turn). Never cleared: without MODERN the slot is a bot's.
+    fn modern_aim(&mut self, i: usize, input: &Input) {
+        const DEGREES: f32 = 360.0 / 65536.0;
+        if self.aims.len() < self.players.len() {
+            self.aims.resize(self.players.len(), None);
+        }
+        let f = &mut self.players[i];
+        self.aims[i] = Some(movement::aim_ray(f.body.pos, input));
+        if f.gun.is_none() && f.body.scope_yaw.is_some() {
+            f.body.scope_yaw = Some(f32::from(movement::aim_yaw(input)) * DEGREES);
+            f.scope_pitch = -f32::from(movement::aim_pitch(input)) * DEGREES;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn player(
         &mut self,
@@ -2055,6 +2073,12 @@ impl Match {
         {
             (f.weapon, f.drawn, f.body.armed) = (f.start, false, 0);
         }
+        // The modern controls: the actions as N64 bits ([`pad`], the identity without them), the
+        // aim's ray and the scope's look ([`Self::modern_aim`]).
+        let input = &pad(&self.players[i], &self.settings, input);
+        if input.actions & movement::action::MODERN != 0 {
+            self.modern_aim(i, input);
+        }
         if self.settings.tank {
             return self.tank_player(i, input, arena, world, ev);
         }
@@ -2071,6 +2095,15 @@ impl Match {
         // it (V: 0xC0); its frame is its own in any mode (V: its movement on every map).
         if self.players[i].class == raptor::CLASS {
             return self.raptor_player(i, input, arena, world, seen, ev);
+        }
+        // The modern aim holds the facing from the frame's start, so the lock-on and the shots read
+        // it (conker-sim's `aim_facing`, which its step keeps; not hurt, not on a mounted gun).
+        let f = &mut self.players[i];
+        if f.gun.is_none()
+            && !matches!(f.action, Action::Hurt { .. })
+            && let Some(face) = movement::aim_facing(&f.body, input)
+        {
+            f.body.facing = face;
         }
         // The other players push this one out of their bodies (conker-sim's `step_among`), those
         // earlier in the slot order where they moved to this frame, and so do the mounted guns (a
@@ -4029,6 +4062,44 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
         .wrapping_add((10240.0 * conker_camera::math::sin_level(phase)) as i16 as u16);
 }
 
+/// The modern controls' actions (`movement::action`) as the N64 bits the rules read, by the player's
+/// own state at the frame's start, on the server and in prediction alike ([`Match::player`]). The
+/// identity while `actions` is 0 (bots, the oracle replays). Bits are only added: R (aim), the C
+/// buttons (the cameras) and B (holster/drop) pass through.
+///
+/// | Action | On foot, a weapon drawn | On foot, none drawn | Mounted gun, raptor, Tank, Race |
+/// |---|---|---|---|
+/// | JUMP | A if the weapon jumps (else A reloads) | A | A (off the gun, the jump, Tank's boost) |
+/// | CROUCH | – (Z fires) | Z, not while drawing | – |
+/// | FIRE | Z | – (C2c: B draws) | Z |
+/// | RELOAD | A if the weapon reloads | – | – |
+///
+/// No weapon both jumps and reloads, so JUMP and RELOAD never share A. CROUCH stays off a draw: a Z
+/// held as it ends would fire.
+pub fn pad(f: &Fighter, settings: &Settings, input: &Input) -> Input {
+    use movement::action::{CROUCH, FIRE, JUMP, RELOAD};
+    if input.actions == 0 {
+        return *input;
+    }
+    let ridden = settings.tank || settings.race || f.class == raptor::CLASS || f.gun.is_some();
+    // Which actions mean something here: (fire, jump, crouch, reload).
+    let (fire, jump, crouch, reload) = match f.weapon().filter(|_| f.drawn) {
+        _ if ridden => (true, true, false, false),
+        Some(w) => (true, w.jumps(), false, w.reload.is_some()),
+        // §4b (C2c): FIRE draws a holstered weapon with B here.
+        None => (false, true, f.action != Action::Draw, false),
+    };
+    let held = |a: u8, means: bool| means && input.actions & a != 0;
+    let mut buttons = input.buttons;
+    if held(FIRE, fire) || held(CROUCH, crouch) {
+        buttons |= BUTTON_Z;
+    }
+    if held(JUMP, jump) || held(RELOAD, reload) {
+        buttons |= BUTTON_A;
+    }
+    Input { buttons, ..*input }
+}
+
 /// Where a player aims (s126+0x16C and +0x170 through the scope, else its facing, level): the unit
 /// direction, and the side vector of its yaw (`(sin, cos)` in x and z).
 fn aim(f: &Fighter) -> ([f32; 3], [f32; 2]) {
@@ -5326,6 +5397,234 @@ mod tests {
                 "{weapon:#x} {dir:?} {hit:?}"
             );
         }
+    }
+
+    /// `pad()` is the identity without actions (the bots' and the oracle replays' inputs) whatever
+    /// the player's state and the mode; with them it adds the N64 bits by the weapon's state.
+    #[test]
+    fn pad_maps_the_actions_and_is_the_identity_without() {
+        use movement::action::{CROUCH, FIRE, JUMP, MODERN, RELOAD};
+        let (_, m, _) = duel();
+        let base = m.players[0];
+        let mut fighters = Vec::new();
+        for weapon in [
+            None,
+            Some(0x09),
+            Some(0x39),
+            Some(0x23),
+            Some(0x14),
+            Some(0x21),
+            Some(0x24),
+        ] {
+            for (drawn, action) in [
+                (false, Action::Free),
+                (false, Action::Draw),
+                (true, Action::Free),
+            ] {
+                for class in [base.class, raptor::CLASS] {
+                    fighters.push(Fighter {
+                        weapon,
+                        drawn,
+                        action,
+                        class,
+                        ..base
+                    });
+                }
+            }
+        }
+        let modes = [
+            Settings::default(),
+            Settings {
+                tank: true,
+                ..Settings::default()
+            },
+            Settings {
+                race: true,
+                ..Settings::default()
+            },
+        ];
+        let mut rng = Rng::new(7);
+        for _ in 0..2000 {
+            let (r, q) = (rng.next_u32(), rng.next_u32());
+            let input = Input {
+                stick_x: r as i8,
+                stick_y: (r >> 8) as i8,
+                buttons: (r >> 16) as u16,
+                camera_yaw: q as u16,
+                actions: 0,
+                aim_pitch: (q >> 16) as i16,
+            };
+            for f in &fighters {
+                for s in &modes {
+                    assert_eq!(pad(f, s, &input), input);
+                }
+            }
+        }
+        let foot = Settings::default();
+        let bits = |f: &Fighter, s: &Settings, a: u8| {
+            let input = Input {
+                buttons: BUTTON_R | C_BUTTONS | BUTTON_B,
+                actions: MODERN | a,
+                ..Input::default()
+            };
+            pad(f, s, &input).buttons & !(BUTTON_R | C_BUTTONS | BUTTON_B)
+        };
+        let with = |weapon, drawn, action| Fighter {
+            weapon: Some(weapon),
+            drawn,
+            action,
+            ..base
+        };
+        let twin = with(0x09, true, Action::Free);
+        assert_eq!(bits(&twin, &foot, FIRE), BUTTON_Z);
+        assert_eq!(bits(&twin, &foot, RELOAD), BUTTON_A);
+        assert_eq!(bits(&twin, &foot, JUMP | CROUCH), 0); // A reloads, Z fires
+        let melee = with(0x21, true, Action::Free);
+        assert_eq!(bits(&melee, &foot, JUMP), BUTTON_A);
+        assert_eq!(bits(&melee, &foot, RELOAD), 0);
+        assert_eq!(bits(&base, &foot, JUMP), BUTTON_A);
+        assert_eq!(bits(&base, &foot, CROUCH), BUTTON_Z);
+        assert_eq!(bits(&base, &foot, FIRE | RELOAD), 0);
+        assert_eq!(bits(&with(0x09, false, Action::Draw), &foot, CROUCH), 0);
+        let raptor = Fighter {
+            class: raptor::CLASS,
+            ..base
+        };
+        assert_eq!(bits(&raptor, &foot, FIRE | CROUCH), BUTTON_Z);
+        assert_eq!(
+            bits(&base, &modes[1], FIRE | JUMP | CROUCH),
+            BUTTON_Z | BUTTON_A
+        );
+        assert_eq!(bits(&base, &modes[2], FIRE | RELOAD), BUTTON_Z);
+    }
+
+    /// The modern aim ray (`Match::aims`): from 67.5 up, `AIM_SHOULDER` to the right of an aim along
+    /// +x (+z), to the left with `action::SHOULDER`; nothing aimed without MODERN.
+    #[test]
+    fn the_shoulder_moves_the_modern_aim_ray() {
+        use movement::action::{MODERN, SHOULDER};
+        let (arena, mut m, w) = duel();
+        let aim = |actions| {
+            let input = Input {
+                camera_yaw: 0xC000,
+                actions,
+                ..Input::default()
+            };
+            [input, Input::default()]
+        };
+        m.step(&arena, &aim(0), &w);
+        assert!(m.aims.is_empty());
+        let side = movement::AIM_SHOULDER;
+        for (shoulder, side) in [(0, side), (SHOULDER, -side)] {
+            let at = m.players[0].body.pos;
+            m.step(&arena, &aim(MODERN | shoulder), &w);
+            let (start, dir) = m.aims[0].expect("aimed");
+            assert_eq!(dir, [1.0, 0.0, 0.0]);
+            assert_eq!(start, [at[0], at[1] + 67.5, at[2] + side]);
+        }
+    }
+
+    /// The modern aim's ray starts at the shoulder, inside the shooter's own body, and aimed down at
+    /// the pitch's limit it crosses the shooter's torso: every hit test along it leaves the shooter
+    /// out, and the twin guns fired along it hurt nobody.
+    #[test]
+    fn the_modern_aim_ray_leaves_out_the_shooters_own_body() {
+        use movement::action::{FIRE, MODERN};
+        let (arena, mut m, w) = duel();
+        m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+        m.give(0, 0x09);
+        let mut hits = 0;
+        for t in 0..60 {
+            let input = Input {
+                buttons: if t == 0 { BUTTON_B } else { 0 },
+                camera_yaw: 0xC000,
+                actions: MODERN | if t >= 20 { FIRE } else { 0 },
+                aim_pitch: -movement::AIM_PITCH_MAX,
+                ..Input::default()
+            };
+            let me = m.players[0].body.pos;
+            let ev = m.step(&arena, &[input, Input::default()], &w);
+            hits += ev.iter().filter(|e| matches!(e, Event::Hit { .. })).count();
+            let (start, dir) = m.aims[0].expect("aimed");
+            assert!(projectile::hits_parts(start, dir, RAY_RANGE, me, false).is_some());
+            assert_eq!(m.first_part(0, start, dir, RAY_RANGE, &here), None);
+        }
+        assert!(m.players[0].shots > 0);
+        assert_eq!((hits, m.players[0].health), (0, HEALTH));
+    }
+
+    /// The modern aim: a human's bullets follow its aim's pitch (`Input::aim_pitch`) through
+    /// `Match::aims` as a bot's do: the twin guns hit a Tedi on a ledge 415 above, and one 415 below
+    /// the shooter's ledge, which level shots pass under and over.
+    #[test]
+    fn modern_bullets_follow_the_aim_pitch() {
+        use movement::action::{FIRE, MODERN};
+        let (h, big) = (415.0, 20_000.0);
+        let quad = |y: f32, a: f32, b: f32, c: f32, d: f32| {
+            [
+                ([[a, y, c], [a, y, d], [b, y, d]], 5),
+                ([[a, y, c], [b, y, d], [b, y, c]], 5),
+            ]
+        };
+        let shoot = |above: bool, aimed: bool| {
+            let (arena, mut m, _) = duel();
+            let (me, them) = if above { (0.0, h) } else { (h, 0.0) };
+            let ledge = if above { 3400.0 } else { -200.0 };
+            let w = CollisionWorld::new(quad(0.0, -big, big, -big, big).into_iter().chain(quad(
+                h,
+                ledge,
+                ledge + 400.0,
+                -200.0,
+                200.0,
+            )));
+            let side = movement::AIM_SHOULDER;
+            m.players[0].body.pos = [0.0, me, 0.0];
+            m.players[1].body.pos = [3600.0, them, side];
+            // From the shoulder to the target's torso (35 up).
+            let rise = (them + 35.0) - (me + 67.5);
+            let pitch = (rise.atan2(3600.0) * 65536.0 / std::f32::consts::TAU).round() as i16;
+            m.give(0, 0x09);
+            let mut hit = None;
+            for t in 0..120 {
+                let input = Input {
+                    buttons: if t == 0 { BUTTON_B } else { 0 },
+                    camera_yaw: 0xC000,
+                    actions: MODERN | if t >= 20 { FIRE } else { 0 },
+                    aim_pitch: if aimed { pitch } else { 0 },
+                    ..Input::default()
+                };
+                let ev = m.step(&arena, &[input, Input::default()], &w);
+                hit = hit.or(ev
+                    .iter()
+                    .any(|e| matches!(e, Event::Hit { victim: 1, .. }))
+                    .then_some(t));
+            }
+            assert!((m.players[0].body.pos[1] - me).abs() < 1.0);
+            assert!((m.players[1].body.pos[1] - them).abs() < 1.0);
+            hit
+        };
+        for above in [true, false] {
+            assert!(shoot(above, true).is_some(), "above {above}");
+            assert!(shoot(above, false).is_none(), "above {above}");
+        }
+    }
+
+    /// The modern scope looks along the aim (yaw and pitch, in degrees, pitch down positive), not
+    /// along the N64 scope camera's.
+    #[test]
+    fn the_modern_scope_looks_along_the_aim() {
+        let (arena, mut m, w) = duel();
+        (m.players[0].body.scope_yaw, m.players[0].scope_pitch) = (Some(123.0), 9.0);
+        let input = Input {
+            camera_yaw: 0xC000 + 0x2000,
+            actions: movement::action::MODERN,
+            aim_pitch: 0x1000,
+            ..Input::default()
+        };
+        m.step(&arena, &[input, Input::default()], &w);
+        let f = &m.players[0];
+        assert_eq!((f.body.scope_yaw, f.scope_pitch), (Some(45.0), -22.5));
+        assert_eq!(f.body.facing, 0x2000);
     }
 
     /// `func_151D4DAC`'s head hits, V oracle ohit (0x30): a stunned player at 4 hit on the head

@@ -8,7 +8,7 @@
 //! models while taken (they are the level glTF's placement nodes); War: Total War adds its props
 //! ([`props_scene`]), shown as the match says, and its victory outro ([`crate::outro`]). The HUD is
 //! [`crate::hud`]'s;
-//! [`TEXT_HUD_KEY`] shows the old text readout too ([`crate::hud_text`]; in the browser, the page's
+//! the TextHud action (H) shows the old text readout too ([`crate::hud_text`]; in the browser, the page's
 //! `#hud` element).
 //!
 //! The glTF materials already carry the N64 render state the extractor read (wrap/mirror/clamp,
@@ -52,8 +52,6 @@ pub const FIRST_SPAWN: usize = 1;
 pub const MODEL_SCALE: f32 = 0.5;
 /// The character's root joint; its z travel in the creep clip is root motion (see [`pin_creep_root`]).
 const ROOT_JOINT: &str = "joint_00";
-/// Toggles the free debug camera (WASD/QE fly, hold the right mouse button to look, Shift = fast).
-pub const DEBUG_CAMERA_KEY: KeyCode = KeyCode::KeyC;
 /// Sky and fog colour (I: the extractor reads no fog or sky state yet).
 const SKY: Color = Color::srgb(0.55, 0.68, 0.85);
 
@@ -582,11 +580,13 @@ fn shade_vertex_colors(
     }
 }
 
+/// The DebugCamera action (F8) toggles the free debug camera (WASD/QE fly, hold the right mouse
+/// button to look, Shift = fast).
 fn toggle_debug_camera(
-    keys: Res<ButtonInput<KeyCode>>,
+    controls: crate::bindings::Controls,
     camera: Single<(&Transform, &mut FreeCameraState)>,
 ) {
-    if !keys.just_pressed(DEBUG_CAMERA_KEY) {
+    if !controls.just_pressed(crate::bindings::Action::DebugCamera) {
         return;
     }
     let (transform, mut state) = camera.into_inner();
@@ -1038,15 +1038,13 @@ pub fn shrink(k: u32) -> Option<f32> {
     (k < 3).then(|| 1.0 - 0.26 * (k + 1) as f32)
 }
 
-/// Shows the old text readout ([`hud_text`]) over the HUD ([`crate::hud`]), for debugging.
-pub const TEXT_HUD_KEY: KeyCode = KeyCode::KeyH;
-
-/// Whether the text readout is on ([`TEXT_HUD_KEY`] toggles it).
+/// Whether the old text readout ([`hud_text`]) shows over the HUD ([`crate::hud`]), for debugging:
+/// the TextHud action (H) toggles it.
 #[derive(Resource, Default)]
 struct TextHud(bool);
 
-fn toggle_text_hud(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<TextHud>) {
-    if keys.just_pressed(TEXT_HUD_KEY) {
+fn toggle_text_hud(controls: crate::bindings::Controls, mut on: ResMut<TextHud>) {
+    if controls.just_pressed(crate::bindings::Action::TextHud) {
         on.0 = !on.0;
     }
 }

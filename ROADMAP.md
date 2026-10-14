@@ -97,6 +97,17 @@ batches: I bump `PROTOCOL_ID` once per wave that changes the wire or the shared 
 | C3 | Esc menu: Resume / Settings / Leave; rebinding with conflicts; mouse and pad settings; input zeroed while open | no | |
 | C4 | Polish: the pad look stick, curves and glyphs; the masked upper-body animation; spread; shoulder swap; the blocked-shot marker; aim-assist slowdown | no | |
 
+## Controls waves (planned 2026-10-14)
+`CONTROLS_RESEARCH.md` implemented: modern TPS controls (keyboard + mouse, Xbox / DualSense), rebinding and an Esc menu.
+Everything new is gated on the MODERN action bit; bots and the oracle replays stay on the N64 path, unchanged. Same
+rules as the gap-closing waves (one protocol bump per round, by me).
+
+| Round | Agents (lanes) | Items | Status |
+|---|---|---|---|
+| R1 | C1 client input plumbing; C2a modern rules | C1: `Bindings` and `Settings` (persisted; defaults = today's bits, crouch on C, walk on Shift), pointer lock (raw, lock loss, mouse 4/5), the debug camera off C. C2a: `Input.actions` and `pad()`, `aim_pitch` and the shoulder bit, humans' `m.aims`, the MODERN gate (move while aiming and firing, facing and scope on the aim, speeds 0.75 / 0.5) || done 2026-10-15 (protocol 40). C1: `bindings.rs` (20 actions, 2 keyboard/mouse slots + 1 pad slot, Esc and Start never bound, defaults §7 sending today's bits), `settings.rs` (overrides only, clamped, `.bak`; `$CONKER_SETTINGS` or the config dir), pointer lock on the canvas's press (`unadjustedMovement`, lock loss pauses input, mouse 4/5 blocked; unverified, no browser), native grab, the debug camera on F8, the AZERTY label cache; BALANCE moved to W/S. C2a: `Input.actions` (0x01 jump, 0x02 crouch, 0x04 fire, 0x08 reload, 0x10 left shoulder, 0x20 interact, 0x40 grenade, 0x80 MODERN; holster on B, walk halves the stick) and `aim_pitch` (±14563); `pad()` in `Match::player`, the identity at 0 (679 tests, no expected value edited); humans' `m.aims` from the arm (pivot 67.5, arm 160, shoulder 20; `camera_yaw` = aim − 0x4000); the MODERN gate (move while aiming ×0.75, scoped ×0.5, facing on the aim, the scope from the aim). Left → R2: keyboard C-left/right strafing gone until the orbit camera; pistol, 0x23 and tommy bullets take only the ray's pitch (20 to the side); C-left/right still strafe under MODERN; the mounted gun turns by the N64 scope camera |
+| R2 | C2b modern client; C2c weapon handling; C3 Esc menu | C2b: the orbit camera feeding the aim, prediction, the centre crosshair, server-confirmed hit markers. C2c: §4b (Interact pickups, draw on pickup, Fire draws, armed jump and crouch, the armed grenade, moving while drawing, mounted guns F/Q, "PRESS F"). C3: Resume / Settings / Leave, rebinding with conflicts, mouse and pad settings | |
+| R3 | C4 client feel; C4 rules spread | Pad look stick, curves, glyphs, vibration; masked upper-body aim; shoulder swap; the blocked-shot marker; aim-assist slowdown (pads); hip/aim/scope spread | |
+
 ## Before wave 5 (done 2026-10-10)
 - Feet under the floor: fixed. The game draws the model 0.5 × 43 above the player (bank 0x11 record +6, obj+0xC8,
   `func_1502DF38`); `MODEL_LIFT` in the client. Matches the game's drawn joints on idle, run, crouch, crouch-walk.

@@ -15,6 +15,7 @@
 
 pub mod audio;
 pub mod beach;
+pub mod bindings;
 pub mod connection;
 pub mod corpses;
 pub mod effects;
@@ -27,12 +28,14 @@ pub mod hud;
 pub mod laser;
 pub mod lights;
 pub mod outro;
+pub mod pointer;
 pub mod projectiles;
 pub mod race;
 pub mod raptor;
 pub mod render;
 pub mod results;
 pub mod segments;
+pub mod settings;
 pub mod smooth;
 pub mod tank;
 pub mod teams;
@@ -87,7 +90,7 @@ use conker_rules::{Arena, Event, Fighter, Match, Placement, Rng, Settings, Spawn
 use conker_sim::TICK_HZ;
 use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
-use conker_sim::movement::{BUTTON_A, BUTTON_Z, Input, PlayerState, STRAFE_PERCENT, Side, state};
+use conker_sim::movement::{BUTTON_A, Input, PlayerState, STRAFE_PERCENT, Side, state};
 use conker_sim::net::{
     Collision, Combat, DEFAULT_PORT, MatchView, Player, PlayerId, ProtocolPlugin, Saw, SawChannel,
     map_scene, scene_world,
@@ -383,84 +386,6 @@ pub fn circle_input(id: u64, tick: u32) -> (u16, i8, i8) {
     let q = |v: f32| (v * STICK_MAX).round() as i8;
     let a = if tick.is_multiple_of(45) { BUTTON_A } else { 0 };
     (a, q(angle.cos()), q(angle.sin()))
-}
-
-/// Keyboard, mouse and the first gamepad as an N64 pad: (buttons, stick x, stick y).
-/// - Keyboard: WASD/arrows full stick (Alt: walk at half stick; not Ctrl, as browsers keep Ctrl+W),
-///   Space = A (jump; reloads a drawn gun), Shift = Z (crouch; fires a drawn weapon), F = Z,
-///   B = B (draw or put away the weapon), R = R (aim), G = C-down (grenade), Q / E = C-left /
-///   C-right (strafe).
-/// - Mouse: left button = Z (fire), right button = R (aim).
-/// - Gamepad: left stick × 80, South = A, West = B, both triggers and the left bumper = Z, the right
-///   bumper = R, right stick = C buttons (down: grenade, left/right: strafe).
-///
-/// The C buttons do not turn the camera in the original's multiplayer (held, C-left/right stop its
-/// swing-back and strafe), so no key or mouse turns it either.
-pub fn device_input(
-    keys: Option<&ButtonInput<KeyCode>>,
-    mouse: Option<&ButtonInput<MouseButton>>,
-    pad: Option<&Gamepad>,
-) -> (u16, i8, i8) {
-    use KeyCode::*;
-    let held = |codes: &[KeyCode]| keys.is_some_and(|k| k.any_pressed(codes.iter().copied()));
-    let clicked = |b: MouseButton| mouse.is_some_and(|m| m.pressed(b));
-    let axis = |pos: &[KeyCode], neg: &[KeyCode]| held(pos) as i8 as f32 - held(neg) as i8 as f32;
-    let mut stick = Vec2::new(
-        axis(&[KeyD, ArrowRight], &[KeyA, ArrowLeft]),
-        axis(&[KeyW, ArrowUp], &[KeyS, ArrowDown]),
-    );
-    let walk = held(&[AltLeft, AltRight]);
-    let mut scale = if walk { STICK_WALK } else { STICK_MAX };
-    let mut buttons = 0;
-    for (on, bit) in [
-        (held(&[Space]), BUTTON_A),
-        (
-            held(&[ShiftLeft, ShiftRight, KeyF]) || clicked(MouseButton::Left),
-            BUTTON_Z,
-        ),
-        (held(&[KeyB]), BUTTON_B),
-        (held(&[KeyR]) || clicked(MouseButton::Right), BUTTON_R),
-        (held(&[KeyT]), C_UP),
-        (held(&[KeyG]), C_DOWN),
-        (held(&[KeyQ]), C_LEFT),
-        (held(&[KeyE]), C_RIGHT),
-    ] {
-        if on {
-            buttons |= bit;
-        }
-    }
-    if let Some(pad) = pad {
-        if stick == Vec2::ZERO {
-            (stick, scale) = (pad.left_stick(), STICK_MAX);
-        }
-        use GamepadButton::*;
-        for (on, bit) in [
-            (pad.pressed(South), BUTTON_A),
-            (pad.pressed(West), BUTTON_B),
-            (
-                pad.pressed(LeftTrigger2) || pad.pressed(RightTrigger2) || pad.pressed(LeftTrigger),
-                BUTTON_Z,
-            ),
-            (pad.pressed(RightTrigger), BUTTON_R),
-        ] {
-            if on {
-                buttons |= bit;
-            }
-        }
-        let c = pad.right_stick();
-        for (on, bit) in [
-            (c.x < -0.5, C_LEFT),
-            (c.x > 0.5, C_RIGHT),
-            (c.y > 0.5, C_UP),
-            (c.y < -0.5, C_DOWN),
-        ] {
-            if on {
-                buttons |= bit;
-            }
-        }
-    }
-    let q = |v: f32| (v.clamp(-1.0, 1.0) * scale).round() as i8;
-    (buttons, q(stick.x), q(stick.y))
 }
 
 /// Stick units per pixel the mouse moves in a frame while R aims ([`mouse_aim`]).
@@ -811,7 +736,7 @@ pub fn weapon_name(id: u8) -> String {
     }
 }
 
-/// The text readout (logged as `HUD` lines; on screen with `render::TEXT_HUD_KEY`): health, weapon
+/// The text readout (logged as `HUD` lines; on screen with the TextHud action, H): health, weapon
 /// and ammo, grenades, score, clock, and the respawn countdown.
 pub fn hud_text(c: &Combat, m: &MatchView) -> String {
     let secs = m.timer.max(0) / 60;
@@ -1052,6 +977,19 @@ pub fn run(
         app.add_systems(FixedUpdate, screenshot_at_read.run_if(not(is_in_rollback)));
     }
     teams::build(&mut app, !cfg.headless);
+    // Only a window reads the player's settings (headless and offscreen runs keep the defaults).
+    let windowed = !cfg.headless && !cfg.offscreen;
+    let settings = match windowed {
+        true => settings::load(),
+        false => settings::Settings::default(),
+    };
+    bindings::build(
+        &mut app,
+        bindings::Bindings::with(&settings.bindings),
+        windowed,
+    );
+    app.insert_resource(settings);
+    pointer::build(&mut app, windowed);
     app.insert_resource(cfg);
     connection::build(&mut app);
     corpses::build(&mut app);
@@ -1199,10 +1137,8 @@ fn buffer_input(
     cfg: Res<Config>,
     script: Res<Script>,
     timeline: Res<LocalTimeline>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
-    mouse: Option<Res<ButtonInput<MouseButton>>>,
-    gamepads: Query<&Gamepad>,
-    windows: Query<&Window>,
+    controls: bindings::Controls,
+    (paused, mut wheel): (Res<pointer::Paused>, ResMut<bindings::Wheel>),
     free_camera: Query<&FreeCameraState>,
     game: Query<&MatchView>,
     motion: Option<Res<AccumulatedMouseMotion>>,
@@ -1215,6 +1151,7 @@ fn buffer_input(
         Query<(&PlayerId, &Player), With<Interpolated>>,
     ),
 ) {
+    let wheel = std::mem::take(&mut wheel.0);
     let Ok((mut action, camera)) = player.single_mut() else {
         return;
     };
@@ -1241,14 +1178,17 @@ fn buffer_input(
         Some(_) => circle_input(cfg.id, tick),
         None if free_camera.iter().any(|c| c.enabled) => (0, 0, 0), // the keys fly the camera
         None if team_screen.open => (0, 0, 0),                      // the pad picks a team
+        None if paused.0 => (0, 0, 0), // the pointer lock lost (Esc): stand, keeping the yaw
         None => {
-            // The pad only drives a focused window (with two windows open, one pad drove both).
-            let pad = gamepads
-                .iter()
-                .next()
-                .filter(|_| windows.iter().any(|w| w.focused));
-            let (b, x, y) = device_input(keys.as_deref(), mouse.as_deref(), pad);
-            let (x, y) = mouse_aim(b, (x, y), motion.map_or(Vec2::ZERO, |m| m.delta));
+            let motion = motion.map_or(Vec2::ZERO, |m| m.delta);
+            let d = bindings::device_input(&controls.bindings, &controls.devices(wheel, motion));
+            let Input {
+                buttons: b,
+                stick_x: x,
+                stick_y: y,
+                ..
+            } = d.input;
+            let (x, y) = mouse_aim(b, (x, y), d.mouse);
             (b, x, y)
         }
     };
@@ -1257,6 +1197,7 @@ fn buffer_input(
         stick_y,
         buttons,
         camera_yaw: camera.follow.yaw(),
+        ..Default::default()
     };
 }
 
@@ -1819,6 +1760,8 @@ fn log_players(
 mod tests {
     use super::*;
 
+    use conker_sim::movement::BUTTON_Z;
+
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         list.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1944,49 +1887,6 @@ mod tests {
             circle_input(2, 10),
             "clients differ by phase"
         );
-    }
-
-    #[test]
-    fn keyboard_maps_to_the_n64_pad() {
-        let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(KeyCode::KeyW);
-        keys.press(KeyCode::KeyD);
-        keys.press(KeyCode::Space);
-        assert_eq!(device_input(Some(&keys), None, None), (BUTTON_A, 80, 80));
-        keys.release(KeyCode::Space);
-        keys.release(KeyCode::KeyD);
-        keys.press(KeyCode::ShiftLeft);
-        keys.press(KeyCode::ControlLeft);
-        assert_eq!(device_input(Some(&keys), None, None), (BUTTON_Z, 0, 80)); // Ctrl does not walk
-        keys.press(KeyCode::AltLeft);
-        assert_eq!(device_input(Some(&keys), None, None), (BUTTON_Z, 0, 41)); // walk, crouched
-        assert_eq!(device_input(None, None, None), (0, 0, 0));
-    }
-
-    #[test]
-    fn combat_keys_and_mouse_map_to_the_n64_buttons() {
-        let mut keys = ButtonInput::<KeyCode>::default();
-        let mut mouse = ButtonInput::<MouseButton>::default();
-        let pad = |k: &ButtonInput<KeyCode>, m: &ButtonInput<MouseButton>| {
-            device_input(Some(k), Some(m), None).0
-        };
-        mouse.press(MouseButton::Left);
-        assert_eq!(pad(&keys, &mouse), BUTTON_Z);
-        mouse.press(MouseButton::Right);
-        assert_eq!(pad(&keys, &mouse), BUTTON_Z | BUTTON_R);
-        mouse.release_all();
-        for (key, bit) in [
-            (KeyCode::KeyF, BUTTON_Z),
-            (KeyCode::KeyB, BUTTON_B),
-            (KeyCode::KeyR, BUTTON_R),
-            (KeyCode::KeyG, C_DOWN),
-            (KeyCode::KeyQ, C_LEFT),
-            (KeyCode::KeyE, C_RIGHT),
-        ] {
-            keys.press(key);
-            assert_eq!(pad(&keys, &mouse), bit, "{key:?}");
-            keys.release(key);
-        }
     }
 
     #[test]
