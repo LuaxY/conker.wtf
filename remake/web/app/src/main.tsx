@@ -113,8 +113,21 @@ const routes = [
   }),
 ] as const;
 
+// The router moves the scroll after every load, and a refresh (useRefresh's every 5 s, Run it, Kill)
+// is a load too: only a new URL may move the page (to the top, or back where it was on Back).
+let shown = "";
+const moved = ({ location }: { location: { href: string } }) => {
+  const changed = location.href !== shown;
+  shown = location.href;
+  return changed;
+};
+
 // Hash URLs (/#/servers, /#/lobby/1): any static server serves them, no fallback needed.
-const router = createRouter({ routeTree: root.addChildren(routes), history: createHashHistory() });
+const router = createRouter({
+  routeTree: root.addChildren(routes),
+  history: createHashHistory(),
+  scrollRestoration: moved,
+});
 
 declare module "@tanstack/react-router" {
   interface Register {
