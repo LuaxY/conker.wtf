@@ -107,7 +107,8 @@ use serde::{Deserialize, Serialize};
 /// 45: MODERN's club and bat swing with the aim held, the start item swapped by touch, the rocket to the aim's point and
 /// the sniper on the press; a quiet client stands; the netcode timeout 30 s (was 3; carried in the token).
 /// 46: the netcode and WebTransport idle timeouts 5 min (were 30 s; carried in the token).
-pub const PROTOCOL_ID: u64 = 46;
+/// 47: the modern aim arm 40 to the side (was 20: the body hid the crosshair; shared).
+pub const PROTOCOL_ID: u64 = 47;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

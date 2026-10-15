@@ -1,7 +1,24 @@
-# Status (newest first; latest 2026-10-15, protocol 46)
+# Status (newest first; latest 2026-10-15, protocol 47)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## From play: LEAVE MATCH in the browser, the body over the crosshair
+
+**Since (protocol 47):** the modern aim arm's shoulder is 40, not 20.
+- **Esc → LEAVE MATCH did nothing in the browser.** `connection::leave` runs in `Last` (it must drain the exit before
+  winit reads it) and triggered netcode's disconnect there, so the despawns that brings landed between the frame's
+  visibility and its render extraction. WebGL2's unbatchable meshes then panicked (`bevy_render` `render_phase`
+  index out of bounds), and the page froze before it went to the landing page. A lost connection never did this:
+  lightyear despawns in `PreUpdate`. Now `leave` only records the leave, and `disconnect` sends it at the next
+  frame's `PreUpdate`. The 0.2 s `LEAVE_DELAY` still covers it. Reproduced and checked in headless Chrome (join,
+  Esc, LEAVE MATCH: the panic before, the landing page after).
+- **The body hid the crosshair.** The camera sat at eye height only 20 right of the pivot, so the helmet and the
+  gun in the right hand covered the screen's centre, worse with the arm shortened by a wall behind. `AIM_SHOULDER`
+  20 → 40. It's shared, because the server's aim ray starts there too, so the protocol is bumped. Shots still leave
+  the muzzle (only the target point is the ray's), so the wider shoulder doesn't shoot around corners. The
+  self-hit test now uses a wall at the shoulder to pull the ray's start back into the body.
+  CONTROLS_RESEARCH.md never chose a framing.
 
 ## Fix batch F3 lane C: QUIT, staying connected, the reconnect menu
 

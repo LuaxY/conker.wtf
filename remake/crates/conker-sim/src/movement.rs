@@ -197,7 +197,7 @@ pub mod action {
 /// forward × up, `(sin yaw, 0, cos yaw)` for the facing's `(cos yaw, 0, −sin yaw)`.
 pub const AIM_PIVOT_HEIGHT: f32 = 67.5;
 pub const AIM_ARM: f32 = 160.0;
-pub const AIM_SHOULDER: f32 = 20.0;
+pub const AIM_SHOULDER: f32 = 40.0;
 /// How far short of a wall at the shoulder the aim ray starts ([`aim_ray`]; the client's arm keeps its eye
 /// as far off a wall behind).
 pub const AIM_WALL_GAP: f32 = 8.0;
@@ -2370,7 +2370,7 @@ mod tests {
     }
 
     /// A wall 10 to the right of the pivot (an aim along +x) pulls the aim ray's start back to 2
-    /// (`AIM_WALL_GAP` short); the left shoulder, clear, keeps its 20.
+    /// (`AIM_WALL_GAP` short); the left shoulder, clear, keeps its `AIM_SHOULDER`.
     #[test]
     fn a_wall_at_the_shoulder_pulls_the_aim_rays_start_in() {
         let big = 5000.0;

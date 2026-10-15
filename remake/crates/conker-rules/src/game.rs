@@ -5735,13 +5735,23 @@ mod tests {
         }
     }
 
-    /// The modern aim's ray starts at the shoulder, inside the shooter's own body, and aimed down at
-    /// the pitch's limit it crosses the shooter's torso: every hit test along it leaves the shooter
-    /// out, and the twin guns fired along it hurt nobody.
+    /// A wall 24 to the right pulls the modern aim's ray start in to the shoulder, inside the
+    /// shooter's own body, and aimed down at the pitch's limit it crosses the shooter's torso: every
+    /// hit test along it leaves the shooter out, and the twin guns fired along it hurt nobody.
     #[test]
     fn the_modern_aim_ray_leaves_out_the_shooters_own_body() {
         use movement::action::{FIRE, MODERN};
-        let (arena, mut m, w) = duel();
+        let (arena, mut m, _) = duel();
+        let big = 20_000.0;
+        let w = CollisionWorld::new([
+            ([[-big, 0.0, -big], [-big, 0.0, big], [big, 0.0, big]], 5),
+            ([[-big, 0.0, -big], [big, 0.0, big], [big, 0.0, -big]], 5),
+            (
+                [[-big, -big, 24.0], [big, -big, 24.0], [-big, big, 24.0]],
+                5,
+            ),
+            ([[big, -big, 24.0], [big, big, 24.0], [-big, big, 24.0]], 5),
+        ]);
         m.players[1].body.pos = [3000.0, 0.0, 3000.0];
         m.give(0, 0x09);
         let mut hits = 0;
@@ -6389,7 +6399,7 @@ mod tests {
     }
 
     /// The modern aim sends the pistol's, 0x23's and the tommy gun's bullets from the muzzle to the
-    /// aim ray's hit point (a wall 3,000 ahead, 20 to the right of the facing: the shoulder), not
+    /// aim ray's hit point (a wall 3,000 ahead, `AIM_SHOULDER` to the right of the facing), not
     /// parallel to the ray; the ray turned within the hip's spread cone ([`spread::scatter`] of
     /// that frame and shot).
     #[test]

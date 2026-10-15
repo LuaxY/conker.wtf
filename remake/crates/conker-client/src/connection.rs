@@ -226,7 +226,7 @@ pub fn build(app: &mut App) {
         Update,
         (retry, connect.run_if(ready), watchdog, show).chain(),
     );
-    app.add_systems(Last, leave.after(bevy::window::ExitSystems));
+    leaving(app);
     app.add_systems(
         PostUpdate,
         delay_sends
@@ -867,32 +867,46 @@ fn on_attached(trigger: On<Add, FollowCamera>, mut commands: Commands) {
         .insert(InputMarker::<Input>::default());
 }
 
-/// Holds any exit until netcode's disconnect has gone out: the first exit request sends it and
-/// comes back [`LEAVE_DELAY`] later (a closed window asks again every frame meanwhile). In the
-/// browser the exit is the landing page ([`LANDING`], once). Every leave comes here: the Esc menu's
-/// LEAVE MATCH, the results' QUIT and the lost connection's QUIT write an exit.
+/// A leave under way ([`leave`]): when its exit goes through, and whether netcode's disconnect is
+/// still to be sent ([`disconnect`]).
+#[derive(Resource, Default)]
+struct Leaving {
+    exit: Option<(f64, AppExit)>,
+    disconnect: bool,
+}
+
+/// The leave's systems: [`leave`] after the exit requests, [`disconnect`] at the next frame's start.
+fn leaving(app: &mut App) {
+    app.init_resource::<Leaving>();
+    app.add_systems(PreUpdate, disconnect);
+    app.add_systems(Last, leave.after(bevy::window::ExitSystems));
+}
+
+/// Holds any exit until netcode's disconnect has gone out: the first exit request has it sent
+/// ([`disconnect`]) and comes back [`LEAVE_DELAY`] later (a closed window asks again every frame
+/// meanwhile). In the browser the exit is the landing page ([`LANDING`], once). Every leave comes
+/// here: the Esc menu's LEAVE MATCH, the results' QUIT and the lost connection's QUIT write an exit.
 fn leave(
     mut exits: ResMut<Messages<AppExit>>,
     time: Res<Time<Real>>,
-    clients: Query<Entity, (With<Client>, With<Connected>)>,
-    mut leaving: Local<Option<(f64, AppExit)>>,
-    mut commands: Commands,
+    clients: Query<(), (With<Client>, With<Connected>)>,
+    mut leaving: ResMut<Leaving>,
 ) {
     let now = time.elapsed_secs_f64();
-    if leaving.is_none()
+    if leaving.exit.is_none()
         && let Some(exit) = exits.drain().last()
     {
-        let at = match clients.single() {
-            Ok(entity) => {
+        leaving.disconnect = clients.single().is_ok();
+        let at = match leaving.disconnect {
+            true => {
                 info!("leaving: disconnecting first");
-                commands.trigger(Disconnect { entity });
                 now + LEAVE_DELAY
             }
-            Err(_) => now,
+            false => now,
         };
-        *leaving = Some((at, exit));
+        leaving.exit = Some((at, exit));
     }
-    let Some((at, exit)) = leaving.clone() else {
+    let Some((at, exit)) = leaving.exit.clone() else {
         return;
     };
     exits.clear();
@@ -902,13 +916,29 @@ fn leave(
     #[cfg(target_family = "wasm")]
     {
         let _ = exit;
-        *leaving = Some((f64::INFINITY, AppExit::Success));
+        leaving.exit = Some((f64::INFINITY, AppExit::Success));
         if let Some(w) = web_sys::window() {
             let _ = w.location().set_href(LANDING);
         }
     }
     #[cfg(not(target_family = "wasm"))]
     exits.write(exit);
+}
+
+/// The leave's disconnect, in the frame after the exit request: sent from [`leave`] in `Last`, the
+/// despawns it brings would land between the frame's visibility and its render extraction, which
+/// WebGL2's unbatchable meshes panic on (`render_phase` index out of bounds; the page froze there,
+/// never going to the landing page).
+fn disconnect(
+    mut leaving: ResMut<Leaving>,
+    clients: Query<Entity, (With<Client>, With<Connected>)>,
+    mut commands: Commands,
+) {
+    if std::mem::take(&mut leaving.disconnect)
+        && let Ok(entity) = clients.single()
+    {
+        commands.trigger(Disconnect { entity });
+    }
 }
 
 #[cfg(test)]
@@ -1160,7 +1190,7 @@ mod tests {
             bevy::time::TimePlugin,
             bevy::window::WindowPlugin::default(),
         ));
-        app.add_systems(Last, leave.after(bevy::window::ExitSystems));
+        leaving(&mut app);
         let client = app
             .world_mut()
             .spawn((Client, RemoteId(PeerId::Server), Connected))

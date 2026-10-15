@@ -740,9 +740,9 @@ mod tests {
             (s - eye - Vec3::X * (s.x - x - 8.0)).length() < 1e-3,
             "{eye} {s}"
         );
-        // The other shoulder: the start 40 across.
+        // The other shoulder: the start 2 · AIM_SHOULDER across.
         o.left = false;
-        assert!((arm(&o, feet, &wall).0 - s - Vec3::Z * 40.0).length() < 1e-3);
+        assert!((arm(&o, feet, &wall).0 - s - Vec3::Z * 2.0 * AIM_SHOULDER).length() < 1e-3);
     }
 
     /// A wall at the right shoulder pulls the arm's start in where the server's aim ray starts (8

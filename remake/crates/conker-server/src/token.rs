@@ -2,7 +2,7 @@
 //! never leaves this process, and hands it out over plain HTTP: `GET /token[?id=N]` answers the
 //! token's 2048 bytes as hex (a random client id without `id=`). `GET /info` answers what a client
 //! needs before it loads anything, and what a server list shows:
-//! `{"map":"2d","protocol":46,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
+//! `{"map":"2d","protocol":47,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
 //! pack's fingerprint, conker-sim's `pack_hash`, and the players in the match now, [`Live`]).
 //!
 //! The endpoint lives in the game server because the server holds the key and its public

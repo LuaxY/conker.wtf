@@ -262,7 +262,7 @@ RESTART's fade; the stuck-in-gas case; the landing page; a cheat pick's glTF loa
 twist.
 **Modern controls in a browser:** pointer lock (`unadjustedMovement` and its fallback); Esc or lock loss opening the
 menu with neutral input; RESUME re-locking ("CLICK RESUME AGAIN" on refusal); mouse 4/5 not navigating; settings in
-localStorage (`conker-settings`, APPLY); LEAVE MATCH returning to the page; the PRESS F prompt and crosshair; whether
+localStorage (`conker-settings`, APPLY); LEAVE MATCH returning to the page (fixed; checked headless with the keys, a real click not); the PRESS F prompt and crosshair; whether
 Chrome scales mouse movement on high-DPI screens; middle-click autoscroll; a pointer-lock permission prompt.
 **Other browsers:** Firefox and Safari 26.4+ (two windows; the empty `serverCertificateHashes` list), background tabs
 and the 5 min timeout (F3: a hidden page ticks on a timer; RECONNECT after a drop).
