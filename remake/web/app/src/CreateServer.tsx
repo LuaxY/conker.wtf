@@ -1,5 +1,5 @@
 import { Link, useRouter } from "@tanstack/react-router";
-import { Brain, ChevronDown, Ear, KeyRound, Lock, LockOpen, Play } from "lucide-react";
+import { Brain, ChevronDown, Dices, Ear, KeyRound, Lock, LockOpen, Play } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type CSSProperties, type FormEvent, type ReactNode, useState } from "react";
 import {
@@ -15,6 +15,7 @@ import {
   type Mode,
   type NewServer,
   PICKS,
+  randomName,
   ROUTES,
   type Route,
   type Settings,
@@ -34,8 +35,8 @@ const REVEAL = {
 // The Deathmatch arenas first, then the maps built round their own mode.
 const MAP_ORDER: MapId[] = ["2d", "30", "34", "3f", "1a", "2b", "24", "33"];
 
-const DEFAULT: NewServer = {
-  name: "Bad Fur Day",
+// The name: a fresh one from the game each time the form mounts.
+const DEFAULT: Omit<NewServer, "name"> = {
   map: "2d",
   mode: "deathmatch",
   settings: {
@@ -75,7 +76,7 @@ const numbers = (lo: number, hi: number) =>
 /** The game server's settings (conker-server's flags), only those the map and mode use, and Run. */
 export function CreateServer() {
   const router = useRouter();
-  const [form, setForm] = useState(DEFAULT);
+  const [form, setForm] = useState(() => ({ ...DEFAULT, name: randomName() }));
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [started, setStarted] = useState<GameServer | null>(null);
@@ -318,6 +319,15 @@ export function CreateServer() {
                 className="field"
               />
             </label>
+            <button
+              type="button"
+              onClick={() => setForm({ ...form, name: randomName(form.name) })}
+              aria-label="Another name"
+              title="Another name"
+              className="pill"
+            >
+              <Dices aria-hidden className="size-5" />
+            </button>
             <button type="submit" disabled={pending} className="cta">
               <Play aria-hidden className="size-5" />
               {pending ? "Starting…" : "Run it"}

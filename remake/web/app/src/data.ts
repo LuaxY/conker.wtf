@@ -270,6 +270,70 @@ export function players({ info }: GameServer): string | undefined {
   return `${count(info.humans, "human")}, ${count(info.bots, "bot")}`;
 }
 
+/** The form's server names, from the game's characters, places and lines (server.ts checks each
+ * against its NAME when it starts). */
+export const NAMES = [
+  "Tediz Tea Party",
+  "The Great Mighty Poo's Throne",
+  "Berri's Hideout",
+  "Uga Buga Bar",
+  "Windy Chocolate Shop",
+  "Count Batula's Cellar",
+  "Sergeant's Last Stand",
+  "Panther King's Table",
+  "Have a Nice Day",
+  "Rock Solid",
+  "The Cock and Plucker",
+  "Hungover Again",
+  "The Hangover Cure",
+  "Birdy's Booze Barn",
+  "Franky's Hay Loft",
+  "Haybot's Barn",
+  "Barn Boys Hoedown",
+  "Mrs. Bee's Hive",
+  "The Wasps' Nest",
+  "Marvin's Cheese Stash",
+  "The Sunflower's Garden",
+  "The Gargoyle's Ledge",
+  "Bats Tower",
+  "Gregg's Graveyard",
+  "Batula's Blood Bank",
+  "Night of the Living Tediz",
+  "Sloprano Opera Night",
+  "Hold the Sweetcorn",
+  "Dung Beetle Derby",
+  "Buga the Knut's Arena",
+  "The Raptor's Nest",
+  "Caveman Egg Fry-Up",
+  "Saving Private Rodent",
+  "Squirrels vs Tediz",
+  "Tediz Fortress",
+  "Total War Trenches",
+  "Beach Landing Party",
+  "Nick Their Flag",
+  "Gas Bomb Bunker",
+  "Hoverboard Hooligans",
+  "Heinrich's Revenge",
+  "Von Kriplespac's Lab",
+  "The Feral Reserve",
+  "Don Weaso's Vault",
+  "Weasel Mob Bank Job",
+  "Wads of Cash",
+  "No Milk for the Panther King",
+  "Red Squirrel Wanted",
+  "King Conker's Court",
+  "Twelve Tales",
+  "Conker's Pocket Tales",
+  "Context Sensitive",
+  "A Very Bad Fur Day",
+];
+
+/** One of NAMES at random, other than `not` (so the form's dice always changes it). */
+export function randomName(not?: string): string {
+  const pool = NAMES.filter((n) => n !== not);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 /** `s` within `mode`'s limits: fewer bots, and its default score for one out of its range. */
 export function fit(s: Settings, mode: Mode): Settings {
   const { maxScore, defaultScore, maxBots } = MODES[mode];

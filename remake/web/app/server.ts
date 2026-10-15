@@ -19,6 +19,7 @@ import {
   type MapId,
   type Mode,
   MODES,
+  NAMES,
   type NewServer,
   SKILLS,
 } from "./src/data";
@@ -50,11 +51,15 @@ const [LO, HI] = args["game-ports"].split("-").map(Number);
 if (!(LO > 0 && HI > LO && HI < 65536)) throw new Error("--game-ports: LO-HI, e.g. 5900-5949");
 /** Seconds a game server may take to answer /info (it reads the asset pack first). */
 const START_SECS = 30;
+/** Minutes a running game server may go without a human in its match before it is stopped. */
+const IDLE_MINUTES = 5;
 
 interface Running {
   record: Omit<GameServer, "address" | "info">;
   proc: Bun.Subprocess;
   dir: string;
+  /** When its /info last counted a human (its start until one joins). */
+  lastHuman: number;
 }
 const servers = new Map<string, Running>();
 let nextId = 1;
@@ -70,6 +75,8 @@ const isSkill = (v: unknown): v is (typeof SKILLS)[number] => SKILLS.some((s) =>
 const isCheat = (v: unknown): v is Cheat => typeof v === "string" && Object.hasOwn(CHEATS, v);
 // The name never reaches the command line; still, nothing a shell or a page would read as code.
 const NAME = /^[\p{L}\p{N} _.,'!?-]{1,32}$/u;
+const badName = NAMES.find((n) => !NAME.test(n));
+if (badName !== undefined) throw new Error(`src/data.ts NAMES: "${badName}" fails NAME`);
 
 /** Every value whitelisted: the request, or what is wrong with it. */
 function validate(body: unknown): NewServer | string {
@@ -179,7 +186,7 @@ function spawn({ name, map, mode, settings: s }: NewServer, port: number): Runni
     code: null,
     started: new Date().toISOString(),
   };
-  const running = { record, proc, dir };
+  const running = { record, proc, dir, lastHuman: Date.now() };
   servers.set(record.id, running);
   console.log(`game server ${record.id} "${name}": pid ${proc.pid}, port ${port}, ${dir}`);
   void proc.exited.then((code) => {
@@ -322,6 +329,27 @@ if (!loopback)
       "game servers on this machine. This dev tool has no authentication: never expose it to the internet.\n",
   );
 console.log(`game servers: ${BINARY}, ports ${LO}-${HI}, assets ${ASSETS}`);
+
+// Every 15 s, a running game server without a human (bots don't count) for IDLE_MINUTES stops, as a
+// DELETE would; an /info that doesn't answer counts no human.
+setInterval(() => {
+  for (const s of servers.values()) {
+    if (s.record.status !== "running") continue;
+    void info(s.record.port, 2000).then((live) => {
+      if (live?.humans) s.lastHuman = Date.now();
+      else if (
+        Date.now() - s.lastHuman >= IDLE_MINUTES * 60_000 &&
+        servers.get(s.record.id) === s
+      ) {
+        servers.delete(s.record.id);
+        console.log(
+          `game server ${s.record.id} "${s.record.name}": no human for ${IDLE_MINUTES} min, stopped`,
+        );
+        void stop(s);
+      }
+    });
+  }
+}, 15_000);
 
 // Ctrl-C or a SIGTERM stops every game server first.
 for (const signal of ["SIGINT", "SIGTERM"] as const)
