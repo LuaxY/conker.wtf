@@ -5,7 +5,7 @@ What runs on the host:
 | Process | Listens on | Does |
 |---|---|---|
 | Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/api/` to the web server |
-| `conker-web` (systemd) | `127.0.0.1:8080` | the web server (`web/app/server.ts`, `web/README.md`, "Dev web server"): the landing's servers list, Create server and Kill; it starts a `conker-server` per match and stops one 5 min after its last human left (or its start, if none joined) |
+| `conker-web` (systemd) | `127.0.0.1:8080` | the web server (`web/app/server.ts`, `web/README.md`, "Dev web server"): the landing's servers list, Create server and its unlinked `/#/admin` page's Kill; it starts a `conker-server` per match and stops one 5 min after its last human left (or its start, if none joined) |
 | `conker-server` (one per match) | TCP + UDP N (5900-5949, even), and `127.0.0.1:N+1` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
 | certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to Caddy and the game servers (they take it without a restart) |
 

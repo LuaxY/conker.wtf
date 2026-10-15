@@ -7,13 +7,21 @@ import { type GameServer, killServer, MAPS, MODES, players, settingRows } from "
 import { SkullIcon, StatusBadge, useRefresh } from "./ui";
 
 const route = getRouteApi("/servers");
+const adminRoute = getRouteApi("/admin");
 
 // One grid for the header and the rows: stacked on phones, columns from md up.
 const COLUMNS =
   "grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1 md:grid-cols-[minmax(0,1.5fr)_1.1fr_1.8fr_6.5rem_12rem]";
 
-export function Servers() {
-  const servers = route.useLoaderData();
+/** The unlinked admin page (/#/admin): the same list with Kill and Clear, and no Create server. */
+export function Admin() {
+  return <Servers admin />;
+}
+
+export function Servers({ admin = false }: { admin?: boolean }) {
+  const all = (admin ? adminRoute : route).useLoaderData();
+  // Players see the live ones only: without Clear, an exited one would stay listed for good.
+  const servers = admin ? all : (all?.filter((s) => s.status !== "exited") ?? null);
   const router = useRouter();
   const [refreshing, setRefreshing] = useState(false);
   useRefresh();
@@ -32,7 +40,9 @@ export function Servers() {
     >
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="chrome font-display text-6xl [--c:#00c0f0]">Servers</h1>
+          <h1 className="chrome font-display text-6xl [--c:#00c0f0]">
+            {admin ? "Admin" : "Servers"}
+          </h1>
           <p className="mt-2 text-dust">
             {servers === null
               ? "No server list on this site."
@@ -71,23 +81,23 @@ export function Servers() {
           <ul className="mt-3 grid gap-4">
             {servers.map((server) => (
               <li key={server.id}>
-                <ServerRow server={server} />
+                <ServerRow server={server} admin={admin} />
               </li>
             ))}
           </ul>
           {servers.length === 0 && (
             <p className="bubble mt-6 max-w-xl">
-              Nobody's here. Even the Tediz went home. Run one below, you lazy git.
+              Nobody's here. Even the Tediz went home.{admin ? "" : " Run one below, you lazy git."}
             </p>
           )}
-          <CreateServer />
+          {!admin && <CreateServer />}
         </>
       )}
     </motion.main>
   );
 }
 
-function ServerRow({ server: s }: { server: GameServer }) {
+function ServerRow({ server: s, admin }: { server: GameServer; admin: boolean }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const exited = s.status === "exited";
@@ -131,16 +141,18 @@ function ServerRow({ server: s }: { server: GameServer }) {
             Lobby
           </Link>
         )}
-        <button
-          type="button"
-          onClick={kill}
-          disabled={busy}
-          aria-label={`${exited ? "Clear" : "Kill"} ${s.name}`}
-          className="pill pill-red"
-        >
-          {exited ? <X aria-hidden className="size-4" /> : <SkullIcon />}
-          {exited ? "Clear" : "Kill"}
-        </button>
+        {admin && (
+          <button
+            type="button"
+            onClick={kill}
+            disabled={busy}
+            aria-label={`${exited ? "Clear" : "Kill"} ${s.name}`}
+            className="pill pill-red"
+          >
+            {exited ? <X aria-hidden className="size-4" /> : <SkullIcon />}
+            {exited ? "Clear" : "Kill"}
+          </button>
+        )}
       </span>
     </div>
   );

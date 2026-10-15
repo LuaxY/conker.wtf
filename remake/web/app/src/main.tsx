@@ -18,7 +18,7 @@ import { createRoot } from "react-dom/client";
 import { getServer, listServers } from "./data";
 import { Home } from "./Home";
 import { Lobby } from "./Lobby";
-import { Servers } from "./Servers";
+import { Admin, Servers } from "./Servers";
 import { DANGER, Sprite } from "./ui";
 
 function Layout() {
@@ -110,6 +110,13 @@ const routes = [
       return server;
     },
     component: Lobby,
+  }),
+  // Linked from nowhere: the servers with Kill and Clear (the API itself stays open).
+  createRoute({
+    getParentRoute: () => root,
+    path: "/admin",
+    loader: listServers,
+    component: Admin,
   }),
 ] as const;
 
