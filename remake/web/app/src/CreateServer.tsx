@@ -1,5 +1,5 @@
 import { Link, useRouter } from "@tanstack/react-router";
-import { Brain, Ear, Play } from "lucide-react";
+import { Brain, ChevronDown, Ear, KeyRound, Lock, LockOpen, Play } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type CSSProperties, type FormEvent, type ReactNode, useState } from "react";
 import {
@@ -14,6 +14,7 @@ import {
   MODES,
   type Mode,
   type NewServer,
+  PICKS,
   ROUTES,
   type Route,
   type Settings,
@@ -63,6 +64,10 @@ const BRAINS: Record<Skill, string> = {
 const hud = (file: string, place: string) =>
   `url(${new URL(`assets/hud/${file}`, document.baseURI).href}) ${place} no-repeat`;
 
+const and = new Intl.ListFormat("en-GB", { type: "conjunction" });
+/** The picks in `mask` (bit k: PICKS[k]), named: "Conker and Neo Conker". */
+const picked = (mask: number) => and.format(PICKS.filter((_, k) => mask & (1 << k)));
+
 const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
 const numbers = (lo: number, hi: number) =>
   range(lo, hi).map((n): [number, string] => [n, String(n)]);
@@ -77,6 +82,8 @@ export function CreateServer() {
   const s = form.settings;
   const mode = MODES[form.mode];
   const untimed = mode.laps || s.time === "unlimited";
+  // The map's character select without cheats (0: none, so no cheats either).
+  const select = allowed(form.map, form.mode, []);
   const setting = (change: Partial<Settings>) =>
     setForm({ ...form, settings: { ...s, ...change } });
   const pick = (map: MapId, next: Mode) =>
@@ -282,43 +289,13 @@ export function CreateServer() {
               >
                 <RadarSwitch on={s.radar} onChange={(radar) => setting({ radar })} />
               </Tile>
-              {allowed(form.map, form.mode, []) !== 0 && (
-                <motion.details
+              {select !== 0 && (
+                <CheatCodes
                   key="cheats"
-                  {...REVEAL}
-                  className="rounded-2xl border-2 border-dashed border-oak p-4 md:col-span-2"
-                >
-                  <summary className="cursor-pointer font-hand text-lg text-dust marker:text-lime">
-                    Psst… cheat codes{s.cheats.length > 0 && ` (${s.cheats.length} on)`}
-                  </summary>
-                  <fieldset className="mt-3 min-w-0">
-                    <legend className="sr-only">Cheats</legend>
-                    <div className="flex flex-wrap gap-2">
-                      {(Object.keys(CHEATS) as Cheat[]).map((code) => (
-                        <label key={code} className="chip">
-                          <input
-                            type="checkbox"
-                            name="cheats"
-                            value={code}
-                            checked={s.cheats.includes(code)}
-                            onChange={(e) =>
-                              setting({
-                                cheats: e.target.checked
-                                  ? [...s.cheats, code]
-                                  : s.cheats.filter((c) => c !== code),
-                              })
-                            }
-                            className="sr-only"
-                          />
-                          {code}
-                        </label>
-                      ))}
-                    </div>
-                    <p className="mt-3 text-sm text-dust">
-                      Each one adds characters to pick in the lobby.
-                    </p>
-                  </fieldset>
-                </motion.details>
+                  select={select}
+                  on={s.cheats}
+                  onChange={(cheats) => setting({ cheats })}
+                />
               )}
             </AnimatePresence>
           </div>
@@ -688,5 +665,94 @@ function RadarSwitch({ on, onChange }: { on: boolean; onChange: (on: boolean) =>
         {on ? "On" : "Off"}
       </span>
     </label>
+  );
+}
+
+/** The cheats, folded away: each code a padlock tag whose bubble names the characters it adds on this
+ * map (the select has some already), and below them everyone the codes on have unlocked. */
+function CheatCodes({
+  select,
+  on,
+  onChange,
+}: {
+  select: number;
+  on: Cheat[];
+  onChange: (cheats: Cheat[]) => void;
+}) {
+  const unlocked = on.reduce((mask, c) => mask | CHEATS[c], 0) & ~select;
+  return (
+    <motion.details
+      {...REVEAL}
+      className="group/cheats rounded-2xl border-2 border-black bg-black/35 md:col-span-2"
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-3 rounded-2xl p-4 transition-colors hover:bg-white/5 [&::-webkit-details-marker]:hidden">
+        <span
+          aria-hidden
+          className="grid size-11 shrink-0 -rotate-6 place-items-center rounded-full border-3 border-black bg-amber text-night shadow-[3px_3px_0_#000]"
+        >
+          <KeyRound className="size-5" />
+        </span>
+        <span className="grid min-w-0">
+          <span className="font-hand text-lg leading-snug text-bone">Psst… cheat codes</span>
+          <span className="text-sm text-dust">Unlock more characters to pick in the lobby.</span>
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {on.length > 0 && (
+            <span className="rounded-full border-2 border-black bg-lime px-2.5 py-0.5 font-display text-sm text-moss">
+              {on.length} on
+            </span>
+          )}
+          <ChevronDown
+            aria-hidden
+            className="size-6 text-lime transition-[rotate] duration-200 ease-snap group-open/cheats:rotate-180"
+          />
+        </span>
+      </summary>
+      <fieldset className="min-w-0 px-4 pt-2 pb-4">
+        <legend className="sr-only">Cheat codes</legend>
+        <div className="flex flex-wrap gap-3">
+          {(Object.keys(CHEATS) as Cheat[]).map((code) => {
+            const adds = CHEATS[code] & ~select;
+            const checked = on.includes(code);
+            const Icon = checked ? LockOpen : Lock;
+            return (
+              <label key={code} className={`cheat ${adds ? "" : "opacity-60"}`}>
+                <input
+                  type="checkbox"
+                  name="cheats"
+                  value={code}
+                  checked={checked}
+                  aria-describedby={`cheat-${code}`}
+                  onChange={(e) =>
+                    onChange(e.target.checked ? [...on, code] : on.filter((c) => c !== code))
+                  }
+                  className="sr-only"
+                />
+                <Icon aria-hidden className="size-4 shrink-0" />
+                {code}
+                <span id={`cheat-${code}`} aria-hidden className="tooltip">
+                  {adds ? (
+                    <>
+                      Unlocks <strong>{picked(adds)}</strong>
+                    </>
+                  ) : (
+                    "Nothing new here: this map has them already."
+                  )}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <p className="mt-4 text-sm text-dust">
+          {unlocked ? (
+            <>
+              Unlocked in the lobby: <span className="text-lime">{picked(unlocked)}</span>.
+            </>
+          ) : (
+            "Point at a code to see who it unlocks."
+          )}
+        </p>
+      </fieldset>
+    </motion.details>
   );
 }

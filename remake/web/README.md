@@ -40,7 +40,7 @@ Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDi
 | URL | Screen |
 |---|---|
 | `/#/` | Home: the pitch, "Join game", the Total War briefing's battle plan between the two sides' banners, and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
-| `/#/servers` | The server browser: the game servers the dev web server started (name, map, mode, settings, players, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server" in four steps: (1) the map, as cards with its screenshot, a line about it and the modes it plays; (2) the mode, as cards for that map's modes only (Deathmatch, War: Total War on Arena 0x2D, War: Colors on Colors 0x30, War: Beach on Beach 0x2B, War: Heist on Vault 0x1A, Tank on Tank 0x24 only, War: Raptor on Temple 0x3F, Race on Race 0x33 only); (3) the house rules that mode uses, and only those: bots as the HUD's chocolate bar (up to the mode's most with one human: Deathmatch 9, Total War and Colors 11, Beach, Heist, Tank, Raptor and Race 7; the server drops some as humans join), bot skill as columns of growing brains (greyed out with no bots), time on a slider (3-10 min or unlimited; Race has laps 1-20 and the route instead), lives (only untimed, and never in Colors or Beach), kill limit on a slider (Deathmatch and Tank; the clock and the skull from the HUD as the knobs), score (Colors' and Beach's 1-40 or unlimited; Raptor's 1-40; Heist's bags 1-5), radar as a switch beside a live HUD radar, and the cheats where the map has a character select; (4) the name and "Run it", which starts it, waits until it answers and links to its lobby. Pills, sliders, meters and a switch over native radios, checkboxes and ranges. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
+| `/#/servers` | The server browser: the game servers the dev web server started (name, map, mode, settings, players, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server" in four steps: (1) the map, as cards with its screenshot, a line about it and the modes it plays; (2) the mode, as cards for that map's modes only (Deathmatch, War: Total War on Arena 0x2D, War: Colors on Colors 0x30, War: Beach on Beach 0x2B, War: Heist on Vault 0x1A, Tank on Tank 0x24 only, War: Raptor on Temple 0x3F, Race on Race 0x33 only); (3) the house rules that mode uses, and only those: bots as the HUD's chocolate bar (up to the mode's most with one human: Deathmatch 9, Total War and Colors 11, Beach, Heist, Tank, Raptor and Race 7; the server drops some as humans join), bot skill as columns of growing brains (greyed out with no bots), time on a slider (3-10 min or unlimited; Race has laps 1-20 and the route instead), lives (only untimed, and never in Colors or Beach), kill limit on a slider (Deathmatch and Tank; the clock and the skull from the HUD as the knobs), score (Colors' and Beach's 1-40 or unlimited; Raptor's 1-40; Heist's bags 1-5), radar as a switch beside a live HUD radar, and the cheats where the map has a character select (folded away; each code's bubble, on hover or focus, names the characters it adds on that map, and a line lists everyone the codes on have unlocked); (4) the name and "Run it", which starts it, waits until it answers and links to its lobby. Pills, sliders, meters and a switch over native radios, checkboxes and ranges. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
 | `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings, and who is playing (the humans and bots in its match, from its `/info`; both pages reload every 5 s); your side (two cards on the map's riveted plates), Heist's team and connection (WebTransport or WebSocket); "Join game" (running servers only) |
 
 **Real data only.** `app/src/data.ts` holds the maps and the modes each plays (`MAPS`: a new mode, e.g. Colors on 30,
@@ -208,15 +208,15 @@ the reload reads the new hash (before wave 5's browser test, the page wrote the 
 the old one and failed over WebTransport until the `digest=` was removed by hand). A `?digest=` typed in the address
 is used as it is. The file is stale once the server exits, so delete it then. For a second player, open a second window, not a second tab of the same window. A
 background tab runs a frame a second at most (Chrome: one a minute after 5 min hidden), and the server stands its
-player meanwhile; past the 30 s netcode timeout it drops it, and the page offers RECONNECT (I).
+player meanwhile; past the 5 min netcode timeout it drops it, and the page offers RECONNECT (I).
 
 The line at the bottom left is the connection's status (also logged as `connection: ...`): `loading the level`,
 `connecting to HOST:PORT over WebTransport…`, `connected to ...`, `could not connect to ...: REASON. HINT` or
 `disconnected from ...: REASON`. The HUD stays off until the player is in the match; once the connection is gone or
-failed, a page over the level says why and offers RECONNECT (a fresh token, as a new player; it tries again for 35 s,
+failed, a page over the level says why and offers RECONNECT (a fresh token, as a new player; it tries again for 5 min 5 s,
 as the server may still hold the old slot) or QUIT (the landing page, as the Esc menu's LEAVE MATCH and the results'
 QUIT). The page connects once the level and the character have loaded and ten frames in a row took under 0.25 s, so
-the load's stalls don't eat into the 30 s netcode timeout.
+the load's stalls don't eat into the 5 min netcode timeout.
 
 `http.server` sends no `Cache-Control`, so after a rebuild or an edit of the pack a plain reload may run the old
 `client_bg.wasm`, a page or pack files (V: Chrome kept the old help text). Reload bypassing the cache
@@ -728,7 +728,7 @@ For each browser, using the same server and static server as above:
 6. Move in each window and check that the other window shows that player moving and animating. In the console, the
    `remote/interpolated` lines should show its position and clip changing.
 7. Reload one window. The old player disappears at once (the closed page's transport closes; the netcode timeout,
-   30 s, is the fallback), and the reloaded page joins as a new player.
+   5 min, is the fallback), and the reloaded page joins as a new player.
 
 Known limits per browser (from `lab/research/rust-stack.md` and `web-platform.md`):
 
