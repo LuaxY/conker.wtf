@@ -390,7 +390,8 @@ pub struct Fighter {
     pub ready: u32,
     /// The match's start item (MP+0x1170, written by the scene's script at the match start; V:
     /// 0x40 on 0x3F, `../lab/oracle/caveman_README.md`): the weapon manager hands it to this
-    /// player whenever it holds no weapon (the match start, the frame after a respawn).
+    /// player whenever it holds no weapon (the match start, the frame after a respawn), drawn at
+    /// once under the modern controls.
     pub start: Option<u8>,
     /// The last frame the club's second swing may start: [`weapon::COMBO_WINDOW`] after this
     /// player's last landed swing (obj+0x107).
@@ -452,7 +453,7 @@ pub struct Fighter {
     pub actions: u8,
     pub late_actions: u8,
     /// Modern: a grenade asked for with a weapon drawn, thrown once the holster ends; and the
-    /// weapon to draw once free (after that throw, or a pickup) ([`pad`]).
+    /// weapon to draw once free (after that throw, a pickup or the start item) ([`pad`]).
     pub throw: bool,
     pub redraw: bool,
 }
@@ -2136,9 +2137,12 @@ impl Match {
         }
         // The match's start item: the manager hands it over whenever the player holds no weapon
         // (`func_1508DC24` with no pickup held: MP+0x1170; V combat6_e40 1214, the frame after
-        // the respawn).
+        // the respawn). Modern: drawn at once, once free, as a pickup is (decision 11; not Beach's
+        // item 0x3E, no weapon of the rules; a raptor's club stays put, `pad` gives it no B).
         if let (None, Some(id)) = (self.players[i].weapon, self.players[i].start) {
             self.give(i, id);
+            let f = &mut self.players[i];
+            f.redraw |= input.actions & movement::action::MODERN != 0 && f.weapon().is_some();
         }
         // The raptor (War: Raptor's, a pick on 0x3F) keeps the club in the slot but never draws
         // it (V: 0xC0); its frame is its own in any mode (V: its movement on every map).
@@ -4151,7 +4155,7 @@ fn burn_run(f: &mut Fighter, world: &CollisionWorld, t: u32, others: &[Other]) {
 /// | FIRE | Z | B (draws a held weapon), free | Z |
 /// | RELOAD | A if the weapon reloads | – | – |
 /// | GRENADE | B (holsters; no Z), free | C-down (held, or a tap's frame) | – |
-/// | B (Q) | | B, or the draw after a pickup or a throw ([`Fighter::redraw`]), free | A on the gun (off) |
+/// | B (Q) | | B, or the draw after a pickup, the start item or a throw ([`Fighter::redraw`]), free | A on the gun (off) |
 ///
 /// A draw's last frame (`t`) counts as drawn: the rules end a timed action before a new one starts
 /// (V ctlw_k5), so FIRE held through a draw fires in that frame (decision 22), as the N64's Z.
@@ -4237,8 +4241,10 @@ pub fn can_mount(f: &Fighter, at: [f32; 3], interact: bool) -> bool {
 /// nothing, V r11; a mask only while the gas counts down, `func_1511DF6C` skips model 0x54 on scene
 /// 0x2D while G+0x1FE4 ≤ 0, C, and not over one, I) and touching it. Under the modern controls
 /// (`interact`: Interact pressed this frame) an on-foot weapon, Raptor's bone weapons included, waits
-/// for Interact (decisions 12, 18); grenades, masks and Tank's, Race's and Beach's items stay
-/// automatic. The server's gate ([`Match::step`]'s pickups) and the client's prompt ask it alike.
+/// for Interact (decisions 12, 18), but by a player holding nothing, which takes it by touch (a mask
+/// worn holds the weapon's place, V d2: MP+0xEB0 13 → 19); grenades, masks and Tank's, Race's and
+/// Beach's items stay automatic. The server's gate ([`Match::step`]'s pickups) and the client's
+/// prompt ask it alike.
 pub fn can_take(
     s: &Settings,
     gives: Gives,
@@ -4257,7 +4263,7 @@ pub fn can_take(
             true => race::touches(pos, f),
             false => tank::touches(pos, f, reach),
         }
-        && !(manual && interact == Some(false))
+        && !(manual && interact == Some(false) && (f.weapon.is_some() || f.masked))
 }
 
 /// Where a player aims (s126+0x16C and +0x170 through the scope, else its facing, level): the unit
@@ -5868,16 +5874,21 @@ mod tests {
         out
     }
 
-    /// Decisions 11, 12 and 18: a modern player takes a weapon's pickup only with an Interact press
-    /// (`can_take` says so for the prompt too), and draws it at once; the grenades stay automatic.
+    /// Decisions 11, 12 and 18: a modern player holding a weapon takes a weapon's pickup only with an
+    /// Interact press (`can_take` says so for the prompt too), and draws it at once; the grenades
+    /// stay automatic.
     #[test]
     fn modern_weapon_pickups_wait_for_interact_and_draw() {
         use movement::action::INTERACT;
         let (arena, mut m, w) = duel();
+        m.give(0, 0x39);
         m.players[0].body.pos = [0.0, 0.0, 2950.0]; // on the twin guns
         m.players[1].body.pos = [0.0, 0.0, -2950.0]; // on the grenades
         let ev = run_with(&mut m, &arena, &w, 10, |_| [modern(0); 2]);
-        assert_eq!((m.players[0].weapon, m.players[1].grenades), (None, 6));
+        assert_eq!(
+            (m.players[0].weapon, m.players[1].grenades),
+            (Some(0x39), 6)
+        );
         assert!(
             !ev.iter()
                 .any(|e| matches!(e.1, Event::Pickup { player: 0, .. }))
@@ -5921,6 +5932,74 @@ mod tests {
         };
         let b = |late| pad(&Fighter { buttons: late, ..f }, &m.settings, &modern(0), 0).buttons;
         assert_eq!((b(0) & BUTTON_B, b(BUTTON_B) & BUTTON_B), (BUTTON_B, 0));
+    }
+
+    /// A modern player holding nothing takes a weapon's pickup by touch, as the N64's, and draws it
+    /// at once (no prompt: `can_take` takes it without the press); a mask worn holds the weapon's
+    /// place, so it still waits for Interact.
+    #[test]
+    fn modern_empty_hands_take_a_weapon_by_touch_and_draw_it() {
+        let (arena, mut m, w) = duel();
+        m.players[0].body.pos = [0.0, 0.0, 2950.0]; // on the twin guns
+        let (pickup, pos) = arena.pickups[0];
+        let take = |f: &Fighter| {
+            can_take(
+                &m.settings,
+                pickup.gives,
+                pos,
+                f,
+                weapon::REACH,
+                0,
+                Some(false),
+            )
+        };
+        let f = m.players[0];
+        assert!(take(&f) && !take(&Fighter { masked: true, ..f }));
+        let ev = run_with(&mut m, &arena, &w, 3, |_| [modern(0), Input::default()]);
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, (0, Event::Pickup { player: 0, .. })))
+        );
+        let f = m.players[0];
+        assert_eq!((f.weapon, f.action, f.since), (Some(0x09), Action::Draw, 2));
+        let draw = u32::from(weapon::TWIN_GUNS.draw.1);
+        run_with(&mut m, &arena, &w, draw, |_| [modern(0), Input::default()]);
+        assert!(m.players[0].drawn);
+    }
+
+    /// The start item: drawn at once under the modern controls, at the match start and after a
+    /// respawn; holstered under the N64's (V combat6_e40); Beach's item 0x3E, no weapon of the
+    /// rules, asks for no draw.
+    #[test]
+    fn the_modern_start_item_is_drawn() {
+        let draw = u32::from(weapon::CLUB.draw.1);
+        for actions in [0, movement::action::MODERN] {
+            let (arena, mut m, w) = duel();
+            m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+            m.players[0].start = Some(weapon::CLUB.id);
+            let input = Input {
+                actions,
+                ..Input::default()
+            };
+            for _ in 0..2 {
+                run_with(&mut m, &arena, &w, draw + 2, |_| [input, Input::default()]);
+                let f = m.players[0];
+                assert_eq!(
+                    (f.weapon, f.drawn),
+                    (Some(0x40), actions != 0),
+                    "{actions:#x}"
+                );
+                m.respawn(0, &arena, &mut Vec::new());
+            }
+        }
+        let (arena, mut m, w) = duel();
+        m.players[0].start = Some(beach::ITEM);
+        run_with(&mut m, &arena, &w, 5, |_| [modern(0), Input::default()]);
+        let f = m.players[0];
+        assert_eq!(
+            (f.weapon, f.redraw, f.action),
+            (Some(beach::ITEM), false, Action::Free)
+        );
     }
 
     /// Decisions 10, 22 and 24: FIRE draws a holstered pistol (refilling it) and, still held, fires

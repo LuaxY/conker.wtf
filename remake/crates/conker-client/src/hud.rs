@@ -4180,7 +4180,8 @@ mod tests {
 
     /// The modern pickup prompt agrees with the server's gate (`can_take`): on a weapon's pickup,
     /// shown, it asks for Interact; not on grenades, a taken one, one out of reach, nor in Race
-    /// (automatic there). The key is Interact's, as the layout types it once pressed.
+    /// (automatic there), nor with empty hands (taken by touch). The key is Interact's, as the
+    /// layout types it once pressed.
     #[test]
     fn the_pickup_prompt_follows_the_gate_and_the_binding() {
         use conker_assets::{Gives, Pickup};
@@ -4190,7 +4191,11 @@ mod tests {
             facing: 0,
             camera: [0.0; 3],
         };
-        let f = conker_rules::Fighter::new(&place, 0, 0);
+        let empty = conker_rules::Fighter::new(&place, 0, 0);
+        let f = conker_rules::Fighter {
+            weapon: Some(0x39),
+            ..empty
+        };
         let at = |gives| Pickup {
             placement: 12,
             gives,
@@ -4202,6 +4207,7 @@ mod tests {
         let m = MatchView::default();
         let line = Some("PRESS F TO PICK UP".to_string());
         assert_eq!(pickup_prompt(&gun, &m, &f, "F"), line);
+        assert_eq!(pickup_prompt(&gun, &m, &empty, "F"), None);
         assert_eq!(pickup_prompt(&grenades, &m, &f, "F"), None);
         let taken = MatchView {
             taken: 1 << 12,

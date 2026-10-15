@@ -103,7 +103,8 @@ use serde::{Deserialize, Serialize};
 /// 42: the modern spread, the hip bolt on the aim, the aim ray pulled out of walls, the draw-end shot and the grenade
 /// latch (shared, MODERN-gated).
 /// 43: the sniper's aimed ray counts a shot; MODERN's rocket fires while aiming (shared).
-pub const PROTOCOL_ID: u64 = 43;
+/// 44: MODERN's start item drawn when handed over and an empty-handed player's weapon pickup by touch (shared).
+pub const PROTOCOL_ID: u64 = 44;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()

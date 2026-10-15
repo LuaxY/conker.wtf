@@ -18,8 +18,8 @@ Paths are under `remake/crates/`. Two research rounds; the sources are in §11.
 | 8 | Jump while armed? | **Yes** |
 | 9 | Crouch while armed? | **Yes** |
 | 10 | Fire while unarmed? | **Draws the weapon** |
-| 11 | Picking up a weapon | **Draws it at once** |
-| 12 | Weapon pickup | **Manual, with an Interact key (F)**, no longer automatic when walking over it |
+| 11 | Picking up a weapon | **Draws it at once** (F2: so is the start item, at the match start and after each respawn; Beach's 0x3E is no weapon and stays as it is) |
+| 12 | Weapon pickup | **Manual, with an Interact key (F)**, no longer automatic when walking over it (F2: but taken by touch with empty hands, no prompt; a start item or a gas mask counts as held) |
 | 13 | Grenade while armed? | **Holsters the weapon and throws** |
 | 14 | Legs slide when strafing (no strafe clips) | **Accepted** |
 
@@ -30,7 +30,7 @@ Decided 2026-10-14 (the user took every recommendation):
 | 15 | Toggle aim | An option in Settings; hold is the default |
 | 16 | Speed while aiming | 0.75 of the run; 0.5 when scoped |
 | 17 | Menu UI | The HUD's own quad renderer (§6) |
-| 18 | Manual pickups | Only on-foot weapons. Grenade packs, gas masks, canisters, flags, the bag, eggs, the bomb and the Tank, Race and Beach items stay automatic (§4b) |
+| 18 | Manual pickups | Only on-foot weapons. Grenade packs, gas masks, canisters, flags, the bag, eggs, the bomb and the Tank, Race and Beach items stay automatic (§4b). F2: only while a weapon is held (`can_take`) |
 | 19 | Mounted guns | F gets on, Q gets off |
 | 20 | Picking up a weapon while holding another | The old one vanishes, as today. Dropping it needs a new world item: later |
 | 21 | Move while drawing or holstering | Yes (the original holds you still 13-64 frames) |

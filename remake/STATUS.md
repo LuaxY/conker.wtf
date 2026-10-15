@@ -1,7 +1,36 @@
-# Status (newest first; latest 2026-10-15, protocol 43)
+# Status (newest first; latest 2026-10-15, protocol 44)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Fix batch F2: the start item drawn, the first pickup by touch (MODERN)
+From play: "Default weapons should be drawn out by default" and "If no weapons, the first one is picked up
+automatically without needing to press F." Both MODERN only (`pad()`'s identity at `actions == 0` keeps bots, the
+N64 controls and the oracle replays as they were: no expected value of theirs changed). **No wire change**: `redraw`
+is on the wire since protocol 41; no shared-sim change.
+- **The start item drawn.** `Match::player` sets `Fighter::redraw` where it hands the start item over (the match
+  start, the frame after each respawn), as a pickup does (decision 11): `pad()` presses B once free, so the draw clip
+  plays (15 frames for the club and the bat). Not for Beach's 0x3E, no weapon of the rules (B would press forever). The
+  rules run in prediction too (`step_player`), so the client shows it drawn with no client change (C).
+- **The first pickup by touch.** `can_take` waives the Interact press while the player holds nothing: no weapon and
+  no gas mask (the mask holds the weapon's place, V d2: MP+0xEB0 13 → 19; I: walking unmasked into the gas by touch
+  would be a trap). The server's gate and the client's "PRESS F" prompt both ask it, so the prompt is gone there. A
+  start item counts as held, so F is still needed.
+- **Where request 2 applies** (C, `conker-server`'s `start_item`): Deathmatch on other maps than 0x1A and 0x3F,
+  Total War, Colors, Beach's Tediz. Everyone holds a melee start item (so F stays) in Deathmatch on 0x3F or with
+  `--cavemen` (the club 0x40), any mode on 0x1A, Heist included (the bat 0x19), and Raptor (the cavemen's club; the
+  raptors keep it undrawn). Beach's villagers hold 0x3E. Tank and Race have no start item and their items are
+  automatic anyway.
+- Tests: `modern_empty_hands_take_a_weapon_by_touch_and_draw_it`, `the_modern_start_item_is_drawn` (MODERN drawn,
+  N64 holstered, at the start and after `respawn`; 0x3E asks for no draw). Two MODERN tests changed their setup:
+  `modern_weapon_pickups_wait_for_interact_and_draw` gives player 0 the pistol first (with empty hands it would take
+  by touch; its first check now reads the pistol, not None); conker-client's
+  `the_pickup_prompt_follows_the_gate_and_the_binding` likewise, plus no prompt with empty hands. conker-rules lib 171
+  + 1 ignored, conker-client lib 230, all of rules/bots/sim/client with `CONKER_ROM` pass; clippy clean (rules,
+  client native and wasm32).
+
+**Left:** the start item's draw is not seen in a client (no browser run); a dying modern player's weapon still swaps
+for the start item holstered during the death (V e4 dth), drawn again only after the respawn.
 
 ## Fix batch F1 lane D: which shots draw a bullet
 From play: "some weapons we don't see the bullet while shooting, is that normal?" Mostly yes: only the bullet guns
