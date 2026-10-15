@@ -46,7 +46,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 /// Netcode's timeout both ways (the connect token carries it, conker-server's `token.rs` sets it), and
 /// the native WebTransport idle timeout: a client that sends nothing for this long loses its slot.
 /// A browser tab in the background may run no frame for that long.
-pub const TIMEOUT_SECS: i32 = 30;
+pub const TIMEOUT_SECS: i32 = 300;
 /// Seconds a connection attempt may take: a WebTransport handshake that never completes (a stale
 /// certificate digest in some browsers, blocked UDP) raises no error of its own.
 pub const CONNECT_SECS: f64 = 10.0;
@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn netcode_states_read_as_words() {
         let e = |s: &str| why(&DisconnectedReason::TransportError(s.into()));
-        assert_eq!(e("ConnectionTimedOut"), "nothing from the server for 30 s");
+        assert_eq!(e("ConnectionTimedOut"), "nothing from the server for 300 s");
         assert_eq!(e("ConnectionRequestTimedOut"), "the server did not answer");
         assert!(e("ConnectionDenied").contains("refused"));
         assert_eq!(e("Other"), "Other");

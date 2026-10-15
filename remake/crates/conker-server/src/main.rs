@@ -65,7 +65,7 @@
 //! dual-stack by default). A joined human stands as it joined ([`Waiting`]) until the first tick
 //! its client sent an input for: its client predicts from that tick, from the state the server holds.
 //! It leaves on its client's netcode disconnect, its transport closing (a closed page, a killed
-//! WebSocket client) or the netcode timeout (30 s, carried in the connect token; the WebTransport
+//! WebSocket client) or the netcode timeout (5 min, carried in the connect token; the WebTransport
 //! idle timeout is as long); a client whose inputs stop for [`STALE_TICKS`] (a hidden page) stands
 //! until they come back ([`stale_inputs`]). Every 10 s the log has each client's traffic (`NET`
 //! lines).

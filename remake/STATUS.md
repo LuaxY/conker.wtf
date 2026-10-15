@@ -1,9 +1,13 @@
-# Status (newest first; latest 2026-10-15, protocol 45)
+# Status (newest first; latest 2026-10-15, protocol 46)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
 
 ## Fix batch F3 lane C: QUIT, staying connected, the reconnect menu
+
+**Since (protocol 46):** the timeouts are 5 min, not 30 s (`TIMEOUT_SECS` on both sides; the QUIC idle timeout and
+`RETRY_SECS`, now 305 s, follow it). A crashed client holds its slot 5 min; Chrome's once-a-minute wake after 5 min
+hidden should keep a background tab joined (I).
 From play: the results' RESTART and QUIT "do nothing", and switching windows ends in "lost connection, reload to
 reconnect". **Wire:** the connect token's `timeout_seconds` 3 → 30 (no format or protocol change; each side honours
 the token it holds). No conker-sim or rules change.

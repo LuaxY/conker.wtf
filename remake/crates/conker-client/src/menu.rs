@@ -1610,7 +1610,7 @@ mod tests {
                 glyphs: Glyphs::Xbox,
                 now: 0.0,
                 click: false,
-                lost: ["CONNECTION LOST", "nothing from the server for 30 s"],
+                lost: ["CONNECTION LOST", "nothing from the server for 300 s"],
             };
             layout(m, &hud, &look)
         };
