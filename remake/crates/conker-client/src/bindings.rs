@@ -376,14 +376,43 @@ pub fn device_input(bindings: &Bindings, d: &Devices) -> Device {
     }
 }
 
-/// The wheel since the input last read it: the input is read at the tick (30 Hz), slower than
-/// frames, so a frame's turn would be lost.
+/// The wheel's notches since the input last read it (a frame's turn is one: the browser's pixels
+/// and a native mouse's lines don't compare), and the reads they still hold: the input is read at
+/// the tick (30 Hz), slower than frames, so a frame's turn would be lost. Each notch holds its
+/// direction for the setting's reads ([`crate::settings::Mouse::wheel_zoom`]); one the other way
+/// drops what is left.
+// ponytail: a trackpad turns every frame of a swipe and its momentum, so it queues a long hold
+// (the zoom stops at its end; turning back cancels it); a cap or per-unit notch sizes if it bites.
 #[derive(Resource, Clone, Copy, Debug, Default)]
-pub struct Wheel(pub f32);
+pub struct Wheel {
+    notches: i32,
+    held: i32,
+}
 
-fn gather_wheel(scroll: Res<AccumulatedMouseScroll>, mut wheel: ResMut<Wheel>) {
-    if scroll.delta.y != 0.0 {
-        wheel.0 += scroll.delta.y;
+impl Wheel {
+    /// This read's wheel (+1 up, -1 down, 0), each notch held for `ticks` reads.
+    pub fn read(&mut self, ticks: i32) -> f32 {
+        let n = std::mem::take(&mut self.notches);
+        if n != 0 {
+            if n.signum() != self.held.signum() {
+                self.held = 0;
+            }
+            self.held += n * ticks;
+        }
+        let sign = self.held.signum();
+        self.held -= sign;
+        sign as f32
+    }
+}
+
+/// Not while the Esc menu holds the input (its list scrolls with the wheel).
+fn gather_wheel(
+    scroll: Res<AccumulatedMouseScroll>,
+    paused: Option<Res<crate::pointer::Paused>>,
+    mut wheel: ResMut<Wheel>,
+) {
+    if scroll.delta.y != 0.0 && !paused.is_some_and(|p| p.0) {
+        wheel.notches += scroll.delta.y.signum() as i32;
     }
 }
 
@@ -569,5 +598,27 @@ mod tests {
             ..Devices::default()
         };
         assert_eq!(device_input(&b, &d).input.buttons, 0);
+    }
+
+    /// A notch holds the wheel for the setting's reads; notches add up; one the other way drops
+    /// the rest.
+    #[test]
+    fn a_wheel_notch_holds_for_its_ticks() {
+        let mut w = Wheel::default();
+        let reads = |w: &mut Wheel, n: usize| (0..n).map(|_| w.read(3)).collect::<Vec<_>>();
+        w.notches = 1;
+        assert_eq!(reads(&mut w, 4), [1.0, 1.0, 1.0, 0.0]);
+        // Two notches, in two frames before a read or one read apart: six reads.
+        w.notches = 2;
+        assert_eq!(reads(&mut w, 7), [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+        w.notches = 1;
+        w.read(3);
+        w.notches = 1;
+        assert_eq!(reads(&mut w, 6), [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+        // Down mid-hold: the hold up is dropped.
+        w.notches = 1;
+        w.read(3);
+        w.notches = -1;
+        assert_eq!(reads(&mut w, 4), [-1.0, -1.0, -1.0, 0.0]);
     }
 }

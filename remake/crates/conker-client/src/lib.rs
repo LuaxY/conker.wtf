@@ -1180,15 +1180,7 @@ fn buffer_input(
     game: Query<&MatchView>,
     motion: Option<Res<AccumulatedMouseMotion>>,
     team_screen: Res<teams::Screen>,
-    mut player: Query<
-        (
-            &mut ActionState<Input>,
-            &FollowCamera,
-            &Player,
-            Option<&Fighting>,
-        ),
-        With<InputMarker<Input>>,
-    >,
+    mut player: Query<(&mut ActionState<Input>, &FollowCamera, &Player), With<InputMarker<Input>>>,
     (sync, shown, mut senders, remotes): (
         Option<Res<LocalTimelineSync>>,
         Res<Shown>,
@@ -1197,8 +1189,8 @@ fn buffer_input(
     ),
     (mut orbit, settings): (ResMut<orbit::Orbit>, Res<settings::Settings>),
 ) {
-    let wheel = std::mem::take(&mut wheel.0);
-    let Ok((mut action, camera, p, fighting)) = player.single_mut() else {
+    let wheel = wheel.read(settings.mouse.wheel_zoom as i32);
+    let Ok((mut action, camera, p)) = player.single_mut() else {
         return;
     };
     let tick = timeline.tick().0;
@@ -1244,16 +1236,8 @@ fn buffer_input(
             let scoped = camera.follow.cam.scope.on;
             let i = orbit::input(&controls.bindings, &d, &orbit, &settings, scoped);
             actions = i.actions;
-            // On a mounted gun the mouse turns it as a stick (its sight is the N64 scope's).
-            let seated = fighting.is_some_and(|f| f.state.gun.is_some());
-            let motion = motion.map_or(Vec2::ZERO, |m| m.delta);
-            let stick = (i.stick_x, i.stick_y);
-            let (x, y) = if seated {
-                mouse_aim(BUTTON_R, stick, motion)
-            } else {
-                stick
-            };
-            (i.buttons, x, y)
+            // On a mounted gun too: the look turns it, sent as the aim ([`orbit`]).
+            (i.buttons, i.stick_x, i.stick_y)
         }
         None => {
             let motion = motion.map_or(Vec2::ZERO, |m| m.delta);

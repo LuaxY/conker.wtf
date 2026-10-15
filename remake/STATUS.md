@@ -1,7 +1,155 @@
-# Status (newest first; latest 2026-10-15, protocol 42)
+# Status (newest first; latest 2026-10-15, protocol 43)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Fix batch F1 lane D: which shots draw a bullet
+From play: "some weapons we don't see the bullet while shooting, is that normal?" Mostly yes: only the bullet guns
+(twin, pistol, 0x23, tommy gun, mounted gun) shoot a bullet the original draws, as a tracer; the sniper's ray, the
+shotgun's spheres, melee and flame have none. The remake lacked the shotgun's spray, and the pistol's and 0x23's
+tracers were too short; both fixed. Client only (`effects.rs`); **no wire change**, no rules change. Oracle runs on a
+private copy (`../lab/research/mp-original/bullets-f1d-scratch/NOTES.md`): twin, pistol, gun23, shotgun2, sniper.
+
+| Weapon | The original draws | The remake draws | Why it may be unseen |
+|---|---|---|---|
+| Twin guns 0x09 | Bullets (300 a frame): the 2D and 3D flashes, a tracer from age 1 (186, 265, 366 long), impact sparks at the wall (V) | All but the sparks; tracer 0.62 then 1.22 frames (V) | A hit within 300 of the muzzle: no tracer in either (V); end-on from the orbit eye (I, below) |
+| Pistol 0x39 | Flash, six-ray star, tracer 280 then 546, from the muzzle (V); no sparks (V) | The same; **tracer now 0.93/1.82** (was 0.62/1.22) | As the twin guns |
+| 0x23 | Flash (size 682), one 3D quad 127 × 79 (V), tracer 302 then 589 from the muzzle (V); no sparks (V) | Flash 359-629 and the star (I, not V's quad); **tracer now 1.01/1.96** | As the twin guns |
+| Tommy gun 0x38 | Pool bullets (C), so a tracer (I) | Tracer, the twin guns' lengths (I) | As the twin guns |
+| Mounted gun | Pool bullets at 252 (C), the constructor's tracer arguments (C) | Tracer, the twin guns' look and lengths (I) | As the twin guns |
+| Shotgun 0x37 | No bullet (C: four spheres). V: one 3D quad 126 × 76, a 2D flash of size 837-1179, a **spray of 10 flash blobs** at 20-39 a frame for 5-10 frames | Flash 359-629 and the star (I); **now the spray** | Nothing travels further than about 300 |
+| Sniper 0x24 | No bullet: an instant ray (C). V: no flash, no tracer; a red laser dot and beam for the 3 frames from Z to the shot; impact sparks where the ray hits | Nothing (its shot now counts, lane A; no flash is right) | Normal for the trail; the laser and sparks are missing |
+| 0x14 | R + Z: a thrown knife model at 75 a frame (V); no R: no shot (V) | The knife model | Without R nothing is thrown |
+| Rocket 0x16 | Rocket, glow, streak, trail (V) | The same | — |
+| Crossbow 0x18 | Bolt at 125 a frame, aim laser (V) | The same; 0x41's and 0x3F's are drawn as the knife (C `projectiles::look`; the original's not checked) | — |
+| Flamethrower 0x15 | Stream, puffs, tongues (V) | The same | — |
+| Melee 0x21, 0x22, 0x40, 0x19 | Nothing (C) | Nothing | Normal |
+| Tank, Beach bunkers | Shell glow, scope tracer; bunker tracers (V, C) | The same | — |
+
+**The checks**
+- **A bullet lost in one tick.** A bullet whose first 300-unit sweep meets a wall or a body dies in its birth tick, so
+  it is never in `MatchView::bullets`. The original never draws one either. V: twin heads are only ever at 300, 600 or
+  900 from the muzzle (first lists at age 1 or 2 by the list's parity), never at it: a bullet is made and swept in the
+  same frame. The display lists repeat in pairs in every run (built every other frame); the 2D sprites' RAM changes
+  every read.
+- **One's own shots.** `Fighting` carries no bullets, so one's own tracer comes only from snapshots: about the RTT
+  plus the prediction margin after the predicted flash, at its age-1 place (I, not measured). `watch` reads the view
+  once a client tick. With network jitter, two snapshots in one tick lose a bullet seen only in the first: one that
+  met a wall or body 300-600 out (I).
+- **Modern aim.** `strike` fires from the muzzle (`b.pos`) to the crosshair's point, and the view carries the
+  bullet's real `pos`/`vel`. So the tracer lies on the real path (C), its first tail 0.38 of a frame ahead of the
+  muzzle (twin; V the same in the original).
+- **Geometry** (I, `bullets-f1d-scratch/proj.py`; 1080p, 50° vertical; target 600-3000 out). From the orbit eye
+  (160 back, 20 right, 67.5 up), one's own tracer is a short, wide, soft band, not a dot:
+  - length: 32-66 px on its first snapshot, 10-17 px by age 3, converging under the crosshair;
+  - width: 150-270 px (a 60-wide quad close to the eye);
+  - the N64 follow eye (247 back, 100 up) sees 49-73 px, then 22-31 px.
+  With the fix, the pistol's first tracer is 77 px (was 33) and 0x23's 98 px (was 36).
+- Tests: `the_shotgun_spray_and_the_guns_tracers_as_the_original` (10 blobs, speed, spread, sizes, lives, fade; the
+  pistol's and 0x23's lengths within 2 of V, the twin guns' kept). The two `tracer` calls in
+  `the_tracers_as_the_original` now pass `TRACER_BACK[k]`; no expected value changed. conker-client 230 pass; clippy
+  clean (native, wasm32).
+
+**Left (the user's call):**
+- MODERN only, one's own tracer drawn from the predicted shot, as `scope_tracer` does (no RTT wait), keyed by
+  (owner, born) so the snapshot's does not double it.
+- MODERN only, one's own tracer at least N px long on screen (or its first tail at the muzzle). The original's band
+  is wide too.
+- Impact sparks: twin bullets and the sniper's ray (V look: 8-12 streaks a hit, `fuse_spark`-like). The recipe is not read.
+  They are the original's clearest "it landed" cue.
+- The sniper's laser: `Match::laser` (rules) to admit 0x24 from Z to the shot, and `laser.rs`.
+- Per-gun flashes: 0x23's and the shotgun's 3D flash is one long quad, not the star (V). The shotgun's 2D flash is
+  837-1179 (two samples), not 359-629. The spray's point is `muzzles[1]` in both V shots (the remake uses
+  `muzzles[0]`, 5 off).
+
+## Fix batch F1 lane B: the mounted gun under MODERN
+GAPS `controls-mounted-gun-modern-aim` (from play: "the camera turns but not the gun, the bullets always go to the
+same point, the controls are inverted"). Client only; **no wire change**, no shared-sim or rules change (one rules
+test added).
+- **Root cause** (C): the rules already turn a seated gun from the input's aim (`game.rs` `modern_aim`: scope yaw =
+  the aim's facing, scope pitch = −`aim_pitch`° within −60..50, positive down, so up is up). But the client froze its
+  orbit while on a gun (`orbit.rs` `look`/`camera`: `seated` returned early), so `camera_yaw`/`aim_pitch` stayed at
+  their mount-time values and the server's gun never turned; and it sent the mouse as an N64 stick (`lib.rs`
+  `buffer_input` → `mouse_aim`), which turned only the client's own follow-camera scope, N64-style (stick up =
+  `pitch_target` up = look down: the inversion).
+- **Now**: seated, `look` keeps turning the orbit (mouse and right stick, the orbit's sensitivity and invert-Y, at
+  the scope's FOV-normalised speed: the sight is always narrowed), its pitch held within the gun's (`GUN_PITCH`:
+  60° up, 50° down, `Orbit::hold_to_gun`), and `buffer_input` sends it as the aim like on foot (the stick is the move
+  keys', which the seat ignores). `camera` draws the sight from the local aim every frame: the eye is
+  `conker_camera::gun_eye_kicked` at the aim's yaw and pitch (the fire clip's kick as last drawn), looking along the
+  aim, at the gun scope's zoom; `Orbit::view` is set, so the radar and the listener follow. The HUD's heading and
+  elevation tapes read that look (`hud::shown`'s `view`), else the scope's as before.
+- **The jump onto the gun** (I): the follow camera still draws it and the look is held on the gun's yaw, level
+  (`p.move_angle`, the launch's), so the sight opens along the gun as the N64's (V m2 84) instead of swinging the
+  gun to wherever the player looked.
+- Tests: `a_modern_gunners_aim_turns_and_raises_its_shots` (rules: aim 22.5° up → `pitch10` −225, the shot climbs;
+  5.625° down → 56, it dips; facings 0, 0x4000, 0xA000 → the gun's yaw and the shot's heading within 4°);
+  `the_seated_look_stops_at_the_guns_limits_and_sights_from_its_eye` (client: 60° up / 50° down stops, mouse up
+  looks up, the eye is the rules' gun eye). conker-rules 170 + 3 + 4 + 11, conker-client 228 (+1 lane C's
+  `settings_ui` in progress) pass, zero expected values changed; clippy clean (rules, client, client wasm).
+- Left: the feel with a real mouse and pad (sensitivity on the gun, the springless sight vs the N64's springs)
+  and a browser run are unverified. The predicted fighter's `scope_pitch` after `take_camera` is still the N64
+  scope's between ticks (the next step's `modern_aim` overrides it; only `guns::show`'s local gun reads it, hidden
+  behind the sight but under the debug camera). The pad's aim-assist slowdown tests the look from the body's arm,
+  not the gun's eye. Should the follow camera's gun scope close while still seated (`scope_step`'s `lost`, e.g. a
+  busy hurt gunner), the sight keeps drawing but at the unzoomed 50° for those frames (I, unseen).
+
+## Fix batch F1 lane C: Esc closes the menu, the wheel's zoom speed
+Two client fixes from play. Client only, **no wire change**, no `PROTOCOL_ID` bump.
+- **Esc closes the Esc menu** (`menu.rs`). Natively it already did: Esc at the main page resumes, and the cursor is
+  grabbed again once Esc is let go. In the browser Esc at the main page did nothing. Now it resumes there too, but
+  without asking for the pointer lock: a key press gives no user activation, and Chrome refuses a re-lock for about
+  1.25 s after an Esc. The Esc that loses the lock is the browser's and the page never sees it (going by Chrome's
+  and Firefox's key handling, not checked in a browser); the lock's loss opens the menu, and the next Esc closes it.
+  The next click on the canvas takes the lock again (`pointer.rs`'s existing `pointerdown`, which locks whenever the
+  menu is closed). Until then:
+  - keys and the pad play;
+  - the mouse's counts are dropped (`pointer::web::sync` zeroes `AccumulatedMouseMotion` while unlocked), so moving
+    the cursor turns nothing: the orbit look, the mounted gun and the N64 R-aim alike;
+  - `CLICK TO CAPTURE THE MOUSE` shows above the view's centre (keyboard and mouse only: `UsingPad` hides it). It
+    also shows at a match's start before the first click.
+
+  In the settings Esc still goes back a page, and during a rebinding capture it cancels the capture, not the menu.
+  When Esc resumes it also clears a RESUME click still waiting for a refused lock, so a later canvas click can't
+  close the menu a second time. The front end (React) has no overlays to close. On the team screen Esc opens the
+  menu (which closes the team screen) as before.
+- **WHEEL ZOOM SPEED** (Mouse/Look tab, CAMERA, under MOUSE INVERT Y; `Mouse::wheel_zoom`, 1-10 whole, default 4,
+  clamped on load, saved like the rest). Each wheel notch holds the scope's zoom for that many 30 Hz reads (was 1).
+  Notches add up, and a notch the other way drops the rest of the hold (`bindings::Wheel::read`). A frame with a turn
+  counts as one notch: the browser reports pixels (about 100 a notch in Chrome) and a native mouse reports lines, so
+  the two don't compare. The wheel isn't gathered while the menu is open, since its list scrolls with the wheel. Why
+  4: a zoom tick is 1.2° (2% of the 60.6° view), so a full sweep took 46 notches for the sniper and 34 for the other
+  scopes. At 4 that is 12 and 9, 4.8° a notch. The rules' zoom rate and the pad's D-pad are unchanged. The hold
+  applies to whatever is bound to the wheel; by default that is only the zoom actions, which need Aim held.
+- Tests: `esc_closes_the_menu_goes_back_and_cancels_a_capture` (Esc → `(Back, no lock)`; main page → Resume;
+  settings → `Main(1)`; a capture cancelled, bindings untouched), `a_wheel_notch_holds_for_its_ticks` (N = 3: one
+  notch 3 reads; two notches 6, in one read or one read apart; reversing drops the hold), and the clamp test reads
+  `wheel_zoom: 30 → 10`. These are unit tests of the menu's steps (`navs`, `Menu::nav` / `capture`), not the
+  `keys=` harness, which needs a live match. conker-client 229 pass, both clippies clean.
+- Left: the browser paths are unverified (no browser this batch): the Esc close, the click re-lock with Chrome's
+  cooldown (a click within 1.25 s is refused and needs a second click), the hint, and the dropped mouse counts. A
+  trackpad turns every frame of a swipe, so it queues a long hold (`ponytail:` in `bindings.rs`). The click that
+  takes the lock also fires (as at a match's start). With the debug camera (F8) on but its button up, the hint
+  shows too.
+
+## Fix batch F1 lane A (rules): sniper shots, bazooka aim
+Two rules fixes from play, both in `conker-rules/src/game.rs`. No wire format change; the rules crate is shared, so
+the server and the client's prediction both take them.
+- **The sniper's shots count** (GAPS `controls-sniper-shots-uncounted`, now closed): the aimed ray (`Action::Aim`'s
+  shot frame) adds 1 to `Fighter::shots` (s126+0x1AA, the places' tie-break), as every other weapon's shot does, bots
+  included, N64 and modern alike. The original's count for the ray stays I: no oracle trace reads s126+0x1AA around
+  a sniper shot, and no replay test changed. The hip `Attack::Ray` arm in `Action::Fire` (C: unreachable, the sniper
+  only fires from its aim) is left as it was.
+- **The bazooka fires while aiming under MODERN**: `no_fire` refused weapon 0x16's Z while R was held. That is the
+  original's behaviour (V combat4_w16 980; R opens its scope, `conker_camera::scoped`), and the N64 path keeps it.
+  Under MODERN it now fires, along `aim(f)`: the scope's look, which `modern_aim` sets from the aim (C). Without a
+  scope (in the air: the scope opens only on the ground) the rocket leaves level along the aim's yaw (C, as before).
+- Tests: `a_sniper_shot_counts` (an aimed shot: `shots` 0 → 1); `the_modern_rocket_fires_from_the_aim` (0x16 drawn, R
+  held: N64 Z fires nothing; MODERN FIRE pushes one rocket whose direction is the aim ray's within 1e-3, pitched up).
+  conker-rules 168 + 3 + 4 + 11, conker-bots 18 + 3 + 26, conker-sim 78 + 16 + 3 pass with `CONKER_ROM`, zero
+  expected values changed; `cargo clippy -p conker-rules -- -D warnings` clean.
+- Left: the client's prediction aims the rocket only if its own N64 follow camera opens the 0x16 scope as the
+  server's does (not checked here, client lanes).
 
 ## Controls C4: the client's feel (2026-10-15)
 **Lane C4-client** of `../CONTROLS_RESEARCH.md` (§4, §8, §9, §10). Client only plus one helper pulled out in

@@ -1771,10 +1771,13 @@ fn shown(
         .collect();
     let scope = camera.follow.cam.scope;
     // On a mounted gun its scope is the gun's sight; the weapon is the gun's (no icon: V one-view
-    // DLs).
+    // DLs). Its tapes read the look: the modern controls' (`view`, the aim's) or the scope's.
+    let (heading, elevation) = view.map_or((scope.yaw + 90.0, -scope.pitch), |v| {
+        (v.x.atan2(v.z).to_degrees(), v.y.asin().to_degrees())
+    });
     let gun = (scope.on && scope.weapon == conker_camera::GUN).then(|| Sight {
-        heading: scope.yaw + 90.0,
-        elevation: -scope.pitch,
+        heading,
+        elevation,
         zoom: scope.zoom[0] / conker_camera::zoom_limit(conker_camera::GUN),
         slide: -3.0 * ((scope.zoom[0] + scope.zoom[1]) / 2.0).clamp(-25.0, 0.0),
         ..Sight::default()

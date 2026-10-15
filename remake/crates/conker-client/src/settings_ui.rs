@@ -94,6 +94,7 @@ fn fields(tab: Tab, group: &str) -> &'static [Field] {
             MouseSensitivity,
             MouseAim,
             MouseInvert,
+            WheelZoom,
             PadSensitivity,
             PadAim,
             PadInvert,
@@ -130,6 +131,7 @@ pub enum Field {
     MouseSensitivity,
     MouseAim,
     MouseInvert,
+    WheelZoom,
     PadSensitivity,
     PadAim,
     PadInvert,
@@ -172,6 +174,7 @@ impl Field {
             MouseSensitivity => "MOUSE SENSITIVITY",
             MouseAim => "MOUSE AIM MULTIPLIER",
             MouseInvert => "MOUSE INVERT Y",
+            WheelZoom => "WHEEL ZOOM SPEED",
             PadSensitivity => "STICK SENSITIVITY",
             PadAim => "STICK AIM MULTIPLIER",
             PadInvert => "STICK INVERT Y",
@@ -201,6 +204,7 @@ impl Field {
             MouseSensitivity => Value::Number(&mut m.sensitivity, [0.1, 10.0, 0.1]),
             MouseAim => Value::Number(&mut m.aim_multiplier, [0.1, 4.0, 0.05]),
             MouseInvert => Value::Toggle(&mut m.invert_y, on),
+            WheelZoom => Value::Number(&mut m.wheel_zoom, [1.0, 10.0, 1.0]),
             PadSensitivity => Value::Number(&mut p.sensitivity, [0.5, 2.0, 0.05]),
             PadAim => Value::Number(&mut p.aim_multiplier, [0.1, 4.0, 0.05]),
             PadInvert => Value::Toggle(&mut p.invert_y, on),
@@ -259,7 +263,14 @@ impl Field {
     /// The value as the row shows it.
     pub fn text(self, s: &Settings) -> String {
         let text = match self.value(&mut s.clone()) {
-            Value::Number(v, [.., step]) => format!("{:.*}", if step < 0.1 { 2 } else { 1 }, *v),
+            Value::Number(v, [.., step]) => {
+                let places = match step {
+                    s if s < 0.1 => 2,
+                    s if s < 1.0 => 1,
+                    _ => 0,
+                };
+                format!("{:.*}", places, *v)
+            }
             Value::Toggle(v, words) => words[usize::from(*v)].into(),
             Value::Mode(v) => format!("{v:?}"),
             Value::Prompts(v) => format!("{v:?}"),
@@ -601,7 +612,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(fields.len(), 19);
+        assert_eq!(fields.len(), 20);
         for f in &fields {
             assert_eq!(fields.iter().filter(|g| *g == f).count(), 1, "{f:?}");
         }

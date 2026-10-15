@@ -16,7 +16,10 @@
 //! - **RESUME:** natively at once (the cursor grabbed again, [`crate::pointer`]); in the browser a
 //!   click or key asks for the pointer lock (a user gesture) and the menu closes once it holds
 //!   (refused, as Chrome does for 1.25 s after an Esc: CLICK RESUME AGAIN); the pad's resumes
-//!   without it. Esc doesn't resume in the browser: it is the lock's, and may reach the page late.
+//!   without it. **Esc** goes back a page, and on the main page resumes; in the browser without the
+//!   lock (a key is no user gesture; the Esc that lost it the page doesn't see), which the next
+//!   click on the canvas takes: CLICK TO CAPTURE THE MOUSE shows meanwhile, the mouse turning
+//!   nothing ([`crate::pointer`]).
 //! - **LEAVE MATCH:** natively an exit (`connection::leave` disconnects first); in the browser
 //!   netcode's disconnect, then the landing page ([`LANDING`]) once it went out.
 //! - **Settings** apply live, APPLY saves them ([`crate::settings::save`]; offscreen runs never do),
@@ -594,9 +597,11 @@ pub struct Look<'a> {
     pub labels: Option<&'a KeyLabels>,
     pub glyphs: Glyphs,
     pub now: f64,
+    /// Browser: playing on the keyboard and mouse without the pointer lock (a click takes it).
+    pub click: bool,
 }
 
-/// The open menu's quads and rectangles (none closed or closing).
+/// The open menu's quads and rectangles (closed, but the browser's click hint).
 pub fn layout(menu: &Menu, hud: &Hud, look: &Look) -> Quads {
     let mut p = Paint {
         hud,
@@ -604,7 +609,12 @@ pub fn layout(menu: &Menu, hud: &Hud, look: &Look) -> Quads {
     };
     let far = 10_000.0;
     match &menu.page {
-        Page::Closed | Page::Closing => return p.out,
+        Page::Closed | Page::Closing => {
+            if look.click {
+                let line = "CLICK TO CAPTURE THE MOUSE";
+                p.text(line, [146.0, 64.0], true, SMALL, WHITE, Z_TEXT);
+            }
+        }
         Page::Main(focus) => {
             p.fill([-far, -far, 2.0 * far, 2.0 * far], [0, 0, 0, 150], Z);
             p.text("MENU", [146.0, 56.0], true, 1.0, AMBER, Z_TEXT);
@@ -853,13 +863,13 @@ fn press_keys(
     }
 }
 
-/// The frame's navigation (with whether the pad gave it): held directions (arrows, D-pad, left
-/// stick), the wheel, Enter / A, Esc / B (`esc`: Esc goes back), LB / RB, the pad's Menu.
+/// The frame's navigation (with whether it resumes without the pointer lock: the pad's, and Esc's,
+/// as a key grants the browser's lock no user activation): held directions (arrows, D-pad, left
+/// stick), the wheel, Enter / A, Esc / B (back: the main page's resumes), LB / RB, the pad's Menu.
 fn navs(
     keys: &ButtonInput<KeyCode>,
     pad: Option<&Gamepad>,
     wheel: f32,
-    esc: bool,
     repeat: &mut Repeat,
     now: f64,
 ) -> Vec<(Nav, bool)> {
@@ -890,8 +900,8 @@ fn navs(
     if keys.any_just_pressed([K::Enter, K::NumpadEnter]) {
         out.push((Nav::Confirm, false));
     }
-    if esc && keys.just_pressed(K::Escape) {
-        out.push((Nav::Back, false));
+    if keys.just_pressed(K::Escape) {
+        out.push((Nav::Back, true));
     }
     let pads = [
         (P::South, Nav::Confirm),
@@ -928,11 +938,12 @@ fn run(
         Res<crate::outro::Outros>,
         ResMut<Paused>,
     ),
-    (mut settings, mut bindings, mut teams, labels): (
+    (mut settings, mut bindings, mut teams, labels, using_pad): (
         ResMut<Settings>,
         ResMut<Bindings>,
         ResMut<crate::teams::Screen>,
         Option<Res<KeyLabels>>,
+        Option<Res<crate::bindings::UsingPad>>,
     ),
     mut last: Local<Last>,
     (clients, mut exit, mut commands): (
@@ -1002,22 +1013,22 @@ fn run(
             if let Some(t) = target.filter(|_| click) {
                 effects.extend(menu.click(t, now, &mut s, &mut b).map(|e| (e, false)));
             }
-            // In the browser Esc is the pointer lock's: it goes back, but doesn't resume.
-            let esc = !(web && matches!(menu.page, Page::Main(_)));
             let wheel = scroll.delta.y;
-            for (nav, by_pad) in navs(&keys, gamepad, wheel, esc, &mut last.repeat, now) {
-                effects.extend(menu.nav(nav, now, &mut s, &mut b).map(|e| (e, by_pad)));
+            for (nav, no_lock) in navs(&keys, gamepad, wheel, &mut last.repeat, now) {
+                effects.extend(menu.nav(nav, now, &mut s, &mut b).map(|e| (e, no_lock)));
             }
         }
     }
-    for (effect, by_pad) in effects {
+    for (effect, no_lock) in effects {
         match effect {
-            Effect::Resume if web && !by_pad => {
+            Effect::Resume if web && !no_lock => {
                 crate::pointer::lock();
                 (menu.resuming, menu.refused) = (true, false);
             }
+            // The browser's pointer stays free (Esc, the pad): the next click on the canvas takes
+            // it ([`crate::pointer`]); a RESUME still waiting for it waits no more.
             Effect::Resume => {
-                menu.page = Page::Closing;
+                (menu.page, menu.resuming) = (Page::Closing, false);
                 info!("menu: resume");
             }
             Effect::Leave => {
@@ -1050,6 +1061,11 @@ fn run(
         labels: labels.as_deref(),
         glyphs,
         now,
+        click: web
+            && signals.playing
+            && !signals.results
+            && !signals.locked
+            && !using_pad.is_some_and(|u| u.0),
     };
     *quads = layout(&menu, &setup.hud, &look);
 }
@@ -1101,7 +1117,7 @@ mod tests {
             esc: true,
             ..playing()
         });
-        // Esc again resumes (natively); the menu waits for it to be let go.
+        // Esc again resumes; the menu waits for it to be let go.
         assert_eq!(m.nav(Nav::Back, 0.0, &mut s, &mut b), Some(Effect::Resume));
         m.page = Page::Closing;
         assert!(m.open());
@@ -1125,6 +1141,44 @@ mod tests {
             ..playing()
         });
         assert_eq!((m.page.clone(), m.resuming), (Page::Closing, false));
+    }
+
+    /// Esc as `run` steers it (the frame's capture first, then [`navs`] on a menu open before the
+    /// frame): opened, Esc again resumes, in the browser without the lock; in the settings it goes
+    /// back to the main page; during a capture it cancels that, the menu kept.
+    #[test]
+    fn esc_closes_the_menu_goes_back_and_cancels_a_capture() {
+        let (mut s, mut b) = (Settings::default(), Bindings::default());
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Escape);
+        let esc = navs(&keys, None, 0.0, &mut Repeat::default(), 0.0);
+        assert_eq!(esc, vec![(Nav::Back, true)], "no lock asked for");
+        let mut m = Menu::default();
+        assert!(m.signals(&Signals {
+            esc: true,
+            ..playing()
+        }));
+        assert_eq!(m.nav(Nav::Back, 0.0, &mut s, &mut b), Some(Effect::Resume));
+        // The settings: back to the main page (SETTINGS focused), then out.
+        settings_page(&mut m, &mut s, &mut b);
+        assert_eq!(m.nav(Nav::Back, 0.0, &mut s, &mut b), None);
+        assert_eq!(m.page, Page::Main(1));
+        assert_eq!(m.nav(Nav::Back, 0.0, &mut s, &mut b), Some(Effect::Resume));
+        // A capture: Esc cancels it and spends the frame (no navigation), the settings kept.
+        let sh = settings_page(&mut m, &mut s, &mut b);
+        sh.nav(Nav::Down, 1.0, &mut s, &mut b);
+        sh.nav(Nav::Confirm, 1.0, &mut s, &mut b);
+        assert!(sh.capture.is_some());
+        let held = Held {
+            keys: vec![KeyCode::Escape],
+            ..Held::default()
+        };
+        assert!(m.capture(1.1, &held, &mut s, &mut b));
+        let Page::Settings(sh) = &m.page else {
+            panic!("{:?}", m.page)
+        };
+        assert!(sh.capture.is_none() && sh.conflict.is_none());
+        assert_eq!(b, Bindings::default());
     }
 
     #[test]
@@ -1440,6 +1494,7 @@ mod tests {
                 labels: None,
                 glyphs: Glyphs::Xbox,
                 now: 0.0,
+                click: false,
             };
             layout(m, &hud, &look)
         };

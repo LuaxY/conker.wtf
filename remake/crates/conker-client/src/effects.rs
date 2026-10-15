@@ -15,8 +15,9 @@
 //! The triggers:
 //! - a player's shot count going up ([`Combat::shots`]; the local player's predicted one): the
 //!   guns' flashes ([`flash`], [`rocket_flash`]), the twin guns' 3D flash ([`flash_3d`]), the other
-//!   bullet guns' star ([`star`]); a tank's flashes ([`tank_flash`]) and its scope's bullet.
-//! - the match's lists: the bullets' tracers ([`tracer`]); the rocket's glow, trail and streak; the
+//!   bullet guns' star ([`star`]), the shotgun's spray ([`spray`]); a tank's flashes
+//!   ([`tank_flash`]) and its scope's bullet.
+//! - the match's lists: the bullets' tracers ([`tracer`], per gun [`tracer_back`]); the rocket's glow, trail and streak; the
 //!   shells' glow; where a rocket, grenade or shell leaves them, the blast ([`blast`], [`ring`]),
 //!   with the scorch ([`scorch`]) and the smoke left ([`smoke`]) where a rocket or shell struck a
 //!   face; item 0x3A's fuse sparks ([`fuse`]) in flight. Not across a match's end or restart
@@ -510,6 +511,38 @@ pub fn flash_3d(rng: &mut Rng, at: Vec3, dir: Vec3) -> Streak {
     }
 }
 
+/// The blobs in the shotgun's spray (V shotgun2: 10 in each of two shots).
+pub const SPRAY: usize = 10;
+
+/// The shotgun's spray (V shotgun2 DLs 99-101 and 219-221, two shots, each blob born at the 2D
+/// flash's point and moved once by the first list; I the laws, fitted to those 20): [`SPRAY`]
+/// blobs of the four along the barrel `dir` at rand × 19 + 20 a frame (V 20.5-38.7), plus up to 8
+/// each way across and up (V ±7.8); y change −(rand × 0.55 + 0.04) a frame (V −0.04..−0.58);
+/// size rand × 141 + 80 (V 80-221), life rand % 12 + 10 VIs (V 10-21), alpha rand % 100 + 155
+/// (V 156-254), below 7 VIs life × 36 (V); random flips.
+pub fn spray(rng: &mut Rng, at: Vec3, dir: Vec3) -> Vec<Particle> {
+    let side = dir.cross(Vec3::Y).normalize_or_zero();
+    let up = side.cross(dir).normalize_or_zero();
+    (0..SPRAY)
+        .map(|_| {
+            let life = (rng.next_u32() % 12) as f32 + 10.0;
+            let alpha = (rng.next_u32() % 100) as f32 + 155.0;
+            let size = rng.next_f32() * 141.0 + 80.0;
+            let speed = rng.next_f32() * 19.0 + 20.0;
+            let across = side * (rng.next_f32() * 16.0 - 8.0) + up * (rng.next_f32() * 16.0 - 8.0);
+            let fall = -(rng.next_f32() * 0.55 + 0.04);
+            let tex = exhaust(rng);
+            let flip = flips(rng);
+            Particle {
+                vel: dir * speed + across,
+                fall,
+                flip,
+                ..Particle::new(tex, at, size, life, alpha, [7.0, 36.0])
+            }
+        })
+        .collect()
+}
+
 /// The star's rays' angle off the barrel (V rifle DL 100: forward 0.26-0.32 of each).
 pub const STAR_TILT: f32 = 73.0;
 
@@ -537,8 +570,19 @@ pub fn star(rng: &mut Rng, at: Vec3, dir: Vec3) -> Vec<Streak> {
 }
 
 /// A tracer's tail behind its bullet, in frames of its motion: on the first list it is in, then
-/// on (V twin2: 183-190 long, then 357-371, at 300 a frame; rifle 280 then 546).
+/// on (V twin2: 183-190 long, then 357-371, at 300 a frame).
 pub const TRACER_BACK: [f32; 2] = [0.62, 1.22];
+
+/// [`TRACER_BACK`] for a bullet of `weapon` (V laneD pistol, gun23: their first list at 300 from
+/// the muzzle, 280 and 302 long, so from the muzzle; at 900, 546 and 589); the twin guns' for the
+/// others (I: the tommy gun's and the mounted gun's not seen).
+pub fn tracer_back(weapon: u8) -> [f32; 2] {
+    match weapon {
+        0x39 => [0.93, 1.82],
+        0x23 => [1.01, 1.96],
+        _ => TRACER_BACK,
+    }
+}
 
 /// A bullet's tracer's look (kind 0x41, `tracer.png`; V twin2: head alphas 124-238, rifle 222;
 /// widths 56-63.6): its head's alpha and its half-width.
@@ -550,10 +594,9 @@ pub fn tracer_look(rng: &mut Rng) -> [f32; 2] {
 }
 
 /// A bullet's tracer (V twin2, rifle): a quad from the bullet (S 0, its alpha) back along its
-/// motion `vel` a frame to a tail (S 63, alpha 0), [`TRACER_BACK`] frames of it behind; moving
-/// with it between ticks.
-pub fn tracer(head: Vec3, vel: Vec3, first: bool, [alpha, half]: [f32; 2]) -> Streak {
-    let back = TRACER_BACK[usize::from(!first)];
+/// motion `vel` a frame to a tail (S 63, alpha 0), `back` frames of it behind ([`tracer_back`]);
+/// moving with it between ticks.
+pub fn tracer(head: Vec3, vel: Vec3, back: f32, [alpha, half]: [f32; 2]) -> Streak {
     Streak {
         u: [1.0, 0.0],
         vel,
@@ -574,7 +617,7 @@ pub fn scope_tracer(rng: &mut Rng, from: Vec3, dir: Vec3, reach: f32) -> Streak 
     Streak {
         trail: TRACER_BACK[1],
         life: 2.0 * reach / BULLET_SPEED,
-        ..tracer(from, vel, true, tracer_look(rng))
+        ..tracer(from, vel, TRACER_BACK[0], tracer_look(rng))
     }
 }
 
@@ -1693,6 +1736,11 @@ fn watch(
                     }
                     _ => {}
                 }
+                if let Some(Attack::Spread { .. }) = attack {
+                    for b in spray(&mut s.rng, p, facing) {
+                        fx.sprite(b);
+                    }
+                }
             }
         }
         let carry = s.flames.entry(e).or_default();
@@ -1709,7 +1757,7 @@ fn watch(
             }
         }
     }
-    // The bullets' tracers, a pool of quads.
+    // The bullets' tracers, a pool of quads; a seated gunner's are the mounted gun's.
     let mut looks = HashMap::new();
     for (i, b) in m.bullets.iter().enumerate() {
         let key = (b.owner, b.born);
@@ -1719,10 +1767,14 @@ fn watch(
             .entry(key)
             .or_insert_with(|| tracer_look(&mut s.rng));
         looks.insert(key, look);
+        let weapon = match m.guns.iter().any(|g| g.gunner == Some(b.owner)) {
+            true => 0,
+            false => (players.iter().find(|p| p.1.slot == b.owner)).map_or(0, |p| p.1.weapon),
+        };
         let t = tracer(
             Vec3::from_array(b.pos),
             Vec3::from_array(b.vel),
-            first,
+            tracer_back(weapon)[usize::from(!first)],
             look,
         );
         match s.tracers.get(i).and_then(|&e| tracers.get_mut(e).ok()) {
@@ -2391,13 +2443,13 @@ mod tests {
         let mut rng = Rng::default();
         let vel = Vec3::new(0.0, 0.0, -300.0);
         let look = tracer_look(&mut rng);
-        let mut first = tracer(Vec3::ZERO, vel, true, look);
+        let mut first = tracer(Vec3::ZERO, vel, TRACER_BACK[0], look);
         assert!(
             (183.0..=190.0).contains(&length(&first)),
             "{}",
             length(&first)
         );
-        let next = tracer(Vec3::ZERO, vel, false, look);
+        let next = tracer(Vec3::ZERO, vel, TRACER_BACK[1], look);
         assert!((357.0..=371.0).contains(&length(&next)) && next.ends[1] == Vec3::ZERO);
         assert!(first.alpha[0] == 0.0 && (124.0..=238.0).contains(&first.alpha[1]));
         assert!((28.0..=32.0).contains(&first.half) && first.u == [1.0, 0.0]);
@@ -2424,6 +2476,37 @@ mod tests {
         let t = bunker_tracer(&mut rng, 0, [0.0; 2]);
         assert!((250.0..=550.0).contains(&length(&t)) && (t.vel.length() - 191.0).abs() < 0.01);
         assert!(t.vel.z > 0.95 * 191.0 && t.vel.y < 0.0 && (t.life - 120.38).abs() < 0.01);
+    }
+
+    /// The shotgun's spray (V shotgun2, two shots of 10: 20.5-38.7 a frame along the barrel,
+    /// ±7.8 across, sizes 80-221, lives 10-21 VIs, alphas 156-254, gone in at most 10 frames) and
+    /// the pistol's and 0x23's tracers from the muzzle (V laneD pistol 280 then 546, gun23 302
+    /// then 589 at 300 a frame; the twin guns' kept).
+    #[test]
+    fn the_shotgun_spray_and_the_guns_tracers_as_the_original() {
+        let mut rng = Rng::default();
+        let dir = Vec3::NEG_Z;
+        for _ in 0..200 {
+            let blobs = spray(&mut rng, Vec3::ZERO, dir);
+            assert_eq!(blobs.len(), SPRAY);
+            for mut b in blobs {
+                let ahead = b.vel.dot(dir);
+                let across = b.vel - dir * ahead;
+                assert!(
+                    (20.0..39.0).contains(&ahead) && across.x.abs() <= 8.0 && across.y.abs() <= 8.0
+                );
+                assert!((80.0..221.0).contains(&b.size) && (10.0..=21.0).contains(&b.life));
+                assert!((155.0..=254.0).contains(&b.alpha) && (-0.59..=-0.04).contains(&b.fall));
+                let frames = (1..30).take_while(|_| b.step(1.0)).count();
+                assert!(frames <= 10 && b.alpha() <= 36.0, "{frames}");
+            }
+        }
+        let vel = Vec3::new(0.0, 0.0, -300.0);
+        let look = tracer_look(&mut rng);
+        let len = |w: u8, k: usize| length(&tracer(Vec3::ZERO, vel, tracer_back(w)[k], look));
+        assert!((len(0x39, 0) - 280.0).abs() < 2.0 && (len(0x39, 1) - 546.0).abs() < 2.0);
+        assert!((len(0x23, 0) - 302.0).abs() < 2.0 && (len(0x23, 1) - 589.0).abs() < 2.0);
+        assert_eq!([0x09, 0x38, 0].map(tracer_back), [TRACER_BACK; 3]);
     }
 
     /// The restart empties the rocket and grenade lists at once: nothing goes off then, nor at the

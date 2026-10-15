@@ -9,7 +9,9 @@
 //! from the input alone. Aiming narrows the view ([`AIM_ZOOM`]); through a scope the view is the
 //! scope's eye looking along the aim, its zoom the N64 scope's (the wheel steps it). The N64 follow
 //! camera keeps running underneath (its aim gate and scope are the rules'); Tank, Race and Raptor
-//! keep their own cameras and the N64 input, and a mounted gun its sight.
+//! keep their own cameras and the N64 input. On a mounted gun the look turns the gun (conker-rules'
+//! `modern_aim` turns it from the input's aim) and the view is its sight's eye along the aim
+//! ([`gun_eye`]), its pitch within the gun's ([`GUN_PITCH`]).
 
 use crate::bindings::{Action, Bindings, Controls, Devices};
 use crate::outro::team_mode;
@@ -58,6 +60,10 @@ pub const RAMP_GAIN: f32 = 1.75;
 /// how far it looks for one (the crosshair's wall range).
 pub const ASSIST: f32 = 0.4;
 const ASSIST_RANGE: f32 = 20_000.0;
+/// On a mounted gun the aim's pitch (up positive) stays within the gun's: conker-rules' `modern_aim`
+/// holds the gun's scope pitch (positive down) within the N64 gun scope's −60..50, so 50° down, 60°
+/// up; the sight then stops where the gun does.
+pub const GUN_PITCH: [f32; 2] = [-50.0 * UNITS, 60.0 * UNITS];
 /// The actions a press shorter than a tick still sends once ([`Orbit::taps`]).
 const TAPPED: [(Action, u8); 5] = [
     (Action::Jump, action::JUMP),
@@ -90,7 +96,7 @@ pub struct Orbit {
     /// until the camera first draws (it starts there).
     pub side: Option<f32>,
     /// The view this camera drew last (eye, look), for the radar and the listener; none when another
-    /// camera drew it (Tank, Race, a mounted gun, the debug camera).
+    /// camera drew it (Tank, Race, the jump onto a mounted gun, the debug camera).
     pub view: Option<(Vec3, Vec3)>,
     /// Actions pressed since the tick last read the input: a press shorter than a tick is sent
     /// once ([`TAPPED`]); the pad's X tap ([`HOLD`]) as Reload.
@@ -116,6 +122,11 @@ impl Orbit {
         self.yaw = (self.yaw + d.x).rem_euclid(65536.0);
         let max = f32::from(AIM_PITCH_MAX);
         self.pitch = (self.pitch + d.y).clamp(-max, max);
+    }
+
+    /// On a mounted gun: the pitch within the gun's ([`GUN_PITCH`]).
+    pub fn hold_to_gun(&mut self) {
+        self.pitch = self.pitch.clamp(GUN_PITCH[0], GUN_PITCH[1]);
     }
 
     /// The aim's facing as the wire has it.
@@ -158,6 +169,19 @@ pub fn arm_at(orbit: &Orbit, feet: Vec3, world: &CollisionWorld, side: f32) -> (
     let wall = world.ray(start.to_array(), (-dir).to_array(), AIM_ARM + ARM_MARGIN);
     let back = wall.map_or(AIM_ARM, |h| (h.dist - ARM_MARGIN).clamp(0.0, AIM_ARM));
     (start, start - dir * back)
+}
+
+/// On the mounted gun at `at` (its origin), its sight's eye: the gun's (`conker_camera::gun_eye_kicked`,
+/// kicked as last drawn) turned and pitched by the aim, as conker-rules turns the gun from the input
+/// and its shot's sight takes it; the view looks along the aim from there.
+pub fn gun_eye(orbit: &Orbit, at: [f32; 3], kick: [f32; 3]) -> Vec3 {
+    let pitch = -f32::from(orbit.aim_pitch()) / UNITS;
+    Vec3::from_array(conker_camera::gun_eye_kicked(
+        at,
+        orbit.aim_yaw(),
+        pitch,
+        kick,
+    ))
 }
 
 /// Mouse counts (y down; raw, no acceleration or smoothing) as a turn in game units: CS's scale,
@@ -396,7 +420,9 @@ pub fn input(b: &Bindings, d: &Devices, o: &Orbit, s: &Settings, scoped: bool) -
 /// (the stick ramped at its edge, [`ramp`], and slowed over an enemy's body, [`ASSIST`]), the
 /// toggles, the shoulder swap and the taps take this frame's presses. Not while the debug camera
 /// flies, a screen or the lost pointer lock holds the input, nor in the modes with their own camera
-/// or on a mounted gun; natively only with the cursor grabbed (a click); scripts turn it themselves.
+/// or jumping onto a mounted gun (its sight then opens along the gun, level, as the N64's: V m2 84);
+/// seated, it turns the gun, at the scope's speed, within its pitch ([`Orbit::hold_to_gun`]).
+/// Natively only with the cursor grabbed (a click); scripts turn it themselves.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn look(
     controls: Controls,
@@ -421,20 +447,31 @@ fn look(
         return;
     };
     orbit.face(p.facing, cam.lives);
-    let seated = fighting.is_some_and(|f| f.state.gun.is_some());
+    // On a mounted gun: seated, or jumping on along the gun's yaw (I: the N64's opening).
+    let seated = fighting.and_then(|f| f.state.gun.map(|_| f.state.seated()));
+    if seated == Some(false) {
+        (orbit.yaw, orbit.pitch) = (f32::from(p.move_angle), 0.0);
+    }
     let grabbed = cfg!(target_family = "wasm")
         || cursor
             .iter()
             .any(|c| c.grab_mode == bevy::window::CursorGrabMode::Locked);
-    if free.iter().any(|c| c.enabled) || team.open || paused.0 || cam.tank.is_some() || seated {
+    if free.iter().any(|c| c.enabled)
+        || team.open
+        || paused.0
+        || cam.tank.is_some()
+        || seated == Some(false)
+    {
         return;
     }
+    let seated = seated == Some(true);
     let d = controls.devices(0.0, Vec2::ZERO);
     press(&controls.bindings, &d, &mut orbit, &settings);
     hold(&controls.bindings, &d, &mut orbit, time.delta_secs());
     let scope = cam.follow.cam.scope;
     let scope = scope.on.then_some(&scope);
-    let aiming = on(&controls.bindings, &d, &orbit, &settings, 0);
+    // The gun's sight is a scope, always narrowed: its look at the scope's speed.
+    let aiming = seated || on(&controls.bindings, &d, &orbit, &settings, 0);
     let fov = aimed_fov(scope);
     let mut turn = Vec2::ZERO;
     if let Some(m) = motion.filter(|_| grabbed) {
@@ -478,11 +515,16 @@ fn look(
         turn += stick_turn(v, &ps, scale, dt) * ramp(orbit.edge) * assist;
     }
     orbit.turn(turn);
+    if seated {
+        orbit.hold_to_gun();
+    }
 }
 
 /// The view (after the follow camera's, before the outros' and Beach's, which win): the arm's
 /// eye on the drawn body (between ticks, as the body is drawn), zoomed while aiming; through a
-/// scope, the follow camera's eye (the head) looking along the aim, at the scope's zoom.
+/// scope, the follow camera's eye (the head) looking along the aim, at the scope's zoom; on a
+/// mounted gun, its sight's eye ([`gun_eye`]) along the aim at its scope's zoom (the follow camera
+/// draws the jump onto it).
 #[allow(clippy::type_complexity)]
 pub fn camera(
     fixed: Res<Time<Fixed>>,
@@ -497,8 +539,8 @@ pub fn camera(
     let Ok((p, cam, fighting)) = player.single() else {
         return;
     };
-    let seated = fighting.is_some_and(|f| f.state.gun.is_some());
-    if !orbit.on || free.enabled || cam.tank.is_some() || seated {
+    let gun = fighting.and_then(|f| f.state.gun.map(|m| (m.at, f.state.seated())));
+    if !orbit.on || free.enabled || cam.tank.is_some() || gun.is_some_and(|g| !g.1) {
         return;
     }
     let k = 1.0 - (-time.delta_secs() / ZOOM_TIME).exp();
@@ -508,9 +550,13 @@ pub fn camera(
     let f = fixed.overstep_fraction().clamp(0.0, 1.0);
     let drawn = cam.drawn.between(cam.drawn.frame(p, &cam.follow), f);
     let scope = cam.follow.cam.scope;
-    let (eye, fov) = match scope.on {
-        true => (drawn.eye, crate::render::fov(&scope)),
-        false => (
+    let (eye, fov) = match (gun, scope.on) {
+        (Some((at, _)), _) => (
+            gun_eye(&orbit, at, cam.gun.drawn),
+            crate::render::fov(&scope),
+        ),
+        (None, true) => (drawn.eye, crate::render::fov(&scope)),
+        (None, false) => (
             arm_at(&orbit, drawn.body, &world.0, side).1,
             aim_fov(orbit.zoom),
         ),
@@ -608,6 +654,32 @@ mod tests {
         // The pitch stops at ±80°.
         o.turn(Vec2::new(0.0, 1e6));
         assert_eq!(o.aim_pitch(), AIM_PITCH_MAX);
+    }
+
+    /// Fix F1-B: on a mounted gun the look is the gun's aim, mouse up looking up (no N64 stick
+    /// inversion): its pitch stops where conker-rules stops the gun's (−60..50 positive down: 60° up,
+    /// 50° down) and the sight's eye is the gun's, turned and pitched as the rules turn it.
+    #[test]
+    fn the_seated_look_stops_at_the_guns_limits_and_sights_from_its_eye() {
+        let m = settings::Mouse::default();
+        let mut o = Orbit::default();
+        let degrees = |o: &Orbit| f32::from(o.aim_pitch()) / UNITS;
+        o.turn(mouse_turn(Vec2::new(0.0, -1e5), &m, 1.0));
+        o.hold_to_gun();
+        assert!((degrees(&o) - 60.0).abs() < 0.01, "{}", degrees(&o));
+        o.turn(mouse_turn(Vec2::new(0.0, 1e5), &m, 1.0));
+        o.hold_to_gun();
+        assert!((degrees(&o) + 50.0).abs() < 0.01, "{}", degrees(&o));
+        // Facing 0x4000 (−z), 22.5° up: the rules' scope pitch −22.5; the look climbs.
+        (o.yaw, o.pitch) = (16384.0, 4096.0);
+        let at = [170.0, 560.0, 5990.0];
+        let eye = conker_camera::gun_eye(at, 0x4000, -22.5);
+        assert_eq!(gun_eye(&o, at, [0.0; 3]).to_array(), eye);
+        let look = o.look().0;
+        assert!(
+            look.y > 0.38 && look.z < -0.92 && look.x.abs() < 1e-3,
+            "{look}"
+        );
     }
 
     #[test]

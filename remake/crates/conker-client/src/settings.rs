@@ -50,6 +50,8 @@ pub struct Mouse {
     /// Aiming and scoped, FOV-normalised: 0.1-4.
     pub aim_multiplier: f32,
     pub invert_y: bool,
+    /// Ticks a wheel notch holds the scope's zoom (1.2° a tick): 1-10, whole.
+    pub wheel_zoom: f32,
     pub aim: Mode,
     pub crouch: Mode,
     pub walk: Mode,
@@ -61,6 +63,7 @@ impl Default for Mouse {
             sensitivity: 1.5,
             aim_multiplier: 1.0,
             invert_y: false,
+            wheel_zoom: 4.0,
             aim: Mode::Hold,
             crouch: Mode::Hold,
             walk: Mode::Hold,
@@ -147,6 +150,7 @@ impl Settings {
         let m = &mut self.mouse;
         m.sensitivity = m.sensitivity.clamp(0.1, 10.0);
         m.aim_multiplier = m.aim_multiplier.clamp(0.1, 4.0);
+        m.wheel_zoom = m.wheel_zoom.clamp(1.0, 10.0).round();
         let p = &mut self.pad;
         p.sensitivity = p.sensitivity.clamp(0.5, 2.0);
         p.aim_multiplier = p.aim_multiplier.clamp(0.1, 4.0);
@@ -327,12 +331,13 @@ mod tests {
     #[test]
     fn values_are_clamped_on_load() {
         let s = Settings::parse(
-            r#"{"mouse":{"sensitivity":50,"aim_multiplier":0},
+            r#"{"mouse":{"sensitivity":50,"aim_multiplier":0,"wheel_zoom":30},
                 "pad":{"sensitivity":0.1,"aim_multiplier":9,"dead_zone":[-1,0.7]},
                 "crosshair":{"size":3}}"#,
         )
         .unwrap();
         assert_eq!((s.mouse.sensitivity, s.mouse.aim_multiplier), (10.0, 0.1));
+        assert_eq!(s.mouse.wheel_zoom, 10.0);
         assert_eq!((s.pad.sensitivity, s.pad.aim_multiplier), (0.5, 4.0));
         assert_eq!((s.pad.dead_zone, s.crosshair.size), ([0.0, 0.5], 2.0));
     }

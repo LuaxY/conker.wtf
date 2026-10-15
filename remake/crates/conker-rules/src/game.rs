@@ -347,7 +347,8 @@ pub struct Fighter {
     pub deaths: u16,
     /// s126+0x1AA: the shots fired (a tie in kills − deaths ranks fewer first): +1 per round, swing
     /// and grenade pulled (C `func_151D5148`, `func_15074840`, `func_15065A5C`; V: twin guns,
-    /// chainsaw, grenade; I: the rocket, aimed shot and ray, and the flame counts none).
+    /// chainsaw, grenade; I: the rocket, the aimed shots and the sniper's ray +1 each, the flame
+    /// none).
     pub shots: u16,
     /// gGameState+0x66+0xC*i and +0x6A: the hits this player landed on other teams' players, and
     /// those on the head (the results' accuracy and headshots; `func_151E5FF4`: none on its own team).
@@ -2352,10 +2353,11 @@ impl Match {
         // Then a new action; the frame's own work (a shot on frame 0) follows below. Weapon 0x23
         // with R held starts nothing (V ctlw_k6: B and Z ignored; I: an aim without its own
         // state); weapon 0x16 with R held does not fire (V combat4_w16 980) but holsters (ctlw_k7
-        // 190).
+        // 190). The modern controls fire it from R's aim, along the aim (the user's call).
         let armed = w.filter(|_| f.drawn);
         let aiming = armed.is_some_and(|w| w.id == 0x23) && late_held(BUTTON_R);
-        let no_fire = armed.is_some_and(|w| w.id == 0x16 || w.club()) && late_held(BUTTON_R);
+        let no_fire =
+            armed.is_some_and(|w| (w.id == 0x16 && !modern) || w.club()) && late_held(BUTTON_R);
         // The club: a Z press in a swing draws the RNG (`func_150641D8`, C) and, within
         // `COMBO_WINDOW` frames of the first swing's hit, chains the second (V combat6_e40 870,
         // 990; 1110: no hit, nothing).
@@ -2622,6 +2624,7 @@ impl Match {
                         t,
                     );
                     if let Attack::Ray { kind, origin } = w.attack {
+                        f.shots = f.shots.saturating_add(1);
                         strikes.push(Strike::Ray(kind, origin));
                     }
                 } else if let Attack::Bolt {
@@ -4793,6 +4796,23 @@ mod tests {
         assert_eq!(m.players[0].anim, anim::SNIPER_IDLE); // R last held at 99: out at 101 + 8
     }
 
+    /// The sniper's aimed ray counts one shot (s126+0x1AA, the places' tie-break; I).
+    #[test]
+    fn a_sniper_shot_counts() {
+        let (arena, mut m, w) = duel();
+        m.give(0, 0x24);
+        let input = |t: u32| match t {
+            0 => BUTTON_B,
+            70 => BUTTON_R | BUTTON_Z,
+            60..=90 => BUTTON_R,
+            _ => 0,
+        };
+        run(&mut m, &arena, &w, 73, input);
+        assert_eq!(m.players[0].shots, 0);
+        run(&mut m, &arena, &w, 20, input);
+        assert_eq!(m.players[0].shots, 1);
+    }
+
     /// Melee: one frame into the swing the attacker turns onto the nearest enemy (move angle onto
     /// the direction, facing by as much), and the swing hits 10 frames in (V e_w21, e_w22).
     /// s126+0x78 and +0x11A as the probes show them: the twin guns from the draw's first row,
@@ -5782,6 +5802,45 @@ mod tests {
         let f = &m.players[0];
         assert_eq!((f.body.scope_yaw, f.scope_pitch), (Some(45.0), -22.5));
         assert_eq!(f.body.facing, 0x2000);
+    }
+
+    /// Weapon 0x16 with R held: the N64 controls' Z fires nothing (V combat4_w16 980); the modern
+    /// controls' FIRE fires the rocket along the aim, its pitch included, from the scope.
+    #[test]
+    fn the_modern_rocket_fires_from_the_aim() {
+        use movement::action::{FIRE, MODERN};
+        for modern in [false, true] {
+            let (arena, mut m, w) = duel();
+            m.give(0, 0x16);
+            m.players[0].body.scope_yaw = Some(0.0);
+            let input = |t: u32| {
+                let fire = (50..=52).contains(&t);
+                let z = if fire && !modern { BUTTON_Z } else { 0 };
+                Input {
+                    buttons: if t == 0 { BUTTON_B } else { 0 }
+                        | if t >= 45 { BUTTON_R | z } else { 0 },
+                    camera_yaw: 0xE000,
+                    aim_pitch: 0x1000,
+                    actions: if modern {
+                        MODERN | if fire { FIRE } else { 0 }
+                    } else {
+                        0
+                    },
+                    ..Input::default()
+                }
+            };
+            run_with(&mut m, &arena, &w, 51, |t| [input(t), Input::default()]);
+            // The shot count, as a rocket on player 1 would go off in its own frame.
+            assert_eq!(m.players[0].shots, u16::from(modern));
+            if modern {
+                let (dir, aim) = (m.rockets[0].1.dir, m.aims[0].unwrap().1);
+                assert!(
+                    (0..3).all(|j| (dir[j] - aim[j]).abs() < 1e-3),
+                    "{dir:?} {aim:?}"
+                );
+                assert!(dir[1] > 0.3);
+            }
+        }
     }
 
     /// A modern input aiming along +x (`camera_yaw` 0xC000), with `actions`.
@@ -7341,6 +7400,58 @@ mod tests {
             fired += served;
         }
         assert!(fired >= 5 && usize::from(m.players[0].shots) == fired);
+    }
+
+    /// Decision 19 (fix F1-B): the modern gunner's aim turns the gun and its shots
+    /// ([`Match::modern_aim`]). Raised (`aim_pitch` up positive), the barrels rise (`pitch10`,
+    /// positive down: −225 at 22.5° up) and the shot climbs; lowered, both dip; turned, the gun
+    /// and the shot turn with it (within the mounted cone and the muzzle's offset to the sight).
+    #[test]
+    fn a_modern_gunners_aim_turns_and_raises_its_shots() {
+        use movement::action::FIRE;
+        let (arena, mut m, w, _) = seated_gunner();
+        let mut fire = |facing: u16, aim_pitch: i16| {
+            let aim = Input {
+                camera_yaw: facing.wrapping_sub(0x4000),
+                aim_pitch,
+                ..modern(FIRE)
+            };
+            for _ in 0..30 {
+                let ev = m.step(&arena, &[aim, Input::default()], &w);
+                if ev
+                    .iter()
+                    .any(|e| matches!(e, Event::Shot { player: 0, .. }))
+                {
+                    let d = m
+                        .bullets
+                        .iter()
+                        .rev()
+                        .find(|b| b.1.owner == 0)
+                        .unwrap()
+                        .1
+                        .dir;
+                    let off = atan2_u16(-d[2], d[0]).wrapping_sub(facing) as i16;
+                    let g = &m.guns[0];
+                    return (g.yaw, g.pitch10, d[1], off.unsigned_abs() < 728); // 4°
+                }
+            }
+            panic!("no shot at {facing:#x}, {aim_pitch}");
+        };
+        let (yaw, pitch10, y, ahead) = fire(0, 0x1000);
+        assert!(
+            (yaw, pitch10, ahead) == (0, -225, true) && y > 0.3,
+            "{pitch10} {y}"
+        );
+        let (yaw, pitch10, y, ahead) = fire(0x4000, -0x400);
+        assert!(
+            (yaw, pitch10, ahead) == (0x4000, 56, true) && y < 0.0,
+            "{pitch10} {y}"
+        );
+        let (yaw, pitch10, y, ahead) = fire(0xA000, 0x1000);
+        assert!(
+            (yaw, pitch10, ahead) == (0xA000, -225, true) && y > 0.3,
+            "{pitch10} {y}"
+        );
     }
 
     /// War: Beach (`beach.md` §2): a villager's death scores for the Tediz where it registers (the

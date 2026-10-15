@@ -2,10 +2,11 @@
 //! pointer lock with raw counts (`unadjustedMovement`; a plain lock where that is not supported),
 //! but not while the Esc menu is open (only its RESUME does, [`lock`]); losing it (Esc: the
 //! browser's) raises [`Paused`], which opens the menu, and resets Bevy's grab mode (winit does not
-//! see the loss). Mouse back / forward don't leave the page. Natively a click while playing grabs
-//! the cursor (locked, hidden), and so does the menu's closing; losing the focus, Esc or the open
-//! menu lets it go. Either way the mouse's counts are the device's (no acceleration or smoothing),
-//! as the R-held mouse aim reads them.
+//! see the loss). Without the lock (the menu closed by Esc, the match's start) the mouse turns
+//! nothing until a click on the canvas takes it. Mouse back / forward don't leave the page.
+//! Natively a click while playing grabs the cursor (locked, hidden), and so does the menu's
+//! closing; losing the focus, Esc or the open menu lets it go. Either way the mouse's counts are
+//! the device's (no acceleration or smoothing), as the R-held mouse aim reads them.
 
 use bevy::prelude::*;
 
@@ -48,7 +49,7 @@ pub fn build(app: &mut App, windowed: bool) {
     #[cfg(target_family = "wasm")]
     {
         web::listen();
-        app.add_systems(PreUpdate, web::sync);
+        app.add_systems(PreUpdate, web::sync.after(bevy::input::InputSystems));
     }
     #[cfg(not(target_family = "wasm"))]
     app.add_systems(Update, grab);
@@ -207,8 +208,16 @@ mod web {
 
     /// A loss raises [`Paused`] (the menu opens on it) and puts Bevy's grab mode back to none (a
     /// lock Bevy took, the debug camera's, would otherwise still read as locked); the menu's state
-    /// for the canvas's presses.
-    pub fn sync(mut paused: ResMut<Paused>, mut cursors: Query<&mut CursorOptions>) {
+    /// for the canvas's presses. Without the lock the mouse's counts are dropped: they are the
+    /// cursor's moving over the page (the menu closed by Esc, before the first click), not a look.
+    pub fn sync(
+        mut paused: ResMut<Paused>,
+        mut cursors: Query<&mut CursorOptions>,
+        motion: Option<ResMut<bevy::input::mouse::AccumulatedMouseMotion>>,
+    ) {
+        if let Some(mut motion) = motion.filter(|_| !LOCKED.load(Relaxed)) {
+            motion.delta = Vec2::ZERO;
+        }
         MENU.store(paused.0, Relaxed);
         if LOST.swap(false, Relaxed) {
             info!("pointer lock lost: the menu opens");

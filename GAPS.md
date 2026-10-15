@@ -28,13 +28,13 @@ conker-client; `volume.rs` = conker-camera.
 
 ## 2. Wrong today (found in the code; fix first)
 Most are small. The first two were found by reading the code, not by running it.
-- `controls-mounted-gun-modern-aim` (client S): under MODERN the rules turn a seated gun from the input's aim
+- **Fixed in F1 (protocol 43).** `controls-mounted-gun-modern-aim` (client S): under MODERN the rules turn a seated gun from the input's aim
   (`game.rs:2066-2067`), but the client freezes the orbit while seated (`orbit.rs:424-430`) and sends the mouse as a
   stick (`lib.rs:1247-1255`), so `camera_yaw`/`aim_pitch` stay at their mount-time values: the mouse likely can't turn
   a mounted gun.
 - `cameras-vault-fixed-hints` (client S): Heist's four fixed cameras on 0x1A (commands 5 and 0x11) are dropped:
   `Fixed::parse` keeps command 0 only (`conker-camera/src/volume.rs:174-181`; a test asserts command 5 gives nothing).
-- `controls-sniper-shots-uncounted` (rules S): the sniper's aimed ray (`game.rs:2615-2626`) never adds to
+- **Fixed in F1 (protocol 43).** `controls-sniper-shots-uncounted` (rules S): the sniper's aimed ray (`game.rs:2615-2626`) never adds to
   `Fighter::shots`, which breaks score ties (`game.rs:853`, `:893`).
 - `cameras-burning-busy-flag` (rules S): `camera_view` never sets `PlayerView.busy` (the burning state,
   `brain.rs:149`), so a burning player isn't refused R's aim.
