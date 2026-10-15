@@ -1,5 +1,5 @@
 import { Link, useRouter } from "@tanstack/react-router";
-import { Play } from "lucide-react";
+import { Brain, Ear, Play } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type CSSProperties, type FormEvent, type ReactNode, useState } from "react";
 import {
@@ -58,6 +58,10 @@ const BRAINS: Record<Skill, string> = {
   bastard: "They shoot you in the back.",
   einstein: "They shoot you before you see them.",
 };
+
+/** A HUD sprite of the pack as a slider knob's picture (absolute: the stylesheet lives elsewhere). */
+const hud = (file: string, place: string) =>
+  `url(${new URL(`assets/hud/${file}`, document.baseURI).href}) ${place} no-repeat`;
 
 const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
 const numbers = (lo: number, hi: number) =>
@@ -159,12 +163,7 @@ export function CreateServer() {
                 hint={s.bots ? BRAINS[s.skill] : "No bots, no brains."}
                 disabled={!s.bots}
               >
-                <Chips
-                  name="skill"
-                  value={s.skill}
-                  options={SKILLS.map((k) => [k, k])}
-                  onChange={(skill) => setting({ skill })}
-                />
+                <Brains value={s.skill} onChange={(skill) => setting({ skill })} />
               </Tile>
               {mode.laps ? (
                 <Tile key="laps" label="Laps" readout={s.laps}>
@@ -173,6 +172,7 @@ export function CreateServer() {
                     value={s.laps}
                     min={1}
                     max={20}
+                    marks={["1", "20"]}
                     onChange={(laps) => setting({ laps })}
                   />
                 </Tile>
@@ -180,7 +180,7 @@ export function CreateServer() {
                 <Tile
                   key="time"
                   label="Time limit"
-                  readout={s.time === "unlimited" ? "None" : `${s.time} min`}
+                  readout={s.time === "unlimited" ? "No limit" : `${s.time} min`}
                   hint={
                     s.time === "unlimited"
                       ? "Unlimited. Pace yourself."
@@ -189,11 +189,16 @@ export function CreateServer() {
                         : undefined
                   }
                 >
-                  <Chips
-                    name="time"
-                    value={s.time}
-                    options={[...numbers(3, 10), ["unlimited", "No limit"]]}
-                    onChange={(time) => setting({ time })}
+                  {/* Past 10: no clock. */}
+                  <Slider
+                    label="Time limit"
+                    value={s.time === "unlimited" ? 11 : s.time}
+                    min={3}
+                    max={11}
+                    text={s.time === "unlimited" ? "No limit" : `${s.time} minutes`}
+                    marks={["3 min", "No limit"]}
+                    thumb={hud("stat_deaths.png", "0 0 / 200%")}
+                    onChange={(n) => setting({ time: n > 10 ? "unlimited" : n })}
                   />
                 </Tile>
               )}
@@ -221,12 +226,17 @@ export function CreateServer() {
                 <Tile
                   key="kills"
                   label="Kill limit"
+                  readout={s.kills || "None"}
                   hint={s.kills ? `First to ${s.kills} wins.` : "No limit. Keep shooting."}
                 >
-                  <Chips
-                    name="kills"
+                  <Slider
+                    label="Kill limit"
                     value={s.kills}
-                    options={[[0, "None"], ...numbers(1, 10)]}
+                    min={0}
+                    max={10}
+                    text={s.kills ? undefined : "None"}
+                    marks={["None", "10"]}
+                    thumb={hud("skull.png", "center / 80%")}
                     onChange={(kills) => setting({ kills })}
                   />
                 </Tile>
@@ -259,6 +269,7 @@ export function CreateServer() {
                       min={1}
                       max={mode.maxScore ?? 41}
                       text={s.score === "unlimited" ? "No limit" : undefined}
+                      marks={["1", mode.maxScore ? String(mode.maxScore) : "No limit"]}
                       onChange={(n) => setting({ score: n > 40 ? "unlimited" : n })}
                     />
                   )}
@@ -269,15 +280,7 @@ export function CreateServer() {
                 label="Radar"
                 hint={s.radar ? "Everyone's a blip on the HUD." : "No radar. Use your ears."}
               >
-                <Chips
-                  name="radar"
-                  value={s.radar}
-                  options={[
-                    [true, "On"],
-                    [false, "Off"],
-                  ]}
-                  onChange={(radar) => setting({ radar })}
-                />
+                <RadarSwitch on={s.radar} onChange={(radar) => setting({ radar })} />
               </Tile>
               {allowed(form.map, form.mode, []) !== 0 && (
                 <motion.details
@@ -506,7 +509,7 @@ function Tile({
 }
 
 /** A row of lit pills, one radio each. */
-function Chips<T extends string | number | boolean>({
+function Chips<T extends string | number>({
   name,
   value,
   options,
@@ -578,13 +581,15 @@ function ChocBar({
   );
 }
 
-/** A native range, filled amber up to the thumb. */
+/** A native range, filled amber up to the knob (which can wear a HUD sprite), its ends named under it. */
 function Slider({
   label,
   value,
   min,
   max,
   text,
+  marks,
+  thumb,
   onChange,
 }: {
   label: string;
@@ -592,20 +597,96 @@ function Slider({
   min: number;
   max: number;
   text?: string;
+  marks: [string, string];
+  thumb?: string;
   onChange: (value: number) => void;
 }) {
-  const fill = { "--fill": `${((value - min) / (max - min)) * 100}%` } as CSSProperties;
+  const style = {
+    "--fill": `${((value - min) / (max - min)) * 100}%`,
+    "--thumb": thumb,
+  } as CSSProperties;
   return (
-    <input
-      type="range"
-      aria-label={label}
-      aria-valuetext={text}
-      min={min}
-      max={max}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      className="slider"
-      style={fill}
-    />
+    <div className="grid gap-0.5">
+      <input
+        type="range"
+        aria-label={label}
+        aria-valuetext={text}
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="slider"
+        style={style}
+      />
+      <span
+        aria-hidden
+        className="flex justify-between font-stencil text-xs tracking-wider text-dust uppercase"
+      >
+        <span>{marks[0]}</span>
+        <span>{marks[1]}</span>
+      </span>
+    </div>
+  );
+}
+
+/** The bot skills as a meter of rising columns, the brain in each one bigger than the last. */
+function Brains({ value, onChange }: { value: Skill; onChange: (skill: Skill) => void }) {
+  const at = SKILLS.indexOf(value);
+  return (
+    <div className="grid h-36 grid-cols-5 gap-1.5 sm:gap-2">
+      {SKILLS.map((k, i) => (
+        <label key={k} className="brains grid cursor-pointer grid-rows-[1fr_auto] gap-1.5">
+          <input
+            type="radio"
+            name="skill"
+            value={k}
+            checked={k === value}
+            onChange={() => onChange(k)}
+            className="sr-only"
+          />
+          <span
+            className={`brain ${i <= at ? "brain-on" : ""}`}
+            style={{ height: `${36 + i * 16}%` }}
+          >
+            <Brain aria-hidden style={{ width: 14 + i * 6, height: 14 + i * 6 }} />
+          </span>
+          <span className="text-center font-display text-[0.65rem] tracking-wide text-dust uppercase sm:text-xs">
+            {k}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Radar on or off: the HUD's radar, its view sweeping and the blips blinking, beside a switch. */
+function RadarSwitch({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="radar-switch flex cursor-pointer items-center gap-5">
+      <input
+        type="checkbox"
+        role="switch"
+        aria-checked={on}
+        name="radar"
+        aria-label="Radar on the HUD"
+        checked={on}
+        onChange={(e) => onChange(e.target.checked)}
+        className="sr-only"
+      />
+      <span aria-hidden className="relative shrink-0">
+        <span className="radar">
+          <span className="radar-view" />
+          <span className="blip top-[24%] left-[30%] bg-tediz" />
+          <span className="blip top-[56%] left-[70%] bg-tediz [animation-delay:-0.5s]" />
+          <span className="blip top-[70%] left-[36%] bg-squirrels [animation-delay:-0.8s]" />
+          <span className="blip top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-none bg-bone" />
+        </span>
+        <Ear className="radar-ear" />
+      </span>
+      <span aria-hidden className="switch" />
+      <span aria-hidden className="font-display text-2xl text-bone">
+        {on ? "On" : "Off"}
+      </span>
+    </label>
   );
 }
