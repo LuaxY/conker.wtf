@@ -1,30 +1,12 @@
 import { getRouteApi, Link, useRouter } from "@tanstack/react-router";
-import { LogIn, Play, RefreshCw, X } from "lucide-react";
+import { LogIn, RefreshCw, X } from "lucide-react";
 import { motion } from "motion/react";
-import { type FormEvent, type ReactNode, useState } from "react";
-import {
-  allowed,
-  CHEATS,
-  type Cheat,
-  createServer,
-  fit,
-  type GameServer,
-  killServer,
-  MAPS,
-  type MapId,
-  MODES,
-  type NewServer,
-  players,
-  ROUTES,
-  type Route,
-  type Settings,
-  settingRows,
-  SKILLS,
-} from "./data";
+import { useState } from "react";
+import { CreateServer } from "./CreateServer";
+import { type GameServer, killServer, MAPS, MODES, players, settingRows } from "./data";
 import { SkullIcon, StatusBadge, useRefresh } from "./ui";
 
 const route = getRouteApi("/servers");
-const LABEL = "font-stencil text-sm tracking-wider text-dust uppercase";
 
 // One grid for the header and the rows: stacked on phones, columns from md up.
 const COLUMNS =
@@ -54,7 +36,7 @@ export function Servers() {
           <p className="mt-2 text-dust">
             {servers === null
               ? "No server list on this site."
-              : `${servers.filter((s) => s.status === "running").length} running on this machine. Open one's lobby to join, or run your own.`}
+              : `${servers.filter((s) => s.status === "running").length} running. Open a lobby to join, or run your own below.`}
           </p>
         </div>
         <button type="button" onClick={refresh} disabled={refreshing} className="pill">
@@ -122,11 +104,8 @@ function ServerRow({ server: s }: { server: GameServer }) {
 
   return (
     <div className={`${COLUMNS} board px-5 py-4 ${exited ? "opacity-70 grayscale" : ""}`}>
-      <span className="min-w-0">
-        <span className="block font-display text-xl tracking-wide text-amber md:truncate">
-          {s.name}
-        </span>
-        <span className="block truncate font-mono text-xs text-dust">{s.address}</span>
+      <span className="min-w-0 font-display text-xl tracking-wide text-amber md:truncate">
+        {s.name}
       </span>
       <span className="order-3 col-span-2 text-sm text-bone md:order-none md:col-span-1">
         {MAPS[s.map].name} · {MODES[s.mode].name}
@@ -164,271 +143,5 @@ function ServerRow({ server: s }: { server: GameServer }) {
         </button>
       </span>
     </div>
-  );
-}
-
-const DEFAULT: NewServer = {
-  name: "Bad Fur Day",
-  map: "2d",
-  mode: "deathmatch",
-  settings: {
-    bots: 3,
-    skill: "normal",
-    time: 10,
-    lives: 3,
-    kills: 0,
-    score: 20,
-    radar: true,
-    laps: 5,
-    route: 11,
-    cheats: [],
-  },
-};
-
-const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
-const TIMES: [Settings["time"], string][] = [
-  ...range(3, 10).map((n): [number, string] => [n, `${n} min`]),
-  ["unlimited", "Unlimited"],
-];
-
-/** The game server's settings (conker-server's flags), and Run. */
-function CreateServer() {
-  const router = useRouter();
-  const [form, setForm] = useState(DEFAULT);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const [started, setStarted] = useState("");
-  const map = MAPS[form.map];
-  const s = form.settings;
-  const { laps } = MODES[form.mode];
-  const setting = (change: Partial<Settings>) =>
-    setForm({ ...form, settings: { ...s, ...change } });
-
-  const run = async (e: FormEvent) => {
-    e.preventDefault();
-    setPending(true);
-    setError("");
-    setStarted("");
-    try {
-      const server = await createServer(form);
-      setStarted(`${server.name} is up at ${server.address}. Go on then.`);
-      await router.invalidate({ sync: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPending(false);
-    }
-  };
-
-  return (
-    <section aria-labelledby="create" className="board mt-12 p-6 sm:p-8">
-      <p className="font-stencil text-sm tracking-widest text-lime uppercase">Set-up</p>
-      <h2 id="create" className="cartoon font-display text-4xl text-amber">
-        Create server
-      </h2>
-      <p className="mt-1 text-sm text-dust">
-        Starts a game server on this machine. Several can run at once, each on its own port.
-      </p>
-      <form onSubmit={run} className="mt-6 grid gap-x-4 gap-y-5 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="grid content-start gap-1 sm:col-span-2">
-          <span className={LABEL}>Name</span>
-          <input
-            name="name"
-            required
-            maxLength={32}
-            autoComplete="off"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            className="field"
-          />
-        </label>
-        <Select
-          label="Map"
-          value={form.map}
-          options={(Object.keys(MAPS) as MapId[]).sort().map((id) => [id, MAPS[id].name])}
-          onChange={(id) => {
-            const modes = MAPS[id].modes;
-            const mode = modes.includes(form.mode) ? form.mode : modes[0];
-            setForm({ ...form, map: id, mode, settings: fit(s, mode) });
-          }}
-        />
-        <Select
-          label="Mode"
-          value={form.mode}
-          options={map.modes.map((m) => [m, MODES[m].name])}
-          onChange={(mode) => setForm({ ...form, mode, settings: fit(s, mode) })}
-        />
-        <Select
-          label="Bots"
-          value={s.bots}
-          options={range(0, MODES[form.mode].maxBots[0]).map((n) => [n, n ? String(n) : "None"])}
-          onChange={(bots) => setting({ bots })}
-        />
-        <Select
-          label="Bot skill"
-          value={s.skill}
-          options={SKILLS.map((k) => [k, k[0].toUpperCase() + k.slice(1)])}
-          onChange={(skill) => setting({ skill })}
-          hint={s.bots ? undefined : "No bots"}
-        />
-        <Select
-          label="Time"
-          value={s.time}
-          options={TIMES}
-          onChange={(time) => setting({ time })}
-          hint={laps ? `None in ${MODES[form.mode].name}` : undefined}
-        />
-        <Select
-          label="Laps"
-          value={s.laps}
-          options={range(1, 20).map((n) => [n, String(n)])}
-          onChange={(n) => setting({ laps: n })}
-          hint={laps ? undefined : "Only in Race"}
-        />
-        <Select
-          label="Route"
-          value={s.route}
-          options={([11, 12] as const).map((r): [Route, string] => [r, ROUTES[r]])}
-          onChange={(r) => setting({ route: r })}
-          hint={laps ? undefined : "Only in Race"}
-        />
-        <Select
-          label="Lives"
-          value={s.lives}
-          options={range(1, 5).map((n) => [n, String(n)])}
-          onChange={(lives) => setting({ lives })}
-          hint={
-            !MODES[form.mode].lives
-              ? `Never lost in ${MODES[form.mode].name}`
-              : laps || s.time === "unlimited"
-                ? undefined
-                : "Only with unlimited time"
-          }
-        />
-        <Select
-          label="Kill limit"
-          value={s.kills}
-          options={range(0, 10).map((n) => [n, n ? String(n) : "None"])}
-          onChange={(kills) => setting({ kills })}
-          hint={MODES[form.mode].kills ? undefined : `None in ${MODES[form.mode].name}`}
-        />
-        <Select
-          label="Score"
-          value={s.score}
-          options={[
-            ...range(1, MODES[form.mode].maxScore ?? 40).map((n): [number, string] => [
-              n,
-              String(n),
-            ]),
-            ...(MODES[form.mode].maxScore
-              ? []
-              : [["unlimited", "Unlimited"] as [Settings["score"], string]]),
-          ]}
-          onChange={(score) => setting({ score })}
-          hint={MODES[form.mode].score ? undefined : `None in ${MODES[form.mode].name}`}
-        />
-        <label className="grid content-start gap-1">
-          <span className={LABEL}>Radar</span>
-          <span className="field flex items-center gap-3">
-            <input
-              type="checkbox"
-              name="radar"
-              checked={s.radar}
-              onChange={(e) => setting({ radar: e.target.checked })}
-              className="size-5 accent-lime"
-            />
-            On the HUD
-          </span>
-        </label>
-        <fieldset
-          disabled={!allowed(form.map, form.mode, [])}
-          className="grid content-start gap-1 sm:col-span-2 lg:col-span-4"
-        >
-          <legend className={LABEL}>Cheats</legend>
-          <div className="mt-1 flex flex-wrap gap-x-5 gap-y-2">
-            {(Object.keys(CHEATS) as Cheat[]).map((code) => (
-              <label key={code} className="flex items-center gap-2 font-mono text-sm text-bone">
-                <input
-                  type="checkbox"
-                  checked={s.cheats.includes(code)}
-                  onChange={(e) =>
-                    setting({
-                      cheats: e.target.checked
-                        ? [...s.cheats, code]
-                        : s.cheats.filter((c) => c !== code),
-                    })
-                  }
-                  className="size-5 accent-lime"
-                />
-                {code}
-              </label>
-            ))}
-          </div>
-          <span className="text-xs text-dust">
-            {allowed(form.map, form.mode, [])
-              ? "More characters to pick in the lobby."
-              : `No character select in ${MODES[form.mode].name} on this map`}
-          </span>
-        </fieldset>
-        {map.note && <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">{map.note}</p>}
-        <p className="text-sm text-dust sm:col-span-2 lg:col-span-4">
-          Bots in {MODES[form.mode].name} with 1, 2, 3 or 4 humans: at most{" "}
-          {MODES[form.mode].maxBots.join(", ")}. The server leaves out what doesn't fit as humans
-          join (the original's bots and team screens).
-        </p>
-        <div className="flex flex-wrap items-center gap-4 sm:col-span-2 lg:col-span-4">
-          <button type="submit" disabled={pending} className="cta">
-            <Play aria-hidden className="size-5" />
-            {pending ? "Starting…" : "Run it"}
-          </button>
-          <output className="text-sm text-lime">{started}</output>
-        </div>
-        {error && (
-          <pre
-            role="alert"
-            className="overflow-x-auto rounded-xl border-3 border-tediz bg-black/70 p-4 text-sm whitespace-pre-wrap text-tediz sm:col-span-2 lg:col-span-4"
-          >
-            {error}
-          </pre>
-        )}
-      </form>
-    </section>
-  );
-}
-
-/** A labelled select over typed values; with a hint, it is off (the setting doesn't apply). */
-function Select<T extends string | number>({
-  label,
-  value,
-  options,
-  onChange,
-  hint,
-}: {
-  label: string;
-  value: T;
-  options: [T, string][];
-  onChange: (value: T) => void;
-  hint?: string;
-}): ReactNode {
-  return (
-    <label className="grid content-start gap-1">
-      <span className={LABEL}>{label}</span>
-      <select
-        value={String(value)}
-        disabled={hint !== undefined}
-        onChange={(e) => {
-          const found = options.find(([v]) => String(v) === e.target.value);
-          if (found) onChange(found[0]);
-        }}
-        className="field"
-      >
-        {options.map(([v, text]) => (
-          <option key={String(v)} value={String(v)}>
-            {text}
-          </option>
-        ))}
-      </select>
-      {hint && <span className="text-xs text-dust">{hint}</span>}
-    </label>
   );
 }

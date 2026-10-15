@@ -1,4 +1,4 @@
-import { Panda, Skull, Squirrel } from "lucide-react";
+import { Camera, Panda, Skull, Squirrel } from "lucide-react";
 import { useRouter } from "@tanstack/react-router";
 import { type CSSProperties, type ReactNode, useEffect, useState } from "react";
 import type { Side, Status } from "./data";
@@ -53,6 +53,24 @@ export function Sprite({
       className={`pixelated ${className}`}
       style={style}
     />
+  );
+}
+
+/** A 16:9 screenshot, `assets/screenshots/<path>.jpg` (`maps/2d`, `modes/total-war`): taken from the
+ * game, so it lives in the pack, never in this tree. A gray box until someone drops it in. */
+export function Shot({ path }: { path: string }) {
+  return (
+    <span className="block aspect-video overflow-hidden rounded-xl border-2 border-black bg-[#4a4a4a]">
+      <Sprite
+        src={`assets/screenshots/${path}.jpg`}
+        className="size-full object-cover [image-rendering:auto]"
+        fallback={
+          <span className="grid size-full place-items-center bg-[repeating-linear-gradient(-45deg,#555_0_10px,#4a4a4a_10px_20px)] text-[#9a9a9a]">
+            <Camera aria-hidden className="size-7" />
+          </span>
+        }
+      />
+    </span>
   );
 }
 

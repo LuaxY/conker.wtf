@@ -26,6 +26,9 @@
   --color-squirrels-deep: #386818;
   --color-tediz: #ff3737;
   --color-tediz-deep: #900000;
+
+  /* Quick to answer, soft to land. */
+  --ease-snap: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 @layer base {
@@ -295,6 +298,144 @@
   .field:disabled {
     cursor: not-allowed;
     opacity: 0.5;
+  }
+
+  /* A small pill over a native radio or checkbox (the form's options): unlit like .pill, lit when picked. */
+  .chip {
+    display: inline-flex;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: var(--color-bone);
+    color: var(--color-moss);
+    padding-inline: 0.85rem;
+    font-family: var(--font-display);
+    font-size: 1rem;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    touch-action: manipulation;
+    user-select: none;
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 -3px 0 2px #8a8a8a,
+      0 3px 0 #000;
+    transition:
+      translate 120ms var(--ease-snap),
+      background-color 120ms,
+      color 120ms,
+      box-shadow 120ms;
+  }
+  .chip:has(:checked) {
+    background: #0b1a04;
+    color: var(--color-lime);
+    box-shadow:
+      inset 0 0 0 2px #d8d8d8,
+      inset 0 0 0 4px #000,
+      0 3px 0 #000,
+      0 0 12px rgb(86 255 0 / 0.5);
+  }
+  .chip:has(:focus-visible) {
+    outline: 3px solid var(--color-lime);
+    outline-offset: 3px;
+  }
+  .chip:active {
+    translate: 0 2px;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .chip:hover:not(:has(:checked, :disabled)) {
+      background: #fff8e0;
+    }
+  }
+  .chip:has(:disabled) {
+    cursor: not-allowed;
+  }
+
+  /* A square of the HUD's chocolate bar (DESIGN.md's choc-1..4): dark until lit. */
+  .choc {
+    display: block;
+    width: 2.5rem;
+    height: 2.5rem;
+    cursor: pointer;
+    border-radius: 4px;
+    background: #3a1a06;
+    box-shadow:
+      inset 2px 2px 0 rgb(0 0 0 / 0.5),
+      inset -1px -1px 0 rgb(255 255 255 / 0.06);
+    touch-action: manipulation;
+    transition:
+      scale 120ms var(--ease-snap),
+      filter 120ms;
+  }
+  .choc-on {
+    background: linear-gradient(135deg, #ce734a, #bd6329 35%, #a54a08 70%, #8c3908);
+    box-shadow:
+      inset 2px 2px 0 rgb(255 220 180 / 0.45),
+      inset -3px -3px 0 rgb(60 20 0 / 0.55);
+  }
+  .choc:has(:focus-visible) {
+    outline: 3px solid var(--color-lime);
+    outline-offset: 2px;
+  }
+  .choc:active {
+    scale: 0.92;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .choc:hover {
+      filter: brightness(1.3);
+    }
+  }
+
+  /* A native range: a black-ringed groove filled amber up to a bone knob (--fill: the value's share). */
+  .slider {
+    --fill: 50%;
+    width: 100%;
+    height: 2.75rem;
+    cursor: pointer;
+    appearance: none;
+    background: transparent;
+    touch-action: manipulation;
+  }
+  .slider::-webkit-slider-runnable-track {
+    box-sizing: content-box;
+    height: 8px;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, var(--color-amber) var(--fill), #0b0703 var(--fill));
+  }
+  .slider::-moz-range-track {
+    box-sizing: content-box;
+    height: 8px;
+    border: 3px solid #000;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, var(--color-amber) var(--fill), #0b0703 var(--fill));
+  }
+  .slider::-webkit-slider-thumb {
+    width: 28px;
+    height: 28px;
+    margin-top: -10px;
+    appearance: none;
+    border: 3px solid #000;
+    border-radius: 50%;
+    background: var(--color-bone);
+    box-shadow:
+      inset 0 -3px 0 #8a8a8a,
+      0 2px 0 #000;
+  }
+  .slider::-moz-range-thumb {
+    box-sizing: border-box;
+    width: 28px;
+    height: 28px;
+    border: 3px solid #000;
+    border-radius: 50%;
+    background: var(--color-bone);
+    box-shadow:
+      inset 0 -3px 0 #8a8a8a,
+      0 2px 0 #000;
   }
 
   /* Luckiest Guy's lowercase is a second, odd set of capitals: always use the real ones. */

@@ -28,18 +28,42 @@ export interface ModeInfo {
   defaultScore?: number;
   maxBots: [number, number, number, number];
   laps?: boolean;
+  /** The rules in a line, for the server form. */
+  note: string;
 }
 export const MODES: Record<Mode, ModeInfo> = {
-  deathmatch: { name: "Deathmatch", kills: true, lives: true, score: false, maxBots: [9, 6, 1, 0] },
+  deathmatch: {
+    name: "Deathmatch",
+    kills: true,
+    lives: true,
+    score: false,
+    maxBots: [9, 6, 1, 0],
+    note: "Free for all. Grab a gun off the floor and frag everyone.",
+  },
   "total-war": {
     name: "War: Total War",
     kills: false,
     lives: true,
     score: false,
     maxBots: [11, 10, 1, 0],
+    note: "Squirrels vs Tediz. Carry the gas canister into their base. Wear a mask.",
   },
-  colors: { name: "War: Colors", kills: false, lives: false, score: true, maxBots: [11, 10, 1, 0] },
-  beach: { name: "War: Beach", kills: false, lives: false, score: true, maxBots: [7, 6, 5, 4] },
+  colors: {
+    name: "War: Colors",
+    kills: false,
+    lives: false,
+    score: true,
+    maxBots: [11, 10, 1, 0],
+    note: "Squirrels vs Tediz. Nick their flag and bring it home.",
+  },
+  beach: {
+    name: "War: Beach",
+    kills: false,
+    lives: false,
+    score: true,
+    maxBots: [7, 6, 5, 4],
+    note: "The villagers leg it up the beach. The Tediz man the guns.",
+  },
   heist: {
     name: "War: Heist",
     kills: false,
@@ -48,8 +72,16 @@ export const MODES: Record<Mode, ModeInfo> = {
     maxScore: 5,
     defaultScore: 3,
     maxBots: [7, 6, 1, 0],
+    note: "Four gangs, one bag of cash. Grab it and walk it home.",
   },
-  tank: { name: "Tank", kills: true, lives: true, score: false, maxBots: [7, 2, 1, 0] },
+  tank: {
+    name: "Tank",
+    kills: true,
+    lives: true,
+    score: false,
+    maxBots: [7, 2, 1, 0],
+    note: "Tanks, free for all. When the gas bomb goes off, get in a bunker.",
+  },
   raptor: {
     name: "War: Raptor",
     kills: false,
@@ -58,6 +90,7 @@ export const MODES: Record<Mode, ModeInfo> = {
     maxScore: 40,
     defaultScore: 20,
     maxBots: [7, 6, 3, 2],
+    note: "Cavemen vs raptors. Raptors feed bodies to their baby; cavemen cook the eggs.",
   },
   race: {
     name: "Race",
@@ -66,39 +99,53 @@ export const MODES: Record<Mode, ModeInfo> = {
     score: false,
     maxBots: [7, 2, 1, 0],
     laps: true,
+    note: "Hoverboards, power-ups and missiles. First over the line wins.",
   },
 };
 
 export type MapId = "1a" | "24" | "2b" | "2d" | "30" | "33" | "34" | "3f";
-/** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. */
-export const MAPS: Record<MapId, { name: string; modes: Mode[]; note?: string }> = {
+/** `conker-server --map`, and the modes each map plays: a new mode goes into its maps' lists. The
+ * name and note are what players read. */
+export const MAPS: Record<MapId, { name: string; modes: Mode[]; note: string }> = {
   "1a": {
-    name: "Vault 0x1A",
+    name: "Vault",
     modes: ["deathmatch", "heist"],
-    note: "Everyone is the Wise Guy, holding the bat. Heist: 4 teams, 1-5 bags.",
+    note: "A bank vault full of weasel mobsters, every one of them holding a bat.",
   },
   "24": {
-    name: "Tank 0x24",
+    name: "Tank",
     modes: ["tank"],
-    note: "Everyone is a tank, free for all; the bomb gasses everyone outside a bunker.",
+    note: "Tanks only. Bunkers, wrecks and a gas bomb on a timer.",
   },
   "2b": {
-    name: "Beach 0x2B",
+    name: "Beach",
     modes: ["deathmatch", "beach"],
-    note: "Beach: the villagers escape, at most 2 Tediz shoot (6 villagers against them, more with BALANCE).",
+    note: "The beach landing. Bunkers, a machine gun and a long way to run.",
   },
-  "2d": { name: "Arena 0x2D", modes: ["deathmatch", "total-war"] },
-  "30": { name: "Colors 0x30", modes: ["deathmatch", "colors"] },
+  "2d": {
+    name: "Arena",
+    modes: ["deathmatch", "total-war"],
+    note: "Two fortified bases and a whole lot of no-man's-land.",
+  },
+  "30": {
+    name: "Colors",
+    modes: ["deathmatch", "colors"],
+    note: "Two forts, two flags, lifts and ledges.",
+  },
   "33": {
-    name: "Race 0x33",
+    name: "Race",
     modes: ["race"],
-    note: "Hoverboards, free for all: laps of the low road or the elevated one, canisters and missiles.",
+    note: "A jungle hoverboard track: the low road or the elevated one.",
   },
-  "34": { name: "Bunker 0x34", modes: ["deathmatch"] },
+  "34": {
+    name: "Bunker",
+    modes: ["deathmatch"],
+    note: "Pressure plates, flame jets and electric floors. Mind your feet.",
+  },
   "3f": {
-    name: "Temple 0x3F",
+    name: "Temple",
     modes: ["deathmatch", "raptor"],
-    note: "The bots are cavemen on this map. Raptor: cavemen against at most 2 raptors (a Tediz pick plays a raptor).",
+    note: "An old stone temple. The bots here are cavemen with clubs.",
   },
 };
 

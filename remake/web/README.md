@@ -16,7 +16,14 @@ and its three fonts self-hosted with @fontsource (Luckiest Guy, Black Ops One, G
 The look follows the game's own menus and HUD: the pub at night, lime-lit pill buttons, the box art's amber lettering,
 speech bubbles, hazard tape and chocolate; [`DESIGN.md`](DESIGN.md) has the brief (palette, type, the pack's sprites,
 copy, references). All of it is CSS in `app/src/index.css` (`.pill`, `.cta`, `.board`, `.bubble`, `.chrome`, ...), and
-every animation stops under `prefers-reduced-motion`. Build it with bun:
+every animation stops under `prefers-reduced-motion`.
+
+**Screenshots.** The server form shows one per map and per mode: `assets/screenshots/maps/<map>.jpg` (`2d.jpg`,
+`1a.jpg`, ...) and `assets/screenshots/modes/<mode>.jpg` (`deathmatch.jpg`, `total-war.jpg`, ...), 16:9 (1280×720 is
+plenty). They show the game, so they go into the asset pack next to the page, never into this tree; until one is there,
+its card shows a gray box.
+
+Build it with bun:
 
 ```sh
 cd remake/web/app
@@ -33,7 +40,7 @@ Vite warns that its `outDir` is the app's parent folder: on purpose (`emptyOutDi
 | URL | Screen |
 |---|---|
 | `/#/` | Home: the pitch, "Join game", the Total War briefing's battle plan between the two sides' banners, and the controls (keyboard and mouse, gamepad), grouped as move, combat and camera. On a phone it says that playing needs a keyboard or a gamepad |
-| `/#/servers` | The server browser: the game servers the dev web server started (name, address, map, mode, settings, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server": name, map, mode (the map's own: Deathmatch, War: Total War on 0x2D, War: Colors on 0x30, War: Beach on 0x2B, War: Heist on 0x1A, Tank on 0x24 only, War: Raptor on 0x3F), bots (the most with one human: Deathmatch 9, Total War and Colors 11, Beach, Heist, Tank, Raptor and Race 7; the form lists the caps with 2-4 humans, which the server applies as humans join), bot skill, time (3-10 min or unlimited), lives (only with unlimited time; never lost in Colors or Beach), kill limit (Deathmatch and Tank only), score (Colors' and Beach's 1-40 or unlimited, default 20; Raptor's 1-40, default 20; Heist's bags 1-5, default 3), radar; "Run it" starts it and waits until it answers. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
+| `/#/servers` | The server browser: the game servers the dev web server started (name, map, mode, settings, players, status: starting, running, or exited with its code), refresh; per server "Lobby" (running ones) and "Kill" ("Clear" once exited; its status reads "Snuffed it (CODE)"). Under the list, "Create server" in four steps: (1) the map, as cards with its screenshot, a line about it and the modes it plays; (2) the mode, as cards for that map's modes only (Deathmatch, War: Total War on Arena 0x2D, War: Colors on Colors 0x30, War: Beach on Beach 0x2B, War: Heist on Vault 0x1A, Tank on Tank 0x24 only, War: Raptor on Temple 0x3F, Race on Race 0x33 only); (3) the house rules that mode uses, and only those: bots as the HUD's chocolate bar (up to the mode's most with one human: Deathmatch 9, Total War and Colors 11, Beach, Heist, Tank, Raptor and Race 7; the server drops some as humans join), bot skill (greyed out with no bots), time (3-10 min or unlimited; Race has laps 1-20 and the route instead), lives (only untimed, and never in Colors or Beach), kill limit (Deathmatch and Tank), score (Colors' and Beach's 1-40 or unlimited; Raptor's 1-40; Heist's bags 1-5), radar, and the cheats where the map has a character select; (4) the name and "Run it", which starts it, waits until it answers and links to its lobby. Pills and a slider over native radios, checkboxes and a range. On a site without the dev web server (`http.server`, `deploy/`'s Caddy) it says so and links to `play.html` (that host's server on port 5888) |
 | `/#/lobby/ID` | The lobby: the server's name, address, status, map, mode and settings, and who is playing (the humans and bots in its match, from its `/info`; both pages reload every 5 s); your side (two cards on the map's riveted plates), Heist's team and connection (WebTransport or WebSocket); "Join game" (running servers only) |
 
 **Real data only.** `app/src/data.ts` holds the maps and the modes each plays (`MAPS`: a new mode, e.g. Colors on 30,
