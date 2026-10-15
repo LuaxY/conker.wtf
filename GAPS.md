@@ -246,7 +246,7 @@ menu with neutral input; RESUME re-locking ("CLICK RESUME AGAIN" on refusal); mo
 localStorage (`conker-settings`, APPLY); LEAVE MATCH returning to the page; the PRESS F prompt and crosshair; whether
 Chrome scales mouse movement on high-DPI screens; middle-click autoscroll; a pointer-lock permission prompt.
 **Other browsers:** Firefox and Safari 26.4+ (two windows; the empty `serverCertificateHashes` list), background tabs
-and the 3 s timeout.
+and the 30 s timeout (F3: a hidden page ticks on a timer; RECONNECT after a drop).
 **Pads and input:** a real Xbox/DualSense with two windows (X tap/hold, the edge ramp, aim-assist, triggers past 0.5,
 Start, glyphs); rumble on native Windows/Linux; the team screen's BALANCE on a pad; AZERTY labels; a native window's
 grab and close; tuning the spread cones in real play.

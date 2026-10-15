@@ -156,7 +156,7 @@ pub fn open_webtransport(
         .with_bind_address(addr.0)
         .with_custom_tls(tls.0.clone())
         .keep_alive_interval(Some(Duration::from_secs(1)))
-        .max_idle_timeout(Some(Duration::from_secs(5)))
+        .max_idle_timeout(Some(Duration::from_secs(crate::token::TIMEOUT_SECS as u64)))
         .expect("a valid idle timeout")
         .build();
     let server = trigger.entity;

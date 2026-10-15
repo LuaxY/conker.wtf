@@ -207,14 +207,16 @@ makes a new self-signed certificate (valid 14 days) on every start, so reload th
 the reload reads the new hash (before wave 5's browser test, the page wrote the hash into its address, so a reload kept
 the old one and failed over WebTransport until the `digest=` was removed by hand). A `?digest=` typed in the address
 is used as it is. The file is stale once the server exits, so delete it then. For a second player, open a second window, not a second tab of the same window. A
-background tab may be throttled and then dropped by the server (I).
+background tab runs a frame a second at most (Chrome: one a minute after 5 min hidden), and the server stands its
+player meanwhile; past the 30 s netcode timeout it drops it, and the page offers RECONNECT (I).
 
 The line at the bottom left is the connection's status (also logged as `connection: ...`): `loading the level`,
 `connecting to HOST:PORT over WebTransport…`, `connected to ...`, `could not connect to ...: REASON. HINT` or
-`disconnected from ...: REASON. Reload to reconnect`. The HUD stays off until the player is in the match, and again
-once the connection is gone. The page connects once the level and the character have
-loaded and ten frames in a row took under 0.25 s, so the load's stalls can't trip the 3 s netcode timeout. Reloading
-the page reconnects.
+`disconnected from ...: REASON`. The HUD stays off until the player is in the match; once the connection is gone or
+failed, a page over the level says why and offers RECONNECT (a fresh token, as a new player; it tries again for 35 s,
+as the server may still hold the old slot) or QUIT (the landing page, as the Esc menu's LEAVE MATCH and the results'
+QUIT). The page connects once the level and the character have loaded and ten frames in a row took under 0.25 s, so
+the load's stalls don't eat into the 30 s netcode timeout.
 
 `http.server` sends no `Cache-Control`, so after a rebuild or an edit of the pack a plain reload may run the old
 `client_bg.wasm`, a page or pack files (V: Chrome kept the old help text). Reload bypassing the cache
@@ -726,7 +728,7 @@ For each browser, using the same server and static server as above:
 6. Move in each window and check that the other window shows that player moving and animating. In the console, the
    `remote/interpolated` lines should show its position and clip changing.
 7. Reload one window. The old player disappears at once (the closed page's transport closes; the netcode timeout,
-   3 s, is the fallback), and the reloaded page joins as a new player.
+   30 s, is the fallback), and the reloaded page joins as a new player.
 
 Known limits per browser (from `lab/research/rust-stack.md` and `web-platform.md`):
 

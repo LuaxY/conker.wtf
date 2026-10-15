@@ -2039,7 +2039,8 @@ fn prompt(
 }
 
 /// This frame's HUD: the quads of [`sprites`] for the local player while connected, placed in the
-/// HUD camera's target ([`place`]); their materials are kept for reuse.
+/// HUD camera's target ([`place`]); their materials are kept for reuse. The menu's over them, and
+/// alone without them (a lost connection's page).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn draw(
     assets: Option<Res<HudAssets>>,
@@ -2088,12 +2089,18 @@ fn draw(
     let (Some(a), Some(window)) = (assets, camera.logical_viewport_size()) else {
         return;
     };
-    let (Ok(own), Ok(m)) = (own.single(), game.single()) else {
-        return;
+    let menu_quads = esc_menu.iter().flat_map(|q| q.sprites.iter().cloned());
+    let (Ok(own), Ok(m), NetStatus::Connected) = (own.single(), game.single(), &*status) else {
+        // Not playing (the connection lost or failed): the menu's page alone.
+        return spawn(
+            menu_quads,
+            &a,
+            window,
+            &mut materials,
+            &mut cache,
+            &mut commands,
+        );
     };
-    if *status != NetStatus::Connected {
-        return;
-    }
     let quads = match (playing.running(&outros), restart_fade(m)) {
         (Some((o, k)), _) => outro(&a.hud, o, k),
         // RESTART: only its fade over the frozen level (the skull's clock kept, for the next match).
@@ -2245,8 +2252,20 @@ fn draw(
         }
     };
     // The Esc menu over all of it.
-    let menu_quads = esc_menu.iter().flat_map(|q| q.sprites.iter().cloned());
-    for s in quads.into_iter().chain(menu_quads) {
+    let quads = quads.into_iter().chain(menu_quads);
+    spawn(quads, &a, window, &mut materials, &mut cache, &mut commands);
+}
+
+/// `quads` as the HUD layer's meshes in a `window`-sized target, their materials kept in `cache`.
+fn spawn(
+    quads: impl Iterator<Item = Sprite>,
+    a: &HudAssets,
+    window: Vec2,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut HashMap<(Tex, [u32; 4], Rgba), Handle<StandardMaterial>>,
+    commands: &mut Commands,
+) {
+    for s in quads {
         let key = (s.tex.clone(), s.uv.map(f32::to_bits), s.colour);
         let material = cache.entry(key).or_insert_with(|| {
             let (texture, size) = match &s.tex {
@@ -4180,8 +4199,8 @@ mod tests {
 
     /// The modern pickup prompt agrees with the server's gate (`can_take`): on a weapon's pickup,
     /// shown, it asks for Interact; not on grenades, a taken one, one out of reach, nor in Race
-    /// (automatic there), nor with empty hands (taken by touch). The key is Interact's, as the
-    /// layout types it once pressed.
+    /// (automatic there), nor with empty hands or only the start item (taken by touch). The key is
+    /// Interact's, as the layout types it once pressed.
     #[test]
     fn the_pickup_prompt_follows_the_gate_and_the_binding() {
         use conker_assets::{Gives, Pickup};
@@ -4208,6 +4227,12 @@ mod tests {
         let line = Some("PRESS F TO PICK UP".to_string());
         assert_eq!(pickup_prompt(&gun, &m, &f, "F"), line);
         assert_eq!(pickup_prompt(&gun, &m, &empty, "F"), None);
+        let club = conker_rules::Fighter {
+            weapon: Some(0x40),
+            start: Some(0x40),
+            ..empty
+        };
+        assert_eq!(pickup_prompt(&gun, &m, &club, "F"), None);
         assert_eq!(pickup_prompt(&grenades, &m, &f, "F"), None);
         let taken = MatchView {
             taken: 1 << 12,

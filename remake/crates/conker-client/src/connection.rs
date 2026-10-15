@@ -1,7 +1,7 @@
 //! The connection to the game server ([`build`]).
 //! - **When:** once the level and the character have loaded (windowed) and [`CALM`] frames in a row
 //!   took under [`CALM_SECS`]: the seconds the load and the first draws after it block the main
-//!   thread (V: 7 s in a debug build under load; shaders compile in the browser) would trip the 3 s
+//!   thread (V: 7 s in a debug build under load; shaders compile in the browser) would eat into the
 //!   netcode timeout. Headless clients have no assets, so they connect after the calm frames.
 //! - **Status** ([`NetStatus`]): loading, connecting (the token fetch, then the handshake),
 //!   connected, failed or disconnected, with the reason and what to do (the page's words in the
@@ -10,10 +10,14 @@
 //! - **Input** starts with the follow camera (the client synced, its player arrived): no input goes
 //!   out before, `predict` steps nothing before (it reads the input), and the server holds the
 //!   player as it joined until that first input, so both start on the same tick from the same state.
-//! - **Leaving:** an exit (the window closed, `seconds`, natively Ctrl-C, SIGTERM or SIGHUP) first
-//!   sends netcode's disconnect and exits [`LEAVE_DELAY`] later, once it has gone out. A closed page runs no more frames: its
-//!   transport closes (the browser's unload, and winit's exit dropping the session), which frees
-//!   the slot on the server as well.
+//! - **Leaving:** an exit (the window closed, `seconds`, natively Ctrl-C, SIGTERM or SIGHUP; the Esc
+//!   menu's LEAVE MATCH, the results' QUIT, the lost connection's QUIT) first sends netcode's
+//!   disconnect and exits [`LEAVE_DELAY`] later, once it has gone out; in the browser it goes to the
+//!   landing page ([`LANDING`]) instead. A closed page runs no more frames: its transport closes
+//!   (the browser's unload, and winit's exit dropping the session), which frees the slot on the
+//!   server as well.
+//! - **Lost or failed** ([`Reconnect`]): the menu's page offers RECONNECT (a fresh token and id, tried
+//!   again for [`RETRY_SECS`]: the server may still hold the old slot) or QUIT ([`crate::menu`]).
 //! - **Token:** the server signs each client's netcode connect token (its key never reaches the
 //!   client). Without `token=`, the client fetches it as it connects, after the assets loaded (a
 //!   token lasts 60 s): from `token-url`, else (an https page) `/token` on the page's own origin,
@@ -39,17 +43,26 @@ use lightyear::prelude::*;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 
-/// Netcode's timeout both ways (the connect token carries it to the server): a client that sends
-/// nothing for this long loses its slot.
-pub const TIMEOUT_SECS: i32 = 3;
+/// Netcode's timeout both ways (the connect token carries it, conker-server's `token.rs` sets it), and
+/// the native WebTransport idle timeout: a client that sends nothing for this long loses its slot.
+/// A browser tab in the background may run no frame for that long.
+pub const TIMEOUT_SECS: i32 = 30;
 /// Seconds a connection attempt may take: a WebTransport handshake that never completes (a stale
 /// certificate digest in some browsers, blocked UDP) raises no error of its own.
 pub const CONNECT_SECS: f64 = 10.0;
 /// Seconds the native token and `/info` fetch waits to connect, then for the answer (under
 /// [`CONNECT_SECS`] together: the watchdog counts the fetch too).
 pub const FETCH_SECS: u64 = 4;
+/// Where a leave goes in the browser: the landing page, next to `play.html`.
+pub const LANDING: &str = "index.html";
 /// Seconds a leaving client keeps running after its netcode disconnect, so the packets go out.
 pub const LEAVE_DELAY: f64 = 0.2;
+/// Seconds a reconnect keeps trying: past the old slot's timeout, as a server that missed the loss
+/// holds it that long (a join it refuses, a full match, is tried again until then).
+pub const RETRY_SECS: f64 = TIMEOUT_SECS as f64 + 5.0;
+/// Seconds between a reconnect's failed attempt and the next (the token endpoint gives an address 10
+/// tokens per 10 s).
+const RETRY_EVERY: f64 = 2.0;
 /// Frames in a row, each shorter than [`CALM_SECS`], before connecting.
 pub const CALM: u32 = 10;
 pub const CALM_SECS: f32 = 0.25;
@@ -80,8 +93,7 @@ impl NetStatus {
             Self::Failed(why) => {
                 let hint = match cfg.transport {
                     Transport::WebTransport if secure(cfg) => page(
-                        "Is the server running? Reload the page for a new connect token. \
-                         ?transport=ws tries WebSocket",
+                        "Is the server running? ?transport=ws tries WebSocket",
                         "Is the server running? --transport ws tries WebSocket",
                     ),
                     Transport::WebTransport if cfg.digest.is_empty() => page(
@@ -103,10 +115,35 @@ impl NetStatus {
                     true,
                 )
             }
-            Self::Disconnected(why) => {
-                let again = page("Reload to reconnect", "Run the client again to reconnect");
-                (format!("disconnected from {server}: {why}. {again}"), true)
-            }
+            // The menu's page offers RECONNECT and QUIT.
+            Self::Disconnected(why) => (format!("disconnected from {server}: {why}"), true),
+        }
+    }
+}
+
+/// RECONNECT ([`crate::menu`]'s page for a lost or failed connection): attempts until `until`, each
+/// with a fresh token and client id (netcode refuses the old id while the server still holds its
+/// slot), the next at `next`; `why` the last one's failure. Over once the local player is back.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct Reconnect {
+    pub until: Option<f64>,
+    next: Option<f64>,
+    pub why: String,
+}
+
+impl Reconnect {
+    pub fn active(&self) -> bool {
+        self.until.is_some()
+    }
+
+    /// RECONNECT chosen: an attempt now, more until [`RETRY_SECS`] from now.
+    pub fn start(&mut self, now: f64) {
+        if !self.active() {
+            *self = Reconnect {
+                until: Some(now + RETRY_SECS),
+                next: Some(now),
+                why: String::new(),
+            };
         }
     }
 }
@@ -140,8 +177,13 @@ pub fn why(reason: &DisconnectedReason) -> String {
             }
             _ => tidy(state),
         },
-        // The server's own words (a full match, conker-server's `join_player`).
-        DisconnectedReason::LinkFailed(UnlinkReason::ByPeer(r)) if !r.is_empty() => r.clone(),
+        // The server's own words (a full match, conker-server's `join_player`), not aeronet's
+        // placeholders (`(dropped)`: a stopping server's session).
+        DisconnectedReason::LinkFailed(UnlinkReason::ByPeer(r))
+            if !r.is_empty() && !r.starts_with('(') =>
+        {
+            r.clone()
+        }
         DisconnectedReason::ByPeer(_) | DisconnectedReason::LinkFailed(UnlinkReason::ByPeer(_)) => {
             "the server closed the connection".into()
         }
@@ -179,7 +221,11 @@ fn tidy(error: &str) -> String {
 /// The connection's systems and observers (see the module docs).
 pub fn build(app: &mut App) {
     app.insert_resource(NetStatus::Loading);
-    app.add_systems(Update, (connect.run_if(ready), watchdog, show).chain());
+    app.init_resource::<Reconnect>();
+    app.add_systems(
+        Update,
+        (retry, connect.run_if(ready), watchdog, show).chain(),
+    );
     app.add_systems(Last, leave.after(bevy::window::ExitSystems));
     app.add_systems(
         PostUpdate,
@@ -248,9 +294,11 @@ fn connect(
     mut fetching: Local<Fetching>,
 ) {
     if cfg.token.is_empty() {
-        // The fetch counts as connecting (the HUD says so; the watchdog bounds it).
+        // The fetch counts as connecting (the HUD says so; the watchdog bounds it). Each attempt
+        // fetches its own (a reconnect's: [`retry`]).
         if *status == NetStatus::Loading {
             *status = NetStatus::Connecting(time.elapsed_secs_f64());
+            *fetching = Fetching::default();
         }
         let Some(fetched) = fetching.poll(&cfg) else {
             return;
@@ -631,7 +679,7 @@ mod wt {
         };
         let config = config
             .keep_alive_interval(Some(Duration::from_secs(1)))
-            .max_idle_timeout(Some(Duration::from_secs(5)))?
+            .max_idle_timeout(Some(Duration::from_secs(super::TIMEOUT_SECS as u64)))?
             .build();
         let (link, target) = (trigger.entity, wt.target.clone());
         commands.queue(move |world: &mut World| {
@@ -702,7 +750,8 @@ fn on_connected(
 }
 
 /// A failed attempt or a lost connection (the client spawns `Disconnected` before it connects:
-/// that one is ignored, as is any after a [`watchdog`] failure).
+/// that one is ignored, as is any after a [`watchdog`] failure, and a leave's: [`leave`] goes on
+/// without the lost connection's page).
 fn on_disconnected(
     trigger: On<Insert, Disconnected>,
     clients: Query<&Disconnected, With<Client>>,
@@ -711,10 +760,57 @@ fn on_disconnected(
     let Ok(d) = clients.get(trigger.entity) else {
         return;
     };
+    if matches!(d.reason, DisconnectedReason::UserRequested(_)) {
+        return;
+    }
     match *status {
         NetStatus::Connecting(_) => *status = NetStatus::Failed(why(&d.reason)),
         NetStatus::Connected => *status = NetStatus::Disconnected(why(&d.reason)),
         _ => {}
+    }
+}
+
+/// A reconnect's attempts ([`Reconnect`]): the old client goes and a new one starts as the first did
+/// ([`connect`]: a token fetched), under a fresh id; a failure tries again [`RETRY_EVERY`] later
+/// until [`RETRY_SECS`] ran out (then the menu offers RECONNECT again); the local player's arrival
+/// ends it (not netcode's connection: a full match refuses the join after it).
+fn retry(
+    time: Res<Time<Real>>,
+    mut r: ResMut<Reconnect>,
+    mut status: ResMut<NetStatus>,
+    mut cfg: ResMut<Config>,
+    clients: Query<Entity, With<Client>>,
+    playing: Query<(), With<FollowCamera>>,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs_f64();
+    let Some(until) = r.until else {
+        return;
+    };
+    if !playing.is_empty() {
+        info!("reconnected as client {}", cfg.id);
+        *r = Reconnect::default();
+        return;
+    }
+    if let NetStatus::Failed(why) | NetStatus::Disconnected(why) = &*status
+        && r.next.is_none()
+    {
+        if now >= until {
+            info!("reconnect: giving up after {RETRY_SECS} s");
+            *r = Reconnect::default();
+            return;
+        }
+        (r.why, r.next) = (why.clone(), Some(now + RETRY_EVERY));
+    }
+    if r.next.is_some_and(|t| now >= t) {
+        r.next = None;
+        for entity in &clients {
+            commands.entity(entity).despawn();
+        }
+        cfg.token.clear();
+        cfg.id = getrandom::u64().unwrap_or(cfg.id.wrapping_add(1)).max(1);
+        *status = NetStatus::Loading;
+        info!("reconnecting as client {}", cfg.id);
     }
 }
 
@@ -772,7 +868,9 @@ fn on_attached(trigger: On<Add, FollowCamera>, mut commands: Commands) {
 }
 
 /// Holds any exit until netcode's disconnect has gone out: the first exit request sends it and
-/// comes back [`LEAVE_DELAY`] later (a closed window asks again every frame meanwhile).
+/// comes back [`LEAVE_DELAY`] later (a closed window asks again every frame meanwhile). In the
+/// browser the exit is the landing page ([`LANDING`], once). Every leave comes here: the Esc menu's
+/// LEAVE MATCH, the results' QUIT and the lost connection's QUIT write an exit.
 fn leave(
     mut exits: ResMut<Messages<AppExit>>,
     time: Res<Time<Real>>,
@@ -781,26 +879,36 @@ fn leave(
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs_f64();
-    if let Some((at, exit)) = leaving.clone() {
-        exits.clear();
-        if now >= at {
-            exits.write(exit);
-        }
-        return;
+    if leaving.is_none()
+        && let Some(exit) = exits.drain().last()
+    {
+        let at = match clients.single() {
+            Ok(entity) => {
+                info!("leaving: disconnecting first");
+                commands.trigger(Disconnect { entity });
+                now + LEAVE_DELAY
+            }
+            Err(_) => now,
+        };
+        *leaving = Some((at, exit));
     }
-    let Some(exit) = exits.drain().last() else {
+    let Some((at, exit)) = leaving.clone() else {
         return;
     };
-    match clients.single() {
-        Ok(entity) => {
-            info!("leaving: disconnecting first");
-            commands.trigger(Disconnect { entity });
-            *leaving = Some((now + LEAVE_DELAY, exit));
-        }
-        Err(_) => {
-            exits.write(exit);
+    exits.clear();
+    if now < at {
+        return;
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = exit;
+        *leaving = Some((f64::INFINITY, AppExit::Success));
+        if let Some(w) = web_sys::window() {
+            let _ = w.location().set_href(LANDING);
         }
     }
+    #[cfg(not(target_family = "wasm"))]
+    exits.write(exit);
 }
 
 #[cfg(test)]
@@ -834,10 +942,7 @@ mod tests {
         assert!(t.contains("new certificate: pass its --digest"), "{t}");
         cfg.transport = Transport::WebSocket;
         let (t, problem) = text(NetStatus::Disconnected("left".into()), &cfg);
-        assert!(
-            problem && t.ends_with("left. Run the client again to reconnect"),
-            "{t}"
-        );
+        assert!(problem && t.ends_with("[::1]:5888: left"), "{t}");
         assert!(t.is_ascii(), "{t}");
     }
 
@@ -866,7 +971,7 @@ mod tests {
     #[test]
     fn netcode_states_read_as_words() {
         let e = |s: &str| why(&DisconnectedReason::TransportError(s.into()));
-        assert_eq!(e("ConnectionTimedOut"), "nothing from the server for 3 s");
+        assert_eq!(e("ConnectionTimedOut"), "nothing from the server for 30 s");
         assert_eq!(e("ConnectionRequestTimedOut"), "the server did not answer");
         assert!(e("ConnectionDenied").contains("refused"));
         assert_eq!(e("Other"), "Other");
@@ -901,6 +1006,10 @@ mod tests {
             "the server closed the connection"
         );
         assert_eq!(link(UnlinkReason::ByPeer("full".into())), "full");
+        assert_eq!(
+            link(UnlinkReason::ByPeer("(dropped)".into())),
+            "the server closed the connection"
+        );
     }
 
     #[test]
@@ -991,6 +1100,55 @@ mod tests {
             ),
             (body, 3, 2, 4, 7, Some(0x09), true)
         );
+    }
+
+    /// RECONNECT: the old client goes and an attempt starts under a fresh id and token; a failure
+    /// waits [`RETRY_EVERY`] and tries again, until [`RETRY_SECS`] ran out (the last reason kept
+    /// for the page meanwhile).
+    #[test]
+    fn reconnect_tries_again_until_it_gives_up() {
+        let mut app = App::new();
+        let start = std::time::Instant::now();
+        let mut cfg = Config::from_pairs([("token".to_string(), "ab".to_string())]).unwrap();
+        cfg.id = 7;
+        app.insert_resource(Time::<Real>::new(start))
+            .insert_resource(cfg)
+            .insert_resource(NetStatus::Disconnected("connection lost".into()))
+            .init_resource::<Reconnect>()
+            .add_systems(Update, retry);
+        let at = |app: &mut App, secs: f64| {
+            let now = start + Duration::from_secs_f64(secs);
+            app.world_mut()
+                .resource_mut::<Time<Real>>()
+                .update_with_instant(now);
+            app.update();
+        };
+        let old = app.world_mut().spawn(Client).id();
+        app.world_mut().resource_mut::<Reconnect>().start(0.0);
+        at(&mut app, 0.0);
+        let cfg = app.world().resource::<Config>();
+        assert!(cfg.id != 7 && cfg.token.is_empty());
+        assert!(app.world().get_entity(old).is_err(), "the old client went");
+        assert_eq!(*app.world().resource::<NetStatus>(), NetStatus::Loading);
+        // A full match refuses it: again 2 s later, the reason shown meanwhile.
+        *app.world_mut().resource_mut::<NetStatus>() = NetStatus::Disconnected("full".into());
+        at(&mut app, 1.0);
+        assert_eq!(app.world().resource::<Reconnect>().why, "full");
+        at(&mut app, 2.5);
+        assert!(matches!(
+            app.world().resource::<NetStatus>(),
+            NetStatus::Disconnected(_)
+        ));
+        at(&mut app, 3.0);
+        assert_eq!(*app.world().resource::<NetStatus>(), NetStatus::Loading);
+        // Failing past RETRY_SECS: given up, the failure left for the page's buttons.
+        *app.world_mut().resource_mut::<NetStatus>() = NetStatus::Failed("no answer".into());
+        at(&mut app, RETRY_SECS);
+        assert!(!app.world().resource::<Reconnect>().active());
+        assert!(matches!(
+            app.world().resource::<NetStatus>(),
+            NetStatus::Failed(_)
+        ));
     }
 
     /// Closing the window: Bevy despawns it and asks to exit every frame; the first request sends

@@ -4410,4 +4410,52 @@ mod tests {
         assert_eq!(hum_step(1000.0, (24000.0, false)), 1512.0);
         assert_eq!(hum_state(150.0), 0);
     }
+
+    /// A rocket's launch is its fire clip's event (C: the clips' route events): sound 699 on the
+    /// shooter's channel A, at its own volume for the shooter, on the tick the clip starts (the
+    /// local player's predicted clip, the others' shown one): 0x77 for every body; War: Beach's
+    /// 0x207 for the Tediz and the Sergeant's and Tediz Leader's 0x2C7 (classes 0x25, 0x26) once
+    /// the pack has those clips' events.
+    #[test]
+    fn a_rocket_launch_plays_its_sound() {
+        use conker_anim::combat::{W16_FIRE, W16_IDLE};
+        use conker_anim::request_at;
+        use conker_rules::beach::{ROCKET_FIRE, TEDI_CLASS};
+        let Some(pack) = map_pack("2d") else { return };
+        let body = |name| (pack.characters.iter()).position(|c| *c == name);
+        let mut shooters: Vec<_> = (0..pack.characters.len())
+            .map(|b| (b, TEDI_CLASS, W16_FIRE))
+            .collect();
+        shooters.extend(body("117").map(|b| (b, TEDI_CLASS, ROCKET_FIRE)));
+        shooters.extend(body("176").map(|b| (b, 0x25, W16_FIRE)));
+        for (body, class, clip) in shooters {
+            let name = pack.characters[body];
+            let drawn = conker_rules::characters::clip(class, clip);
+            if !pack.clips[body].iter().any(|e| e.clip == drawn) {
+                eprintln!("{name}: no clip {drawn:#x} events in the pack (re-pack): skipping");
+                continue;
+            }
+            let mut was = Seen {
+                body,
+                class,
+                local: true,
+                ..at(0, 0.0, 0x16)
+            };
+            let (mut clock, mut level) = (AnimPlayer::default(), None);
+            let ids = heard(&mut Sounds::default(), &pack, 100..104, |s, cx| {
+                let id = if cx.tick < 102 { W16_IDLE } else { clip };
+                clock.tick(request_at(id, 0.0, 0.0, 0), 28);
+                let is = Seen { clock, ..was };
+                s.player(cx, &was, &is);
+                let launch = s
+                    .voices
+                    .iter()
+                    .find(|v| v.id == 699 && v.started == cx.tick);
+                level = level.or(launch.map(|v| v.level(&cx.ear)));
+                was = is;
+            });
+            assert_eq!(ids, [(102, 699)], "{name} {drawn:#x}");
+            assert_eq!(level, Some((32000.0 / 32767.0, 0.5)), "{name}");
+        }
+    }
 }

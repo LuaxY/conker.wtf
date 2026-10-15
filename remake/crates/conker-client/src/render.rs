@@ -304,8 +304,18 @@ pub fn build(app: &mut App, slice: Slice, cfg: &Config) {
             FreeCameraPlugin,
         ));
     }
-    // Keep simulating and talking to the server while unfocused.
+    // Keep simulating and talking to the server while unfocused. In the browser, also while the page
+    // is hidden ([`hidden_page`]).
+    #[cfg(not(target_family = "wasm"))]
     app.insert_resource(bevy::winit::WinitSettings::continuous());
+    #[cfg(target_family = "wasm")]
+    {
+        app.insert_resource(bevy::winit::WinitSettings {
+            focused_mode: bevy::winit::UpdateMode::Continuous,
+            unfocused_mode: hidden_mode(),
+        });
+        app.add_systems(PreUpdate, hidden_page);
+    }
     app.insert_resource(ClearColor(SKY));
     app.init_resource::<TextHud>();
     app.insert_resource(GlobalAmbientLight {
@@ -1117,6 +1127,36 @@ struct TextHud(bool);
 fn toggle_text_hud(controls: crate::bindings::Controls, mut on: ResMut<TextHud>) {
     if controls.just_pressed(crate::bindings::Action::TextHud) {
         on.0 = !on.0;
+    }
+}
+
+/// The browser's frames while the page is unfocused or hidden: on a timer, which a hidden page clamps
+/// to one a second (Chrome: one a minute after 5 min hidden, unless it plays sound).
+#[cfg(target_family = "wasm")]
+fn hidden_mode() -> bevy::winit::UpdateMode {
+    bevy::winit::UpdateMode::reactive(core::time::Duration::from_millis(16))
+}
+
+/// The browser: a hidden page (another tab, a covered or minimised window) runs no
+/// `requestAnimationFrame`, so no frame, no packet, and the server's netcode timeout ends the
+/// match. Bevy's winit loop runs a frame without a redraw only when every window is invisible, and
+/// on a timer only in its reactive mode: the page's visibility goes into the window's (winit's web
+/// backend ignores it there) and into the mode, even focused, until it shows again.
+#[cfg(target_family = "wasm")]
+fn hidden_page(
+    mut occluded: MessageReader<bevy::window::WindowOccluded>,
+    mut windows: Query<&mut Window>,
+    mut settings: ResMut<bevy::winit::WinitSettings>,
+) {
+    for e in occluded.read() {
+        if let Ok(mut window) = windows.get_mut(e.window) {
+            window.visible = !e.occluded;
+        }
+        settings.focused_mode = match e.occluded {
+            true => hidden_mode(),
+            false => bevy::winit::UpdateMode::Continuous,
+        };
+        info!("page {}", if e.occluded { "hidden" } else { "shown" });
     }
 }
 

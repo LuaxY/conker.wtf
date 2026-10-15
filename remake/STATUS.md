@@ -1,7 +1,115 @@
-# Status (newest first; latest 2026-10-15, protocol 44)
+# Status (newest first; latest 2026-10-15, protocol 45)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Fix batch F3 lane C: QUIT, staying connected, the reconnect menu
+From play: the results' RESTART and QUIT "do nothing", and switching windows ends in "lost connection, reload to
+reconnect". **Wire:** the connect token's `timeout_seconds` 3 → 30 (no format or protocol change; each side honours
+the token it holds). No conker-sim or rules change.
+- **The results' QUIT** (C, V native): the pad's path worked (V: a scripted client's stick push and A picked QUIT and
+  exited), but the mouse and Enter did nothing and the pointer stayed locked. Now the pointer over RESTART or QUIT
+  lights it, a click or Enter chooses (`results::button_at`, `Menu::press`, read in `menu::run`; V: Enter voted RESTART
+  on the server, offscreen), and over the results the pointer is free (`pointer::Free`: natively ungrabbed, in the
+  browser the lock exited and a press takes none). RESTART is unchanged (the existing vote).
+- **One leave** (C): LEAVE MATCH, the results' QUIT and the lost page's QUIT write an exit; `connection::leave`
+  disconnects first, then exits natively or, in the browser, goes to the landing page (`index.html`, once). A leave's
+  own disconnect no longer reads as a lost connection. Side effect: `seconds=` in the browser now ends on the landing.
+- **Timeouts** (C, V native): netcode 3 s → 30 s (`token.rs`, `connection.rs` `TIMEOUT_SECS`), WebTransport idle 5 s →
+  30 s (server `tls.rs`, native client); keep-alive still 1 s. V: a native client frozen (SIGSTOP) 10 s and 20 s
+  stayed connected; 40 s dropped at 30 s (the QUIC idle fired first natively; in a browser its network process keeps
+  answering the server's pings, so netcode's 30 s is the limit there). Cost: a hard-dead client holds its slot 30 s
+  (was 3), a hard-killed server is noticed in 30 s (was 3-5); closed pages and graceful stops are still immediate.
+- **A quiet client stands** (C, V native): lightyear repeats a client's last input while none arrive, so a held fire
+  or stick went on for the whole stall. The server now plays a neutral input (stick and buttons let go; camera, aim,
+  MODERN and shoulder kept) once a client's newest input is 15 ticks (0.5 s) behind (`stale_inputs`). V: the frozen
+  client's player stood from 0.5 s in, and was killed and respawned once mid-freeze (standing, not leaving, is the cost).
+- **A hidden page keeps ticking** (C, browser only, not tried): rAF stops in a hidden page, and Bevy's winit loop runs
+  a frame without a redraw only when every window is invisible. `render::hidden_page` mirrors winit's `Occluded` into
+  the window's `visible` (a no-op for winit's web backend) and switches to the reactive mode (a 16 ms timer, which a
+  hidden page clamps to 1 s; Chrome one a minute after 5 min hidden, unless the page plays sound). So a short switch
+  keeps the connection (frames at ~1 Hz, inside 30 s with none at all); a long one drops, and the page below covers it.
+  This is reasoned from bevy_winit's and winit's sources, not measured.
+- **The lost connection's page** (C, V native screenshot): `menu::Page::Lost` replaces any page when the connection
+  is lost or failed (the first connect too): CONNECTION LOST / COULD NOT CONNECT, the reason (46 characters), RECONNECT
+  and QUIT, with the Esc menu's mouse, keys and pad (Esc does nothing there); the HUD draws it with no player
+  (`hud::draw`'s new `spawn`). RECONNECT (`connection::Reconnect`, `retry`): the old client despawned, a fresh token and
+  a fresh client id (netcode refuses a live id), status back to loading so `connect` runs as on the first join;
+  RECONNECTING... with the last failure until the player is back; a failure tries again 2 s later for 35 s (past the
+  old slot's 30 s), then the buttons come back. Rejoining is as a new player (score lost). V: after a 40 s freeze the
+  same client reconnected (new id, synced, slot 0, no warning in either log); across a server restart it retried every
+  2.0 s and rejoined; with the server down it gave up at 35 s, status left failed. aeronet's `(dropped)` now reads
+  "the server closed the connection". After a reconnect the browser shows CLICK TO CAPTURE THE MOUSE (the hint's rule:
+  playing, no lock).
+- The status line lost its "Reload to reconnect" / "Run the client again" hint; `web/README.md` follows.
+- Tests: new `reconnect_tries_again_until_it_gives_up`, `the_lost_page_offers_reconnect_and_quit`,
+  `the_pointer_finds_the_buttons` (results), `a_quiet_client_lets_go` (server); `the_pointer_hits_what_is_drawn` covers
+  the lost page's buttons; `netcode_states_read_as_words` and `statuses_read_with_their_reasons_and_hints` updated.
+  conker-client lib 233 pass (1 failing: lane A's `the_pickup_prompt_follows_the_gate_and_the_binding`, its
+  `game.rs` in progress), conker-server 31; clippy clean (client, server, wasm); `bun run typecheck` clean.
+- Left: every browser path is unverified (the pointer lock's exit, `Occluded` delivery and ~1 Hz frames with
+  lightyear's sync, Chrome's throttling, the landing from `play.html` in dev and prod). Not hit: reconnecting while the
+  server still holds the old slot (a new id joins if there is room; a full match's refusal retries until 35 s; the ghost
+  counts as a human meanwhile, so a Deathmatch's bots may dip). Not built: reclaiming the old slot (and its score) by
+  identity; word-wrapping the reason. A connection lost on the settings page keeps unapplied changes live; natively the
+  text status (full reason) shows beside the page; `team=` is not asked again after a reconnect (`teams::Screen.asked`).
+
+## Fix batch F3 lane B: the sniper's delay, the bazooka's sound
+From play: "when using the sniper there is a delay between when we click to shoot and the shoot", and "the bazooka,
+when we shoot, doesn't make any sound". **No wire change**, no conker-sim change. The sniper's change is MODERN only
+and runs on both sides (prediction runs the rules); bots, the N64 controls and the oracle replays are unchanged, no
+expected value of theirs edited.
+- **The sniper's delay was `AIM_DELAY`** (`game.rs`, the `Action::Aim` arm): Z (FIRE) in the scope set the shot for 3
+  frames later on both controls (measured: press → `Strike::Ray` +3 ticks, the clip 0x156, the shot cue 755/756 and
+  the hit all on that tick; no animation, `ready` or latch gate besides). In the original those 3 frames show the red
+  aim laser (V `bullets-f1d-scratch` NOTES, sniper DLs 159-162), which the remake does not draw for 0x24, so they were
+  dead latency. Under MODERN the press now shoots in its own frame; the N64 keeps the 3. Its sound already came from
+  the predicted clip, so it now plays on the click (E2E, headless client and server: read 160 for a FIRE at 160, the
+  N64's at 163). The hit marker stays the server's (by design, `crosshair.rs`), a round trip later.
+- **The bazooka's launch is clip 0x77's route event** (sound 699 on the shooter's channel A at time 0, C), played
+  from the local player's predicted clip: it played on every native path tried (E2E: hip, aimed, moving, 80 ms lag,
+  each at the press read at the shooter's own volume), and every pack WAV decodes with the client's reader. Found
+  (C, the ROM's route events): the pack's clip list (`conker-extract` `MATCH_CLIPS`) left out weapon 0x16's other fire
+  clips, War: Beach's 0x207 and the Sergeant's and the Tediz Leader's 0x2C7 (classes 0x25, 0x26; walk 0x2C6's
+  footsteps too), which carry the same 699: those rockets were silent. Added; **the pack needs re-running**
+  (`bun run pack`) for it to take effect.
+- Tests: `modern_shots_leave_on_the_press` (the sniper's ray and hit on the press under MODERN, +3 with the N64's Z;
+  the rocket with its clip 0x77 on the press, N64 hip, MODERN hip and aimed); conker-client's
+  `a_rocket_launch_plays_its_sound` (each body's 0x77 start plays 699 at its own volume; 0x207 and 0x2C7 once
+  re-packed, skipped before). Rules/bots/sim/client with `CONKER_ROM` and conker-extract pass; clippy clean (rules,
+  client native, extract); the wasm32 clippy stopped on another lane's in-progress `menu.rs`/`pointer.rs`.
+- Left: the browser. No native path loses 699, so if the default characters' rocket is still silent in a browser the
+  suspects are the deployment (`audio/common/0699.wav` not served or not loaded before the shot: `upkeep` starts a
+  one-shot only on its tick) or the pick (176/177 before the re-pack). A sniper FIRE pressed on the very tick R goes
+  down is still lost (Free skips the ray, the next frame sees no press); hold R first.
+
+## Fix batch F3 lane A (rules): melee while aiming, the start item swapped by touch, the rocket to the crosshair
+From play, all MODERN only (`pad()`'s identity at `actions == 0`: bots, the N64 controls and the oracle replays
+unchanged, no expected value of theirs edited). **No wire change** (`Fighter::start` is on the wire since protocol
+12, the aim is `Input`'s), no conker-sim change; the rules' behaviour changes on both sides (prediction runs them).
+- **The club and the bat swing while aiming** (C, `game.rs` `Match::player`'s `no_fire`): Z with R held was refused
+  for the club's handler (0x19, 0x40) under any controls, and the combo's second swing keys on the same flag. Now
+  only the N64's refuse it (as 0x16's). The other melee weapons (0x21, 0x22) already swung with R held (C).
+- **The start item counts as empty hands for pickups** (C, `can_take`): Interact is needed only for a weapon held
+  other than `Fighter::start` (the club on 0x3F / `--cavemen` and Raptor's cavemen, the bat on 0x1A, Beach
+  villagers' 0x3E), or a gas mask worn (kept: a touch in the gas would take it off). The server's gate and the
+  client's prompt ask the same function, so the "PRESS F" prompt goes there too.
+- **The rocket to the crosshair** (C, `Match::strike`'s `Strike::Rocket`): it left along `aim(f)`, the facing level
+  unless the N64 scope camera was open. Under MODERN it now leaves its muzzle toward what the aim ray meets
+  (`Match::aims`, a wall or a body part), from the hip and aimed alike, with no spread cone, as the bullets and the
+  crossbow's bolt. It reads only the `Input`-built aim ray, the facing (`aim_facing`, from `Input`), the world and the
+  seen bodies, not `scope_yaw`/`scope_pitch`, so the client's prediction and the server fire it alike whatever each
+  side's follow camera did with the scope (C; not checked live).
+- Tests: new `modern_club_and_bat_swing_while_aiming` (0x40 and 0x19, R held: MODERN's FIRE swings, the N64's Z
+  doesn't). `the_modern_rocket_fires_from_the_aim` now also fires from the hip (no R, no scope) and checks the aim point
+  lies on the rocket's line, up 22.5° and turned 45° as the aim (it compared the ray's direction before).
+  `modern_empty_hands_take_a_weapon_by_touch_and_draw_it` also runs with the club handed over and drawn;
+  `modern_weapon_pickups_wait_for_interact_and_draw` checks a pistol held with the club as start item still waits;
+  conker-client's `the_pickup_prompt_follows_the_gate_and_the_binding`: no prompt holding only the start item.
+  conker-rules lib 172 + 1 ignored, conker-client lib 231, rules/bots/sim with `CONKER_ROM` pass; clippy (rules) clean.
+- Left: not tried in a live match (the rocket's agreement, the touch swap in Heist on 0x1A where everyone holds the
+  bat). A rocket aimed at a wall nearer than its muzzle (the shoulder's ray against a wall) flies toward that point,
+  possibly back past the shooter, as a bullet would (I, untested).
 
 ## Fix batch F2: the start item drawn, the first pickup by touch (MODERN)
 From play: "Default weapons should be drawn out by default" and "If no weapons, the first one is picked up

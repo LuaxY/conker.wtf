@@ -108,8 +108,9 @@ fn throw_frames(f: &Fighter) -> u32 {
 /// The hand during the hold, in the thrower's frame (V combat4_dead2: the blast 22.3 behind, 12.2
 /// to the side, 60.3 up).
 const HOLD_HAND: [f32; 3] = [-22.3, -12.2, 60.3];
-/// The sniper's shot leaves 3 frames after Z (V e_w24, k10), its ray reaches this far (I); its aim
-/// (and a shot in progress) ends 8 frames after R is let go (V e_w24 1161, ctlw_k10 251).
+/// The sniper's shot leaves 3 frames after Z (V e_w24, k10; the modern controls': on the press),
+/// its ray reaches this far (I); its aim (and a shot in progress) ends 8 frames after R is let go
+/// (V e_w24 1161, ctlw_k10 251).
 const AIM_DELAY: u32 = 3;
 const AIM_EXIT: u32 = 8;
 /// The crossbow's aim laser waits this many frames into 0x10A, its blend (V g3a combat8_xbl:
@@ -2357,11 +2358,12 @@ impl Match {
         // Then a new action; the frame's own work (a shot on frame 0) follows below. Weapon 0x23
         // with R held starts nothing (V ctlw_k6: B and Z ignored; I: an aim without its own
         // state); weapon 0x16 with R held does not fire (V combat4_w16 980) but holsters (ctlw_k7
-        // 190). The modern controls fire it from R's aim, along the aim (the user's call).
+        // 190). The modern controls fire it from R's aim, toward the aim point, and swing the club
+        // and the bat while aiming (the user's calls).
         let armed = w.filter(|_| f.drawn);
         let aiming = armed.is_some_and(|w| w.id == 0x23) && late_held(BUTTON_R);
         let no_fire =
-            armed.is_some_and(|w| (w.id == 0x16 && !modern) || w.club()) && late_held(BUTTON_R);
+            !modern && armed.is_some_and(|w| w.id == 0x16 || w.club()) && late_held(BUTTON_R);
         // The club: a Z press in a swing draws the RNG (`func_150641D8`, C) and, within
         // `COMBO_WINDOW` frames of the first swing's hit, chains the second (V combat6_e40 870,
         // 990; 1110: no hit, nothing).
@@ -2618,6 +2620,13 @@ impl Match {
                 }
             }
             (Action::Aim { shot }, Some(w)) => {
+                // The modern controls fire the sniper on the press: the original's 3 frames are its
+                // red laser's (V `bullets-f1d-scratch` sniper DLs 159-162), which is not drawn here.
+                let ray = matches!(w.attack, Attack::Ray { .. });
+                let shot = match modern && ray && shot == NONE && pressed(BUTTON_Z) {
+                    true => t,
+                    false => shot,
+                };
                 if shot == t {
                     f.set(
                         Action::Fire {
@@ -2979,7 +2988,23 @@ impl Match {
                 self.bullets.push((t, b));
             }
             Strike::Grenade(g) => self.grenades.push((t, g)),
-            Strike::Rocket(r) => self.rockets.push((t, r)),
+            Strike::Rocket(mut r) => {
+                // The modern aim sends it from the muzzle to what its ray meets, as the crosshair
+                // shows, from the hip as through the scope (no cone; the scope's look plays no part,
+                // so the client's prediction and the server read the same input).
+                let ray = (self.aims.get(i).copied().flatten())
+                    .filter(|_| self.players[i].actions & movement::action::MODERN != 0);
+                if let Some((eye, dir)) = ray {
+                    let wall = raycast(world, eye, dir, RAY_RANGE);
+                    let d = (self.first_part(i, eye, dir, wall, seen)).map_or(wall, |h| h.1);
+                    let to: [f32; 3] = core::array::from_fn(|j| eye[j] + dir[j] * d - r.pos[j]);
+                    let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+                    if len > 0.0 {
+                        r = Rocket::fire(world, i, r.pos, to.map(|c| c / len));
+                    }
+                }
+                self.rockets.push((t, r))
+            }
             Strike::Blast(pos) => {
                 self.players[i].dropped = Some(t);
                 let blasts = [
@@ -4241,8 +4266,9 @@ pub fn can_mount(f: &Fighter, at: [f32; 3], interact: bool) -> bool {
 /// nothing, V r11; a mask only while the gas counts down, `func_1511DF6C` skips model 0x54 on scene
 /// 0x2D while G+0x1FE4 ≤ 0, C, and not over one, I) and touching it. Under the modern controls
 /// (`interact`: Interact pressed this frame) an on-foot weapon, Raptor's bone weapons included, waits
-/// for Interact (decisions 12, 18), but by a player holding nothing, which takes it by touch (a mask
-/// worn holds the weapon's place, V d2: MP+0xEB0 13 → 19); grenades, masks and Tank's, Race's and
+/// for Interact (decisions 12, 18), but by a player holding nothing or only its start item
+/// ([`Fighter::start`]), which takes it by touch (a mask worn holds the weapon's place, V d2:
+/// MP+0xEB0 13 → 19, so it still waits); grenades, masks and Tank's, Race's and
 /// Beach's items stay automatic. The server's gate ([`Match::step`]'s pickups) and the client's
 /// prompt ask it alike.
 pub fn can_take(
@@ -4263,7 +4289,9 @@ pub fn can_take(
             true => race::touches(pos, f),
             false => tank::touches(pos, f, reach),
         }
-        && !(manual && interact == Some(false) && (f.weapon.is_some() || f.masked))
+        && !(manual
+            && interact == Some(false)
+            && (f.weapon.is_some_and(|w| Some(w) != f.start) || f.masked))
 }
 
 /// Where a player aims (s126+0x16C and +0x170 through the scope, else its facing, level): the unit
@@ -5811,20 +5839,22 @@ mod tests {
     }
 
     /// Weapon 0x16 with R held: the N64 controls' Z fires nothing (V combat4_w16 980); the modern
-    /// controls' FIRE fires the rocket along the aim, its pitch included, from the scope.
+    /// controls' FIRE fires the rocket from its muzzle to the aim point (what the aim ray meets, as
+    /// the crosshair shows), through the scope as from the hip (no R, no scope: the N64's would fly
+    /// level along the facing), turned and pitched with the aim.
     #[test]
     fn the_modern_rocket_fires_from_the_aim() {
         use movement::action::{FIRE, MODERN};
-        for modern in [false, true] {
+        for (modern, scoped) in [(false, true), (true, true), (true, false)] {
             let (arena, mut m, w) = duel();
             m.give(0, 0x16);
-            m.players[0].body.scope_yaw = Some(0.0);
+            m.players[0].body.scope_yaw = scoped.then_some(0.0);
             let input = |t: u32| {
                 let fire = (50..=52).contains(&t);
                 let z = if fire && !modern { BUTTON_Z } else { 0 };
                 Input {
                     buttons: if t == 0 { BUTTON_B } else { 0 }
-                        | if t >= 45 { BUTTON_R | z } else { 0 },
+                        | if t >= 45 && scoped { BUTTON_R | z } else { 0 },
                     camera_yaw: 0xE000,
                     aim_pitch: 0x1000,
                     actions: if modern {
@@ -5837,14 +5867,117 @@ mod tests {
             };
             run_with(&mut m, &arena, &w, 51, |t| [input(t), Input::default()]);
             // The shot count, as a rocket on player 1 would go off in its own frame.
-            assert_eq!(m.players[0].shots, u16::from(modern));
+            assert_eq!(m.players[0].shots, u16::from(modern), "scoped {scoped}");
             if modern {
-                let (dir, aim) = (m.rockets[0].1.dir, m.aims[0].unwrap().1);
+                let r = m.rockets[0].1;
+                let (eye, aim) = m.aims[0].unwrap();
+                let wall = raycast(&w, eye, aim, RAY_RANGE);
+                let d = (m.first_part(0, eye, aim, wall, &here)).map_or(wall, |h| h.1);
+                let p: [f32; 3] = core::array::from_fn(|j| eye[j] + aim[j] * d - r.pos[j]);
+                let [x, y, z] = r.dir;
+                let off = [
+                    p[1] * z - p[2] * y,
+                    p[2] * x - p[0] * z,
+                    p[0] * y - p[1] * x,
+                ];
+                assert!(off.iter().all(|c| c.abs() < 0.5), "{off:?} {r:?}");
+                // Up 22.5° and 45° round, as the aim.
                 assert!(
-                    (0..3).all(|j| (dir[j] - aim[j]).abs() < 1e-3),
-                    "{dir:?} {aim:?}"
+                    y > 0.3 && (x + z).abs() < 0.01,
+                    "scoped {scoped} {:?}",
+                    r.dir
                 );
-                assert!(dir[1] > 0.3);
+            }
+        }
+    }
+
+    /// The modern controls swing the club and the bat with R's aim held; the N64's refuse Z there.
+    #[test]
+    fn modern_club_and_bat_swing_while_aiming() {
+        use movement::action::{FIRE, MODERN};
+        for (id, modern) in [(0x40, false), (0x40, true), (0x19, false), (0x19, true)] {
+            let (arena, mut m, w) = duel();
+            m.players[1].body.pos = [3000.0, 0.0, 3000.0];
+            m.give(0, id);
+            let input = |t: u32| {
+                let fire = t == 30;
+                Input {
+                    buttons: if t == 0 { BUTTON_B } else { 0 }
+                        | if t >= 25 { BUTTON_R } else { 0 }
+                        | if fire && !modern { BUTTON_Z } else { 0 },
+                    camera_yaw: 0xC000,
+                    actions: if modern {
+                        MODERN | if fire { FIRE } else { 0 }
+                    } else {
+                        0
+                    },
+                    ..Input::default()
+                }
+            };
+            run_with(&mut m, &arena, &w, 31, |t| [input(t), Input::default()]);
+            let f = m.players[0];
+            assert!(f.drawn, "{id:#x}");
+            assert_eq!(
+                (matches!(f.action, Action::Fire { .. }), f.shots),
+                (modern, u16::from(modern)),
+                "{id:#x} modern {modern}"
+            );
+        }
+    }
+
+    /// The shots leave with their fire clip, whose start the client's sound plays (the rocket's
+    /// launch, the sniper's shot): the rocket on the press, from the hip or (modern) the aim; the
+    /// sniper through the scope 3 frames after the N64 controls' Z (V e_w24, the laser's frames),
+    /// on the modern controls' FIRE, its ray's hit in that frame.
+    #[test]
+    fn modern_shots_leave_on_the_press() {
+        use movement::action::{FIRE, MODERN};
+        for (id, modern, aimed) in [
+            (0x24, false, true),
+            (0x24, true, true),
+            (0x16, false, false),
+            (0x16, true, false),
+            (0x16, true, true),
+        ] {
+            let (arena, mut m, w) = duel();
+            m.give(0, id);
+            m.players[1].body.pos[0] = 3000.0; // out of the blast
+            let input = |t: u32| {
+                let fire = (100..=102).contains(&t);
+                Input {
+                    buttons: if t == 0 { BUTTON_B } else { 0 }
+                        | if aimed && t >= 70 { BUTTON_R } else { 0 }
+                        | if fire && !modern { BUTTON_Z } else { 0 },
+                    camera_yaw: 0xC000,
+                    actions: if modern {
+                        MODERN | if fire { FIRE } else { 0 }
+                    } else {
+                        0
+                    },
+                    ..Input::default()
+                }
+            };
+            let (mut shot, mut hit) = (None, None);
+            for t in 0..110 {
+                let ev = m.step(&arena, &[input(t), Input::default()], &w);
+                let f = &m.players[0];
+                if f.shots > 0 && shot.is_none() {
+                    shot = Some((t, f.anim));
+                }
+                if ev.iter().any(|e| matches!(e, Event::Hit { victim: 1, .. })) {
+                    hit = hit.or(Some(t));
+                }
+            }
+            let at = if id == 0x24 && !modern {
+                100 + AIM_DELAY
+            } else {
+                100
+            };
+            let clip = weapon::weapon(id).unwrap().fire.0;
+            let case = format!("{id:#x} modern {modern} aimed {aimed}");
+            assert_eq!(shot, Some((at, clip)), "{case}");
+            if id == 0x24 {
+                assert_eq!(hit, Some(at), "{case}");
             }
         }
     }
@@ -5874,9 +6007,9 @@ mod tests {
         out
     }
 
-    /// Decisions 11, 12 and 18: a modern player holding a weapon takes a weapon's pickup only with an
-    /// Interact press (`can_take` says so for the prompt too), and draws it at once; the grenades
-    /// stay automatic.
+    /// Decisions 11, 12 and 18: a modern player holding a weapon (not its start item) takes a weapon's
+    /// pickup only with an Interact press (`can_take` says so for the prompt too), and draws it at
+    /// once; the grenades stay automatic.
     #[test]
     fn modern_weapon_pickups_wait_for_interact_and_draw() {
         use movement::action::INTERACT;
@@ -5907,6 +6040,11 @@ mod tests {
         };
         let f = &m.players[0];
         assert!(!take(f, Some(false)) && take(f, Some(true)) && take(f, None));
+        let club_start = Fighter {
+            start: Some(weapon::CLUB.id),
+            ..*f
+        };
+        assert!(!take(&club_start, Some(false)));
         // Held through: one press takes it, then it comes 2 frames later and is drawn at once.
         let ev = run_with(&mut m, &arena, &w, 3, |_| [modern(INTERACT), modern(0)]);
         assert_eq!(
@@ -5934,37 +6072,50 @@ mod tests {
         assert_eq!((b(0) & BUTTON_B, b(BUTTON_B) & BUTTON_B), (BUTTON_B, 0));
     }
 
-    /// A modern player holding nothing takes a weapon's pickup by touch, as the N64's, and draws it
-    /// at once (no prompt: `can_take` takes it without the press); a mask worn holds the weapon's
-    /// place, so it still waits for Interact.
+    /// A modern player holding nothing, or only its start item (the club, drawn), takes a weapon's
+    /// pickup by touch, as the N64's, and draws it at once (no prompt: `can_take` takes it without
+    /// the press); a mask worn holds the weapon's place, so it still waits for Interact.
     #[test]
     fn modern_empty_hands_take_a_weapon_by_touch_and_draw_it() {
-        let (arena, mut m, w) = duel();
-        m.players[0].body.pos = [0.0, 0.0, 2950.0]; // on the twin guns
-        let (pickup, pos) = arena.pickups[0];
-        let take = |f: &Fighter| {
-            can_take(
-                &m.settings,
-                pickup.gives,
-                pos,
-                f,
-                weapon::REACH,
-                0,
-                Some(false),
-            )
-        };
-        let f = m.players[0];
-        assert!(take(&f) && !take(&Fighter { masked: true, ..f }));
-        let ev = run_with(&mut m, &arena, &w, 3, |_| [modern(0), Input::default()]);
-        assert!(
-            ev.iter()
-                .any(|e| matches!(e, (0, Event::Pickup { player: 0, .. })))
-        );
-        let f = m.players[0];
-        assert_eq!((f.weapon, f.action, f.since), (Some(0x09), Action::Draw, 2));
-        let draw = u32::from(weapon::TWIN_GUNS.draw.1);
-        run_with(&mut m, &arena, &w, draw, |_| [modern(0), Input::default()]);
-        assert!(m.players[0].drawn);
+        let club = weapon::CLUB.id;
+        for start in [None, Some(club)] {
+            let (arena, mut m, w) = duel();
+            m.players[0].start = start;
+            // The start item handed over and drawn first.
+            let ready = u32::from(weapon::CLUB.draw.1) + 2;
+            run_with(&mut m, &arena, &w, ready, |_| [modern(0), Input::default()]);
+            assert_eq!(m.players[0].drawn, start.is_some());
+            m.players[0].body.pos = [0.0, 0.0, 2950.0]; // on the twin guns
+            let (pickup, pos) = arena.pickups[0];
+            let take = |f: &Fighter| {
+                can_take(
+                    &m.settings,
+                    pickup.gives,
+                    pos,
+                    f,
+                    weapon::REACH,
+                    0,
+                    Some(false),
+                )
+            };
+            let f = m.players[0];
+            assert_eq!(f.weapon, start);
+            assert!(take(&f) && !take(&Fighter { masked: true, ..f }));
+            let t = m.tick;
+            let ev = run_with(&mut m, &arena, &w, 3, |_| [modern(0), Input::default()]);
+            assert!(
+                ev.iter()
+                    .any(|e| matches!(e, (at, Event::Pickup { player: 0, .. }) if *at == t))
+            );
+            let f = m.players[0];
+            assert_eq!(
+                (f.weapon, f.action, f.since),
+                (Some(0x09), Action::Draw, t + 2)
+            );
+            let draw = u32::from(weapon::TWIN_GUNS.draw.1);
+            run_with(&mut m, &arena, &w, draw, |_| [modern(0), Input::default()]);
+            assert!(m.players[0].drawn, "{start:?}");
+        }
     }
 
     /// The start item: drawn at once under the modern controls, at the match start and after a

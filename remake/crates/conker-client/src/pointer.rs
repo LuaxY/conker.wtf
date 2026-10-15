@@ -6,7 +6,9 @@
 //! nothing until a click on the canvas takes it. Mouse back / forward don't leave the page.
 //! Natively a click while playing grabs the cursor (locked, hidden), and so does the menu's
 //! closing; losing the focus, Esc or the open menu lets it go. Either way the mouse's counts are
-//! the device's (no acceleration or smoothing), as the R-held mouse aim reads them.
+//! the device's (no acceleration or smoothing), as the R-held mouse aim reads them. Over the results
+//! and the lost connection's page ([`Free`]) the pointer is theirs: let go (the browser's lock
+//! exited), and a press takes no lock.
 
 use bevy::prelude::*;
 
@@ -15,6 +17,11 @@ use bevy::prelude::*;
 /// opens on it).
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Paused(pub bool);
+
+/// The pointer is a screen's (the results, the lost connection's page): freed, and a press takes no
+/// lock. [`crate::menu`] sets it each frame.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Free(pub bool);
 
 /// RESUME's click or key: the pointer lock again (the browser; natively the cursor follows
 /// [`Paused`]). Within the click's user activation; Chrome refuses it for 1.25 s after an Esc.
@@ -43,6 +50,7 @@ pub fn refused() -> bool {
 
 pub fn build(app: &mut App, windowed: bool) {
     app.init_resource::<Paused>();
+    app.init_resource::<Free>();
     if !windowed {
         return;
     }
@@ -69,7 +77,7 @@ fn grab(
     keys: Res<ButtonInput<KeyCode>>,
     playing: Query<(), With<crate::FollowCamera>>,
     free: Query<&bevy::camera_controller::free_camera::FreeCameraState>,
-    paused: Res<Paused>,
+    (paused, screen): (Res<Paused>, Res<Free>),
     mut was: Local<bool>,
 ) {
     use bevy::window::CursorGrabMode;
@@ -82,7 +90,7 @@ fn grab(
     }
     let press = resumed || mouse.get_just_pressed().next().is_some();
     let lock = match () {
-        _ if !window.focused || paused.0 || keys.just_pressed(KeyCode::Escape) => false,
+        _ if !window.focused || paused.0 || screen.0 || keys.just_pressed(KeyCode::Escape) => false,
         _ if press && !playing.is_empty() => true,
         _ => return,
     };
@@ -100,14 +108,15 @@ fn grab(
 
 #[cfg(target_family = "wasm")]
 mod web {
-    use super::Paused;
+    use super::{Free, Paused};
     use bevy::prelude::*;
     use bevy::window::{CursorGrabMode, CursorOptions};
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
     /// The page holds the pointer lock; it lost it since the last frame; a request was refused;
-    /// the Esc menu is open (as [`Paused`] was last frame).
+    /// the Esc menu is open or a screen has the pointer (as [`Paused`] and [`Free`] were last
+    /// frame).
     pub static LOCKED: AtomicBool = AtomicBool::new(false);
     static LOST: AtomicBool = AtomicBool::new(false);
     pub static REFUSED: AtomicBool = AtomicBool::new(false);
@@ -208,17 +217,25 @@ mod web {
 
     /// A loss raises [`Paused`] (the menu opens on it) and puts Bevy's grab mode back to none (a
     /// lock Bevy took, the debug camera's, would otherwise still read as locked); the menu's state
-    /// for the canvas's presses. Without the lock the mouse's counts are dropped: they are the
-    /// cursor's moving over the page (the menu closed by Esc, before the first click), not a look.
+    /// for the canvas's presses; [`Free`] exits the lock. Without the lock the mouse's counts are
+    /// dropped: they are the cursor's moving over the page (the menu closed by Esc, before the first
+    /// click), not a look.
     pub fn sync(
         mut paused: ResMut<Paused>,
+        free: Res<Free>,
         mut cursors: Query<&mut CursorOptions>,
         motion: Option<ResMut<bevy::input::mouse::AccumulatedMouseMotion>>,
     ) {
         if let Some(mut motion) = motion.filter(|_| !LOCKED.load(Relaxed)) {
             motion.delta = Vec2::ZERO;
         }
-        MENU.store(paused.0, Relaxed);
+        MENU.store(paused.0 || free.0, Relaxed);
+        if free.0
+            && LOCKED.load(Relaxed)
+            && let Some(d) = web_sys::window().and_then(|w| w.document())
+        {
+            d.exit_pointer_lock();
+        }
         if LOST.swap(false, Relaxed) {
             info!("pointer lock lost: the menu opens");
             for mut cursor in &mut cursors {

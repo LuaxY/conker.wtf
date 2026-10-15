@@ -2,7 +2,7 @@
 //! never leaves this process, and hands it out over plain HTTP: `GET /token[?id=N]` answers the
 //! token's 2048 bytes as hex (a random client id without `id=`). `GET /info` answers what a client
 //! needs before it loads anything, and what a server list shows:
-//! `{"map":"2d","protocol":44,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
+//! `{"map":"2d","protocol":45,"pack":"…","humans":1,"bots":3}` (the pack map, [`PROTOCOL_ID`], the
 //! pack's fingerprint, conker-sim's `pack_hash`, and the players in the match now, [`Live`]).
 //!
 //! The endpoint lives in the game server because the server holds the key and its public
@@ -27,8 +27,11 @@ use std::time::{Duration, Instant};
 /// Seconds a token may start a connection: the page fetches it when the ROM is picked and connects
 /// once the level has loaded (2-3 s here, 7+ s in a debug build under load).
 pub const TOKEN_SECS: i32 = 60;
-/// Netcode's timeout both ways, carried in the token (conker-client's `TIMEOUT_SECS`).
-pub const TIMEOUT_SECS: i32 = 3;
+/// Netcode's timeout both ways, carried in the token (conker-client's `TIMEOUT_SECS`), and the
+/// WebTransport sessions' idle timeout ([`crate::tls`]): a client silent this long loses its slot.
+/// Long enough for a browser tab in the background (it may run no frame at all) or a short stall;
+/// a closed page or a leaving client goes at once (its transport's close, netcode's disconnect).
+pub const TIMEOUT_SECS: i32 = 30;
 /// Tokens one address may take per [`WINDOW`] (a page takes one per load).
 pub const PER_WINDOW: u32 = 10;
 pub const WINDOW: Duration = Duration::from_secs(10);

@@ -3,9 +3,13 @@
 //! menu. RESTART votes for the next match (conker-sim's [`Restart`]: the server starts it once every
 //! human voted, or on its own after its countdown, past RESTART's 17-frame fade: phase 3,
 //! [`crate::hud::restart_fade`], where the menu, shown no more, ignores the pad); QUIT leaves: the
-//! browser goes back to the landing page (`index.html`), the native client exits.
+//! browser goes back to the landing page, the native client exits (`connection::leave`). The stick
+//! pushed left or right, A or Jump; the pointer over a button lights it, a click on it or Enter
+//! chooses ([`button_at`], [`Menu::press`]: [`crate::menu`] reads the mouse and keys, the pointer
+//! freed meanwhile, [`crate::pointer::Free`]).
 
 use bevy::prelude::*;
+use conker_assets::hud::Hud;
 use conker_sim::movement::{BUTTON_A, Input};
 use conker_sim::net::{JoinChannel, MatchView, Restart};
 use lightyear::prelude::input::native::{ActionState, InputMarker};
@@ -23,12 +27,24 @@ pub enum Pick {
 }
 
 /// The results' menu: the lit choice (0 RESTART, lit first; 1 QUIT), whether this player voted to
-/// restart, and the last frame's pad (a push or press acts on its first frame).
+/// restart, a click or Enter waiting for the next tick (it chooses as A does), and the last frame's
+/// pad (a push or press acts on its first frame).
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Menu {
     pub choice: usize,
     pub voted: bool,
+    pub press: bool,
     last: (u16, i8),
+}
+
+/// The results' button under `at` (window pixels in a `window`-sized target): 0 RESTART, 1 QUIT.
+pub fn button_at(hud: &Hud, window: Vec2, at: Vec2) -> Option<usize> {
+    let r = &hud.end.as_ref()?.results;
+    [&r.restart, &r.quit].iter().position(|b| {
+        let rect = b.rect.map(f32::from);
+        let [x, y, w, h] = crate::hud::place(hud.frame, b.anchor, rect, window);
+        (x..x + w).contains(&at.x) && (y..y + h).contains(&at.y)
+    })
 }
 
 impl Menu {
@@ -75,9 +91,10 @@ fn menu(
     let Input {
         buttons, stick_x, ..
     } = input.0;
-    // The modern controls' Jump confirms as A does.
+    // The modern controls' Jump confirms as A does, and so does a click or Enter.
     let jump = input.0.actions & conker_sim::movement::action::JUMP != 0;
-    let buttons = buttons | if jump { BUTTON_A } else { 0 };
+    let buttons = buttons | if jump || menu.press { BUTTON_A } else { 0 };
+    menu.press = false;
     if !game
         .iter()
         .any(|m| crate::outro::results(m, &playing, &outros))
@@ -95,11 +112,6 @@ fn menu(
         }
         Some(Pick::Quit) => {
             info!("results: QUIT");
-            #[cfg(target_family = "wasm")]
-            if let Some(w) = web_sys::window() {
-                let _ = w.location().set_href("index.html");
-                return;
-            }
             exit.write(AppExit::Success);
         }
         None => {}
@@ -130,5 +142,22 @@ mod tests {
         m.step(0, 0);
         m.step(0, 30);
         assert_eq!(m.choice, 0);
+    }
+
+    /// The pointer finds RESTART and QUIT where they are drawn: in a 1280×720 window the 292×216
+    /// frame scales by 10/3, centred (RESTART at frame x 51-115, QUIT 181-245, y 164-196).
+    #[test]
+    fn the_pointer_finds_the_buttons() {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../assets").into());
+        let read = |p: &str| std::fs::read(std::path::Path::new(&dir).join(p));
+        let (Ok(mut hud), Ok(end)) = (Hud::load(read), conker_assets::hud::End::load(read)) else {
+            eprintln!("no pack HUD in {dir}: skipping");
+            return;
+        };
+        hud.end = Some(end);
+        let at = |x, y| button_at(&hud, Vec2::new(1280.0, 720.0), Vec2::new(x, y));
+        assert_eq!((at(430.0, 600.0), at(860.0, 600.0)), (Some(0), Some(1)));
+        assert_eq!((at(640.0, 600.0), at(430.0, 400.0)), (None, None));
     }
 }

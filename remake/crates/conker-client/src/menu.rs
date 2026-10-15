@@ -20,15 +20,22 @@
 //!   lock (a key is no user gesture; the Esc that lost it the page doesn't see), which the next
 //!   click on the canvas takes: CLICK TO CAPTURE THE MOUSE shows meanwhile, the mouse turning
 //!   nothing ([`crate::pointer`]).
-//! - **LEAVE MATCH:** natively an exit (`connection::leave` disconnects first); in the browser
-//!   netcode's disconnect, then the landing page ([`LANDING`]) once it went out.
+//! - **LEAVE MATCH:** an exit (`connection::leave` disconnects first; in the browser it then goes to
+//!   the landing page).
+//! - **A lost or failed connection** opens its own page ([`Page::Lost`]) over everything, until the
+//!   player is back: why, RECONNECT ([`crate::connection::Reconnect`]: RECONNECTING... while it
+//!   tries) and QUIT (LEAVE MATCH's exit). The same mouse, keys and pad; Esc does nothing there.
+//! - **The results** (not this menu's): the pointer over RESTART or QUIT lights it, a click on it or
+//!   Enter chooses ([`crate::results`]); there, and on the lost page, the pointer is free
+//!   ([`crate::pointer::Free`]).
 //! - **Settings** apply live, APPLY saves them ([`crate::settings::save`]; offscreen runs never do),
 //!   BACK drops what wasn't applied.
 //! - `keys=READ:KEY,…` presses keys at script reads, for screenshots ([`press_keys`]).
 
 use crate::bindings::{Action, Bindings, KeyLabels};
+use crate::connection::{NetStatus, Reconnect};
 use crate::hud::{Sprite, Tex};
-use crate::pointer::Paused;
+use crate::pointer::{Free, Paused};
 use crate::settings::Settings;
 use crate::settings_ui::{
     self as ui, Bound, Capture, Captured, Glyphs, Held, Resolve, Row, Slot, Tab,
@@ -39,13 +46,14 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use conker_assets::hud::{Align, Anchor, Horizontal, Hud, Rgba, Text, Vertical};
 use conker_sim::net::MatchView;
-use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 
-/// Where LEAVE MATCH goes in the browser (the results' QUIT's page).
-pub const LANDING: &str = "index.html";
 /// The main page's choices.
 pub const MAIN: [&str; 3] = ["RESUME", "SETTINGS", "LEAVE MATCH"];
+/// The lost connection's choices.
+pub const LOST: [&str; 2] = ["RECONNECT", "QUIT"];
+/// The most characters of a lost connection's reason shown (at the small scale, in the frame).
+const WHY_CHARS: usize = 46;
 /// A conflict's choices.
 pub const CHOICES: [&str; 3] = ["SWAP", "REPLACE", "CANCEL"];
 /// The settings' buttons: APPLY saves, BACK drops what wasn't applied, DEFAULTS resets the tab.
@@ -65,8 +73,6 @@ pub struct Menu {
     pub resuming: bool,
     /// Browser: a lock was refused (`pointerlockerror`).
     pub refused: bool,
-    /// Browser: leaving, for the landing page from this time.
-    leaving: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -78,6 +84,8 @@ pub enum Page {
     /// The focus among [`MAIN`].
     Main(usize),
     Settings(Box<Sheet>),
+    /// The connection is lost or failed: the focus among [`LOST`].
+    Lost(usize),
 }
 
 /// The settings screen.
@@ -146,6 +154,7 @@ pub enum Nav {
 pub enum Effect {
     Resume,
     Leave,
+    Reconnect,
     /// APPLY: save the settings.
     Save,
 }
@@ -177,6 +186,8 @@ pub struct Signals {
     pub released: bool,
     /// Browser: the pointer lock holds (a resuming menu closes).
     pub locked: bool,
+    /// The connection is lost or failed, or a reconnect is under way.
+    pub offline: bool,
 }
 
 impl Menu {
@@ -186,7 +197,20 @@ impl Menu {
     }
 
     /// Opens or closes on the frame's signals; true if it opened (the Esc or Menu press is spent).
+    /// A lost connection's page replaces any other, and closes once it is back.
     pub fn signals(&mut self, f: &Signals) -> bool {
+        if f.offline {
+            if !matches!(self.page, Page::Lost(_)) {
+                *self = Menu {
+                    page: Page::Lost(0),
+                    ..Menu::default()
+                };
+            }
+            return false;
+        }
+        if matches!(self.page, Page::Lost(_)) {
+            self.page = Page::Closed;
+        }
         if f.results || !f.playing {
             (self.page, self.resuming) = (Page::Closed, false);
             return false;
@@ -234,6 +258,19 @@ impl Menu {
                 }
                 Nav::Confirm => Some(Effect::Leave),
                 Nav::Back | Nav::Menu => Some(Effect::Resume),
+                _ => None,
+            },
+            Page::Lost(focus) => match nav {
+                Nav::Up | Nav::Left => {
+                    *focus = focus.saturating_sub(1);
+                    None
+                }
+                Nav::Down | Nav::Right => {
+                    *focus = (*focus + 1).min(LOST.len() - 1);
+                    None
+                }
+                Nav::Confirm if *focus == 0 => Some(Effect::Reconnect),
+                Nav::Confirm => Some(Effect::Leave),
                 _ => None,
             },
             Page::Settings(sheet) => {
@@ -296,7 +333,7 @@ impl Menu {
     /// The pointer over `t`: the focus goes there.
     pub fn hover(&mut self, t: Target) {
         match (&mut self.page, t) {
-            (Page::Main(focus), Target::Main(i)) => *focus = i,
+            (Page::Main(focus) | Page::Lost(focus), Target::Main(i)) => *focus = i,
             (Page::Settings(sh), Target::Choice(i)) => {
                 if let Some(c) = &mut sh.conflict {
                     c.focus = i;
@@ -599,6 +636,8 @@ pub struct Look<'a> {
     pub now: f64,
     /// Browser: playing on the keyboard and mouse without the pointer lock (a click takes it).
     pub click: bool,
+    /// The lost connection's page: its title and why.
+    pub lost: [&'a str; 2],
 }
 
 /// The open menu's quads and rectangles (closed, but the browser's click hint).
@@ -636,6 +675,24 @@ pub fn layout(menu: &Menu, hud: &Hud, look: &Look) -> Quads {
         Page::Settings(sheet) => {
             p.fill([-far, -far, 2.0 * far, 2.0 * far], [0, 0, 0, 240], Z);
             sheet_layout(&mut p, sheet, look);
+        }
+        Page::Lost(focus) => {
+            p.fill([-far, -far, 2.0 * far, 2.0 * far], [0, 0, 0, 200], Z);
+            let [title, why] = look.lost;
+            p.text(title, [146.0, 56.0], true, 1.0, AMBER, Z_TEXT);
+            let why: String = match why.chars().count() > WHY_CHARS {
+                true => why
+                    .chars()
+                    .take(WHY_CHARS - 3)
+                    .chain("...".chars())
+                    .collect(),
+                false => why.into(),
+            };
+            p.text(&why, [146.0, 70.0], true, SMALL, GREY, Z_TEXT);
+            for (i, label) in LOST.iter().enumerate() {
+                let rect = [86.0, 88.0 + 18.0 * i as f32, 120.0, 16.0];
+                p.button(label, rect, i == *focus, Target::Main(i), [Z_BAR, Z_TEXT]);
+            }
         }
     }
     p.out
@@ -800,12 +857,14 @@ struct Setup {
     save: bool,
 }
 
-/// The last frame's [`Paused`] (as the menu left it), focus, pointer and held direction.
+/// The last frame's [`Paused`] (as the menu left it), focus, pointer (in the frame; in the window,
+/// over the results) and held direction.
 #[derive(Default)]
 struct Last {
     paused: bool,
     focused: bool,
     cursor: Option<[f32; 2]>,
+    pointer: Option<Vec2>,
     repeat: Repeat,
 }
 
@@ -946,10 +1005,12 @@ fn run(
         Option<Res<crate::bindings::UsingPad>>,
     ),
     mut last: Local<Last>,
-    (clients, mut exit, mut commands): (
-        Query<Entity, (With<Client>, With<Connected>)>,
+    (mut exit, status, mut reconnect, mut results, mut free): (
         MessageWriter<AppExit>,
-        Commands,
+        Res<NetStatus>,
+        ResMut<Reconnect>,
+        ResMut<crate::results::Menu>,
+        ResMut<Free>,
     ),
 ) {
     use KeyCode as K;
@@ -970,6 +1031,8 @@ fn run(
             && !keys.any_pressed([K::Enter, K::NumpadEnter, K::Escape])
             && gamepad.is_none_or(|p| p.digital().get_pressed().len() == 0),
         locked: crate::pointer::locked(),
+        offline: matches!(*status, NetStatus::Failed(_) | NetStatus::Disconnected(_))
+            || reconnect.active(),
     };
     // Natively the click that brings the window back is not the menu's (it could be LEAVE MATCH).
     let clicks = web || last.focused;
@@ -982,11 +1045,19 @@ fn run(
     if crate::pointer::refused() && menu.open() {
         menu.refused = true;
     }
-    if menu.leaving.is_some_and(|at| now >= at) {
-        menu.leaving = None;
-        #[cfg(target_family = "wasm")]
-        if let Some(w) = web_sys::window() {
-            let _ = w.location().set_href(LANDING);
+    // The results (no menu over them): the pointer lights RESTART or QUIT once it moves, a click on
+    // one or Enter chooses (on the results' next tick).
+    if signals.results && !signals.offline {
+        let at = window.and_then(|w| w.cursor_position());
+        let size = window.map(|w| w.size());
+        let over = (size.zip(at)).and_then(|(s, at)| crate::results::button_at(&setup.hud, s, at));
+        let click = clicks && over.is_some() && mouse.just_pressed(MouseButton::Left);
+        if let Some(i) = over.filter(|_| click || at != last.pointer) {
+            results.choice = i;
+        }
+        last.pointer = at;
+        if click || keys.any_just_pressed([K::Enter, K::NumpadEnter]) {
+            results.press = true;
         }
     }
     // Settings change on copies, written back if they did (their change detection).
@@ -1033,15 +1104,13 @@ fn run(
             }
             Effect::Leave => {
                 info!("menu: leave match");
-                if web {
-                    for entity in &clients {
-                        commands.trigger(Disconnect { entity });
-                    }
-                    menu.leaving = Some(now + crate::connection::LEAVE_DELAY);
-                } else {
-                    exit.write(AppExit::Success);
-                }
+                exit.write(AppExit::Success);
             }
+            Effect::Reconnect if !reconnect.active() => {
+                info!("menu: reconnect");
+                reconnect.start(now);
+            }
+            Effect::Reconnect => {}
             Effect::Save => {
                 if setup.save {
                     crate::settings::save(&s);
@@ -1054,6 +1123,13 @@ fn run(
     bindings.set_if_neq(b);
     last.paused = menu.open();
     paused.set_if_neq(Paused(last.paused));
+    free.set_if_neq(Free(signals.results || signals.offline));
+    let lost = match (&*status, reconnect.active()) {
+        (_, true) => ["RECONNECTING...", reconnect.why.as_str()],
+        (NetStatus::Failed(why), _) => ["COULD NOT CONNECT", why.as_str()],
+        (NetStatus::Disconnected(why), _) => ["CONNECTION LOST", why.as_str()],
+        _ => ["", ""],
+    };
     let glyphs = ui::pad_glyphs(settings.pad.prompts, pad);
     let look = Look {
         settings: &settings,
@@ -1066,6 +1142,7 @@ fn run(
             && !signals.results
             && !signals.locked
             && !using_pad.is_some_and(|u| u.0),
+        lost,
     };
     *quads = layout(&menu, &setup.hud, &look);
 }
@@ -1107,6 +1184,44 @@ mod tests {
             out.playing = false;
             assert!(!m.signals(&out) && !m.open());
         }
+    }
+
+    /// A lost connection's page replaces any other (no Esc, no resume), steers as the main page
+    /// does, and closes once the connection is back.
+    #[test]
+    fn the_lost_page_offers_reconnect_and_quit() {
+        let (mut s, mut b) = (Settings::default(), Bindings::default());
+        let mut m = Menu::default();
+        settings_page(&mut m, &mut s, &mut b);
+        let offline = Signals {
+            offline: true,
+            esc: true,
+            ..playing()
+        };
+        assert!(!m.signals(&offline));
+        assert_eq!(m.page, Page::Lost(0));
+        assert_eq!(m.nav(Nav::Back, 0.0, &mut s, &mut b), None);
+        assert_eq!(m.nav(Nav::Menu, 0.0, &mut s, &mut b), None);
+        assert_eq!(
+            m.nav(Nav::Confirm, 0.0, &mut s, &mut b),
+            Some(Effect::Reconnect)
+        );
+        m.nav(Nav::Down, 0.0, &mut s, &mut b);
+        m.nav(Nav::Down, 0.0, &mut s, &mut b);
+        assert_eq!(m.page, Page::Lost(1));
+        assert_eq!(
+            m.nav(Nav::Confirm, 0.0, &mut s, &mut b),
+            Some(Effect::Leave)
+        );
+        // Still offline (reconnecting, or the player not back yet): it stays, the focus kept.
+        m.signals(&offline);
+        assert_eq!(m.page, Page::Lost(1));
+        assert_eq!(
+            m.click(Target::Main(0), 0.0, &mut s, &mut b),
+            Some(Effect::Reconnect)
+        );
+        // Back and playing: closed (the Esc of this frame opens the Esc menu as usual).
+        assert!(!m.signals(&playing()) && !m.open());
     }
 
     #[test]
@@ -1495,6 +1610,7 @@ mod tests {
                 glyphs: Glyphs::Xbox,
                 now: 0.0,
                 click: false,
+                lost: ["CONNECTION LOST", "nothing from the server for 30 s"],
             };
             layout(m, &hud, &look)
         };
@@ -1538,6 +1654,14 @@ mod tests {
         );
         let q = quads(&m, &s, &b);
         assert!(q.sprites.iter().any(|s| s.z >= Z_BOX));
+        // The lost connection's page: RECONNECT where MAIN's second button is, QUIT under it.
+        let m = Menu {
+            page: Page::Lost(0),
+            ..Menu::default()
+        };
+        let q = quads(&m, &s, &b);
+        assert_eq!(point(&q, Vec2::new(640.0, 340.0)), Some(Target::Main(0)));
+        assert_eq!(point(&q, Vec2::new(640.0, 400.0)), Some(Target::Main(1)));
     }
 
     #[test]

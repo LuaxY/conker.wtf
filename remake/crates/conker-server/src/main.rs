@@ -65,8 +65,10 @@
 //! dual-stack by default). A joined human stands as it joined ([`Waiting`]) until the first tick
 //! its client sent an input for: its client predicts from that tick, from the state the server holds.
 //! It leaves on its client's netcode disconnect, its transport closing (a closed page, a killed
-//! WebSocket client) or the netcode timeout (3 s, carried in the connect token); every 10 s the
-//! log has each client's traffic (`NET` lines).
+//! WebSocket client) or the netcode timeout (30 s, carried in the connect token; the WebTransport
+//! idle timeout is as long); a client whose inputs stop for [`STALE_TICKS`] (a hidden page) stands
+//! until they come back ([`stale_inputs`]). Every 10 s the log has each client's traffic (`NET`
+//! lines).
 //!
 //! Usage: conker-server [--assets DIR] [--map 2d|30|34|3f|2b|1a|24|33] [--port 5888] [--digest-file PATH] [--seconds N]
 //!   [--bots N] [--time 3-10|unlimited] [--lives 1-5] [--kills 0-10] [--skill inbred|crap|normal|bastard|einstein]
@@ -761,7 +763,10 @@ fn main() {
     );
     app.add_systems(
         FixedPreUpdate,
-        first_inputs.before(InputSystems::UpdateActionState),
+        (
+            first_inputs.before(InputSystems::UpdateActionState),
+            stale_inputs.after(InputSystems::UpdateActionState),
+        ),
     );
     app.add_systems(FixedUpdate, (seat, simulate, publish, log_players).chain());
     app.add_systems(Update, log_traffic);
@@ -1814,6 +1819,35 @@ fn first_inputs(
             );
         }
     }
+}
+
+/// Ticks a client's newest input may lag the server's tick before its player stands (0.5 s): a
+/// hidden page runs few frames or none, and lightyear repeats the last input it has, a held fire or
+/// stick included, until the client's inputs come back or its netcode timeout.
+const STALE_TICKS: i32 = 15;
+
+/// A player whose client went quiet ([`STALE_TICKS`]) plays a neutral input ([`quiet`]).
+fn stale_inputs(
+    timeline: Res<LocalTimeline>,
+    mut players: Query<(&NativeBuffer<Input>, &mut ActionState<Input>)>,
+) {
+    for (buffer, mut action) in &mut players {
+        if let Some(input) = quiet(action.0, buffer.end_tick(), timeline.tick()) {
+            action.0 = input;
+        }
+    }
+}
+
+/// The input to play at `tick` for one whose newest is at `newest`, if that is stale: the stick and
+/// buttons let go, the camera, the aim and the modern controls' mode and shoulder kept.
+fn quiet(input: Input, newest: Option<Tick>, tick: Tick) -> Option<Input> {
+    use conker_sim::movement::action::{MODERN, SHOULDER};
+    (tick - newest? > STALE_TICKS).then_some(Input {
+        camera_yaw: input.camera_yaw,
+        aim_pitch: input.aim_pitch,
+        actions: input.actions & (MODERN | SHOULDER),
+        ..Input::default()
+    })
 }
 
 /// Bytes each client's session sent and received per second over the last 10 s (`NET` lines).
@@ -3051,6 +3085,33 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A client quiet past [`STALE_TICKS`] lets go of its held fire and stick, its camera and
+    /// modern mode kept; within them (a late packet) its last input stands.
+    #[test]
+    fn a_quiet_client_lets_go() {
+        use conker_sim::movement::action::{FIRE, MODERN};
+        let held = Input {
+            stick_y: 80,
+            buttons: 0x2000,
+            camera_yaw: 0x1234,
+            actions: MODERN | FIRE,
+            aim_pitch: 300,
+            ..Input::default()
+        };
+        assert_eq!(quiet(held, Some(Tick(100)), Tick(115)), None);
+        assert_eq!(quiet(held, None, Tick(500)), None);
+        let let_go = quiet(held, Some(Tick(100)), Tick(116)).unwrap();
+        assert_eq!(
+            let_go,
+            Input {
+                camera_yaw: 0x1234,
+                actions: MODERN,
+                aim_pitch: 300,
+                ..Input::default()
+            }
+        );
     }
 
     #[test]
