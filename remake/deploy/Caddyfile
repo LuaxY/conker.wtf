@@ -1,11 +1,11 @@
-# The page and the asset pack over HTTPS, and the connect tokens proxied to the game server
-# (deploy/README.md).
+# The page and the asset pack over HTTPS, and the web server's /api/ (the game servers it starts,
+# their connect tokens) proxied to it (deploy/README.md).
 # Environment:
 #   DOMAIN      the game's domain (e.g. game.example.org)
 #   SITE        the folder deploy/build.sh made (e.g. /srv/conker/site): the landing at /, the game at /play.html
 #   PACK        the asset pack deploy/pack.sh uploaded (e.g. /srv/conker/assets), served at /assets/
 #   TLS_DIR     fullchain.pem and privkey.pem (copied there by renew-hook.sh)
-#   TOKEN_ADDR  conker-server's --token-addr (default 127.0.0.1:5889)
+#   API_ADDR    the web server (conker-web.service; default 127.0.0.1:8080)
 #   HTTP_PORT, HTTPS_PORT  default 80 and 443 (the local test uses others)
 {
 	# certbot owns the certificate, which the game server reads too; Caddy serves it and keeps
@@ -34,10 +34,10 @@
 		}
 	}
 
-	# Connect tokens and the match's map (/info) from the game server: same origin, over this HTTPS.
-	@server path /token /info
-	handle @server {
-		reverse_proxy {$TOKEN_ADDR:127.0.0.1:5889}
+	# The servers list, Create server and Kill, and each game server's connect tokens and map
+	# (/api/servers/ID/token and /info): same origin, over this HTTPS.
+	handle /api/* {
+		reverse_proxy {$API_ADDR:127.0.0.1:8080}
 	}
 
 	handle {

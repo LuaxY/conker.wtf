@@ -88,8 +88,8 @@ missing pack all behaved; no console errors or warnings on any screen; no horizo
 
 ### Dev web server (`bun run serve`)
 
-**A temporary local tool** until game servers are hosted for real, **not for the internet**: it starts processes on
-request and has no authentication, so it listens on loopback only (127.0.0.1 and ::1) unless told otherwise. `app/server.ts`
+It starts processes on request and has no authentication, so it listens on loopback only (127.0.0.1 and ::1) unless
+told otherwise; on a host it runs behind Caddy and its password (`../deploy/README.md`, `conker-web.service`). `app/server.ts`
 (Bun only: `Bun.serve`, no framework, no new runtime dependency):
 
 - Serves `web/` as `python3 -m http.server --directory web` did: `index.html`, `landing/`, `play.html`, `play.js`, `dist/`,
@@ -106,6 +106,9 @@ request and has no authentication, so it listens on loopback only (127.0.0.1 and
   stdout and stderr go to `TMP/server.log` (TMP a new temp folder, printed by the dev server). It answers 201 and the
   record once the game server answers `/info` on N + 1 (it writes the digest just before); if the server exits first or
   takes over 30 s, 500 with the end of its log.
+- `GET /api/servers/ID/token` and `/info` (query kept): that game server's own token endpoint on loopback, with
+  the request's `X-Forwarded-For` (the lobby's `token-url`, so the page needs no port + 1 and, behind Caddy, gets
+  https and its rate limit per address); 404 unless the server runs.
 - `DELETE /api/servers/ID`: SIGTERM, then SIGKILL after 3 s, its temp folder removed, the record dropped (an exited one is
   just cleared); 204.
 - A game server that dies on its own stays listed as exited until cleared. Ctrl-C or SIGTERM stops every game server
@@ -117,6 +120,10 @@ bun run serve                                     # http://localhost:8080/
 bun run serve --port 8094 --game-ports 5990-5999  # also --server PATH, --assets DIR
 bun run serve --host ::                           # the LAN too: anyone there can start and kill servers (it warns)
 ```
+
+Production (`../deploy/conker-web.service`): `--cert PEM --cert-key PEM --token-key FILE --public IP...` give each game
+server the domain's certificate (no `--digest-file`: the record's `digest` stays empty and the lobby passes none), the
+token key, `--token-addr 127.0.0.1:N+1` and the addresses its tokens name.
 
 Defaults: `--port 8080`, `--host localhost`, `--game-ports 5900-5949` (25 servers), `--server
 ../../target-net/release/conker-server` (`CARGO_TARGET_DIR=target-net cargo build --release -p conker-server` from
@@ -326,7 +333,7 @@ The same pages (the landing's `index.html` and `landing/`, `play.html`, `play.js
 | Asset pack (`/assets/`) | `web/assets`, a symlink to `../assets` (gitignored) | `deploy/pack.sh` uploads a copy with `.br` and `.gz` files to a host folder outside the site; Caddy serves it at `/assets/` (`handle_path`), `no-cache` with an ETag (the pack is editable); the server reads the same folder |
 | Static server | `bun run serve` (the dev web server; or `python3 -m http.server`): no compression (21.8 MB per load), no cache headers | Caddy (`deploy/Caddyfile`): brotli or gzip as the browser asks (4.3 MB), `v/*` and `landing/*` cached a year as `immutable`, the pages and `play.js` `no-cache` (revalidated) |
 | Page | `http://localhost` | `https://DOMAIN` |
-| Connect token (fetched once the assets loaded), and `/info` (first) | `http://<server host>:<port + 1>/token` and `/info`, the game server's own endpoint (on `[::]`) | `/token` and `/info` on the page's own origin, which Caddy proxies to the game server's endpoint on loopback |
+| Connect token (fetched once the assets loaded), and `/info` (first) | from the lobby: `/api/servers/ID/token` and `/info`, which the dev web server passes to the game server's own endpoint; `play.html` alone: `http://<server host>:<port + 1>/token` and `/info` (on `[::]`) | `/api/servers/ID/token` and `/info` on the page's own origin: Caddy, the web server, then the game server's endpoint on loopback |
 | Token key | a new random key at each server start | `--token-key FILE`, and `--public` names the addresses the tokens carry (the server checks them) |
 | Password | none | optional: the Caddyfile's `basic_auth` block (commented out) asks for one for the whole site |
 | WebTransport certificate | self-signed for 14 days, pinned by its digest (`dist/digest.txt`, or `?digest=`) | the domain's Let's Encrypt certificate, checked as any site's: no digest |

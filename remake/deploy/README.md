@@ -4,19 +4,21 @@ What runs on the host:
 
 | Process | Listens on | Does |
 |---|---|---|
-| Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/token` and `/info` to the game server |
-| `conker-server` (systemd) | TCP + UDP 5888, and `127.0.0.1:5889` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
-| certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to both (the game server takes it without a restart) |
+| Caddy | TCP 80 (redirect), TCP 443 (+ UDP 443, HTTP/3) | serves `https://DOMAIN/`: the landing (`/`) and the game page (`/play.html`) from `deploy/build.sh`, and the asset pack at `/assets/` (brotli or gzip as the browser asks, cache headers), and proxies `/api/` to the web server |
+| `conker-web` (systemd) | `127.0.0.1:8080` | the web server (`web/app/server.ts`, `web/README.md`, "Dev web server"): the landing's servers list, Create server and Kill; it starts a `conker-server` per match |
+| `conker-server` (one per match) | TCP + UDP N (5900-5949, even), and `127.0.0.1:N+1` | the match: WebTransport (UDP) and `wss://` (TCP) with the domain's certificate; connect tokens on loopback |
+| certbot | TCP 80, only while renewing | obtains and renews the Let's Encrypt certificate, then `renew-hook.sh` hands it to Caddy and the game servers (they take it without a restart) |
 
-How a player connects: the game page, `/play.html` (it connects to `DOMAIN:5888`; add `?transport=ws&side=...` as
-`web/README.md` lists). The landing (`/`) has no server list here: that comes from the local dev web server only
-(`web/README.md`, "Dev web server"), so on this site its Servers screen says so and links to `/play.html`. The game page (over https) loads the client, which asks `/info` which map the server plays
-(`conker-server --map 2d|30|34|3f`), fetches that map and the rest of the asset pack from `/assets/` and
-draws the level; then it fetches `/token` from its own origin. Caddy passes it to the
-game server, which signs a netcode connect token with its private key (`/etc/conker/token.key`, never
-sent anywhere) for the domain's addresses. The page then connects to `DOMAIN:5888` over WebTransport, or
-`wss://` with `?transport=ws`; the browser checks the certificate as for any site. The token is valid for
-60 s; the server refuses one that expired, was signed with another key, or names other addresses.
+How a player connects: the landing's Join game, then a server's lobby (or Create server), whose link opens the game
+page, `/play.html?server=DOMAIN:N&token-url=/api/servers/ID/token&...`. The game page (over https) loads the client,
+which asks `/api/servers/ID/info` which map the server plays, fetches that map and the rest of the asset pack from
+`/assets/` and draws the level; then it fetches `/api/servers/ID/token`. Caddy passes both to the web server, which
+passes them to that match's game server on loopback; the game server signs a netcode connect token with its private
+key (`/etc/conker/token.key`, never sent anywhere) for the domain's addresses. The page then connects to `DOMAIN:N`
+over WebTransport, or `wss://` with `?transport=ws`; the browser checks the certificate as for any site. The token is
+valid for 60 s; the server refuses one that expired, was signed with another key, or names other addresses.
+
+The 25 port pairs cap the matches at 25 at once; one full match takes about 15-20 % of a vCPU and 50 MB.
 
 **The asset pack.** Nobody picks or uploads a ROM. The operator exports the asset pack once from
 **their own ROM** on their machine (`conker-extract pack`: JSON, glTF, PNG and WAV files, about 40 MB) and
@@ -26,7 +28,7 @@ page's client fetches it. It is Rare's data, served to anyone who reaches the pa
 deployment turn on the Caddyfile's password (step 8). Neither the ROM nor the pack goes in the site
 folder or in this source tree.
 
-Files here: `build.sh` (the pages), `pack.sh` (the pack's upload), `Caddyfile`, `conker-server.service`,
+Files here: `build.sh` (the pages), `pack.sh` (the pack's upload), `Caddyfile`, `conker-web.service`,
 `renew-hook.sh`. The examples use
 `game.example.org`, `203.0.113.7` and `2001:db8::7`: replace them with yours.
 
@@ -59,12 +61,12 @@ sudo ufw allow 22/tcp      # ssh
 sudo ufw allow 80/tcp      # http -> https redirect, and certbot's challenge
 sudo ufw allow 443/tcp     # the page
 sudo ufw allow 443/udp     # the page over HTTP/3 (optional)
-sudo ufw allow 5888/tcp    # the game: WebSocket (wss://)
-sudo ufw allow 5888/udp    # the game: WebTransport
+sudo ufw allow 5900:5949/tcp    # the games: WebSocket (wss://)
+sudo ufw allow 5900:5949/udp    # the games: WebTransport
 sudo ufw enable
 ```
 
-Port 5889 (tokens) stays closed: the server binds it to loopback. If your provider has its own firewall
+The token ports (N + 1) are open in that range but bound to loopback, as is the web server's 8080. If your provider has its own firewall
 (security groups), open the same ports there.
 
 ## 4. A user, folders and the token key
@@ -82,10 +84,11 @@ tokens not yet used.
 
 ## 5. The server binary
 
-Build it on the VPS (or on another Linux machine of the same architecture) from this repository:
+Build it on the VPS (or on another Linux machine of the same architecture) from this repository, checked out in
+`/opt/conker/src` (the web server runs from there too), and install [Bun](https://bun.sh) as `/usr/local/bin/bun`:
 
 ```sh
-cd remake
+cd /opt/conker/src/remake
 cargo build --release -p conker-server          # Bevy + lightyear: ~15-30 min the first time
 sudo install -m 0755 target/release/conker-server /opt/conker/conker-server
 ```
@@ -135,13 +138,13 @@ have the same protocol version (`PROTOCOL_ID`), or the server refuses the page's
 
 ## 8. The certificate, the server and Caddy
 
-Install the game server's unit and edit its `--public` addresses to your A and AAAA records (one
+Install the web server's unit and edit its `--public` addresses to your A and AAAA records (one
 `--public` per address; leave out the IPv6 one if the host has none):
 
 ```sh
-sudo cp deploy/conker-server.service /etc/systemd/system/
-sudo systemctl edit --full conker-server            # set the two --public addresses
-sudo systemctl enable conker-server                 # started by the hook below
+sudo cp deploy/conker-web.service /etc/systemd/system/
+sudo systemctl edit --full conker-web               # set the two --public addresses
+sudo systemctl enable conker-web                    # started by the hook below
 ```
 
 Caddy: the Caddyfile and its settings.
@@ -162,12 +165,13 @@ sudo nano /etc/caddy/Caddyfile       # uncomment the basic_auth block and put th
 sudo systemctl reload caddy          # (once Caddy runs, after the certificate below)
 ```
 
-The browser asks once and sends it with every request to the site: the page, the pack and `/token`. The
-game port needs no password: nobody joins a match without a token from `/token`.
+The browser asks once and sends it with every request to the site: the page, the pack and `/api/` (the
+servers, Create server, Kill and the tokens). The game ports need no password: nobody joins a match without a
+token. Without the password anyone can start and kill matches (up to the 25).
 
 Then the certificate. certbot answers Let's Encrypt's challenge itself on port 80 (`--standalone`), so
 Caddy stops for those few seconds (`--pre-hook`, `--post-hook`); the deploy hook copies the certificate
-to `/etc/conker/tls`, restarts Caddy and starts the game server (the first time; after that it is running
+to `/etc/conker/tls`, restarts Caddy and starts the web server (the first time; after that it is running
 already). certbot saves the hooks and renews on its own (its systemd timer, twice a day; a renewal happens 30
 days before expiry):
 
@@ -177,9 +181,9 @@ sudo certbot certonly --standalone -d game.example.org -m you@example.org --agre
   --deploy-hook /etc/conker/renew-hook.sh
 ```
 
-The game server is not restarted on a renewal: it looks at `/etc/conker/tls`'s two files every 10 s and gives
-the new pair to new connections, so matches in progress go on (`journalctl -u conker-server`: `certificate
-reloaded from ...: digest ...`). While the hook is between the two files, it keeps the one in use (`certificate
+The game servers are not restarted on a renewal: each looks at `/etc/conker/tls`'s two files every 10 s and gives
+the new pair to new connections, so matches in progress go on (its log: `certificate reloaded from ...: digest
+...`). While the hook is between the two files, it keeps the one in use (`certificate
 not reloaded yet`) and tries again 10 s later.
 
 ## 9. Check
@@ -187,13 +191,14 @@ not reloaded yet`) and tries again 10 s later.
 On the host:
 
 ```sh
-systemctl status conker-server caddy
-journalctl -u conker-server -n 20       # "Listening on [::]:5888: ... (TCP, wss://) ... connect tokens on
-                                        #  http://127.0.0.1:5889/token, for [203.0.113.7:5888, [2001:db8::7]:5888]"
+systemctl status conker-web caddy
+journalctl -u conker-web -n 20          # "game server 1 ...: pid ..., port 5900, /tmp/conker-server-..." per match
 sysctl net.ipv6.bindv6only              # 0: the [::] sockets accept IPv4 too (Linux's default)
-ss -tuln | grep ':588[89]'              # tcp and udp *:5888 (dual-stack; [::]:5888 would mean IPv6 only),
-                                        # tcp 127.0.0.1:5889
+ss -tuln | grep ':59'                   # once a match runs: tcp and udp *:5900 (dual-stack; [::]:5900 would
+                                        # mean IPv6 only), tcp 127.0.0.1:5901
 ```
+
+A game server's log is in the web server's private `/tmp`: `ls /tmp/systemd-private-*-conker-web.service-*/tmp/`.
 
 If `net.ipv6.bindv6only` is 1, IPv4 players can't connect: set it to 0
 (`echo net.ipv6.bindv6only=0 | sudo tee /etc/sysctl.d/90-dual-stack.conf && sudo sysctl --system`) and
@@ -212,30 +217,34 @@ curl -s -D - -o /dev/null -H 'Accept-Encoding: br' https://game.example.org/v/HA
 curl -s -D - -o /dev/null -H 'Accept-Encoding: br' https://game.example.org/assets/maps/2d/level.gltf \
   | grep -iE '^(HTTP|content-encoding|cache-control|etag)'
 #   200, br, no-cache, an ETag (the pack is editable: pages revalidate it on each load)
-curl -s https://game.example.org/token | wc -c                                    # 4096 (hex)
+curl -s -X POST -H 'content-type: application/json' https://game.example.org/api/servers -d '{"name":"test",
+  "map":"2d","mode":"deathmatch","settings":{"bots":3,"skill":"normal","time":5,"lives":3,"kills":0,"score":20,
+  "radar":true,"laps":5,"route":11,"cheats":[]}}'                                  # 201 and the record: id, port
+curl -s 'https://game.example.org/api/servers/ID/token?id=1' | wc -c              # 4096 (hex)
 #   Each address may take 10 tokens per 10 s, then 429 (behind Caddy: the X-Forwarded-For address)
 #   With the password on: 401 without it; add -u player:PASSWORD to each curl
-nc -4 -vz game.example.org 5888 && nc -6 -vz game.example.org 5888                # TCP over IPv4 and IPv6
+nc -4 -vz game.example.org 5900 && nc -6 -vz game.example.org 5900                # TCP over IPv4 and IPv6
+curl -s -X DELETE https://game.example.org/api/servers/ID                          # 204: the match ends
 ```
 
-Then open `https://game.example.org/` in Chrome: Join game, then the link to the game page opens it,
-which loads the pack and starts by itself; the line at the bottom left reads
-`connected to game.example.org:5888 over WebTransport`. Open `https://game.example.org/play.html?transport=ws` in a
-second window: `... over WebSocket` (that is `wss://`). For UDP over IPv4 (WebTransport into the `[::]`
+Then open `https://game.example.org/` in Chrome: Join game, Create server, then the lobby's link opens the game
+page, which loads the pack and starts by itself; the line at the bottom left reads
+`connected to game.example.org:5900 over WebTransport`. The same lobby with WebSocket picked, in a second window:
+`... over WebSocket` (that is `wss://`). For UDP over IPv4 (WebTransport into the `[::]`
 socket), load the page once from an IPv4-only network (many mobile hotspots).
 
 Renewal: `sudo certbot renew --dry-run` checks the challenge against Let's Encrypt's staging service
 (deploy hooks don't run in a dry run); `sudo RENEWED_LINEAGE=/etc/letsencrypt/live/game.example.org
-/etc/conker/renew-hook.sh` runs the hook by hand: within 10 s `journalctl -u conker-server` logs `certificate
+/etc/conker/renew-hook.sh` runs the hook by hand: within 10 s each game server's log has `certificate
 reloaded`, and the players in a match stay in.
 
 ## Updating
 
 - Page: `deploy/build.sh`, then `rsync` (step 7). Open pages keep their client until reloaded.
 - Asset pack: edit `../assets`, `deploy/pack.sh` (step 6), restart the server.
-- Server: rebuild, `sudo install` the binary (step 5), `sudo systemctl restart conker-server`. A stop or
-  restart (SIGTERM) first sends every player the disconnect, so pages show it at once rather than after the 3 s
-  timeout; matches in progress still end.
+- Server: `git pull` in `/opt/conker/src`, rebuild, `sudo install` the binary (step 5), `sudo systemctl restart
+  conker-web` (it runs `server.ts` from the checkout). A stop or restart (SIGTERM) stops every game server, which
+  first sends its players the disconnect, so pages show it at once; matches in progress end.
 
 ## Tested locally (no host, no domain)
 

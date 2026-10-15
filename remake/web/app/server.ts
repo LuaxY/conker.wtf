@@ -1,10 +1,12 @@
 // The dev web server (`bun run serve`): serves web/ as `python3 -m http.server --directory web` did,
 // and starts, lists and kills game servers for the landing at /api/servers (web/README.md). A
-// temporary local tool: it runs processes on request, so it listens on loopback only unless --host
-// says otherwise. Not for the internet. Its game servers live in memory and die with it.
+// tool that runs processes on request, so it listens on loopback only unless --host says otherwise:
+// on a host, only behind Caddy and its password (deploy/README.md). Its game servers live in memory
+// and die with it.
 //
 //   bun run serve [--port 8080] [--host localhost] [--game-ports 5900-5949]
 //                 [--server ../../target-net/release/conker-server] [--assets ../../../assets]
+//                 [--cert PEM --cert-key PEM --token-key FILE --public IP...]   (production)
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,8 +33,17 @@ const { values: args } = parseArgs({
     "game-ports": { type: "string", default: "5900-5949" },
     server: { type: "string", default: join(REMAKE, "target-net/release/conker-server") },
     assets: { type: "string", default: join(REMAKE, "../assets") },
+    // Production: each game server gets the domain's certificate (no digest), the token key, its
+    // token endpoint on loopback (proxied below) and the addresses the tokens name.
+    cert: { type: "string" },
+    "cert-key": { type: "string" },
+    "token-key": { type: "string" },
+    public: { type: "string", multiple: true },
   },
 });
+const PROD = args.cert !== undefined;
+if (PROD && !(args["cert-key"] && args["token-key"] && args.public?.length))
+  throw new Error("--cert needs --cert-key, --token-key and --public");
 const BINARY = resolve(args.server);
 const ASSETS = resolve(args.assets);
 const [LO, HI] = args["game-ports"].split("-").map(Number);
@@ -127,7 +138,14 @@ function spawn({ name, map, mode, settings: s }: NewServer, port: number): Runni
     map,
     mode,
     port,
-    "digest-file": join(dir, "digest.txt"),
+    ...(PROD
+      ? {
+          cert: args.cert,
+          "cert-key": args["cert-key"],
+          "token-key": args["token-key"],
+          "token-addr": `127.0.0.1:${port + 1}`,
+        }
+      : { "digest-file": join(dir, "digest.txt") }),
     bots: s.bots,
     skill: s.skill,
     lives: s.lives,
@@ -137,7 +155,9 @@ function spawn({ name, map, mode, settings: s }: NewServer, port: number): Runni
       ? { laps: s.laps, route: s.route }
       : { time: s.time, kills: s.kills, score: s.score }),
     ...(s.cheats.length ? { cheats: s.cheats.join(",") } : {}),
-  }).flatMap(([flag, value]) => [`--${flag}`, String(value)]);
+  })
+    .flatMap(([flag, value]) => [`--${flag}`, String(value)])
+    .concat((args.public ?? []).flatMap((ip) => ["--public", ip]));
   const proc = Bun.spawn([BINARY, ...argv], {
     cwd: REMAKE,
     env: { ...process.env, NO_COLOR: "1" },
@@ -228,7 +248,7 @@ const api = {
       if (port === undefined) return fail(503, `no free port pair in ${LO}-${HI}`);
       const s = spawn(body, port);
       if (await started(s)) {
-        s.record.digest = readFileSync(join(s.dir, "digest.txt"), "utf8").trim();
+        if (!PROD) s.record.digest = readFileSync(join(s.dir, "digest.txt"), "utf8").trim();
         s.record.status = "running";
         const live = await info(port, 500);
         return Response.json(view(s, new URL(req.url).hostname, live), { status: 201 });
@@ -248,6 +268,23 @@ const api = {
       servers.delete(req.params.id);
       await stop(s);
       return new Response(null, { status: 204 });
+    },
+  },
+  // The game server's connect token and /info (the lobby's `token-url`), from its token endpoint
+  // on loopback, with the page's address for its rate limit (Caddy's X-Forwarded-For).
+  "/api/servers/:id/:endpoint": {
+    async GET(req: Bun.BunRequest<"/api/servers/:id/:endpoint">) {
+      const { id, endpoint } = req.params;
+      const s = servers.get(id);
+      if (!s || s.record.status !== "running" || !["token", "info"].includes(endpoint))
+        return fail(404, `no game server ${id} ${endpoint}`);
+      const forwarded = req.headers.get("x-forwarded-for");
+      const url = `http://127.0.0.1:${s.record.port + 1}/${endpoint}${new URL(req.url).search}`;
+      const res = await fetch(url, {
+        headers: forwarded ? { "x-forwarded-for": forwarded } : {},
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+      return res ?? fail(502, `game server ${id} is not answering`);
     },
   },
 };

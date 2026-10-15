@@ -21,13 +21,15 @@ export function Lobby() {
   // Heist's four teams (the side picks the team in the other War modes): play.html's `team=`.
   const [team, setTeam] = useState("");
   // play.html's options (web/README.md): the client rejects any it does not know. The digest is this
-  // server's own, since several run at once (dist/digest.txt names one at most).
+  // server's own, since several run at once (dist/digest.txt names one at most); none in production
+  // (the domain's certificate). The token and /info come through the web server, which knows the port.
   const options: Record<string, string> = {
     server: server.address,
     transport,
     side,
-    digest: server.digest,
+    "token-url": `/api/servers/${server.id}/token`,
   };
+  if (server.digest) options.digest = server.digest;
   if (pick !== null) options.character = String(pick);
   if (server.mode === "heist" && team) options.team = team;
   const play = `play.html?${new URLSearchParams(options)}`;
