@@ -25,6 +25,9 @@ conker-client; `volume.rs` = conker-camera.
 - `controls-spread-extras`: build or skip: a movement/jump cone outside the scope, bloom over sustained fire, a crouch
   bonus, the cone drawn on the crosshair (`spread::cone` is unused by the client).
 - `deploy-license`: no `license` in `remake/Cargo.toml`'s `[workspace.package]`.
+- `effects-bullet-visuals` (F1 lane D's options): one's own tracer drawn from the predicted shot (today a round trip
+  late, snapshots only); impact sparks for bullets and the sniper's ray; the sniper's red laser (the N64's 3 frames
+  before its shot; MODERN now shoots on the press, so it would have to be instant); 0x23's and the shotgun's flashes.
 
 ## 2. Wrong today (found in the code; fix first)
 Most are small. The first two were found by reading the code, not by running it.
@@ -72,6 +75,22 @@ Most are small. The first two were found by reading the code, not by running it.
 - `client-sweepers-zone-voices` (client S): zone voices aren't reset on a restart; sweepers and lamps use per-client
   random numbers and move once a tick.
 - `bots-sh-flake` (bots S): `bots.sh` still FAILs a line most runs (a bot that never dies or never hits).
+
+**From play (F1-F3, 2026-10-15), still open**
+- `play-bazooka-silent` (client S): the user heard no launch sound in a browser; 699 plays on every native path
+  (headless, so never heard). Fixed only for the Sergeant, Tediz Leader and Beach's clip (re-pack). Needs: which
+  character, every shot or the first, `audio/common/0699.wav` loaded.
+- `play-rocket-point-blank` (rules S): a MODERN rocket aimed at a wall nearer than its muzzle flies toward that
+  point, maybe back past the shooter (untested; fall back to the facing).
+- `play-sniper-first-tick` (rules S): a MODERN Fire on the tick the aim goes down is lost, not delayed.
+- `play-reconnect-new-player` (server M): RECONNECT joins as a new player (score lost); the old slot stands up to
+  5 min. Reclaiming it by identity is the upgrade. A crashed client holds its slot 5 min.
+- `play-small` (client S): the lost page cuts its reason at 46 characters; `team=` not asked again after a
+  reconnect; a loss with the settings page open keeps unapplied changes; the web re-lock click also fires; the
+  capture hint shows with F8's camera on; a trackpad queues long wheel-zoom holds; the gun's sight has no N64
+  smoothing and the pads' aim-assist tests from the body's arm, not the gun's eye.
+- `results-restart` (server/client M): RESTART on the results now takes a click and Enter and votes; going on to
+  the next game is out of scope for now (the user's call).
 
 ## 3. Not ported or not drawn
 **Deathmatch bots**
@@ -246,7 +265,7 @@ menu with neutral input; RESUME re-locking ("CLICK RESUME AGAIN" on refusal); mo
 localStorage (`conker-settings`, APPLY); LEAVE MATCH returning to the page; the PRESS F prompt and crosshair; whether
 Chrome scales mouse movement on high-DPI screens; middle-click autoscroll; a pointer-lock permission prompt.
 **Other browsers:** Firefox and Safari 26.4+ (two windows; the empty `serverCertificateHashes` list), background tabs
-and the 30 s timeout (F3: a hidden page ticks on a timer; RECONNECT after a drop).
+and the 5 min timeout (F3: a hidden page ticks on a timer; RECONNECT after a drop).
 **Pads and input:** a real Xbox/DualSense with two windows (X tap/hold, the edge ramp, aim-assist, triggers past 0.5,
 Start, glyphs); rumble on native Windows/Linux; the team screen's BALANCE on a pad; AZERTY labels; a native window's
 grab and close; tuning the spread cones in real play.
