@@ -40,6 +40,30 @@ window.conkerLoading = (step, what, progress) => {
   bar.setAttribute("aria-valuenow", Math.round(filled * 100));
 };
 
+// The controls, one tip at a time while it loads.
+const TIPS = [
+  "Click the game to capture the mouse; Esc opens the menu.",
+  "WASD or the arrows move, Space jumps, hold Left Shift to walk.",
+  "Left mouse fires, right mouse aims; the wheel zooms a scope.",
+  "R reloads, Q draws or puts away your weapon, C crouches.",
+  "G throws a grenade: hold it to cook it.",
+  "Tab opens the team screen in the team modes.",
+  "M mutes the sound, H shows the HUD as text.",
+  "The key under Esc shows diagnostics, F8 the free camera.",
+  "Gamepad: A jumps, X reloads, Y draws, B crouches, the triggers aim and fire.",
+  "The Esc menu's Settings rebind the keys, the mouse and the gamepad.",
+];
+const tip = document.getElementById("tip");
+let tips = 0;
+const turn = setInterval(() => {
+  if (intro.hidden) return clearInterval(turn);
+  tip.classList.add("out");
+  setTimeout(() => {
+    tip.textContent = TIPS[++tips % TIPS.length];
+    tip.classList.remove("out");
+  }, 300);
+}, 4000);
+
 // The game's download fills the bar's first 28 % (a compressed one has no known size: its MB, the
 // bar creeping). A clone is counted, so the browser still caches the compiled wasm by its URL.
 const DOWNLOAD = 0.28;
