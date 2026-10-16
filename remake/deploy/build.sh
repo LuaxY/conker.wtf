@@ -23,9 +23,11 @@ rm -rf "$site"
 mkdir -p "$site/v/$hash"
 cp web/dist/client.js web/dist/client_bg.wasm "$site/v/$hash/"
 cp -R web/index.html web/play.html web/landing "$site/"
-# client.js finds client_bg.wasm next to itself (import.meta.url), so only the import moves.
-sed "s|\"./dist/client.js\"|\"./v/$hash/client.js\"|" web/play.js > "$site/play.js"
+# client.js finds client_bg.wasm next to itself (import.meta.url), and play.js fetches it next to
+# client.js's path: every "./dist/client.js" moves (the import and the wasm's fetch).
+sed "s|\"./dist/client.js\"|\"./v/$hash/client.js\"|g" web/play.js > "$site/play.js"
 grep -q "\"./v/$hash/client.js\"" "$site/play.js" || { echo "play.js: import not rewritten" >&2; exit 1; }
+! grep -q '"./dist/client.js"' "$site/play.js" || { echo "play.js: a dist/ path left" >&2; exit 1; }
 find "$site" -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.wasm' \) | while read -r f; do
   brotli -q 11 -f "$f"
   gzip -9 -k -f "$f"

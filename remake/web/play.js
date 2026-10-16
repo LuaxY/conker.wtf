@@ -74,7 +74,8 @@ const turn = setInterval(() => {
 // bar creeping). A clone is counted, so the browser still caches the compiled wasm by its URL.
 const DOWNLOAD = 0.28;
 const wasm = async () => {
-  const res = await fetch(new URL("dist/client_bg.wasm", import.meta.url));
+  // Next to client.js, wherever the import points (deploy/build.sh rewrites both to v/HASH/).
+  const res = await fetch(new URL("client_bg.wasm", new URL("./dist/client.js", import.meta.url)));
   const reader = res.ok && res.clone().body?.getReader();
   const size = res.headers.get("content-encoding") ? 0 : Number(res.headers.get("content-length"));
   const mb = (n) => (n / 1e6).toFixed(1);
