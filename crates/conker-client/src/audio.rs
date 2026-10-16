@@ -1,0 +1,4454 @@
+//! Sound, as the original plays it in a match (`lab/audio/README.md`): the asset pack's
+//! `audio/sounds.json` and `audio/events.json` ([`conker_assets::audio`]) say which game event plays
+//! which sound; this module finds the events in what the client has of the match and plays them.
+//!
+//! - **Events.** The server sends few, so each tick ([`hear`], after the animation clocks) reads
+//!   them from the replicated state: a player's clock passing a clip event's time (the local
+//!   player's predicted clock, the others' from [`Combat::anim`]; `held.json`'s rule, [`passes`]);
+//!   its clip, weapon and model in hand starting or ending a cue's condition (firing, holding,
+//!   burning); its fire clip starting (a shot) or its scope coming up; its health dropping (a hit:
+//!   its weapon is the server's, [`Combat::hit`]); the match ([`MatchView`]: a
+//!   pickup taken, a rocket gone, weapon 0x14's shots, War: Total War's gas); a gas canister taken
+//!   (its player's [`Combat::carrying`] going on), War: Colors' flag taken ([`Combat::flag`]); the grenades in flight (the local fighter
+//!   carries them all: launch, bounces, fuse and blast); the background and the lamps' buzz (each
+//!   flash of [`crate::lights::Flickers`]); a War outro's voice line at its frame (unpositioned, at
+//!   [`MIX`]; its volume is I; it stops a jingle playing, one MP3 stream, I); a mounted
+//!   gun's state changing and its trigger let go ([`MatchView::guns`]), the local gunner's zoom and
+//!   aim moving; War: Beach's detonation ([`MatchView::cooldown`] going on: its three blasts and
+//!   debris, the presser's radio voice), strikes (a villager's [`Combat::deadline`] reaching 0: the
+//!   call and the villager's cry, the blast 40 frames on, debris), the plunger's radio voice in trigger
+//!   0x25 while it is ready, and the local escapee's radio line; War: Colors' captures (a team's
+//!   score rising: 30 ticks on, its jingle for everyone and each loser's voice); the music ducks
+//!   while a line plays ([`duck`]). Radio lines ([`Sounds::radio`]: Beach's voices, a canister or a
+//!   flag taken) are the click on, the line its cue's `delay` later, the click off once it has
+//!   played (a bot's: the line only), at most one a slot every 300 ticks, none while the speaker
+//!   is voicing ([`Sounds::voicing`]); the bullets passing the listener's camera ([`Sounds::fly_by`]);
+//!   a bullet popping a head ([`On::Head`]).
+//! - **The mask's muffle** ([`Sounds::mask`]): while a gas mask's put-on is in force, any player's
+//!   (C `func_15074664`: no camera test), the effects (not the background or the lines) go through
+//!   a [`MUFFLE_HZ`] low-pass ([`Biquad`]), the ones already playing too.
+//! - **Rules** (`events.json`): the listener is the local player. Its own sounds with `own` play
+//!   centred at that volume, the rest by distance (full within `near`, none from `far`, linear
+//!   between, silent below [`QUIET`]) and pan (along the follow camera's right). A sound on channel
+//!   a or b stops its owner's last one there; `chance`, `if_idle`, `pitch` (cents, as the playback
+//!   rate); a loop plays until its cue's condition ends, a stop event, its owner's next sound on the
+//!   channel or `ticks`. Every sound started logs a `SOUND` line (debug), headless clients too
+//!   (without a device a sound that does not loop is over at once, so `if_idle` always passes).
+//! - **Playback** (windowed): rodio's mixer, each sound a [`Playing`] source with its loop points,
+//!   envelope and pitch, at the two ear volumes the tick sets ([`MIX`] for effects, the background
+//!   recording at 1.0, equal-power pan), the effects through the muffle while [`MUFFLED`]. The device opens at once natively and on the first key
+//!   press or click in the browser (a page may start audio only after a gesture), then every WAV
+//!   loads ([`WavLoader`]). The Mute action (M) mutes.
+
+use crate::{Anim, FollowCamera, held};
+use bevy::asset::io::Reader;
+use bevy::asset::{AssetLoader, LoadContext};
+use bevy::prelude::*;
+use conker_anim::AnimPlayer;
+use conker_anim::combat::{
+    BLOWN_UP, BURN_END, BURNING, DEATH_SHOT, FLAME_HIT, GRENADE_HOLD, GRENADE_PULL, GRENADE_THROW,
+};
+use conker_assets::audio::Line;
+use conker_assets::audio::{
+    Audio, Background, Channel, ClipAction, ClipSound, Cue, Emitter, Follow, On, Play, Sound,
+    WATER_STEPS,
+};
+use conker_assets::outro::{Outro, frame};
+use conker_assets::{Held, Manifest, Pickup};
+use conker_camera::volume::CameraVolume;
+use conker_rules::net::Fighting;
+use conker_rules::projectile::{
+    BOLT_STEP, Grenade, LOB, LOB_HOLD, LOB_PULL, LOB_THROW, ROCKET_SPEED, SHOT_STEP,
+};
+use conker_rules::weapon::{Attack, Weapon, weapon};
+use conker_rules::{Rng, beach, gun};
+use conker_sim::collision::NO_FLOOR;
+use conker_sim::movement::atan2_u16;
+use conker_sim::net::{BulletView, Combat, GunView, MatchView, Player, PlayerId, RacerView};
+use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
+use core::time::Duration;
+use lightyear::core::timeline::is_in_rollback;
+use lightyear::prelude::*;
+use rodio::{ChannelCount, SampleRate, Source};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+
+/// Sound effects against the background recording, which plays at 1.0: the original's mix, measured
+/// 0.56-0.67 (`lab/audio`, V `pick57`, `ctl_cd`; centre pan's 0.707 apart, which the pan law
+/// adds back).
+pub const MIX: f32 = 0.6;
+/// A positional sound below this volume (out of 32767) is silent (`func_1000A420`).
+pub const QUIET: f32 = 401.0;
+/// Every [`Playing`] is stereo.
+const STEREO: ChannelCount = ChannelCount::new(2).unwrap();
+/// The background's voice id (the game's sound ids start at 1).
+const BACKGROUND: u16 = 0;
+/// A War outro `n`'s voice line ([`crate::outro`]) plays as id `VOICE - n` (the game's
+/// sound ids end at 1762), the maps' lines ([`Pack::lines`]) as in [`LINES`].
+const VOICE: u16 = u16::MAX;
+const ESCAPE: u16 = VOICE - 0x100;
+/// The maps' voice lines by id: War: Beach's escape, War: Colors' capture jingles (by the scoring
+/// team: the squirrels', the Tediz').
+const LINES: [(u16, &str); 3] = [
+    (ESCAPE, "escape"),
+    (ESCAPE - 1, "jingle-squirrels"),
+    (ESCAPE - 2, "jingle-tediz"),
+];
+/// A War outro `n`'s song ([`conker_assets::outro::Outro::song`]) plays as id `SONG - n`: not an
+/// MP3 (it ducks nothing) nor the background (nothing ducks it).
+const SONG: u16 = ESCAPE - 0x100;
+/// An outro's song against its recording (`lab/audio/tools/song_record.sh`: the match's slot at its
+/// 0x4650, with the map's own volume calls missed): V b4 (`polish-g5-scratch`, a pinned Beach cs4
+/// capture, no lldb), song 0x8A found at the outro's frame 1, least-squares gain 0.79 over its first
+/// 3 s, 0.75 over 9 s (0.65-0.97 in half seconds; the match's music and the voice play over it).
+const SONG_LEVEL: f32 = 0.75;
+/// The background's stem ([`Follow`]): War: Beach's song 0x4D's channels 13 and 14.
+const STEM: u16 = SONG - 0x100;
+/// Tank's countdown song (the map's `countdown` line: song 50 over the map's, not an MP3: it ducks
+/// nothing).
+const COUNTDOWN: u16 = STEM - 1;
+/// Whether a voice is an MP3 line: a map's ([`LINES`]) or an outro's voice.
+fn mp3(id: u16) -> bool {
+    id > ESCAPE - LINES.len() as u16
+}
+/// The outros' script sounds' volume and distances (`func_1000FA64(id, …, 0x7F7F, 0x7D00, 0x7918,
+/// …)`: full volume within 31000, so only the pan tells where; I: the near/far reading).
+const SCRIPT: [f32; 3] = [32639.0, 31000.0, 32000.0];
+/// Ticks from a capture to its jingle and the losers' voices (script 0xBB's timer; V c1a, c1b:
+/// capture 382, the calls 412).
+const CHEER: u32 = 30;
+/// The muffle's cutoff (Hz): the effects player's FX param 9 during a mask put-on (`func_10012020`
+/// mode 5, C: 11025 → 520, its param 8 0 → 127, I: the wet mix, full).
+pub const MUFFLE_HZ: f32 = 520.0;
+/// The radio: ticks between a slot's lines (`0x800D9AB0`'s 600 VIs), the plunger's
+/// voice trigger, and the ticks after a blast its debris lands in (V ev2 655-694 after 617, ev3
+/// 1082-1109 after 1044).
+const RADIO_GAP: u32 = 300;
+const READY_ZONE: usize = 0x25;
+const DEBRIS: [i32; 2] = [38, 77];
+/// Ticks a loop with `ticks` fades out over once they have run (killing bullets' 1278, C
+/// `func_1000EBC4`; the length is I).
+const FADE: u32 = 12;
+/// Weapon ids the cues use for the grenade, the rocket launcher and weapon 0x14.
+const GRENADE: u8 = 0x26;
+const ROCKETS: u8 = 0x16;
+const SHOTS: u8 = 0x14;
+/// The crossbow, whose shots are bolts.
+const BOLTS: u8 = 0x18;
+/// Whether a pack has sound: `pack.json`'s `audio` list is not empty.
+pub fn has_sound(manifest: &[u8]) -> bool {
+    serde_json::from_slice::<Manifest>(manifest).is_ok_and(|m| !m.audio.is_empty())
+}
+
+/// The pack's sound data, the held models (Holding cues) and the pickups (Pickup cues), with each
+/// body's character ([`crate::characters`]) and clip events sorted by clip; the map's background,
+/// emitters (its lamps' buzz), voice lines and (War: Beach) the plunger's voice trigger.
+#[derive(Resource)]
+struct Pack {
+    audio: Audio,
+    held: Vec<Held>,
+    pickups: Vec<Pickup>,
+    characters: Vec<&'static str>,
+    clips: Vec<Vec<ClipSound>>,
+    background: Option<Background>,
+    /// The background's stem and the point its volume follows ([`Follow`]).
+    stem: Option<(Background, Follow)>,
+    emitters: Vec<Emitter>,
+    lines: std::collections::BTreeMap<String, Line>,
+    ready_zone: Option<CameraVolume>,
+    /// The map's sound zones ([`conker_assets::audio::Zone`]) and their trigger records' tests.
+    zones: Vec<(conker_assets::audio::Zone, CameraVolume)>,
+    /// Scene 0x34's traps ([`crate::traps::sounding`]).
+    traps: Vec<conker_rules::traps::Trap>,
+    /// Its grenades are item 0x3A's (`Arena::lob`): their bounces and blast are [`LOB`]'s.
+    lob: bool,
+}
+
+impl Pack {
+    fn new(
+        mut audio: Audio,
+        held: Vec<Held>,
+        pickups: Vec<Pickup>,
+        map: &str,
+        triggers: &[u8],
+    ) -> Self {
+        // On 3f the baby's and the body's events too (no player is drawn as them).
+        let characters = crate::character_files(map);
+        let mut clips: Vec<_> = (characters.iter())
+            .map(|c| audio.events.characters.remove(*c).unwrap_or_default())
+            .collect();
+        for c in &mut clips {
+            c.sort_by_key(|e| e.clip); // stable: each clip's events stay in time order
+        }
+        let traps = match map == "34" {
+            true => conker_rules::traps::parse(triggers),
+            false => Vec::new(),
+        };
+        let ready_zone = (map == "2b")
+            .then(|| triggers.as_chunks::<0x34>().0.get(READY_ZONE))
+            .flatten()
+            .map(CameraVolume::parse_record);
+        let map = audio.events.maps.get(map);
+        let backgrounds = map.map_or(&[][..], |m| &m.background[..]);
+        let background = backgrounds.iter().find(|b| b.follow.is_none()).cloned();
+        let stem = (backgrounds.iter()).find_map(|b| Some((b.clone(), b.follow.clone()?)));
+        let emitters = map.map_or(Vec::new(), |m| m.emitters.clone());
+        let lines = map.map_or_else(Default::default, |m| m.lines.clone());
+        let records = triggers.as_chunks::<0x34>().0;
+        let zones = (map.iter().flat_map(|m| &m.zones))
+            .filter_map(|z| {
+                let r = records.get(usize::from(z.trigger))?;
+                Some((z.clone(), CameraVolume::parse_record(r)))
+            })
+            .collect();
+        Self {
+            audio,
+            held,
+            pickups,
+            characters,
+            clips,
+            background,
+            stem,
+            emitters,
+            lines,
+            ready_zone,
+            zones,
+            traps,
+            lob: false,
+        }
+    }
+
+    /// A character's clip events, by its logical clip: War: Heist's bag's ([`crate::CASH`],
+    /// [`Sounds::heist`]), War: Raptor's baby's and body's ([`Sounds::raptor`]).
+    fn events(&self, character: &str) -> &[ClipSound] {
+        let i = self.characters.iter().position(|c| *c == character);
+        i.map_or(&[], |i| &self.clips[i])
+    }
+}
+
+/// Registers sound: the tick's events and voices ([`hear`], headless too) and, windowed, the device,
+/// the WAV loader and the mute key. `map`: whose ambience plays (`triggers`: its trigger table).
+/// `seed`: the client's own random sounds.
+#[allow(clippy::too_many_arguments)]
+pub fn build(
+    app: &mut App,
+    audio: Audio,
+    held: Vec<Held>,
+    pickups: Vec<Pickup>,
+    windowed: bool,
+    map: &str,
+    triggers: &[u8],
+    seed: u64,
+) {
+    let lob = (app.world().get_resource::<crate::MatchArena>()).is_some_and(|a| a.0.lob);
+    app.insert_resource(Pack {
+        lob,
+        ..Pack::new(audio, held, pickups, map, triggers)
+    });
+    app.insert_resource(Sounds {
+        rng: Rng::new(seed | 1),
+        duck: DUCK[0],
+        ..default()
+    });
+    app.add_systems(
+        FixedUpdate,
+        hear.after(crate::tick_anims)
+            .after(crate::lights::flicker)
+            .after(crate::heist::advance)
+            .after(crate::raptor::advance)
+            .run_if(not(is_in_rollback)),
+    );
+    if windowed {
+        app.init_asset::<Pcm>().init_asset_loader::<WavLoader>();
+        app.add_systems(
+            Update,
+            (open.run_if(not(resource_exists::<Output>)), mute, running),
+        );
+    }
+}
+
+/// Whose a sound is: a player's (channels a and b are per player, by [`Combat::slot`]), a grenade's
+/// (birth tick, thrower), one of weapon 0x14's shots in flight (its index), a mounted gun's (its
+/// index), or nobody's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Owner {
+    Player(u16),
+    Grenade(u32, usize),
+    /// A bullet: its birth tick and owner's slot ([`BulletView`]).
+    Bullet(u32, u16),
+    Shot(usize),
+    Gun(usize),
+    /// An outro's script sound (an index of its `sounds`).
+    Outro(usize),
+    /// An outro's tank (an index of its actors): its engine and gears ([`Sounds::outro_tanks`]).
+    OutroTank(usize),
+    /// A map's sound zone (an index of its `zones`).
+    Zone(usize),
+    /// Scene 0x34's trap (an index of its `traps`).
+    Trap(usize),
+    /// War: Heist's bag.
+    Cash,
+    /// War: Raptor's baby and the body it is fed.
+    Baby,
+    Body,
+    /// Race: a missile in flight (its birth tick and index in that tick's new ones).
+    Missile(u32, usize),
+    World,
+}
+
+/// Where a sound starts from and whose it is: `follows` a player's slot (it moves with it), `tag` the
+/// cue whose condition keeps it playing; `flat`: heard centred at its volume wherever it is (the
+/// radio: near/far 0x7FFF/0x7FFE; V g5c c1, where attenuated records carry flag 0x100 too).
+#[derive(Clone, Copy)]
+struct Src {
+    owner: Owner,
+    pos: [f32; 3],
+    follows: Option<u16>,
+    tag: Option<usize>,
+    flat: bool,
+}
+
+impl Src {
+    fn player(p: &Seen) -> Self {
+        Self {
+            owner: Owner::Player(p.slot),
+            pos: p.pos,
+            follows: Some(p.slot),
+            tag: None,
+            flat: false,
+        }
+    }
+
+    fn at(pos: [f32; 3]) -> Self {
+        Self {
+            owner: Owner::World,
+            pos,
+            follows: None,
+            tag: None,
+            flat: false,
+        }
+    }
+
+    /// The radio at `p`: its owner's, heard centred everywhere.
+    fn radio(p: &Seen) -> Self {
+        Self {
+            flat: true,
+            ..Self::player(p)
+        }
+    }
+}
+
+/// What the sound rules read of a player in a tick; last tick's is its [`Heard`].
+#[derive(Clone, Copy)]
+struct Seen {
+    slot: u16,
+    /// Its body ([`crate::body`]): its character's sounds; its class, whose clip plays the
+    /// clock's (conker-rules' `characters::clip`: the events are that clip's).
+    body: usize,
+    class: u8,
+    pos: [f32; 3],
+    clock: AnimPlayer,
+    /// The weapon held (0: none) and drawn: the local player's prediction, the others' [`Combat`].
+    weapon: u8,
+    drawn: bool,
+    health: u8,
+    /// [`Combat::anim`]: the rules' animation, a hit's first reaction on the tick it lands, and
+    /// [`Combat::hit`]: the server's weapon of the last hit.
+    reaction: u16,
+    hit: u8,
+    /// The grenade's cook timer (VIs): the local player's prediction, the others' [`Combat::cook`].
+    cook: u16,
+    scope: bool,
+    local: bool,
+    /// The floor's surface kind (bits 0-4 of its word; [`WATER_STEPS`] in the water) and the
+    /// horizontal speed: footsteps.
+    floor: Option<u8>,
+    speed: f32,
+    /// The speed the stick asks for (Tank's engine, [`engine`]).
+    target: f32,
+    /// Total War: carrying its team's gas canister, and whether it is a bot ([`On::Carry`]).
+    carry: Option<(u8, bool)>,
+    /// War: Colors: carrying flag f, and whether it is a bot ([`On::Flag`]).
+    flag: Option<(u8, bool)>,
+    /// A bot (no radio), its team; War: Beach's escape freeze and deadline ([`Combat`]).
+    bot: bool,
+    team: u8,
+    freeze: u8,
+    deadline: u16,
+    /// Wearing a gas mask ([`Combat::masked`]; the local player's prediction).
+    masked: bool,
+    /// The height above its floor (Race's hum; none: 0).
+    above: f32,
+    /// Tank: the hull's pitch in degrees (the engine's pitch; else 0).
+    pitch: f32,
+    /// The crossbow's aim laser on ([`crate::laser`]: the local player's prediction, the others'
+    /// [`Combat::laser`]).
+    laser: bool,
+}
+
+/// A player as the last tick saw it.
+#[derive(Component, Clone, Copy)]
+struct Heard(Seen);
+
+/// The listener: the local player (its slot and position) and its view's right (xz): the follow
+/// camera's, or the modern controls' orbit camera's look (`view`) while it draws.
+#[derive(Clone, Copy)]
+struct Ear {
+    slot: u16,
+    pos: [f32; 3],
+    right: [f32; 2],
+}
+
+impl Ear {
+    fn new(slot: u16, pos: [f32; 3], camera: &FollowCamera, view: Option<Vec3>) -> Self {
+        let (eye, at) = camera.drawn.view(&camera.follow);
+        let ahead = view.unwrap_or(at - eye);
+        let right = Vec2::new(-ahead.z, ahead.x).normalize_or_zero();
+        Self {
+            slot,
+            pos,
+            right: right.to_array(),
+        }
+    }
+}
+
+/// A sound playing (or, without a device, as if it were): what it is and how loud, its mixer
+/// controls once it is on the mixer.
+struct Voice {
+    id: u16,
+    owner: Owner,
+    channel: Channel,
+    tag: Option<usize>,
+    pos: [f32; 3],
+    follows: Option<u16>,
+    /// Unpositioned stereo at `volume` (the background recording).
+    flat: bool,
+    /// Volumes out of 32767 (footsteps scaled by speed), and the distances.
+    volume: f32,
+    own: Option<f32>,
+    near: f32,
+    far: f32,
+    /// [`MIX`] × the sample's own volume (1 for the background).
+    base: f32,
+    speed: f32,
+    looped: bool,
+    /// The tick a loop with `ticks` ends, and the tick its fade began.
+    until: Option<u32>,
+    fade: Option<u32>,
+    started: u32,
+    stopped: bool,
+    control: Option<Arc<Control>>,
+    bend: Bend,
+}
+
+/// A positional record's pitch bend over its sound's own rate (C `func_10011624`, the records'
+/// per-frame update): its callback's cents (record+0x20: Race's hums, Tank's engine), the ratio on
+/// the mixer (+0x2C) and, for a record with the Doppler (flag 4: the hums), last tick's distance to
+/// the ear (+0x28).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bend {
+    cents: i32,
+    ratio: f32,
+    dist: Option<u16>,
+}
+
+impl Bend {
+    const FLAT: Self = Self {
+        cents: 0,
+        ratio: 1.0,
+        dist: None,
+    };
+
+    /// A tick at `cents` (`alCents2Ratio`): at once, or with the Doppler at the distance `d` to the
+    /// ear, eased [`DOPPLER_EASE`] of the way a tick (a new record starts at the cents alone).
+    fn step(&mut self, cents: i32, d: Option<u16>) {
+        let ratio = (cents as f32 / 1200.0).exp2();
+        self.ratio = match (self.dist, d) {
+            (Some(was), Some(is)) => {
+                self.ratio + (ratio * doppler(was, is) - self.ratio) * DOPPLER_EASE
+            }
+            _ => ratio,
+        };
+        (self.cents, self.dist) = (cents, d);
+    }
+}
+
+/// The Doppler's ease a frame (`0x8002C404`, V r1).
+const DOPPLER_EASE: f32 = 0.3;
+
+/// The Doppler factor of a record whose distance to the ear went from `was` to `is` in a frame
+/// (`func_10011624`, C; V r1): v = (was − is)·2 VIs / 3, truncated; 367/(367 − v) within 0.5..2
+/// (`0x8002C400`), 2 from v 367.
+pub fn doppler(was: u16, is: u16) -> f32 {
+    let v = (i32::from(was) - i32::from(is)) * 2 / 3;
+    match v {
+        367.. => 2.0,
+        v => (367.0 / (367 - v) as f32).clamp(0.5, 2.0),
+    }
+}
+
+impl Voice {
+    /// Its volume out of 1 and pan (0 left, 0.5 centre, 1 right) for `ear` (`func_1000A420`): the
+    /// listener's own player's sounds with `own` centred at that volume; the others by distance
+    /// (linear from `near` to `far`) and the side of the camera they are on.
+    fn level(&self, ear: &Ear) -> (f32, f32) {
+        if self.flat {
+            return (self.volume / 32767.0, 0.5);
+        }
+        if let (Some(own), true) = (self.own, self.follows == Some(ear.slot)) {
+            return (own / 32767.0, 0.5);
+        }
+        let d: [f32; 3] = core::array::from_fn(|i| self.pos[i] - ear.pos[i]);
+        let dist = dist2(self.pos, ear.pos).sqrt();
+        let near = if self.far > self.near {
+            ((self.far - dist) / (self.far - self.near)).clamp(0.0, 1.0)
+        } else {
+            f32::from(dist <= self.near)
+        };
+        let volume = self.volume * near;
+        if volume < QUIET {
+            return (0.0, 0.5);
+        }
+        let xz = (d[0] * d[0] + d[2] * d[2]).sqrt();
+        let side = if xz < 1.0 {
+            0.0
+        } else {
+            (d[0] * ear.right[0] + d[2] * ear.right[1]) / xz
+        };
+        (volume / 32767.0, 0.5 + 0.5 * side)
+    }
+
+    /// The two ears' volumes on the mixer at `tick`.
+    fn ears(&self, ear: &Ear, tick: u32, muted: bool) -> [f32; 2] {
+        let (volume, pan) = self.level(ear);
+        let fade = self
+            .fade
+            .map_or(1.0, |f| 1.0 - tick.saturating_sub(f) as f32 / FADE as f32);
+        let v = if muted {
+            0.0
+        } else {
+            self.base * volume * fade
+        };
+        if self.flat {
+            return [v, v];
+        }
+        let a = pan * FRAC_PI_2;
+        [v * a.cos(), v * a.sin()]
+    }
+}
+
+/// A cue's sound due later (a gun's case, a body part landing), or (`end`) the end of a cue held by
+/// a condition: its sounds stop and its `then` plays.
+struct Later {
+    tick: u32,
+    cue: usize,
+    src: Src,
+    end: bool,
+}
+
+/// The sound state: the voices, sounds due later, and last tick's projectiles and pickups (what
+/// changed is an event).
+#[derive(Resource, Default)]
+struct Sounds {
+    rng: Rng,
+    voices: Vec<Voice>,
+    later: Vec<Later>,
+    /// Last tick's grenades (the local fighter's: all in flight) and bullets (each with its fly-by
+    /// to come: [`Self::fly_by`]), the grenades' bounces' shuffle bag (drawn, last: [`Self::shuffle`]),
+    /// rockets, shots (each: a bolt, its pass played: [`Self::match_sounds`]) and taken pickups;
+    /// false until the first tick with a match.
+    grenades: Vec<(u32, Grenade)>,
+    bullets: Vec<(BulletView, bool)>,
+    bag: (u32, usize),
+    rockets: Vec<[f32; 3]>,
+    shots: Vec<[f32; 3]>,
+    bolts: Vec<(bool, bool)>,
+    taken: u64,
+    /// Total War's gas out last tick ([`On::Gas`]).
+    gas: bool,
+    primed: bool,
+    /// Last tick's match phase ([`Self::prime`]).
+    phase: u8,
+    background: bool,
+    /// This tick's players (last tick's, this tick's), reused.
+    players: Vec<(Seen, Seen)>,
+    muted: bool,
+    /// The mounted guns last tick, and the local gunner's zoom and aim ([`Self::gunner`]).
+    guns: Vec<GunView>,
+    turning: Option<Turning>,
+    /// War: Beach: the plunger's cooldown last tick (None before the first), the strikes called
+    /// (slot, where, the call's tick; till their blast). The radio: each slot's last line (War:
+    /// Beach's by speaker, Total War's and Colors' by team) and the lines playing (speaker, the tick
+    /// the line is due, its cue). The music's volume ([`duck`]).
+    cooldown: Option<u16>,
+    strikes: Vec<(u16, [f32; 3], u32)>,
+    radio_at: HashMap<u16, u32>,
+    radios: Vec<(u16, u32, usize)>,
+    duck: f32,
+    /// War: Colors: the scores last tick (None before the first), the captures' cheers due (tick,
+    /// the scoring team).
+    scores: Option<[u16; 2]>,
+    cheers: Vec<(u32, u8)>,
+    /// The mask's muffle ([`Self::mask`]) and the players whose put-on was their last mask event
+    /// (s126+0x94).
+    muffled: bool,
+    wearers: HashSet<u16>,
+    /// The outro's script sounds started (indices of its `sounds`).
+    outro: HashSet<usize>,
+    /// The map's sound zones started (indices of [`Pack::zones`]).
+    zones: HashSet<usize>,
+    /// The gun releases' replays due: tick, cue, sound id, where ([`Self::guns`]).
+    replays: Vec<(u32, usize, u16, Src)>,
+    /// The tick a player was last inside each sound zone (a `stops_on_leave` zone's stop).
+    inside: HashMap<usize, u32>,
+    /// War: Heist's last voice line ([`MatchView::voice`]; `None` until the first tick with a
+    /// match: the line already there is not replayed).
+    voice: Option<Option<(u32, u16, u16)>>,
+    /// Tank: each tank's engine ([`engine`]; absent while dead), last tick's shells, the bomb's
+    /// carrier and the bomb's countdown (None before the first tick with a match).
+    engines: HashMap<u16, u8>,
+    /// Tank: each driving tank's rumbles ([`Self::rumble`]): frames to the next, those playing
+    /// (start tick, hold).
+    rumbles: HashMap<Owner, (u32, Vec<(u32, u32)>)>,
+    tank_shells: Vec<[f32; 3]>,
+    bomb: Option<(Option<u16>, i32)>,
+    /// Race: last tick's countdown stage and racers (None before the first tick with a match), the
+    /// missiles in flight (owner, where).
+    race: Option<(u8, Vec<RacerView>)>,
+    missiles: Vec<(Owner, [f32; 3])>,
+}
+
+/// Race's hum `hum` (0-2) on a racer in state `s` (0 fast, 1, 2 slow: [`hum_state`]) `above` its
+/// floor among `racers`: the volume it moves to and whether it jumps there at once ([`On::RaceHum`],
+/// C `func_150D5124`).
+pub fn hum_target(hum: u8, s: u8, above: f32, racers: usize) -> (f32, bool) {
+    match hum {
+        0 => {
+            let v = (25.0 * above).min(5000.0);
+            let v = if v < 500.0 { 0.0 } else { v };
+            match s {
+                0 => (v, v != 0.0),
+                _ => (v + 7000.0, false),
+            }
+        }
+        1 => match s {
+            0 => (16000.0, true),
+            _ if s == 1 || racers >= 5 => (12000.0, false),
+            _ => (0.0, false),
+        },
+        _ => match s {
+            0 => (24000.0, true),
+            _ => (400.0, false),
+        },
+    }
+}
+
+/// Race's hum `hum`'s pitch (cents) on a racer in state `s` `above` its floor among `racers`: the
+/// cents it moves to (C `func_150D5124`'s second value; V r1): hum 0 5 × the height (at most 1000)
+/// in state 2, else 400; hum 1 400 in state 0, and in state 2 under 5 racers; hum 2 none.
+pub fn hum_cents(hum: u8, s: u8, above: f32, racers: usize) -> i32 {
+    match (hum, s) {
+        (0, 2) => ((5.0 * above) as i32).min(1000),
+        (0, _) | (1, 0) => 400,
+        (1, 2) if racers < 5 => 400,
+        _ => 0,
+    }
+}
+
+/// A hum's cents a frame on toward `target`: up 2 VIs × 256, down 2 × 8 (`func_150D5124`; V r1:
+/// 159 → 174 → 192, 207 → 191 → 175).
+pub fn cents_step(cents: i32, target: i32) -> i32 {
+    match cents < target {
+        true => (cents + 512).min(target),
+        false => (cents - 16).max(target),
+    }
+}
+
+/// A tank's drive loop's cents (`func_151BB0E0`, C: trunc(|obj+0x3C| · obj+0xB8 · 0.5), the speed
+/// by the hull's pitch in degrees, [`conker_rules::tank::hull_pitch`]): flat ground keeps the
+/// sample's own pitch.
+pub fn engine_cents(speed: f32, pitch: f32) -> i32 {
+    (speed.abs() * pitch * 0.5) as i32
+}
+
+/// A racer's state for its hum by its speed (C `func_150D3A68`'s bot rule; the original reads a
+/// human's stick, I here): above 6 → 0, above 3 → 1, else 2.
+pub fn hum_state(speed: f32) -> u8 {
+    match speed {
+        v if v > 6.0 => 0,
+        v if v > 3.0 => 1,
+        _ => 2,
+    }
+}
+
+/// A hum's volume a tick on toward `target`: 512 a tick, or there at once.
+pub fn hum_step(volume: f32, (target, at_once): (f32, bool)) -> f32 {
+    match at_once {
+        true => target,
+        false => volume + (target - volume).clamp(-512.0, 512.0),
+    }
+}
+
+/// A tank's engine (`func_151BB0E0`, C; V s1): 1 speeding up (the stick's speed past the speed,
+/// faster than 1), 2 coasting (faster than 5, not speeding up), else 0 idling.
+pub fn engine(speed: f32, target: f32) -> u8 {
+    match (speed.abs(), target.abs()) {
+        (v, t) if t > v && v > 1.0 => 1,
+        (v, _) if v > 5.0 => 2,
+        _ => 0,
+    }
+}
+
+/// A tank rumble's share of its volume `age` frames in, held `hold` frames at full (C
+/// `func_151BB0E0`, V t5): from 8/256 up 8/256 a frame (31 frames), full, then from 255/256 down
+/// 8/256 a frame to 7/256 (32 frames); none once over.
+pub fn swell(age: u32, hold: u32) -> Option<f32> {
+    let level = match age.checked_sub(31) {
+        None => 8 + 8 * age as i32,
+        Some(a) if a < hold => 256,
+        Some(a) => 255 - 8 * (a - hold).min(32) as i32,
+    };
+    (level > 0).then(|| level as f32 / 256.0)
+}
+
+/// The songs' duck factor while an MP3 line plays (`func_1000D758`, each frame; a map's line or an
+/// outro's voice): 0x8000 down to 0x36B0 at −0x400 a frame, back at +0x1000 a frame once it is
+/// over; the music plays at its volume × factor / 0x8000 (V Beach's 0x4650: 0x1E09 at the bottom,
+/// −0x233 and +0x8CA a frame; `b3` 169-187, 686-690; snd ev 103-121, 308-312).
+const DUCK: [f32; 4] = [32768.0, 14000.0, 1024.0, 4096.0];
+
+/// A stem's gain at the listener's distance `d` from its point (`func_1000A420`, `func_1000E588`):
+/// v = clamp(32767·(far − d)/(far − near), 0, 32767) >> 8, then min(v, 100) %.
+pub fn follow(f: &Follow, d: f32) -> f32 {
+    let (near, far) = (f32::from(f.near), f32::from(f.far));
+    let v = (32767.0 * (far - d) / (far - near)).clamp(0.0, 32767.0) as u32 >> 8;
+    v.min(100) as f32 / 100.0
+}
+
+/// A sound zone's volume (out of 32767) at the listener's distance `d` (`func_1000A420`): full
+/// within `near`, linear to none at `far`, silent below [`QUIET`].
+pub fn zone_volume(play: &Play, d: f32) -> f32 {
+    let (near, far) = (f32::from(play.near), f32::from(play.far));
+    let v = f32::from(play.volume) * ((far - d) / (far - near)).clamp(0.0, 1.0);
+    if v < QUIET { 0.0 } else { v }
+}
+
+/// The duck factor a tick on from `level`, a line playing or not ([`DUCK`]).
+pub fn duck(level: f32, line: bool) -> f32 {
+    let [full, low, down, up] = DUCK;
+    match line {
+        true => (level - down).max(low),
+        false => (level + up).min(full),
+    }
+}
+
+/// The local gunner's zoom and aim (the scope's yaw target times its pitch target) last tick, and
+/// how many ticks in a row each has moved.
+#[derive(Clone, Copy)]
+struct Turning {
+    last: [f32; 2],
+    moved: [u32; 2],
+}
+
+/// What a tick's rules read besides the sound state.
+struct Cx<'a> {
+    pack: &'a Pack,
+    tick: u32,
+    /// The oracle read the tick stands for in `--wait` replays, else -1 (logs).
+    read: i64,
+    ear: Ear,
+}
+
+fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum()
+}
+
+/// A player's character folder (cues name it).
+fn character<'a>(cx: &Cx<'a>, p: &Seen) -> &'a str {
+    cx.pack.characters.get(p.body).copied().unwrap_or_default()
+}
+
+/// Whether a clip event at `time` fires this tick: the clock passed it (`held.json`'s rule, V on the
+/// oracle: an event at 1.0 fires as the clock goes from 0.43, or 0.009, past it). A new clip from its
+/// start (this tick's time less the rate) through this tick's time; the same clip after last tick's
+/// time through this one's, round the loop when it wrapped.
+fn passes(was: &AnimPlayer, is: &AnimPlayer, time: f32) -> bool {
+    if is.id != was.id {
+        return (is.time - is.rate..=is.time).contains(&time);
+    }
+    if is.time >= was.time {
+        was.time < time && time <= is.time
+    } else {
+        time > was.time || time <= is.time
+    }
+}
+
+/// Whether the bag's clip event at `time` fires this tick ([`crate::heist::Bag`]: its clip and time
+/// last tick and this): the clock moved past it, from `was` (0 in a new clip) up to but not
+/// including `is`, round the loop when it wrapped. V `snd_bag_calls.txt`: clip 5 starts at 1 (its
+/// t-0 sound) and holds at 8, so its t-8 events never fire; clip 9's fire as it lands, 8 to 9.
+pub fn bag_passes(was: Option<(u8, f32)>, is: (u8, f32), time: f32) -> bool {
+    let from = was.filter(|w| w.0 == is.0).map_or(0.0, |w| w.1);
+    match is.1 >= from {
+        true => from <= time && time < is.1,
+        false => time >= from || time < is.1,
+    }
+}
+
+/// Whether held weapon `w`'s model is in the player's hand ([`held::shows`]).
+fn holding(held: &[Held], w: u8, p: &Seen) -> bool {
+    let draw = weapon(w).map(|w| w.draw.0);
+    held.iter()
+        .filter(|h| h.create.iter().any(|c| Some(c.0) == draw))
+        .any(|h| {
+            held::shows(
+                h,
+                p.weapon,
+                p.drawn,
+                &p.clock,
+                conker_rules::beach::TEDI_CLASS,
+            )
+        })
+}
+
+fn burning(p: &Seen) -> bool {
+    [FLAME_HIT, BURNING, BURN_END].contains(&p.clock.id)
+}
+
+/// The owner of item 0x3A's lit fuse while it is in `p`'s hand (no grenade yet: birth `u32::MAX`).
+fn lit(p: &Seen) -> Owner {
+    Owner::Grenade(u32::MAX, usize::from(p.slot))
+}
+
+/// The projectiles of last tick's list `old` that `new` no longer has. Lists keep their order (new
+/// ones go last), so each one left is the next of `new` within `step` of where it was.
+pub(crate) fn gone(
+    old: &[[f32; 3]],
+    new: &[[f32; 3]],
+    step: f32,
+) -> impl Iterator<Item = [f32; 3]> {
+    let mut next = new.iter().peekable();
+    old.iter().copied().filter(move |o| {
+        let kept = next.peek().is_some_and(|n| dist2(**n, *o) <= step * step);
+        if kept {
+            next.next();
+        }
+        !kept
+    })
+}
+
+impl Sounds {
+    /// A random number in `lo..=hi`.
+    fn between(&mut self, lo: i32, hi: i32) -> i32 {
+        lo + (self.rng.next_u32() % (hi - lo).max(0).unsigned_abs().saturating_add(1)) as i32
+    }
+
+    /// Starts one of `sounds` as `play` says, from `src` (unless its chance or a busy channel says
+    /// no), stopping its owner's last sound on the same channel; volumes × `scale`. Logs it.
+    fn start(&mut self, cx: &Cx, play: &Play, sounds: &[u16], scale: f32, src: Src) {
+        if play.chance < 255 && self.rng.next_u32() as u8 > play.chance {
+            return;
+        }
+        let mine = |v: &Voice| !v.stopped && v.owner == src.owner && v.channel == play.channel;
+        if play.channel != Channel::Free {
+            if play.if_idle && self.voices.iter().any(mine) {
+                return;
+            }
+            self.stop(mine);
+        }
+        if sounds.is_empty() {
+            return;
+        }
+        let id = sounds[self.rng.next_u32() as usize % sounds.len()];
+        let Some(sound) = cx.pack.audio.sounds.sounds.get(&id) else {
+            return;
+        };
+        let cents = self.between(i32::from(play.pitch[0]), i32::from(play.pitch[1]));
+        self.push(
+            cx,
+            Voice {
+                id,
+                owner: src.owner,
+                channel: play.channel,
+                tag: src.tag,
+                pos: src.pos,
+                follows: src.follows,
+                flat: src.flat,
+                volume: f32::from(play.volume) * scale,
+                own: play.own.map(|v| f32::from(v) * scale),
+                near: f32::from(play.near),
+                far: f32::from(play.far),
+                base: MIX * f32::from(sound.volume) / 127.0,
+                speed: (cents as f32 / 1200.0).exp2(),
+                looped: sound.looped.is_some(),
+                until: play.ticks.map(|t| cx.tick + u32::from(t)),
+                fade: None,
+                started: cx.tick,
+                stopped: false,
+                control: None,
+                bend: Bend::FLAT,
+            },
+        );
+    }
+
+    fn push(&mut self, cx: &Cx, v: Voice) {
+        let (volume, pan) = v.level(&cx.ear);
+        debug!(
+            "SOUND t={} read={} id={} p={:?} vol={:.0} gain={volume:.3} pan={pan:.2}",
+            cx.tick, cx.read, v.id, v.owner, v.volume
+        );
+        self.voices.push(v);
+    }
+
+    /// Stops the sounds `which` picks (each fades out over its envelope's release).
+    fn stop(&mut self, which: impl Fn(&Voice) -> bool) {
+        for v in self.voices.iter_mut().filter(|v| !v.stopped && which(v)) {
+            v.stopped = true;
+            if let Some(c) = &v.control {
+                c.stop.store(true, Relaxed);
+            }
+        }
+    }
+
+    /// Plays every cue `matches` picks for player `p` (its character's or anyone's), from `src`.
+    fn cues(&mut self, cx: &Cx, p: &Seen, src: Src, matches: impl Fn(&On) -> bool) {
+        for cue in &cx.pack.audio.events.cues {
+            if matches(&cue.on)
+                && cue
+                    .character
+                    .as_deref()
+                    .is_none_or(|c| c == character(cx, p))
+            {
+                self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+            }
+        }
+    }
+
+    /// A cue held by a condition: it starts as the condition begins; the tick after it ends (its
+    /// sound's callback sees it then, V e_w09: the twin guns' tail a read after the fire clip), its
+    /// sounds stop and `then` plays where the player was.
+    fn hold(&mut self, cx: &Cx, i: usize, cue: &Cue, was: bool, is: bool, p: &Seen) {
+        let src = Src::player(p);
+        if is && !was {
+            let tagged = Src {
+                tag: Some(i),
+                ..src
+            };
+            self.start(cx, &cue.play, &cue.play.sounds, 1.0, tagged);
+        } else if was && !is {
+            let (tick, src) = (
+                cx.tick + 1,
+                Src {
+                    follows: None,
+                    ..src
+                },
+            );
+            self.later.push(Later {
+                tick,
+                cue: i,
+                src,
+                end: true,
+            });
+        }
+    }
+
+    /// The sounds due by now ([`Later`]), before this tick's events.
+    fn due(&mut self, cx: &Cx) {
+        let mut k = 0;
+        while k < self.later.len() {
+            if self.later[k].tick > cx.tick {
+                k += 1;
+                continue;
+            }
+            let Later {
+                cue: i, src, end, ..
+            } = self.later.swap_remove(k);
+            let cue = &cx.pack.audio.events.cues[i];
+            if !end {
+                self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+                continue;
+            }
+            self.stop(|v| v.owner == src.owner && v.tag == Some(i) && v.started < cx.tick);
+            for then in &cue.then {
+                self.start(cx, then, &then.sounds, 1.0, src);
+            }
+        }
+    }
+
+    /// Player `is`'s sounds this tick (`was`: last tick's): its clip's events, its cues' conditions,
+    /// a shot, the scope, a hit.
+    fn player(&mut self, cx: &Cx, was: &Seen, is: &Seen) {
+        let me = Src::player(is);
+        let clips = &cx.pack.clips[is.body];
+        let id = conker_rules::characters::clip(is.class, is.clock.id);
+        let first = clips.partition_point(|c| c.clip < id);
+        for e in clips[first..].iter().take_while(|c| c.clip == id) {
+            if !passes(&was.clock, &is.clock, e.time) {
+                continue;
+            }
+            match &e.action {
+                ClipAction::Play(p) => self.start(cx, p, &p.sounds, 1.0, me),
+                ClipAction::Footstep(kind) => self.footstep(cx, *kind, is),
+                ClipAction::Stop(c) => self.stop(|v| v.owner == me.owner && v.channel == *c),
+            }
+        }
+        // A canister or a flag taken: its team's radio line (`func_15103C14`'s slot).
+        if let (Some((canister, bot)), None) = (is.carry, was.carry) {
+            self.radio(cx, is, On::Carry { canister, bot }, u16::from(canister));
+        }
+        if let (Some((flag, bot)), None) = (is.flag, was.flag) {
+            self.radio(cx, is, On::Flag { flag, bot }, u16::from(flag));
+        }
+        if self.mask(was, is) {
+            debug!(
+                "MUFFLE t={} read={} p={} masked={} muffled={}",
+                cx.tick, cx.read, is.slot, is.masked, self.muffled
+            );
+        }
+        // War: Beach's rockets fire with clip 0x207 (conker-rules' `beach::ROCKET_FIRE`).
+        let fire = |w: u8, p: &Seen| {
+            let rocket = |w: &Weapon| matches!(w.attack, Attack::Rocket { .. });
+            let clip = |w: &Weapon| {
+                w.fire.0 == p.clock.id || (rocket(w) && p.clock.id == beach::ROCKET_FIRE)
+            };
+            p.weapon == w && weapon(w).is_some_and(clip)
+        };
+        for (i, cue) in cx.pack.audio.events.cues.iter().enumerate() {
+            if !cue
+                .character
+                .as_deref()
+                .is_none_or(|c| c == character(cx, is))
+            {
+                continue;
+            }
+            match cue.on {
+                On::Firing { weapon, ref clips } => {
+                    let on = |p: &Seen| p.weapon == weapon && clips.contains(&p.clock.id);
+                    self.hold(cx, i, cue, on(was), on(is), is);
+                }
+                // The grenade's hiss: from 4 ticks into the throw (V e_gren, sq_e_gren, ctlw_k*:
+                // 1299 at the throw's read + 4, stopped by the blast), then with the grenade
+                // ([`Self::grenades`]); a throw that never leaves the hand fades out. Cooked below
+                // 120 VIs it is the fuse's 929 at its volume and distances (C `func_15033BDC`).
+                On::Holding { weapon: GRENADE } => {
+                    let fuse = |c: &&Cue| c.on == On::Fuse { weapon: GRENADE };
+                    let sounds = match cx.pack.audio.events.cues.iter().find(fuse) {
+                        Some(f) if is.cook < 120 => &f.play.sounds,
+                        _ => &cue.play.sounds,
+                    };
+                    let (was, is) = (&was.clock, &is.clock);
+                    if is.id == GRENADE_THROW && passes(was, is, 4.0 * is.rate) {
+                        let at = Src { tag: Some(i), ..me };
+                        self.start(cx, &cue.play, sounds, 1.0, at);
+                        let new = |v: &&mut Voice| v.tag == Some(i) && v.started == cx.tick;
+                        if let Some(v) = self.voices.last_mut().filter(new) {
+                            v.until = Some(cx.tick + 40);
+                        }
+                    }
+                }
+                On::Holding { weapon } => {
+                    let held = &cx.pack.held;
+                    self.hold(
+                        cx,
+                        i,
+                        cue,
+                        holding(held, weapon, was),
+                        holding(held, weapon, is),
+                        is,
+                    );
+                }
+                On::Burning => self.hold(cx, i, cue, burning(was), burning(is), is),
+                // The aim laser's hum, for the aimer alone (2D: `own`).
+                On::Laser if is.local => self.hold(cx, i, cue, was.laser, is.laser, is),
+                On::Shot { weapon } if fire(weapon, is) && !fire(weapon, was) => {
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, me);
+                }
+                On::Casing { weapon, delay } if fire(weapon, is) && !fire(weapon, was) => {
+                    let tick = cx.tick + u32::from(delay);
+                    self.later.push(Later {
+                        tick,
+                        cue: i,
+                        src: me,
+                        end: false,
+                    });
+                }
+                On::Scope { weapon }
+                    if is.local && is.weapon == weapon && is.scope && !was.scope =>
+                {
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, me);
+                }
+                // Item 0x3A's lit fuse from the pull's first frame, in the hand with its thrower,
+                // handed to the grenade at its birth ([`Self::grenades`]).
+                On::Lit { weapon: LOB } if is.clock.id == LOB_PULL && was.clock.id != LOB_PULL => {
+                    let at = Src {
+                        owner: lit(is),
+                        tag: Some(i),
+                        ..me
+                    };
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, at);
+                }
+                _ => {}
+            }
+        }
+        // A pull or throw left before the grenade flew (a death, the blast in the hand).
+        let lobbing = |p: &Seen| [LOB_PULL, LOB_HOLD, LOB_THROW].contains(&p.clock.id);
+        if lobbing(was) && !lobbing(is) {
+            self.stop(|v| v.owner == lit(is));
+        }
+        if is.health < was.health {
+            let (lethal, w) = (is.health == 0, is.hit);
+            debug!(
+                "HIT t={} read={} p={} weapon={w:#04x} lethal={lethal}",
+                cx.tick, cx.read, is.slot
+            );
+            self.cues(cx, is, me, |on| {
+                matches!(*on, On::Hit { weapon, lethal: l } if weapon == w && l.is_none_or(|l| l == lethal))
+            });
+            // A bullet's head pop kills with the shot death (conker-rules' head hit, reaction 0x2E).
+            if lethal && is.reaction == DEATH_SHOT {
+                self.cues(cx, is, me, |on| *on == On::Head { weapon: w });
+            }
+            if lethal {
+                self.gibs(cx, w, is);
+            }
+            // A grenade cooked too long goes off in the thrower's hand: no grenade flies.
+            let pulls = [GRENADE_PULL, GRENADE_HOLD, LOB_PULL, LOB_HOLD];
+            if w == GRENADE && pulls.contains(&was.clock.id) {
+                self.world(cx, is.pos, |on| *on == On::Explosion { weapon: GRENADE });
+            }
+        }
+    }
+
+    /// The mask's muffle (`func_150642AC` cases 3 and 4 → `func_15074664`, C): any player's put-on
+    /// (its mask going on; bots too, no camera test) muffles the effects; a take-off unmuffles them
+    /// if that player's last mask event was a put-on (s126+0x94). A death drops the mask without a
+    /// take-off. Whether the muffle changed.
+    fn mask(&mut self, was: &Seen, is: &Seen) -> bool {
+        let muffled = self.muffled;
+        match (was.masked, is.masked) {
+            (false, true) => {
+                self.wearers.insert(is.slot);
+                self.muffled = true;
+            }
+            (true, false) if is.health > 0 && self.wearers.remove(&is.slot) => {
+                self.muffled = false;
+            }
+            _ => {}
+        }
+        self.muffled != muffled
+    }
+
+    /// A footstep of `kind` on the player's floor (`func_10011EB8`), louder with speed.
+    fn footstep(&mut self, cx: &Cx, kind: u8, p: &Seen) {
+        let steps = &cx.pack.audio.events.footsteps;
+        let surface = p.floor.and_then(|f| steps.surfaces.get(&f));
+        let Some(sounds) = surface.and_then(|s| s.get(usize::from(kind))) else {
+            return;
+        };
+        let full = steps.full_speed.max(1.0);
+        let scale = 0.5 + 0.5 * p.speed.clamp(0.0, full) / full;
+        self.start(cx, &steps.play, sounds, scale, Src::player(p));
+    }
+
+    /// Body parts landing after a gory death by `w`: 6-12 of them, near the victim, over 2 s (I: the
+    /// count and spread seen on the oracle, not read).
+    fn gibs(&mut self, cx: &Cx, w: u8, p: &Seen) {
+        let cues = &cx.pack.audio.events.cues;
+        for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Gibs { weapon: w }) {
+            for _ in 0..self.between(6, 12) {
+                let (dx, dz) = (self.between(-200, 200), self.between(-200, 200));
+                let pos = [p.pos[0] + dx as f32, p.pos[1], p.pos[2] + dz as f32];
+                let tick = cx.tick + self.between(10, 60) as u32;
+                self.later.push(Later {
+                    tick,
+                    cue: i,
+                    src: Src::at(pos),
+                    end: false,
+                });
+            }
+        }
+    }
+
+    /// `func_1000F568`'s shuffle bag over `n` sounds ([`Self::bag`]): a random one, stepping on past
+    /// those drawn since the bag was last full; a full bag empties but for the last drawn.
+    fn shuffle(&mut self, n: usize) -> usize {
+        let (mut drawn, last) = self.bag;
+        if n < 2 {
+            return 0;
+        }
+        if drawn.count_ones() as usize >= n {
+            drawn = 1 << last;
+        }
+        let mut k = self.rng.next_u32() as usize % n;
+        while drawn & 1 << k != 0 {
+            k = (k + 1) % n;
+        }
+        self.bag = (drawn | 1 << k, k);
+        k
+    }
+
+    /// The bullets passing the listener's camera at `eye` ([`On::FlyBy`], C `func_151C2734`): a
+    /// bullet its gun (its owner's weapon when first seen) gave the chance to is tested each step
+    /// it takes; the sound plays panned from the listener, at the bullet while it flies.
+    fn fly_by(&mut self, cx: &Cx, bullets: &[BulletView], eye: [f32; 3], players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let Some((i, cue)) = cues
+            .iter()
+            .enumerate()
+            .find(|c| matches!(c.1.on, On::FlyBy { .. }))
+        else {
+            return;
+        };
+        let On::FlyBy { chances, leads } = &cue.on else {
+            return;
+        };
+        let old = std::mem::take(&mut self.bullets);
+        for b in bullets {
+            let owner = Owner::Bullet(b.born, b.owner);
+            let was = old
+                .iter()
+                .find(|o| (o.0.born, o.0.owner, o.0.vel) == (b.born, b.owner, b.vel));
+            let mut armed = match was {
+                Some(o) => o.1,
+                None => {
+                    let gun = players
+                        .iter()
+                        .find(|p| p.1.slot == b.owner)
+                        .map(|p| p.1.weapon);
+                    let chance = chances.iter().find(|c| Some(c.0) == gun).map_or(0, |c| c.1);
+                    (self.rng.next_u32() & 0xFF) < u32::from(chance)
+                }
+            };
+            let stepped = was.is_none_or(|o| o.0.life != b.life);
+            let speed = Vec3::from(b.vel).length();
+            if armed && stepped && speed > 0.0 && !leads.is_empty() {
+                let k = self.rng.next_u32() as usize % leads.len();
+                let d = Vec3::from(eye) - Vec3::from(b.pos);
+                let (along, dist) = (Vec3::from(b.vel).dot(d) / speed, d.length());
+                let lead = f32::from(leads[k]) * speed;
+                if along > lead - 10.0 * speed
+                    && along < lead
+                    && dist > 0.0
+                    && dist < b.life * speed
+                    && along / dist > 0.9
+                    && let Some(&id) = cue.play.sounds.get(k)
+                {
+                    let src = Src {
+                        owner,
+                        tag: Some(i),
+                        ..Src::at(b.pos)
+                    };
+                    self.start(cx, &cue.play, &[id], 1.0, src);
+                    armed = false;
+                }
+            }
+            for v in self.voices.iter_mut().filter(|v| v.owner == owner) {
+                v.pos = b.pos;
+            }
+            self.bullets.push((*b, armed));
+        }
+    }
+
+    /// The grenades in flight (`now`; last tick's in `self.grenades`), whose sounds follow them: the
+    /// thrower's hiss (its Holding cue, from the throw) goes with its grenade as it leaves the hand,
+    /// still at the thrower (C `func_15033BDC`: the record copies its holder's position); each
+    /// bounce leaving it faster than 5 upward plays the Bounce cue's next sound from its shuffle bag
+    /// ([`Self::shuffle`]; C `func_1505B5F8`; V e_gren, sq_e_gren, ctlw_k*: 1447-1449 each once, in
+    /// every order); the fuse's last 60 ticks, unless it left the hand in them (its thrower's hiss
+    /// is the fuse's then: C `func_15054F74` plays it as the fuse crosses 120 VIs); the blast once
+    /// one is gone, which stops them.
+    fn grenades(&mut self, cx: &Cx, now: &[(u32, Grenade)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let item = if cx.pack.lob { LOB } else { GRENADE };
+        for &(birth, g) in now {
+            let owner = Owner::Grenade(birth, g.owner);
+            let src = Src {
+                owner,
+                ..Src::at(g.pos)
+            };
+            let was = self
+                .grenades
+                .iter()
+                .find(|o| (o.0, o.1.owner) == (birth, g.owner));
+            let thrower = Owner::Player(g.owner as u16);
+            for v in &mut self.voices {
+                let hiss = v
+                    .tag
+                    .is_some_and(|i| cues[i].on == On::Holding { weapon: GRENADE });
+                if was.is_none() && v.owner == thrower && hiss {
+                    (v.owner, v.until) = (owner, None);
+                }
+                if was.is_none() && v.owner == Owner::Grenade(u32::MAX, g.owner) {
+                    (v.owner, v.follows) = (owner, None);
+                }
+                if v.owner == owner && v.follows.is_none() {
+                    v.pos = g.pos;
+                }
+            }
+            let bounced = was.is_some_and(|w| w.1.y_vel < 0.0 && g.y_vel > 5.0);
+            for (i, cue) in cues.iter().enumerate() {
+                let sounds = match cue.on {
+                    On::Bounce { weapon }
+                        if weapon == item && bounced && !cue.play.sounds.is_empty() =>
+                    {
+                        let k = self.shuffle(cue.play.sounds.len());
+                        Some(core::slice::from_ref(&cue.play.sounds[k]))
+                    }
+                    // Released with the fuse's last 60 ticks left (a cook timer below 120 VIs).
+                    On::Fuse { weapon }
+                        if weapon == item
+                            && cx.tick + 60 >= g.fuse
+                            && g.fuse > birth + 60
+                            && !self
+                                .voices
+                                .iter()
+                                .any(|v| v.owner == owner && v.tag == Some(i)) =>
+                    {
+                        Some(&cue.play.sounds[..])
+                    }
+                    _ => None,
+                };
+                if let Some(sounds) = sounds {
+                    self.start(
+                        cx,
+                        &cue.play,
+                        sounds,
+                        1.0,
+                        Src {
+                            tag: Some(i),
+                            ..src
+                        },
+                    );
+                }
+            }
+        }
+        let old = std::mem::take(&mut self.grenades);
+        for (birth, g) in old
+            .iter()
+            .filter(|o| !now.iter().any(|n| (n.0, n.1.owner) == (o.0, o.1.owner)))
+        {
+            let owner = Owner::Grenade(*birth, g.owner);
+            self.stop(|v| v.owner == owner);
+            self.world(cx, g.pos, |on| *on == On::Explosion { weapon: item });
+        }
+        self.grenades = old;
+        self.grenades.clear();
+        self.grenades.extend_from_slice(now);
+    }
+
+    /// Takes the match's lists as they are, so nothing in them goes off: on the first tick with a
+    /// match, and across its end or a restart ([`crate::effects::live`]: the rules freeze when it is
+    /// over and the restart empties the lists at once, which would blast every frozen rocket,
+    /// grenade, shot and shell).
+    fn prime(&mut self, m: &MatchView, grenades: &[(u32, Grenade)]) {
+        let live = crate::effects::live(std::mem::replace(&mut self.phase, m.phase), m.phase);
+        if self.primed && live {
+            return;
+        }
+        self.primed = true;
+        (self.rockets, self.shots, self.taken) = (m.rockets.clone(), m.shots.clone(), m.taken);
+        self.bolts = vec![(false, true); m.shots.len()];
+        self.grenades = grenades.to_vec();
+        self.guns.clone_from(&m.guns);
+        self.tank_shells = m.tanks.shells.iter().map(|s| s.0).collect();
+    }
+
+    /// A rocket gone since last tick blasts where it was.
+    fn rockets(&mut self, cx: &Cx, now: &[[f32; 3]]) {
+        let old = std::mem::replace(&mut self.rockets, now.to_vec());
+        for pos in gone(&old, now, 2.0 * ROCKET_SPEED) {
+            self.world(cx, pos, |on| *on == On::Explosion { weapon: ROCKETS });
+        }
+    }
+
+    /// The mounted guns' sounds (`On::Gun`, at the gun on its own channels: a state change stops
+    /// its loops and plays its change's cues; C `func_1507BC14`) and the release (`On::GunStop`, at
+    /// the gunner as the trigger falls; C `func_15065A5C`), whose sound plays again 15 ticks on, no
+    /// longer following the gunner (its callback `func_1000EC24` after 30 VIs restarts it at the
+    /// voice's level and pan, unpositioned; V gcQ).
+    fn guns(&mut self, cx: &Cx, guns: &[GunView], players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        for (_, i, id, src) in (self.replays)
+            .extract_if(.., |r| r.0 <= cx.tick)
+            .collect::<Vec<_>>()
+        {
+            self.start(cx, &cues[i].play, &[id], 1.0, src);
+        }
+        let old = std::mem::replace(&mut self.guns, guns.to_vec());
+        for (k, (was, is)) in old.iter().zip(guns).enumerate() {
+            let owner = Owner::Gun(k);
+            if was.state != is.state {
+                self.stop(|v| v.owner == owner && v.looped);
+                let on = On::Gun {
+                    from: was.state,
+                    to: is.state,
+                };
+                let at = Src {
+                    owner,
+                    ..Src::at(is.pos)
+                };
+                for cue in cues.iter().filter(|c| c.on == on) {
+                    self.start(cx, &cue.play, &cue.play.sounds, 1.0, at);
+                }
+            }
+            if was.trigger && !is.trigger {
+                let gunner = (was.gunner).and_then(|s| players.iter().find(|p| p.1.slot == s));
+                let src = gunner.map_or(Src::at(is.pos), |p| Src::player(&p.1));
+                for (i, cue) in cues.iter().enumerate().filter(|c| c.1.on == On::GunStop) {
+                    let Some(&id) = (cue.play.sounds)
+                        .get(self.rng.next_u32() as usize % cue.play.sounds.len().max(1))
+                    else {
+                        continue;
+                    };
+                    self.start(cx, &cue.play, &[id], 1.0, src);
+                    let again = Src {
+                        follows: None,
+                        ..src
+                    };
+                    self.replays.push((cx.tick + 15, i, id, again));
+                }
+            }
+        }
+    }
+
+    /// The local gunner's zoom and aim (`scope`: its zoom and aim this tick; `None` off a gun; C
+    /// `func_15126378`, `func_15127520`, `func_151277B0`), heard by the gunner only: the zoom's loop
+    /// while it moves, its stop's sound as it stops and, 16 ticks on, the last one's, which decays
+    /// in 0.1 s (its loop is held at full in the pack: stopped here); the aim's loop from the 5th
+    /// tick (10th VI) it keeps changing, its stop's sound as it stops. Leaving the gun stops them.
+    fn gunner(&mut self, cx: &Cx, scope: Option<[f32; 2]>) {
+        let cues = &cx.pack.audio.events.cues;
+        let cue = |on: On| cues.iter().position(|c| c.on == on);
+        let zoom = [0, 1, 2].map(|step| cue(On::GunZoom { step }));
+        let aim = [0, 1].map(|step| cue(On::GunAim { step }));
+        let looping = [zoom[0], aim[0]];
+        let src = Src {
+            owner: Owner::Player(cx.ear.slot),
+            follows: Some(cx.ear.slot),
+            ..Src::at(cx.ear.pos)
+        };
+        let Some(now) = scope else {
+            if self.turning.take().is_some() {
+                self.stop(|v| v.tag.is_some() && looping.contains(&v.tag));
+            }
+            return;
+        };
+        let t = self.turning.get_or_insert(Turning {
+            last: now,
+            moved: [0; 2],
+        });
+        let before = t.moved;
+        t.moved = [0, 1].map(|i| {
+            if now[i] != t.last[i] {
+                t.moved[i] + 1
+            } else {
+                0
+            }
+        });
+        t.last = now;
+        let after = t.moved;
+        let play = |s: &mut Self, i: Option<usize>| {
+            if let Some(i) = i {
+                let tagged = Src {
+                    tag: Some(i),
+                    ..src
+                };
+                s.start(cx, &cues[i].play, &cues[i].play.sounds, 1.0, tagged);
+            }
+        };
+        for (k, (steps, from)) in [(&zoom[..], 1), (&aim[..], 5)].into_iter().enumerate() {
+            if after[k] == from {
+                play(self, steps[0]);
+            } else if after[k] == 0 && before[k] >= from {
+                self.stop(|v| v.tag.is_some() && v.tag == steps[0]);
+                play(self, steps[1]);
+                if let Some(&Some(last)) = steps.get(2) {
+                    let src = Src {
+                        tag: Some(last),
+                        ..src
+                    };
+                    let (tick, end) = (cx.tick + 16, false);
+                    (self.later).push(Later {
+                        tick,
+                        cue: last,
+                        src,
+                        end,
+                    });
+                }
+            }
+        }
+        for v in &mut self.voices {
+            if v.tag.is_some() && v.tag == zoom[2] && v.started == cx.tick {
+                v.until = Some(cx.tick + 3);
+            }
+        }
+    }
+
+    /// War: Beach (see the module doc): the detonation, the strikes, the plunger's voice trigger, the
+    /// local escapee's line and the music's duck, and the radio's clicks off.
+    fn beach(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let later = |s: &mut Self, i: usize, src: Src, delay: u16| {
+            let (tick, end) = (cx.tick + u32::from(delay), false);
+            s.later.push(Later {
+                tick,
+                cue: i,
+                src,
+                end,
+            });
+        };
+        let debris = |s: &mut Self, at: [f32; 3], n: i32| {
+            for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Debris) {
+                for _ in 0..n {
+                    let (dx, dz) = (s.between(-200, 200), s.between(-200, 200));
+                    let pos = [at[0] + dx as f32, at[1], at[2] + dz as f32];
+                    let delay = s.between(DEBRIS[0], DEBRIS[1]) as u16;
+                    later(s, i, Src::at(pos), delay);
+                }
+            }
+        };
+        if m.beach && self.cooldown == Some(0) && m.cooldown > 0 {
+            for (i, cue) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Detonation) {
+                let at = cue.at.map_or(cx.ear.pos, |a| a.map(f32::from));
+                later(self, i, Src::at(at), cue.delay);
+                let n = self.between(3, 4);
+                debris(self, at, n);
+            }
+            let presser = players
+                .iter()
+                .map(|p| p.1)
+                .find(|p| beach::Plunger::under(p.pos, m.plunger));
+            if let Some(p) = presser.filter(|p| p.team == beach::VILLAGERS) {
+                self.radio(cx, &p, On::Plunger { bot: p.bot }, p.slot);
+            }
+        }
+        self.cooldown = m.beach.then_some(m.cooldown);
+        if !m.beach {
+            return;
+        }
+        for (was, is) in players {
+            if was.deadline > 0 && is.deadline == 0 && is.team == beach::VILLAGERS {
+                self.cues(cx, is, Src::at(is.pos), |on| *on == On::StrikeCall);
+                self.strikes.push((is.slot, is.pos, cx.tick));
+            }
+            let ready = cx.pack.ready_zone.is_some_and(|z| z.contains(is.pos));
+            if ready && m.cooldown == 0 && is.team == beach::VILLAGERS && is.health > 0 {
+                self.radio(cx, is, On::PlungerReady { bot: is.bot }, is.slot);
+            }
+            if is.local && was.freeze == 0 && is.freeze > 0 && is.team == beach::VILLAGERS {
+                self.line(cx, LINES[0]);
+            }
+        }
+        let strikes = std::mem::take(&mut self.strikes);
+        for (slot, at, call) in strikes {
+            let blown = players
+                .iter()
+                .any(|p| p.1.slot == slot && p.1.reaction == BLOWN_UP);
+            if blown || cx.tick >= call + 40 {
+                self.world(cx, at, |on| *on == On::StrikeBlast);
+                let n = self.between(3, 4);
+                debris(self, at, n);
+            } else {
+                self.strikes.push((slot, at, call));
+            }
+        }
+    }
+
+    /// A radio line that has played: the click off at its speaker.
+    fn clicks_off(&mut self, cx: &Cx, players: &[(Seen, Seen)]) {
+        let cues = &cx.pack.audio.events.cues;
+        let radios = std::mem::take(&mut self.radios);
+        for (slot, due, i) in radios {
+            let owner = Owner::Player(slot);
+            let speaking = |v: &Voice| v.owner == owner && cues[i].play.sounds.contains(&v.id);
+            if cx.tick <= due || self.voices.iter().any(speaking) {
+                self.radios.push((slot, due, i));
+            } else if let Some(p) = players.iter().find(|p| p.1.slot == slot) {
+                self.cues(cx, &p.1, Src::radio(&p.1), |on| {
+                    *on == On::RadioClick { end: true }
+                });
+            }
+        }
+    }
+
+    /// The music's volume ([`DUCK`]) while a line ([`LINES`]) or an outro's voice plays; its stem's
+    /// also by the listener's distance ([`follow`]).
+    fn duck_music(&mut self, cx: &Cx) {
+        let line = (self.voices.iter()).any(|v| !v.stopped && mp3(v.id));
+        self.duck = duck(self.duck, line);
+        let [full, ..] = DUCK;
+        for v in (self.voices.iter_mut()).filter(|v| v.id == BACKGROUND || v.id == STEM) {
+            let (b, gain) = match (v.id, &cx.pack.stem) {
+                (STEM, Some((b, f))) => {
+                    let at = f.at.map(f32::from);
+                    (b, follow(f, dist2(at, cx.ear.pos).sqrt()))
+                }
+                _ => match &cx.pack.background {
+                    Some(b) => (b, 1.0),
+                    None => continue,
+                },
+            };
+            v.volume = f32::from(b.volume) * self.duck / full * gain;
+            if v.id == STEM && cx.tick.is_multiple_of(30) {
+                debug!(
+                    "STEM t={} read={} gain={gain:.2} vol={:.0}",
+                    cx.tick, cx.read, v.volume
+                );
+            }
+        }
+    }
+
+    /// The map's sound zones ([`Pack::zones`]): the first tick any player is inside one, its sound
+    /// starts and plays on (restarted whenever it ends: the record's voice), centred, at its volume
+    /// by the listener's distance ([`zone_volume`]); a `stops_on_leave` zone's stops the tick after
+    /// the last player left and starts again on the next entry (Heist's base hum, V snd_bag 331,
+    /// 441, 630).
+    fn zones(&mut self, cx: &Cx, players: &[(Seen, Seen)]) {
+        for (i, (z, zone)) in cx.pack.zones.iter().enumerate() {
+            let inside = players.iter().any(|p| zone.contains(p.1.pos));
+            if inside {
+                self.inside.insert(i, cx.tick);
+            }
+            let owner = Owner::Zone(i);
+            let left = self.inside.get(&i).is_none_or(|&t| cx.tick > t + 1);
+            if z.stops_on_leave && left && self.zones.remove(&i) {
+                self.stop(|v| v.owner == owner);
+                debug!("ZONE t={} read={} zone={i}: left", cx.tick, cx.read);
+            }
+            if !self.zones.contains(&i) && !inside {
+                continue;
+            }
+            let at = z.at.map(f32::from);
+            let d = match z.horizontal {
+                true => ((at[0] - cx.ear.pos[0]).powi(2) + (at[2] - cx.ear.pos[2]).powi(2)).sqrt(),
+                false => dist2(at, cx.ear.pos).sqrt(),
+            };
+            let volume = zone_volume(&z.play, d);
+            if let Some(v) = (self.voices.iter_mut()).find(|v| v.owner == owner && !v.stopped) {
+                v.volume = volume;
+                continue;
+            }
+            self.zones.insert(i);
+            let sounds = &cx.pack.audio.sounds.sounds;
+            let Some((id, sound)) = (z.play.sounds.first()).and_then(|id| sounds.get_key_value(id))
+            else {
+                continue;
+            };
+            let v = Voice {
+                id: *id,
+                owner,
+                channel: Channel::Free,
+                tag: None,
+                pos: at,
+                follows: None,
+                flat: true,
+                volume,
+                own: None,
+                near: 0.0,
+                far: 0.0,
+                base: MIX * f32::from(sound.volume) / 127.0,
+                speed: 1.0,
+                looped: sound.looped.is_some(),
+                until: None,
+                fade: None,
+                started: cx.tick,
+                stopped: false,
+                control: None,
+                bend: Bend::FLAT,
+            };
+            self.push(cx, v);
+        }
+    }
+
+    /// Scene 0x34's traps' sounds while they are on ([`crate::traps::sounding`]), started again
+    /// whenever one ends (their records' flag 8), stopped as they go off.
+    fn traps(&mut self, cx: &Cx, m: &MatchView) {
+        let on: Vec<_> = crate::traps::sounding(&cx.pack.traps, m.traps).collect();
+        self.stop(|v| matches!(v.owner, Owner::Trap(k) if on.iter().all(|s| s.trap != k)));
+        for s in on {
+            let owner = Owner::Trap(s.trap);
+            if self.voices.iter().any(|v| !v.stopped && v.owner == owner) {
+                continue;
+            }
+            let cents = (self.rng.next_u32() & s.pitch) as i16;
+            let play = Play {
+                sounds: vec![s.id],
+                volume: s.volume,
+                own: None,
+                near: s.near,
+                far: s.far,
+                channel: Channel::Free,
+                chance: 255,
+                if_idle: false,
+                pitch: [cents; 2],
+                ticks: None,
+            };
+            let src = Src {
+                owner,
+                pos: s.at,
+                follows: None,
+                tag: None,
+                flat: false,
+            };
+            self.start(cx, &play, &play.sounds, 1.0, src);
+        }
+    }
+
+    /// Whether player `slot` is voicing (`func_10010894`: its last voice still playing; I: one of
+    /// its radio lines due or playing, or a capture loser's voice).
+    fn voicing(&self, cx: &Cx, slot: u16) -> bool {
+        let cues = &cx.pack.audio.events.cues;
+        let line = |on: &On| {
+            matches!(
+                on,
+                On::Lose { .. }
+                    | On::Flag { .. }
+                    | On::Carry { .. }
+                    | On::Plunger { .. }
+                    | On::PlungerReady { .. }
+            )
+        };
+        let said = |id: u16| (cues.iter()).any(|c| line(&c.on) && c.play.sounds.contains(&id));
+        let owner = Owner::Player(slot);
+        self.radios.iter().any(|r| r.0 == slot)
+            || (self.voices.iter()).any(|v| !v.stopped && v.owner == owner && said(v.id))
+    }
+
+    /// A radio line `on` (its character's) at `p` (`func_15103C14`), unless slot `busy` spoke one in
+    /// the last [`RADIO_GAP`] ticks or `p` is voicing ([`Self::voicing`]): the click on at once on its voice slot, the line its cue's
+    /// `delay` later, the click off once that has played (`func_15103910`; a bot's own line and
+    /// clicks, `func_15103AA0`: volume −25000 is 25000 with flag 0x100). All of it heard by
+    /// everyone, centred ([`Src::radio`]; V `beach-environment.md` §6). War: Beach's slots are its
+    /// speakers, Total War's and Colors' the canister's and the flag's teams.
+    fn radio(&mut self, cx: &Cx, p: &Seen, on: On, busy: u16) {
+        let spoke = (self.radio_at.get(&busy)).is_some_and(|&t| cx.tick < t + RADIO_GAP);
+        if spoke || self.voicing(cx, p.slot) {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        let voice = (cues.iter().enumerate()).find(|(_, c)| {
+            c.on == on && c.character.as_deref().is_none_or(|c| c == character(cx, p))
+        });
+        let Some((i, cue)) = voice else {
+            return;
+        };
+        self.radio_at.insert(busy, cx.tick);
+        let (tick, src, end) = (cx.tick + u32::from(cue.delay), Src::radio(p), false);
+        self.later.push(Later {
+            tick,
+            cue: i,
+            src,
+            end,
+        });
+        self.cues(cx, p, src, |o| *o == On::RadioClick { end: false });
+        self.radios.push((p.slot, tick, i));
+    }
+
+    /// War: Colors: a team's score rising is a capture. [`CHEER`] ticks after the tick this client
+    /// sees it (I: the server's tick plus the latency), the scorers' jingle for everyone and each
+    /// loser's voice at it, unless it is voicing ([`Self::voicing`], `func_1509F354`).
+    fn colors(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        let was = self.scores.replace(m.scores).filter(|_| m.colors);
+        for (team, (is, was)) in m.scores.iter().zip(was.unwrap_or(m.scores)).enumerate() {
+            if *is > was {
+                self.cheers.push((cx.tick + CHEER, team as u8));
+            }
+        }
+        let cheers = std::mem::take(&mut self.cheers);
+        let (due, later): (Vec<_>, Vec<_>) = cheers.into_iter().partition(|c| c.0 <= cx.tick);
+        self.cheers = later;
+        for (_, team) in due {
+            self.line(cx, LINES[1 + usize::from(team)]);
+            for p in players.iter().map(|p| p.1).filter(|p| p.team != team) {
+                if !self.voicing(cx, p.slot) {
+                    let team = p.team;
+                    self.cues(cx, &p, Src::player(&p), |on| *on == On::Lose { team });
+                }
+            }
+        }
+    }
+
+    /// War: Heist: the bag's clip events at it ([`bag_passes`]; heard as its carrier's own sound
+    /// while carried, I), the throw's sound at it as it leaves the hand, its sounds stopped as it
+    /// goes (delivered: `func_10010AA8`, C); and the script's voice lines ([`MatchView::voice`]):
+    /// the line's cue (`CashPickup`, `CashSteal`, `CashDelivery`) with that sound alone, at its
+    /// speaker (its own volume for the speaker: centred, V snd_bag 334).
+    fn heist(&mut self, cx: &Cx, m: &MatchView, bag: &crate::heist::Bag, players: &[(Seen, Seen)]) {
+        let src = Src {
+            owner: Owner::Cash,
+            follows: bag.hand,
+            ..Src::at(m.cash.pos)
+        };
+        if let Some(is) = bag.clip {
+            let clips = cx.pack.events(crate::CASH);
+            let first = clips.partition_point(|c| c.clip < u16::from(is.0));
+            for e in clips[first..]
+                .iter()
+                .take_while(|c| c.clip == u16::from(is.0))
+            {
+                if let ClipAction::Play(p) = &e.action
+                    && bag_passes(bag.was, is, e.time)
+                {
+                    self.start(cx, p, &p.sounds, 1.0, src);
+                }
+            }
+        } else if bag.was.is_some() {
+            self.stop(|v| v.owner == Owner::Cash);
+        }
+        let cues = &cx.pack.audio.events.cues;
+        if bag.was_state == Some(1) && bag.state == Some(2) {
+            for cue in cues.iter().filter(|c| c.on == On::CashThrow) {
+                self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+            }
+        }
+        let last = self.voice.replace(m.voice);
+        let Some((_, slot, id)) = m.voice.filter(|_| last.is_some_and(|l| l != m.voice)) else {
+            return;
+        };
+        let line = |on: &On| matches!(on, On::CashPickup | On::CashSteal { .. } | On::CashDelivery);
+        let Some(cue) = cues
+            .iter()
+            .find(|c| line(&c.on) && c.play.sounds.contains(&id))
+        else {
+            return;
+        };
+        let speaker = players.iter().map(|p| &p.1).find(|p| p.slot == slot);
+        let at = speaker.map_or(Src::at(m.cash.pos), Src::player);
+        debug!("VOICE t={} read={} p={slot} id={id}", cx.tick, cx.read);
+        self.start(cx, &cue.play, &[id], 1.0, at);
+    }
+
+    /// War: Raptor: the baby's clip events at it and the fed body's ([`bag_passes`] on their clocks,
+    /// [`crate::raptor::Nest`]); an egg's splat, sounds 0x1A6 and 0x434 where it lands (C script
+    /// 0xBE: `obj(0x71A6 / 0x7434, 3, 0x7D00, egg, 500, 1000)`; 0x1A6 is not in the pack).
+    fn raptor(&mut self, cx: &Cx, nest: &crate::raptor::Nest) {
+        let d = &nest.data;
+        let baby = Src {
+            owner: Owner::Baby,
+            ..Src::at(d.baby.at.map(f32::from))
+        };
+        let body = Src {
+            owner: Owner::Body,
+            ..baby
+        };
+        for (character, was, is, src) in [
+            (crate::raptor::BABY, nest.baby_was, nest.baby, baby),
+            (crate::raptor::BODY, nest.body_was, nest.body, body),
+        ] {
+            let Some((clip, time)) = is.and_then(|(c, t)| Some((u8::try_from(c).ok()?, t))) else {
+                continue;
+            };
+            let was = was.and_then(|(c, t)| Some((u8::try_from(c).ok()?, t)));
+            let events = cx.pack.events(character);
+            let first = events.partition_point(|c| c.clip < u16::from(clip));
+            for e in events[first..]
+                .iter()
+                .take_while(|c| c.clip == u16::from(clip))
+            {
+                if let ClipAction::Play(p) = &e.action
+                    && bag_passes(was, (clip, time), e.time)
+                {
+                    self.start(cx, p, &p.sounds, 1.0, src);
+                }
+            }
+        }
+        let splat = Play {
+            sounds: Vec::new(),
+            volume: 0x7D00,
+            own: None,
+            near: 500,
+            far: 1000,
+            channel: Channel::Free,
+            chance: 255,
+            if_idle: false,
+            pitch: [0, 0],
+            ticks: None,
+        };
+        for &at in &nest.splats {
+            for id in crate::raptor::SPLAT_SOUNDS {
+                self.start(cx, &splat, &[id], 1.0, Src::at(at));
+            }
+        }
+    }
+
+    /// Tank's sounds: each tank's engine (a loop at it, idling or driving, from its creation to its
+    /// death) and its gear changes ([`engine`]); a shell's blast where it went (on a tank when a
+    /// tank near it lost health); a tank's death, its cue's delay on; the bomb taken; the
+    /// countdown's song at the plant, once, for everyone. Power-ups taken are pickups
+    /// ([`Self::match_sounds`]), the shot clip 1's event, the gas Total War's.
+    fn tank(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        if !m.tank {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        for (was, is) in players {
+            let me = Src::player(is);
+            let state = (is.health > 0).then(|| engine(is.speed, is.target));
+            let last = match state {
+                Some(s) => self.engines.insert(is.slot, s),
+                None => self.engines.remove(&is.slot),
+            };
+            let moving = |s: Option<u8>| s.map(|s| s != 0);
+            if moving(last) != moving(state) {
+                let loops: Vec<_> = (0..cues.len())
+                    .filter(|&i| matches!(cues[i].on, On::TankEngine { .. }))
+                    .collect();
+                self.stop(|v| v.owner == me.owner && v.tag.is_some_and(|t| loops.contains(&t)));
+                let on = moving(state).map(|moving| On::TankEngine { moving });
+                for i in loops
+                    .into_iter()
+                    .filter(|&i| Some(&cues[i].on) == on.as_ref())
+                {
+                    let play = &cues[i].play;
+                    self.start(cx, play, &play.sounds, 1.0, Src { tag: Some(i), ..me });
+                }
+            }
+            if let (Some(a), Some(b)) = (last, state)
+                && a != b
+            {
+                self.cues(cx, is, me, |on| *on == On::TankGear { coast: b == 2 });
+            }
+            // The drive loop's pitch from its second frame (a new record starts at 0 cents).
+            let drive = |i: usize| cues[i].on == On::TankEngine { moving: true };
+            for v in (self.voices.iter_mut())
+                .filter(|v| v.owner == me.owner && v.started < cx.tick && v.tag.is_some_and(drive))
+            {
+                v.bend.step(engine_cents(is.speed, is.pitch), None);
+            }
+            self.rumble(cx, me, moving(state) == Some(true));
+            if was.health > 0 && is.health == 0 {
+                let bomb = is.reaction == u16::from(conker_rules::tank::CLIP_BOMB);
+                let on = On::TankDeath { bomb };
+                for (i, cue) in (cues.iter().enumerate()).filter(|c| c.1.on == on) {
+                    let src = Src::at(is.pos);
+                    self.later.push(Later {
+                        tick: cx.tick + u32::from(cue.delay),
+                        cue: i,
+                        src,
+                        end: false,
+                    });
+                }
+            }
+        }
+        let old = std::mem::take(&mut self.tank_shells);
+        let now: Vec<_> = m.tanks.shells.iter().map(|s| s.0).collect();
+        for pos in gone(&old, &now, 2.0 * conker_rules::tank::SHELL_SPEED) {
+            let hurt =
+                |p: &(Seen, Seen)| p.1.health < p.0.health && dist2(p.1.pos, pos) < 300.0 * 300.0;
+            let ground = !players.iter().any(hurt);
+            self.world(cx, pos, |on| *on == On::TankBlast { ground });
+        }
+        self.tank_shells = now;
+        let (carrier, countdown) = (m.tanks.carrier, m.countdown);
+        if let Some((was, left)) = self.bomb.replace((carrier, countdown)) {
+            if let (None, Some(slot)) = (was, carrier)
+                && let Some(p) = players.iter().find(|p| p.1.slot == slot)
+            {
+                self.cues(cx, &p.1, Src::player(&p.1), |on| *on == On::BombPickup);
+            }
+            if left == 0 && countdown > 0 && cx.pack.lines.contains_key("countdown") {
+                let line = &cx.pack.lines["countdown"];
+                debug!("COUNTDOWN t={} read={}", cx.tick, cx.read);
+                self.push(
+                    cx,
+                    Voice {
+                        id: COUNTDOWN,
+                        owner: Owner::World,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos: cx.ear.pos,
+                        follows: None,
+                        flat: true,
+                        volume: f32::from(line.volume),
+                        own: None,
+                        near: 0.0,
+                        far: 0.0,
+                        base: 1.0,
+                        speed: 1.0,
+                        looped: false,
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                        bend: Bend::FLAT,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Race's sounds: each racer's hums (loops at it from its spawn to its death, their volumes by
+    /// [`hum_target`], their pitch by [`hum_cents`] with the Doppler), the countdown's beeps for everyone, a canister used
+    /// (its boost going up), a missile fired (a new one: at the racer nearest it), each missile in
+    /// flight from its 15th tick, a missile's hit (gone by a racer knocked up), a kick's (a racer
+    /// knocked up with no missile gone near it: at the kicking racer nearest it), a wall's scrape
+    /// (1 hp lost) and a racer blowing up (its last).
+    fn race(&mut self, cx: &Cx, m: &MatchView, players: &[(Seen, Seen)]) {
+        if !m.race {
+            return;
+        }
+        let cues = &cx.pack.audio.events.cues;
+        let r = &m.racing;
+        let n = r.racers.len();
+        let hums: Vec<(usize, u8)> = (cues.iter().enumerate())
+            .filter_map(|(i, c)| match c.on {
+                On::RaceHum { hum } => Some((i, hum)),
+                _ => None,
+            })
+            .collect();
+        let hum = |v: &Voice| {
+            (v.tag)
+                .and_then(|t| hums.iter().find(|h| h.0 == t))
+                .map(|h| h.1)
+        };
+        let (stage, last) = self.race.take().unwrap_or((r.stage, r.racers.clone()));
+        if r.stage != stage && r.stage > 0 {
+            let flat = Src {
+                flat: true,
+                ..Src::at(cx.ear.pos)
+            };
+            self.world_from(cx, flat, |on| *on == On::RaceCountdown { stage: r.stage });
+        }
+        let was = |slot: u16| last.iter().find(|v| v.slot == slot).copied();
+        // The missiles: kept ones in order, new ones last.
+        let old = std::mem::take(&mut self.missiles);
+        let mut next = old.iter().peekable();
+        // ponytail: matched in order within 8 frames' flight (updates come in bunches); a missile
+        // gone with a newer one that close behind it swaps identities.
+        let step = 8.0 * conker_rules::race::MISSILE_STEP;
+        let mut now = Vec::new();
+        let mut kept = Vec::new();
+        for (k, &(pos, _)) in r.missiles.iter().enumerate() {
+            while let Some(o) = next.next_if(|o| dist2(o.1, pos) > step * step) {
+                kept.push((o.0, false));
+            }
+            match next.next() {
+                Some(o) => {
+                    kept.push((o.0, true));
+                    now.push((o.0, pos));
+                }
+                None => {
+                    let owner = Owner::Missile(cx.tick, k);
+                    let d = |p: &&(Seen, Seen)| dist2(p.1.pos, pos);
+                    if let Some(p) = players.iter().min_by(|a, b| d(a).total_cmp(&d(b))) {
+                        let src = Src {
+                            owner,
+                            follows: None,
+                            ..Src::player(&p.1)
+                        };
+                        let shot = |on: &On| {
+                            *on == On::Shot {
+                                weapon: conker_rules::race::MISSILE,
+                            }
+                        };
+                        self.world_from(cx, src, shot);
+                    }
+                    now.push((owner, pos));
+                }
+            }
+        }
+        kept.extend(next.map(|o| (o.0, false)));
+        let mut hits = Vec::new();
+        for (owner, stays) in kept {
+            let Some(&(_, at)) = old.iter().find(|o| o.0 == owner) else {
+                continue;
+            };
+            if !stays {
+                self.stop(|v| v.owner == owner);
+                hits.push(at);
+            }
+        }
+        for &(owner, pos) in &now {
+            for v in self.voices.iter_mut().filter(|v| v.owner == owner) {
+                v.pos = pos;
+            }
+            if let Owner::Missile(born, _) = owner
+                && cx.tick >= born + 15
+            {
+                self.world_from(
+                    cx,
+                    Src {
+                        owner,
+                        ..Src::at(pos)
+                    },
+                    |on| *on == On::RaceMissile,
+                );
+            }
+        }
+        self.missiles = now;
+        for (old_seen, is) in players {
+            let me = Src::player(is);
+            let Some(v) = r.racers.iter().find(|v| v.slot == is.slot) else {
+                continue;
+            };
+            let before = was(is.slot).unwrap_or(*v);
+            // The hums.
+            let mine = |x: &Voice| x.owner == me.owner && !x.stopped && hum(x).is_some();
+            if is.health == 0 {
+                self.stop(mine);
+            } else if !self.voices.iter().any(mine) {
+                for &(i, h) in &hums {
+                    let on = match h {
+                        0 => n < 5,
+                        2 => n < 7 || is.slot == cx.ear.slot,
+                        _ => true,
+                    };
+                    if on {
+                        let play = &cues[i].play;
+                        self.start(cx, play, &play.sounds, 1.0, Src { tag: Some(i), ..me });
+                    }
+                }
+            }
+            let s = hum_state(is.speed);
+            let d = dist2(is.pos, cx.ear.pos).sqrt() as u32 as u16;
+            for x in self.voices.iter_mut().filter(|x| mine(x)) {
+                if let Some(h) = hum(x) {
+                    x.volume = hum_step(x.volume, hum_target(h, s, is.above, n));
+                    let cents = cents_step(x.bend.cents, hum_cents(h, s, is.above, n));
+                    x.bend.step(cents, Some(d));
+                }
+            }
+            // A canister used.
+            if v.boost > before.boost {
+                let used = |on: &On| {
+                    *on == On::Shot {
+                        weapon: conker_rules::race::CANISTER,
+                    }
+                };
+                self.cues(cx, is, me, used);
+            }
+            // Knocked up (again while knocked up): a missile's hit near it, else a kick's.
+            if v.knock > before.knock {
+                let near = |at: &[f32; 3]| dist2(*at, is.pos) < 600.0 * 600.0;
+                if let Some(k) = hits.iter().position(near) {
+                    let at = hits.swap_remove(k);
+                    self.world(cx, at, |on| {
+                        *on == On::Hit {
+                            weapon: conker_rules::race::MISSILE,
+                            lethal: None,
+                        }
+                    });
+                } else {
+                    let kicking = (players.iter())
+                        .filter(|p| p.1.slot != is.slot)
+                        .filter(|p| r.racers.iter().any(|v| v.slot == p.1.slot && v.kick > 0))
+                        .min_by(|a, b| dist2(a.1.pos, is.pos).total_cmp(&dist2(b.1.pos, is.pos)));
+                    if let Some(k) = kicking {
+                        self.cues(cx, &k.1, Src::player(&k.1), |on| *on == On::RaceKick);
+                    }
+                }
+            }
+            // A wall's scrape, or the blow-up.
+            if is.health < old_seen.health {
+                match is.health {
+                    0 => {
+                        let e = is.floor == Some(0xE);
+                        let at = Src::at(is.pos);
+                        self.world_from(cx, at, |on| {
+                            matches!(*on, On::RaceDeath { kind_e } if kind_e.is_none_or(|k| k == e))
+                        });
+                    }
+                    _ => self.cues(cx, is, me, |on| *on == On::RaceWall),
+                }
+            }
+        }
+        self.race = Some((r.stage, r.racers.clone()));
+    }
+
+    /// A map's line ([`LINES`]), unpositioned, unless a line already plays (one MP3 stream, C
+    /// `func_1509E640`).
+    fn line(&mut self, cx: &Cx, (id, name): (u16, &str)) {
+        let Some(line) = cx.pack.lines.get(name) else {
+            return;
+        };
+        if (self.voices.iter()).any(|v| !v.stopped && LINES.iter().any(|l| l.0 == v.id)) {
+            return;
+        }
+        let v = Voice {
+            id,
+            owner: Owner::World,
+            channel: Channel::Free,
+            tag: None,
+            pos: cx.ear.pos,
+            follows: None,
+            flat: true,
+            volume: f32::from(line.volume),
+            own: None,
+            near: 0.0,
+            far: 0.0,
+            base: MIX,
+            speed: 1.0,
+            looped: false,
+            until: None,
+            fade: None,
+            started: cx.tick,
+            stopped: false,
+            control: None,
+            bend: Bend::FLAT,
+        };
+        self.push(cx, v);
+    }
+
+    /// Plays every cue `matches` picks at `pos`, nobody's.
+    fn world(&mut self, cx: &Cx, pos: [f32; 3], matches: impl Fn(&On) -> bool) {
+        self.world_from(cx, Src::at(pos), matches);
+    }
+
+    /// Plays every cue `matches` picks (any character's) from `src`.
+    fn world_from(&mut self, cx: &Cx, src: Src, matches: impl Fn(&On) -> bool) {
+        for cue in (cx.pack.audio.events.cues.iter()).filter(|c| matches(&c.on)) {
+            self.start(cx, &cue.play, &cue.play.sounds, 1.0, src);
+        }
+    }
+
+    /// The match's sounds: weapon 0x14's shots (one sound a tick in flight, the wall's when one is
+    /// gone without hurting anyone near it; a bolt's none), pickups taken (by the nearest player), Total War's gas
+    /// (at the listener while it is out), the background (from the first tick of play to the match's
+    /// end) and the lamps' buzz (an emitter at each lamp in `flashed`, a flash starting this tick, or
+    /// on 0x1A a switching light coming back on).
+    fn match_sounds(
+        &mut self,
+        cx: &Cx,
+        m: &MatchView,
+        players: &[(Seen, Seen)],
+        flashed: &[[f32; 3]],
+    ) {
+        let cues = &cx.pack.audio.events.cues;
+        for (i, _) in (cues.iter().enumerate()).filter(|c| c.1.on == On::Gas) {
+            let tagged = |v: &Voice| v.tag == Some(i);
+            match (self.gas, m.gas) {
+                (false, true) => {
+                    let src = Src {
+                        follows: Some(cx.ear.slot),
+                        tag: Some(i),
+                        ..Src::at(cx.ear.pos)
+                    };
+                    self.start(cx, &cues[i].play, &cues[i].play.sounds, 1.0, src);
+                }
+                (true, false) => self.stop(tagged),
+                _ => {}
+            }
+        }
+        self.gas = m.gas;
+        // A bolt (its shooter, the player nearest where it appeared, holds the crossbow, as
+        // `projectiles::look` takes it) has no flight sound but its pass, once, the first frame a
+        // player stands within 7.5 frames of its flight ahead, 0x100 off its heading
+        // (`func_150538CC`'s type 6 → `func_1505DDA8`, C).
+        let old = std::mem::take(&mut self.shots);
+        let flags = std::mem::take(&mut self.bolts);
+        let mut was = old.iter().zip(flags.iter().copied());
+        for (k, &pos) in m.shots.iter().enumerate() {
+            // The shot it was last tick (`gone`'s pairing: new ones come last).
+            let from = was.find(|(o, _)| dist2(**o, pos) <= 4.0 * BOLT_STEP * BOLT_STEP);
+            let nearest =
+                (players.iter()).min_by(|a, b| dist2(a.1.pos, pos).total_cmp(&dist2(b.1.pos, pos)));
+            let (bolt, mut passed) = from
+                .map_or((nearest.is_some_and(|p| p.1.weapon == BOLTS), false), |f| {
+                    f.1
+                });
+            if let Some((&o, _)) = from.filter(|_| bolt && !passed) {
+                let v = core::array::from_fn::<f32, 3, _>(|j| pos[j] - o[j]);
+                let reach = dist2(v, [0.0; 3]).sqrt() * 7.5;
+                let heading = atan2_u16(-v[2], v[0]);
+                let ahead = |p: &&(Seen, Seen)| {
+                    let to = atan2_u16(pos[2] - p.1.pos[2], p.1.pos[0] - pos[0]);
+                    dist2(p.1.pos, pos) < reach * reach
+                        && heading.wrapping_sub(to).wrapping_add(0x100) < 0x200
+                };
+                if players.iter().any(|p| ahead(&p)) {
+                    passed = true;
+                    self.world(cx, pos, |on| *on == On::Pass { weapon: BOLTS });
+                }
+            }
+            self.bolts.push((bolt, passed));
+            if bolt {
+                continue;
+            }
+            for cue in cues
+                .iter()
+                .filter(|c| matches!(c.on, On::Flight { weapon: SHOTS, .. }))
+            {
+                let sounds = &cue.play.sounds;
+                if let Some(s) = sounds.get(cx.tick as usize % sounds.len().max(1)) {
+                    let src = Src {
+                        owner: Owner::Shot(k),
+                        ..Src::at(pos)
+                    };
+                    self.start(cx, &cue.play, core::slice::from_ref(s), 1.0, src);
+                }
+            }
+        }
+        for pos in gone(&old, &m.shots, 2.0 * SHOT_STEP) {
+            // A bolt on a wall is silent (V xsnd2 160, 272: `func_15060F28` removes it and
+            // `func_10010AA8` stops its sounds, none played).
+            let k = old.iter().position(|o| *o == pos);
+            if k.and_then(|k| flags.get(k)).is_some_and(|f| f.0) {
+                continue;
+            }
+            let hurt =
+                |p: &(Seen, Seen)| p.1.health < p.0.health && dist2(p.1.pos, pos) < 150.0 * 150.0;
+            if !players.iter().any(hurt) {
+                self.world(cx, pos, |on| *on == On::Impact { weapon: SHOTS });
+            }
+        }
+        self.shots = old;
+        self.shots.clone_from(&m.shots);
+        let taken = m.taken & !self.taken;
+        self.taken = m.taken;
+        for pickup in
+            (cx.pack.pickups.iter()).filter(|p| p.placement < 64 && taken >> p.placement & 1 != 0)
+        {
+            // A roaming one (0x1A's) was taken where it stood.
+            let roams = m.roaming.iter().find(|r| r.0 == pickup.placement);
+            let at = roams.map_or(pickup.position, |r| r.1);
+            let d = |p: &Seen| dist2(p.pos, at);
+            let Some(p) = players
+                .iter()
+                .map(|p| p.1)
+                .min_by(|a, b| d(a).total_cmp(&d(b)))
+            else {
+                continue;
+            };
+            let gives = pickup.gives;
+            self.cues(cx, &p, Src::player(&p), |on| *on == On::Pickup { gives });
+        }
+        match (m.phase, &cx.pack.background) {
+            (0, Some(b)) if !self.background => {
+                self.background = true;
+                // Its stem with it, at its volume from the next tick on ([`Self::duck_music`]).
+                let stem = cx.pack.stem.as_ref().map(|s| (STEM, &s.0));
+                for (id, b) in std::iter::once((BACKGROUND, b)).chain(stem) {
+                    let v = Voice {
+                        id,
+                        owner: Owner::World,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos: cx.ear.pos,
+                        follows: None,
+                        flat: true,
+                        volume: f32::from(b.volume) * f32::from(id == BACKGROUND),
+                        own: None,
+                        near: 0.0,
+                        far: 0.0,
+                        base: 1.0,
+                        speed: 1.0,
+                        looped: true,
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                        bend: Bend::FLAT,
+                    };
+                    self.push(cx, v);
+                }
+            }
+            // The music plays on through a War outro and its STATS (V: no stop from the match's
+            // start to the bar scene's songs); RESTART's fade ends it in every mode, so the next
+            // match starts it again.
+            (2 | 3, _) if m.phase == 3 || !crate::outro::team_mode(m) => {
+                self.stop(|v| v.id == BACKGROUND || v.id == STEM);
+                self.background = false;
+            }
+            _ => {}
+        }
+        for &at in flashed {
+            for e in cx
+                .pack
+                .emitters
+                .iter()
+                .filter(|e| e.at.map(f32::from) == at)
+            {
+                self.start(cx, &e.play, &e.play.sounds, 1.0, Src::at(at));
+            }
+        }
+    }
+
+    /// An outro's script sounds at frame `k` (none: they stop): each at its actor, a loop from its
+    /// `t` (a late client's from where the outro is) to its `stop` with its linear fades (V cs5b:
+    /// 0x4A8's bank loop repeats every 1.40 s from 17.6 s to 27.4 s), a one-shot on its frame, at
+    /// `cents`.
+    fn outro_sounds(&mut self, cx: &Cx, playing: Option<(&Outro, u32)>) {
+        let Some((o, k)) = playing else {
+            self.stop(|v| matches!(v.owner, Owner::Outro(_) | Owner::OutroTank(_)));
+            self.outro.clear();
+            return;
+        };
+        self.outro_tanks(cx, o, k);
+        let t = o.t(k);
+        for (i, s) in o.sounds.iter().enumerate() {
+            let owner = Owner::Outro(i);
+            let Some(a) = o.actors().nth(usize::from(s.actor)) else {
+                continue;
+            };
+            let level = match s.stop {
+                Some(stop) if t >= f32::from(stop) => None,
+                Some(stop) => {
+                    let ramp =
+                        |from: f32, to: f32| ((t - from) / (to - from).max(1.0)).clamp(0.0, 1.0);
+                    let fade_in = s
+                        .fade_in
+                        .map_or(1.0, |f| ramp(f32::from(s.t), f32::from(f)));
+                    let fade_out = s
+                        .fade_out
+                        .map_or(1.0, |f| 1.0 - ramp(f32::from(f), f32::from(stop)));
+                    (t >= f32::from(s.t)).then_some(fade_in * fade_out)
+                }
+                None => (k == frame(s.t)).then_some(1.0),
+            };
+            let Some(level) = level else {
+                if s.stop.is_some() {
+                    self.stop(|v| v.owner == owner);
+                }
+                continue;
+            };
+            let pos = a.place(t);
+            let live = self
+                .voices
+                .iter_mut()
+                .find(|v| v.owner == owner && !v.stopped);
+            match (live, cx.pack.audio.sounds.sounds.get(&s.id)) {
+                (Some(v), _) => (v.pos, v.volume) = (pos, SCRIPT[0] * level),
+                (None, Some(sound)) if self.outro.insert(i) => {
+                    let [volume, near, far] = SCRIPT;
+                    let v = Voice {
+                        id: s.id,
+                        owner,
+                        channel: Channel::Free,
+                        tag: None,
+                        pos,
+                        follows: None,
+                        flat: false,
+                        volume: volume * level,
+                        own: None,
+                        near,
+                        far,
+                        base: MIX * f32::from(sound.volume) / 127.0,
+                        speed: (f32::from(s.cents) / 1200.0).exp2(),
+                        looped: s.stop.is_some() && sound.looped.is_some(),
+                        until: None,
+                        fade: None,
+                        started: cx.tick,
+                        stopped: false,
+                        control: None,
+                        bend: Bend::FLAT,
+                    };
+                    self.push(cx, v);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Tank: `src`'s rumbles while it drives ([`On::TankRumble`], C `func_151BB0E0`, V t5): the
+    /// first 150 frames into the drive loop, another 450 or 706 frames ((rand & 0x200) + 900 VIs)
+    /// after each, each at its [`swell`] held 150 or 406 frames; idling stops them at once.
+    fn rumble(&mut self, cx: &Cx, src: Src, driving: bool) {
+        let cues = &cx.pack.audio.events.cues;
+        let Some(i) = cues.iter().position(|c| c.on == On::TankRumble) else {
+            return;
+        };
+        let (owner, play) = (src.owner, &cues[i].play);
+        let mine = move |v: &Voice| v.owner == owner && v.tag == Some(i);
+        if !driving {
+            if self.rumbles.remove(&owner).is_some() {
+                self.stop(mine);
+            }
+            return;
+        }
+        let (mut next, mut swells) = (self.rumbles.remove(&owner))
+            .map_or((150, Vec::new()), |(n, s)| (n.saturating_sub(1), s));
+        if next == 0 {
+            let mut odd = || 256 * (self.rng.next_u32() & 1);
+            next = 450 + odd();
+            swells.push((cx.tick, 150 + odd()));
+            self.start(
+                cx,
+                play,
+                &play.sounds,
+                1.0,
+                Src {
+                    tag: Some(i),
+                    ..src
+                },
+            );
+        }
+        for &(t, hold) in &swells {
+            let this = move |v: &Voice| mine(v) && v.started == t;
+            match swell(cx.tick - t, hold) {
+                Some(share) => (self.voices.iter_mut().filter(|v| this(v)))
+                    .for_each(|v| v.volume = f32::from(play.volume) * share),
+                None => self.stop(this),
+            }
+        }
+        swells.retain(|&(t, hold)| swell(cx.tick - t, hold).is_some());
+        self.rumbles.insert(owner, (next, swells));
+    }
+
+    /// An outro's tanks' own engines at frame `k` (model 40's class, the Tank mode's: [`engine`],
+    /// [`On::TankEngine`], [`On::TankGear`]; C `func_151BB044`, `func_151BB0E0`), besides the
+    /// script's sounds: idling (0x4A7, from its creation before frame 0), coasting (0x4A8) from the
+    /// frame its path moves it faster than 5 (obj+0x3C, twice its step a frame; obj+0x44 stays 0,
+    /// so it never speeds up), a gear change at each switch, at the tank. V cs5b: 0x4A7 at both
+    /// tanks' creation (read 437), 0x4A5 and 0x4A8 at t 2 (439), the lit tank's stop at t 804
+    /// (840: one of 0x4A3-0x4A6 and 0x4A7); speeds 7.70 and 6.86, +0xB8 0 (its pitch term).
+    fn outro_tanks(&mut self, cx: &Cx, o: &Outro, k: u32) {
+        let cues = &cx.pack.audio.events.cues;
+        for (n, a) in o.actors().enumerate() {
+            if a.character.split('-').next() != Some("40") {
+                continue;
+            }
+            let (owner, at) = (Owner::OutroTank(n), |k| a.place(o.t(k)));
+            let state = |k: u32| match k {
+                0 => 0,
+                _ => engine(2.0 * dist2(at(k), at(k - 1)).sqrt(), 0.0),
+            };
+            let src = Src {
+                owner,
+                ..Src::at(at(k))
+            };
+            for v in self.voices.iter_mut().filter(|v| v.owner == owner) {
+                v.pos = src.pos;
+            }
+            let is = state(k);
+            if k > 0 && state(k - 1) != is {
+                self.stop(|v| v.owner == owner && v.tag.is_some());
+                let gear = On::TankGear { coast: is == 2 };
+                for c in cues.iter().filter(|c| c.on == gear) {
+                    self.start(cx, &c.play, &c.play.sounds, 1.0, src);
+                }
+            }
+            self.rumble(cx, src, is != 0);
+            if !(self.voices.iter()).any(|v| v.owner == owner && !v.stopped && v.tag.is_some()) {
+                let on = On::TankEngine { moving: is != 0 };
+                for (i, c) in cues.iter().enumerate().filter(|c| c.1.on == on) {
+                    let src = Src {
+                        tag: Some(i),
+                        ..src
+                    };
+                    self.start(cx, &c.play, &c.play.sounds, 1.0, src);
+                }
+            }
+        }
+    }
+
+    /// Each voice where its player is, its `ticks` and fade run out, on the mixer once its samples
+    /// are in (a loop waits for them; a sound that does not loop plays only from its first tick),
+    /// at this tick's ear volumes; finished ones go.
+    fn upkeep(&mut self, cx: &Cx, players: &[(Seen, Seen)], out: Option<(&Output, &Assets<Pcm>)>) {
+        // The background and its stem go on the mixer together, once both are loaded: their
+        // samples stay aligned.
+        let loaded = |id| out.is_none_or(|(o, p)| o.sounds.get(&id).is_none_or(|h| p.contains(h)));
+        let music = loaded(BACKGROUND) && loaded(STEM);
+        for v in &mut self.voices {
+            if let Some(p) = (v.follows).and_then(|s| players.iter().find(|p| p.1.slot == s)) {
+                v.pos = p.1.pos;
+            }
+            if v.until.is_some_and(|u| cx.tick >= u) && v.fade.is_none() {
+                v.fade = Some(cx.tick);
+            }
+            if v.fade.is_some_and(|f| cx.tick >= f + FADE) {
+                v.stopped = true;
+            }
+            if v.stopped {
+                if let Some(c) = &v.control {
+                    c.stop.store(true, Relaxed);
+                }
+                continue;
+            }
+            let ears = v.ears(&cx.ear, cx.tick, self.muted);
+            if v.control.is_none()
+                && (v.looped || v.started == cx.tick)
+                && (music || (v.id != BACKGROUND && v.id != STEM))
+                && let Some((out, pcms)) = out
+                && let Some(pcm) = out.sounds.get(&v.id).and_then(|h| pcms.get(h))
+            {
+                let sound = cx.pack.audio.sounds.sounds.get(&v.id);
+                v.control = Some(out.play(pcm, sound, v, ears));
+            }
+            if let Some(c) = &v.control {
+                for (a, e) in c.ears.iter().zip(ears) {
+                    a.store(e.to_bits(), Relaxed);
+                }
+                c.pitch.store(v.bend.ratio.to_bits(), Relaxed);
+            }
+        }
+        self.voices.retain(|v| {
+            !v.stopped && (v.control.as_ref()).map_or(v.looped, |c| !c.done.load(Relaxed))
+        });
+    }
+}
+
+/// The tick's sounds (see the module doc): each player's against last tick ([`Heard`]), the
+/// grenades', the match's, then every voice's volumes. Nothing plays until the local player (the
+/// listener) is in.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn hear(
+    timeline: Res<LocalTimeline>,
+    pack: Res<Pack>,
+    mut sounds: ResMut<Sounds>,
+    output: Option<Res<Output>>,
+    pcms: Option<Res<Assets<Pcm>>>,
+    game: Query<&MatchView>,
+    mut players: Query<(
+        Entity,
+        &Player,
+        &Combat,
+        &Anim,
+        Option<&Fighting>,
+        Has<Predicted>,
+        Option<&mut Heard>,
+        Option<&PlayerId>,
+    )>,
+    listener: Query<(&Player, &Combat, &FollowCamera)>,
+    (playing, outros): (Res<crate::outro::Playing>, Res<crate::outro::Outros>),
+    (flickers, bag, nest, world, laser, orbit): (
+        Option<Res<crate::lights::Flickers>>,
+        Res<crate::heist::Bag>,
+        Option<Res<crate::raptor::Nest>>,
+        Option<Res<conker_sim::net::Collision>>,
+        Res<crate::laser::Own>,
+        Option<Res<crate::orbit::Orbit>>,
+    ),
+    mut commands: Commands,
+) {
+    let tick = timeline.tick().0;
+    let s = &mut *sounds;
+    let mut all = std::mem::take(&mut s.players);
+    all.clear();
+    let mut grenades: &[(u32, Grenade)] = &[];
+    let mut mount = None;
+    let guns = game.single().map_or(&[][..], |m| &m.guns[..]);
+    let tank = game.single().is_ok_and(|m| m.tank);
+    for (entity, p, c, anim, fighting, predicted, heard, id) in &mut players {
+        // On a mounted gun the weapon is the gun's (its gunner's battle cry, `On::Firing`).
+        let seated = match fighting {
+            Some(f) if predicted => f.state.seated(),
+            _ => (guns.iter()).any(|g| g.gunner == Some(c.slot) && g.state != gun::LAUNCH),
+        };
+        let (weapon, drawn) = match fighting {
+            _ if seated => (conker_camera::GUN, true),
+            Some(f) if predicted => (f.state.weapon.unwrap_or(0), f.state.drawn),
+            _ => (c.weapon, c.drawn),
+        };
+        let masked = match fighting {
+            Some(f) if predicted => f.state.masked,
+            _ => c.masked,
+        };
+        if let Some(f) = fighting.filter(|_| predicted) {
+            grenades = &f.grenades;
+            mount = f.state.gun;
+        }
+        let bot = id.is_some_and(|i| matches!(i.0, PeerId::Local(_)));
+        let seen = Seen {
+            slot: c.slot,
+            body: crate::body(c, &pack.characters),
+            class: c.class,
+            pos: p.pos,
+            clock: anim.0,
+            weapon,
+            drawn,
+            health: c.health,
+            reaction: c.anim,
+            hit: c.hit,
+            cook: match fighting {
+                Some(f) if predicted => f.state.cook,
+                _ => c.cook,
+            },
+            scope: p.scope_yaw.is_some(),
+            local: predicted,
+            floor: if p.water != NO_FLOOR && p.pos[1] <= p.water {
+                Some(WATER_STEPS)
+            } else {
+                p.floor.map(|f| (f.surface & 0x1F) as u8)
+            },
+            speed: p.xz_speed,
+            target: p.target_speed,
+            // Tank's bomb carrier is no canister carrier (no radio).
+            carry: (c.carrying && !tank).then_some((c.team, bot)),
+            flag: c.flag.map(|f| (f, bot)),
+            bot,
+            team: c.team,
+            freeze: c.freeze,
+            deadline: c.deadline,
+            masked,
+            above: p.floor.map_or(0.0, |f| p.pos[1] - f.y),
+            pitch: match &world {
+                Some(w) if tank => conker_rules::tank::hull_pitch(&p.0, &w.0),
+                _ => 0.0,
+            },
+            laser: if predicted {
+                laser.0.is_some()
+            } else {
+                c.laser.is_some()
+            },
+        };
+        match heard {
+            Some(mut h) => {
+                all.push((h.0, seen));
+                h.0 = seen;
+            }
+            None => {
+                commands.entity(entity).insert(Heard(seen));
+            }
+        }
+    }
+    let (Ok(m), Ok((p, c, camera))) = (game.single(), listener.single()) else {
+        s.players = all;
+        return;
+    };
+    let read = m
+        .start
+        .filter(|&st| st != u32::MAX && tick >= st)
+        .map_or(-1, |st| i64::from(m.first_read + (tick - st)));
+    // While an outro runs the listener is its camera; under the modern controls the orbit camera's
+    // view while it draws.
+    let view = orbit.and_then(|o| o.view);
+    let running = playing.running(&outros);
+    let ear = match running {
+        Some((o, k)) => {
+            let (eye, at) = o.camera(o.t(k));
+            let ahead = Vec2::new(at[0] - eye[0], at[2] - eye[2]);
+            let right = Vec2::new(-ahead.y, ahead.x).normalize_or_zero();
+            Ear {
+                slot: u16::MAX,
+                pos: eye,
+                right: right.to_array(),
+            }
+        }
+        None => Ear::new(c.slot, p.pos, camera, view.map(|v| v.1)),
+    };
+    let cx = Cx {
+        pack: &pack,
+        tick,
+        read,
+        ear,
+    };
+    s.prime(m, grenades);
+    s.rockets(&cx, &m.rockets);
+    s.due(&cx);
+    for (was, is) in &all {
+        s.player(&cx, was, is);
+    }
+    s.grenades(&cx, grenades);
+    let eye = view.map_or(camera.drawn.view(&camera.follow).0, |v| v.0);
+    s.fly_by(&cx, &m.bullets, eye.to_array(), &all);
+    let flashed: Vec<[f32; 3]> = flickers.iter().flat_map(|f| f.flashed()).collect();
+    s.match_sounds(&cx, m, &all, &flashed);
+    s.beach(&cx, m, &all);
+    s.zones(&cx, &all);
+    s.traps(&cx, m);
+    s.colors(&cx, m, &all);
+    s.heist(&cx, m, &bag, &all);
+    if let Some(nest) = &nest {
+        s.raptor(&cx, nest);
+    }
+    s.tank(&cx, m, &all);
+    s.race(&cx, m, &all);
+    s.clicks_off(&cx, &all);
+    s.outro_sounds(&cx, running);
+    s.duck_music(&cx);
+    // The muffle ends with the match (I: the original's sound mode with its scene).
+    if m.phase >= 2 && s.muffled {
+        (s.muffled, s.wearers) = (false, HashSet::new());
+        debug!("MUFFLE t={tick} read={read}: off, over");
+    }
+    MUFFLED.store(s.muffled, Relaxed);
+    // The local gunner's gun as predicted (its fire's sounds on the tick it fires).
+    let mut guns = m.guns.clone();
+    if let Some(g) = mount.and_then(|g| Some((guns.get_mut(usize::from(g.gun))?, g))) {
+        (g.0.state, g.0.trigger) = (g.1.state, g.1.trigger);
+    }
+    s.guns(&cx, &guns, &all);
+    let scope = camera.follow.cam.scope;
+    let gunner = scope.on && scope.weapon == conker_camera::GUN;
+    s.gunner(
+        &cx,
+        gunner.then_some([scope.zoom[0], scope.yaw_target * scope.pitch_target]),
+    );
+    let flat = |id, base| Voice {
+        id,
+        owner: Owner::World,
+        channel: Channel::Free,
+        tag: None,
+        pos: cx.ear.pos,
+        follows: None,
+        flat: true,
+        volume: 32767.0,
+        own: None,
+        near: 0.0,
+        far: 0.0,
+        base,
+        speed: 1.0,
+        looped: false,
+        until: None,
+        fade: None,
+        started: tick,
+        stopped: false,
+        control: None,
+        bend: Bend::FLAT,
+    };
+    let outro = (playing.0).and_then(|(i, k)| Some((i, k, outros.0.get(i)?)));
+    if let Some((i, ..)) = outro.filter(|&(_, k, o)| Some(k) == o.voice_frame()) {
+        s.stop(|v| LINES[1..].iter().any(|l| l.0 == v.id));
+        s.push(&cx, flat(VOICE - i as u16, MIX));
+    }
+    // The song plays at [`SONG_LEVEL`] of its recording.
+    let song = |&(_, k, o): &(usize, u32, &Outro)| o.song.as_ref().is_some_and(|s| k == frame(s.t));
+    if let Some((i, ..)) = outro.filter(song) {
+        s.push(&cx, flat(SONG - i as u16, SONG_LEVEL));
+    }
+    let out = output.as_deref().zip(pcms.as_deref());
+    s.upkeep(&cx, &all, out);
+    s.players = all;
+}
+
+/// The sound device (rodio's mixer) and every sound's samples by id (the background as
+/// [`BACKGROUND`]), loading.
+#[derive(Resource)]
+struct Output {
+    device: rodio::MixerDeviceSink,
+    sounds: HashMap<u16, Handle<Pcm>>,
+}
+
+impl Output {
+    /// Puts a sound on the mixer at `speed` × its rate, starting at these ear volumes.
+    fn play(&self, pcm: &Pcm, sound: Option<&Sound>, v: &Voice, ears: [f32; 2]) -> Arc<Control> {
+        let control = Arc::new(Control::default());
+        for (a, e) in control.ears.iter().zip(ears) {
+            a.store(e.to_bits(), Relaxed);
+        }
+        control.pitch.store(v.bend.ratio.to_bits(), Relaxed);
+        let playing = Playing::new(pcm, sound, v.looped, v.speed, control.clone());
+        self.device.mixer().add(playing);
+        control
+    }
+}
+
+/// Opens the sound device and loads every sound: natively at once; in the browser on the first key
+/// press or click (Chrome lets an AudioContext made after a user gesture run: the click that
+/// captures the mouse).
+fn open(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    pack: Res<Pack>,
+    outros: Res<crate::outro::Outros>,
+    assets: Res<AssetServer>,
+    mut commands: Commands,
+    mut tried: Local<bool>,
+) {
+    let gesture =
+        keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some();
+    if *tried || (cfg!(target_family = "wasm") && !gesture) {
+        return;
+    }
+    *tried = true;
+    let device = rodio::DeviceSinkBuilder::from_default_device()
+        .map(|b| b.with_error_callback(|e| warn!("sound: {e}")))
+        .and_then(|b| b.open_stream());
+    let mut device = match device {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("sound: no output device ({e}): the match plays silent");
+            return;
+        }
+    };
+    device.log_on_drop(false);
+    let config = device.config();
+    info!(
+        "sound: output open, {} channels at {} Hz",
+        config.channel_count(),
+        config.sample_rate()
+    );
+    let load = |file: &str| assets.load::<Pcm>(format!("audio/{file}"));
+    let mut sounds: HashMap<u16, Handle<Pcm>> = (pack.audio.sounds.sounds.iter())
+        .map(|(id, s)| (*id, load(&s.file)))
+        .collect();
+    if let Some(b) = &pack.background {
+        sounds.insert(BACKGROUND, load(&b.file));
+    }
+    if let Some((b, _)) = &pack.stem {
+        sounds.insert(STEM, load(&b.file));
+    }
+    for (n, o) in outros.0.iter().enumerate() {
+        if let Some(v) = &o.voice {
+            sounds.insert(VOICE - n as u16, load(&v.file));
+        }
+        if let Some(s) = &o.song {
+            sounds.insert(SONG - n as u16, load(&s.file));
+        }
+    }
+    for (id, name) in LINES.into_iter().chain([(COUNTDOWN, "countdown")]) {
+        if let Some(line) = pack.lines.get(name) {
+            sounds.insert(id, load(&line.file));
+        }
+    }
+    commands.insert_resource(Output { device, sounds });
+}
+
+/// Set as the mixer first pulls a sound's samples: the output runs.
+static PULLED: AtomicBool = AtomicBool::new(false);
+/// The mask's muffle ([`Sounds::mask`]), set each tick: the effects play through their [`Biquad`].
+static MUFFLED: AtomicBool = AtomicBool::new(false);
+
+/// Logs once that the output runs (in the browser, that the AudioContext started).
+fn running(mut said: Local<bool>) {
+    if !*said && PULLED.load(Relaxed) {
+        *said = true;
+        info!("sound: output running");
+    }
+}
+
+/// The Mute action (M) mutes and unmutes (the page's `#sound` line says so in the browser).
+fn mute(controls: crate::bindings::Controls, mut sounds: ResMut<Sounds>) {
+    if controls.just_pressed(crate::bindings::Action::Mute) {
+        sounds.muted = !sounds.muted;
+        info!("sound {}", if sounds.muted { "muted" } else { "on" });
+        #[cfg(target_family = "wasm")]
+        note(if sounds.muted { "Sound muted (M)" } else { "" });
+    }
+}
+
+/// The page's `#sound` line.
+#[cfg(target_family = "wasm")]
+fn note(text: &str) {
+    let line = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("sound"));
+    if let Some(line) = line {
+        line.set_text_content(Some(text));
+    }
+}
+
+/// A WAV file's samples: 16-bit PCM, interleaved.
+#[derive(Asset, TypePath)]
+pub struct Pcm {
+    rate: u32,
+    channels: u16,
+    samples: Arc<[i16]>,
+}
+
+/// Reads `.wav` files into [`Pcm`].
+#[derive(Default, TypePath)]
+pub struct WavLoader;
+
+impl AssetLoader for WavLoader {
+    type Asset = Pcm;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _: &(),
+        _: &mut LoadContext<'_>,
+    ) -> Result<Pcm, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "not a 16-bit PCM WAV");
+        wav(&bytes).ok_or_else(bad)
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["wav"]
+    }
+}
+
+/// A RIFF WAVE file's samples, 16-bit PCM only (the pack's).
+fn wav(b: &[u8]) -> Option<Pcm> {
+    if b.get(..4)? != b"RIFF" || b.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let u16_at = |s: &[u8], i: usize| Some(u16::from_le_bytes(s.get(i..i + 2)?.try_into().ok()?));
+    let u32_at = |s: &[u8], i: usize| Some(u32::from_le_bytes(s.get(i..i + 4)?.try_into().ok()?));
+    let (mut format, mut i) = (None, 12);
+    while i + 8 <= b.len() {
+        let len = u32_at(b, i + 4)? as usize;
+        let body = &b[i + 8..(i + 8).saturating_add(len).min(b.len())];
+        match &b[i..i + 4] {
+            b"fmt " => {
+                format = Some((
+                    u16_at(body, 0)?,
+                    u16_at(body, 2)?,
+                    u32_at(body, 4)?,
+                    u16_at(body, 14)?,
+                ))
+            }
+            b"data" => {
+                let (pcm, channels, rate, bits) = format?;
+                if pcm != 1 || bits != 16 || channels == 0 || rate == 0 {
+                    return None;
+                }
+                let samples = body
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|s| i16::from_le_bytes(*s));
+                return Some(Pcm {
+                    rate,
+                    channels,
+                    samples: samples.collect(),
+                });
+            }
+            _ => {}
+        }
+        i += 8 + len + len % 2;
+    }
+    None
+}
+
+/// A playing sound's controls, shared with its [`Playing`] on the mixer's thread: each ear's volume
+/// and the pitch bend over its rate ([`Bend`]; f32 bits), stop (fade out over the release), done
+/// (it ended).
+struct Control {
+    ears: [AtomicU32; 2],
+    pitch: AtomicU32,
+    stop: AtomicBool,
+    done: AtomicBool,
+}
+
+impl Default for Control {
+    fn default() -> Self {
+        Self {
+            ears: Default::default(),
+            pitch: AtomicU32::new(1f32.to_bits()),
+            stop: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }
+    }
+}
+
+/// An ADSR envelope in frames and levels out of 1 ([`conker_assets::audio::Envelope`]): linear ramps
+/// (I: the game's envelope mixer's curve is not read).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Env {
+    attack: f32,
+    attack_level: f32,
+    /// None: holds the attack level.
+    decay: Option<f32>,
+    decay_level: f32,
+    release: f32,
+}
+
+impl Env {
+    const FLAT: Self = Self {
+        attack: 0.0,
+        attack_level: 1.0,
+        decay: None,
+        decay_level: 1.0,
+        release: 0.0,
+    };
+
+    fn new(e: &conker_assets::audio::Envelope, frames_per_us: f32) -> Self {
+        let frames = |us: i32| us.max(0) as f32 * frames_per_us;
+        Self {
+            attack: frames(e.attack_us),
+            attack_level: f32::from(e.attack_volume) / 127.0,
+            decay: (e.decay_us >= 0).then(|| frames(e.decay_us)),
+            decay_level: f32::from(e.decay_volume) / 127.0,
+            release: frames(e.release_us),
+        }
+    }
+
+    fn level(&self, age: f32) -> f32 {
+        if age < self.attack {
+            return self.attack_level * age / self.attack;
+        }
+        let t = age - self.attack;
+        match self.decay {
+            Some(d) if t < d => self.attack_level + (self.decay_level - self.attack_level) * t / d,
+            Some(_) => self.decay_level,
+            None => self.attack_level,
+        }
+    }
+}
+
+/// A second-order low-pass (the RBJ cookbook's, Q 1/√2), direct form I.
+#[derive(Clone, Copy, Debug)]
+struct Biquad {
+    b: [f32; 3],
+    a: [f32; 2],
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl Biquad {
+    /// Cutting from `cutoff` Hz at `rate` samples a second (below its Nyquist).
+    fn low_pass(cutoff: f32, rate: f32) -> Self {
+        let (sin, cos) = (TAU * cutoff.min(0.45 * rate) / rate).sin_cos();
+        let alpha = sin * FRAC_1_SQRT_2; // sin / (2Q)
+        let a0 = 1.0 + alpha;
+        let b1 = (1.0 - cos) / a0;
+        Self {
+            b: [b1 / 2.0, b1, b1 / 2.0],
+            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    fn run(&mut self, x: f32) -> f32 {
+        let Self { b, a, x: xs, y: ys } = self;
+        let y = b[0] * x + b[1] * xs[0] + b[2] * xs[1] - a[0] * ys[0] - a[1] * ys[1];
+        (*xs, *ys) = ([x, xs[0]], [y, ys[0]]);
+        y
+    }
+}
+
+/// A sound on the mixer: its samples (a loop's stretch repeating until it is stopped), through its
+/// envelope, as two channels at its [`Control`]'s ear volumes (smoothed over about 20 ms), at its
+/// rate × the pitch's speed, stepping [`Control::pitch`] frames an output frame (between two frames:
+/// linear); an effect (a bank sound) through the muffle's low-pass while [`MUFFLED`] (the filter
+/// runs all along, so a switch finds it settled). ponytail: a loop's `count` is not kept (no sound
+/// of the pack has one).
+struct Playing {
+    samples: Arc<[i16]>,
+    channels: usize,
+    rate: SampleRate,
+    frame: usize,
+    frac: f32,
+    end: usize,
+    loop_start: Option<usize>,
+    env: Env,
+    age: u32,
+    /// The age and level the stop began its release at.
+    release: Option<(u32, f32)>,
+    ears: [f32; 2],
+    smooth: f32,
+    right: Option<f32>,
+    control: Arc<Control>,
+    muffle: Option<[Biquad; 2]>,
+}
+
+impl Playing {
+    /// `sound` None: the background or a line (no envelope; `looped`: whole, the background).
+    fn new(
+        pcm: &Pcm,
+        sound: Option<&Sound>,
+        looped: bool,
+        speed: f32,
+        control: Arc<Control>,
+    ) -> Self {
+        let channels = usize::from(pcm.channels);
+        let frames = pcm.samples.len() / channels;
+        let rate = (pcm.rate as f32 * speed).max(1.0);
+        let (looped, env) = match sound {
+            Some(s) => (
+                (s.looped.as_ref()).map(|l| (l.start as usize, (l.end as usize).min(frames))),
+                Env::new(&s.envelope, rate / 1e6),
+            ),
+            None => (looped.then_some((0, frames)), Env::FLAT),
+        };
+        let looped = looped.filter(|l| l.0 < l.1);
+        Self {
+            samples: pcm.samples.clone(),
+            channels,
+            rate: SampleRate::new(rate.round() as u32).unwrap_or(SampleRate::MIN),
+            frame: 0,
+            frac: 0.0,
+            end: looped.map_or(frames, |l| l.1),
+            loop_start: looped.map(|l| l.0),
+            env,
+            age: 0,
+            release: None,
+            ears: control
+                .ears
+                .each_ref()
+                .map(|e| f32::from_bits(e.load(Relaxed))),
+            smooth: 1.0 - (-1.0 / (rate * 0.02)).exp(),
+            right: None,
+            control,
+            muffle: sound.map(|_| [Biquad::low_pass(MUFFLE_HZ, rate); 2]),
+        }
+    }
+
+    fn done(&mut self) -> Option<f32> {
+        self.control.done.store(true, Relaxed);
+        None
+    }
+}
+
+impl Drop for Playing {
+    fn drop(&mut self) {
+        self.control.done.store(true, Relaxed);
+    }
+}
+
+impl Iterator for Playing {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if let Some(right) = self.right.take() {
+            return Some(right);
+        }
+        if self.age == 0 {
+            PULLED.store(true, Relaxed);
+        }
+        let mut level = self.env.level(self.age as f32);
+        if self.release.is_none() && self.control.stop.load(Relaxed) {
+            self.release = Some((self.age, level));
+        }
+        if let Some((at, from)) = self.release {
+            let t = (self.age - at) as f32;
+            if t >= self.env.release {
+                return self.done();
+            }
+            level = from * (1.0 - t / self.env.release);
+        }
+        if self.frame >= self.end {
+            match self.loop_start {
+                Some(start) => self.frame = start + (self.frame - self.end) % (self.end - start),
+                None => return self.done(),
+            }
+        }
+        let at = |f: usize| {
+            let i = f * self.channels;
+            let left = f32::from(self.samples[i]) / 32768.0;
+            match self.channels {
+                1 => (left, left),
+                _ => (left, f32::from(self.samples[i + 1]) / 32768.0),
+            }
+        };
+        let (mut left, mut right) = at(self.frame);
+        if self.frac > 0.0 {
+            let next = match self.frame + 1 {
+                n if n < self.end => n,
+                _ => self.loop_start.unwrap_or(self.frame),
+            };
+            let (l, r) = at(next);
+            left += (l - left) * self.frac;
+            right += (r - right) * self.frac;
+        }
+        if let Some([l, r]) = &mut self.muffle {
+            let muffled = (l.run(left), r.run(right));
+            if MUFFLED.load(Relaxed) {
+                (left, right) = muffled;
+            }
+        }
+        for (ear, target) in self.ears.iter_mut().zip(&self.control.ears) {
+            *ear += (f32::from_bits(target.load(Relaxed)) - *ear) * self.smooth;
+        }
+        let step = self.frac + f32::from_bits(self.control.pitch.load(Relaxed));
+        self.frame += step as usize;
+        self.frac = step.fract();
+        self.age += 1;
+        self.right = Some(right * level * self.ears[1]);
+        Some(left * level * self.ears[0])
+    }
+}
+
+impl Source for Playing {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        STEREO
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bag's events as the oracle played them (`heist-presentation-scratch/bag/
+    /// snd_bag_calls.txt` against `bag_timeline.txt`): clip 5's t-0 sound at the hand (343), never
+    /// its t-8 ones (held at 8); clip 9's t-0 at the release (395), its t-8 ones at the landing
+    /// (411); clips 7 and 8 at their starts (507, 508) and each loop.
+    #[test]
+    fn bag_events_fire_as_the_oracle() {
+        let fires = |was, is, t| bag_passes(Some(was), is, t);
+        assert!(fires((6, 9.0), (5, 1.0), 0.0) && !fires((6, 9.0), (5, 1.0), 8.0));
+        assert!(!fires((5, 1.0), (5, 8.0), 8.0) && !fires((5, 8.0), (5, 8.0), 8.0));
+        assert!(fires((6, 14.0), (9, 1.0), 0.0) && !fires((6, 14.0), (9, 1.0), 8.0));
+        assert!(!fires((9, 1.0), (9, 2.0), 0.0) && !fires((9, 8.0), (9, 8.0), 8.0));
+        assert!(fires((9, 8.0), (9, 9.0), 8.0) && !fires((9, 8.0), (9, 9.0), 0.0));
+        assert!(fires((6, 1.0), (7, 1.0), 0.0) && fires((7, 1.0), (8, 0.8), 0.0));
+        assert!(fires((7, 39.5), (7, 0.5), 0.0) && !fires((7, 1.0), (7, 2.0), 0.0));
+        assert!(bag_passes(None, (0, 1.0), 0.0));
+    }
+
+    fn clock(id: u16, time: f32, rate: f32) -> AnimPlayer {
+        AnimPlayer {
+            id,
+            time,
+            rate,
+            ..default()
+        }
+    }
+
+    /// The oracle's footsteps (e_w09: clip 2's event at 1.0 fired from 0.426 and from 0.0087, the
+    /// one at 15.0 from 14.33, rate 1.73) and a clip's first tick.
+    #[test]
+    fn clip_events_fire_as_the_clock_passes_them() {
+        let pass = |a: f32, b: f32, t: f32| passes(&clock(2, a, 1.73), &clock(2, b, 1.73), t);
+        assert!(pass(0.426, 2.156, 1.0) && pass(0.0087, 1.7387, 1.0) && pass(14.33, 16.06, 15.0));
+        assert!(!pass(1.0, 2.73, 1.0), "fired last tick");
+        assert!(
+            pass(27.5, 1.2, 1.0) && pass(27.5, 1.2, 28.0),
+            "round the loop"
+        );
+        let new = |t: f32| passes(&clock(0x7F, 40.0, 1.0), &clock(0x58, 1.0, 1.0), t);
+        assert!(new(0.0) && new(1.0) && !new(2.0));
+    }
+
+    #[test]
+    fn a_wav_reads_back() {
+        let samples: [i16; 4] = [0, -1, 32767, -32768];
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut b = b"RIFF\0\0\0\0WAVE".to_vec();
+        b.extend(b"LIST\x03\0\0\0abc\0"); // odd length: padded
+        b.extend(b"fmt \x10\0\0\0\x01\0\x02\0\x44\xAC\0\0\x10\xB1\x02\0\x04\0\x10\0");
+        b.extend(b"data\x08\0\0\0");
+        b.extend(&data);
+        let pcm = wav(&b).unwrap();
+        assert_eq!(
+            (pcm.rate, pcm.channels, &pcm.samples[..]),
+            (44100, 2, &samples[..])
+        );
+        b[46] = 8; // 8-bit
+        assert!(wav(&b).is_none());
+        assert!(wav(b"RIFF").is_none());
+    }
+
+    /// A loop after an intro (sound 719: 1569..14371), a stop's release, and the envelope.
+    #[test]
+    fn loops_keep_their_intro_and_stop_after_the_release() {
+        let pcm = Pcm {
+            rate: 1_000_000,
+            channels: 1,
+            samples: (0..6).map(|i| i * 1000).collect(),
+        };
+        let mut sound = Sound {
+            file: String::new(),
+            rate: 0,
+            volume: 127,
+            pan: 64,
+            envelope: conker_assets::audio::Envelope {
+                attack_us: 0,
+                attack_volume: 127,
+                decay_us: -1,
+                decay_volume: 127,
+                release_us: 2,
+            },
+            looped: Some(conker_assets::audio::Loop {
+                start: 2,
+                end: 5,
+                count: None,
+            }),
+            detune_after_attack: None,
+        };
+        let control = Arc::new(Control::default());
+        control
+            .ears
+            .iter()
+            .for_each(|e| e.store(1f32.to_bits(), Relaxed));
+        let mut p = Playing::new(&pcm, Some(&sound), false, 1.0, control.clone());
+        let left: Vec<f32> = (0..9)
+            .map(|_| (p.next().unwrap() * 32768.0).round())
+            .collect();
+        // Frames 0 1 2 3 4 2 3 4 2 …, each as left then right.
+        assert_eq!(
+            left.iter().step_by(2).copied().collect::<Vec<_>>(),
+            [0.0, 1000.0, 2000.0, 3000.0, 4000.0]
+        );
+        control.stop.store(true, Relaxed);
+        let rest: Vec<f32> = p.by_ref().collect();
+        assert_eq!(
+            rest.len(),
+            1 + 2 * 2,
+            "the pending right sample, then 2 frames of release"
+        );
+        assert!(control.done.load(Relaxed));
+        // Sound 176: decays to 0 over 287.5 ms.
+        sound.envelope.decay_volume = 0;
+        sound.envelope.decay_us = 100;
+        let env = Env::new(&sound.envelope, 1.0);
+        assert_eq!(
+            [0.0, 50.0, 100.0, 500.0].map(|a| env.level(a)),
+            [1.0, 0.5, 0.0, 0.0]
+        );
+    }
+
+    fn at(slot: u16, x: f32, weapon: u8) -> Seen {
+        Seen {
+            slot,
+            body: conker_sim::movement::Side::Tediz as usize,
+            class: conker_rules::beach::TEDI_CLASS,
+            pos: [x, 0.0, 0.0],
+            clock: AnimPlayer::default(),
+            weapon,
+            drawn: true,
+            health: 6,
+            reaction: 0,
+            hit: 0,
+            cook: conker_rules::projectile::COOK,
+            scope: false,
+            local: false,
+            floor: None,
+            speed: 0.0,
+            target: 0.0,
+            carry: None,
+            flag: None,
+            bot: false,
+            team: 0,
+            freeze: 0,
+            deadline: 0,
+            masked: false,
+            above: 0.0,
+            pitch: 0.0,
+            laser: false,
+        }
+    }
+
+    #[test]
+    fn projectiles_gone_are_the_ones_not_carried_on() {
+        let old = [[0.0, 0.0, 0.0], [1000.0, 0.0, 0.0], [5000.0, 0.0, 0.0]];
+        let new = [[150.0, 0.0, 0.0], [5100.0, 0.0, 0.0], [0.0, 9.0, 0.0]];
+        assert_eq!(
+            gone(&old, &new, 400.0).collect::<Vec<_>>(),
+            [[1000.0, 0.0, 0.0]]
+        );
+        assert_eq!(gone(&old, &[], 400.0).count(), 3);
+    }
+    /// The duck factor (`func_1000D758`): Beach's 18000 falls to 7690 in 19 frames of a line (V b3:
+    /// 0x464F → 0x1E09) and comes back 2250 a frame (+0x8CA), all of it 5 frames after.
+    #[test]
+    fn the_music_ducks_by_the_factor_law() {
+        let music = |f: f32| 18000.0 * f / DUCK[0];
+        let mut f = DUCK[0];
+        let down: Vec<f32> = (0..19)
+            .map(|_| {
+                music({
+                    f = duck(f, true);
+                    f
+                })
+            })
+            .collect();
+        assert!((down[0] - (18000.0 - 562.5)).abs() < 0.1 && down[17] > 7700.0);
+        assert!((down[18] - 7690.0).abs() < 1.0);
+        let up: Vec<f32> = (0..5)
+            .map(|_| {
+                music({
+                    f = duck(f, false);
+                    f
+                })
+            })
+            .collect();
+        assert!((up[0] - 7690.0 - 2250.0).abs() < 1.0 && up[3] < 18000.0 && up[4] == 18000.0);
+    }
+
+    /// The end phase of a War match leaves the music playing (through its outro and STATS), a
+    /// Deathmatch's stops it. An outro's loop is silent at its start, full at its fade-in's end,
+    /// half way down half way through its fade-out, and over at its stop; a one-shot plays on its
+    /// frame.
+    #[test]
+    fn the_music_plays_through_the_outro_and_script_sounds_fade() {
+        use conker_assets::outro::ScriptSound;
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let at = |phase, colors| MatchView {
+            phase,
+            colors,
+            ..MatchView::default()
+        };
+        let music = |s: &Sounds| s.voices.iter().any(|v| v.id == BACKGROUND && !v.stopped);
+        s.match_sounds(&cx(&pack, 1), &at(0, true), &[], &[]);
+        s.match_sounds(&cx(&pack, 2), &at(2, true), &[], &[]);
+        assert!(music(&s));
+        s.match_sounds(&cx(&pack, 3), &at(2, false), &[], &[]);
+        assert!(!music(&s));
+        // RESTART's fade stops it in every mode and the next match starts it again.
+        for colors in [false, true] {
+            s.match_sounds(&cx(&pack, 4), &at(3, colors), &[], &[]);
+            assert!(!music(&s));
+            s.match_sounds(&cx(&pack, 5), &at(0, colors), &[], &[]);
+            assert!(music(&s), "colors {colors}");
+        }
+
+        // The tanks' 0x4A8 (looped in the bank).
+        let id = 0x4A8;
+        let sound = |t, stop, fade_in, fade_out| ScriptSound {
+            id,
+            actor: 0,
+            t,
+            stop,
+            fade_in,
+            fade_out,
+            cents: 0,
+        };
+        let o = Outro {
+            length: 300,
+            sounds: vec![
+                sound(0, Some(100), Some(20), Some(60)),
+                sound(50, None, None, None),
+            ],
+            ..Outro::default()
+        };
+        let mut s = Sounds::default();
+        let mut heard = Vec::new();
+        for k in 0..60 {
+            let cx = cx(&pack, k);
+            s.outro_sounds(&cx, Some((&o, k)));
+            let volume = |i| {
+                (s.voices.iter())
+                    .find(|v| v.owner == Owner::Outro(i) && !v.stopped)
+                    .map(|v| v.volume)
+            };
+            heard.push((volume(0), volume(1)));
+            s.upkeep(&cx, &[], None);
+        }
+        let full = SCRIPT[0];
+        assert!(
+            s.voices
+                .iter()
+                .all(|v| v.owner != Owner::Outro(0) || v.looped)
+        );
+        assert_eq!(
+            (heard[0].0, heard[10].0, heard[40].0),
+            (Some(0.0), Some(full), Some(full / 2.0))
+        );
+        assert_eq!((heard[49].0.is_some(), heard[50].0), (true, None));
+        let once: Vec<u32> = (0..60).filter(|&k| heard[k as usize].1.is_some()).collect();
+        assert_eq!(once, [25]);
+    }
+
+    /// Colors cs5's tanks run their own engines (V cs5b): both idle at frame 0 (0x4A7, from their
+    /// creation at read 437), coast from frame 1 (t 2, read 439: 0x4A5 and 0x4A8) at their paths'
+    /// speeds (the oracle's obj+0x3C 7.70 and 6.86), and the lit one (actor 4) idles at frame 402
+    /// (t 804, read 840: a gear change and 0x4A7) while the other drives on; the outro's end stops
+    /// them.
+    #[test]
+    fn the_outro_tanks_run_their_engines() {
+        let Some(pack) = colors_pack() else { return };
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into());
+        let Ok(json) = std::fs::read(format!("{dir}/maps/30/outros.json")) else {
+            return;
+        };
+        let outros: Vec<Outro> = serde_json::from_slice(&json).unwrap();
+        let o = outros.iter().find(|o| o.cutscene == 5).unwrap();
+        let speed = |n: usize| {
+            let a = o.actors().nth(n).unwrap();
+            2.0 * dist2(a.place(o.t(1)), a.place(o.t(0))).sqrt()
+        };
+        assert!(
+            (speed(4) - 7.70).abs() < 0.3 && (speed(7) - 6.86).abs() < 0.3,
+            "{} {}",
+            speed(4),
+            speed(7)
+        );
+        let mut s = Sounds::default();
+        let ids = heard(&mut s, &pack, 0..403, |s, cx| s.outro_tanks(cx, o, cx.tick));
+        let at = |k: u32| -> Vec<u16> { ids.iter().filter(|i| i.0 == k).map(|i| i.1).collect() };
+        assert_eq!(
+            (at(0), at(1), at(151)),
+            (vec![1191; 2], vec![1189, 1192, 1189, 1192], vec![1193; 2])
+        );
+        assert!(matches!(at(402)[..], [1187..=1190, 1191]), "{ids:?}");
+        let engine = |n| {
+            let live = |v: &&Voice| v.owner == Owner::OutroTank(n) && !v.stopped && v.id != 1193;
+            s.voices
+                .iter()
+                .filter(live)
+                .map(|v| v.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!((engine(4), engine(7)), (vec![1191], vec![1192]));
+        s.outro_sounds(&cx(&pack, 403), None);
+        assert!(
+            s.voices
+                .iter()
+                .all(|v| v.stopped || !matches!(v.owner, Owner::OutroTank(_)))
+        );
+    }
+
+    /// A driving tank rumbles as t5's (V): the drive loop at read 32, a rumble at 182 (150 frames
+    /// on: 31 frames up from 8/256, 150 held, 32 down to 7/256, gone at 395), the next 450 frames
+    /// after it (632, held 406: its last read 1100), the next 706 on (1338); idling stops it at
+    /// once.
+    #[test]
+    fn the_rumble_swells_as_t5() {
+        let levels = [0, 30, 31, 180, 181, 212, 213].map(|a| swell(a, 150).map(|s| s * 256.0));
+        let full = Some(256.0);
+        assert_eq!(
+            levels,
+            [
+                Some(8.0),
+                Some(248.0),
+                full,
+                full,
+                Some(255.0),
+                Some(7.0),
+                None
+            ]
+        );
+        assert_eq!(
+            (swell(468, 406), swell(469, 406)),
+            (Some(7.0 / 256.0), None)
+        );
+        let Some(pack) = map_pack("24") else { return };
+        let mut s = Sounds::default();
+        let src = Src::player(&at(1, 0.0, 0));
+        let ids = heard(&mut s, &pack, 32..2000, |s, cx| s.rumble(cx, src, true));
+        let starts: Vec<u32> = ids.iter().filter(|i| i.1 == 1193).map(|i| i.0).collect();
+        assert_eq!(starts[0], 182);
+        assert!(
+            starts
+                .windows(2)
+                .all(|w| [450, 706].contains(&(w[1] - w[0]))),
+            "{starts:?}"
+        );
+        let live = |s: &Sounds| s.voices.iter().filter(|v| !v.stopped).count();
+        let mut s = Sounds::default();
+        heard(&mut s, &pack, 32..200, |s, cx| s.rumble(cx, src, true));
+        assert_eq!(live(&s), 1);
+        s.rumble(&cx(&pack, 200), src, false);
+        assert_eq!(live(&s), 0);
+    }
+
+    /// A line (no bank sound) plays once unless it is the background; an effect's muffle is a
+    /// 520 Hz low-pass (V c1b: `func_10012020` mode 5 sets param 9 to 520).
+    #[test]
+    fn lines_end_and_the_muffle_cuts_at_520_hz() {
+        let pcm = Pcm {
+            samples: vec![1000; 4].into(),
+            channels: 1,
+            rate: 22050,
+        };
+        let play = |looped| Playing::new(&pcm, None, looped, 1.0, Arc::new(Control::default()));
+        assert_eq!(
+            play(false).count(),
+            8,
+            "4 frames, left and right, then done"
+        );
+        assert_eq!(play(true).take(100).count(), 100, "the background loops");
+        let gain = |hz: f32| {
+            let mut f = Biquad::low_pass(MUFFLE_HZ, 22050.0);
+            let out: Vec<f32> = (0..22050)
+                .map(|i| f.run((TAU * hz * i as f32 / 22050.0).sin()))
+                .collect();
+            out[11025..].iter().fold(0f32, |m, y| m.max(y.abs()))
+        };
+        assert!(gain(100.0) > 0.95, "{}", gain(100.0));
+        assert!(
+            (gain(MUFFLE_HZ) - FRAC_1_SQRT_2).abs() < 0.02,
+            "{}",
+            gain(MUFFLE_HZ)
+        );
+        assert!(gain(5000.0) < 0.02, "{}", gain(5000.0));
+    }
+
+    /// Song 0x8A's level (Beach cs4): the least-squares gain of the pack's recording in V b4's
+    /// capture over its first 9 s from the outro's frame 1 (`polish-g5-scratch/b4-song.wav`, cut at
+    /// the song's offset). Skipped without the lab's excerpt or the pack.
+    #[test]
+    fn the_outro_song_plays_at_the_captures_level() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
+        let read = |f: &str| {
+            std::fs::read(format!("{dir}{f}"))
+                .ok()
+                .and_then(|b| wav(&b))
+        };
+        let (Some(cap), Some(song)) = (
+            read("lab/research/mp-original/polish-g5-scratch/b4-song.wav"),
+            read("assets/audio/maps/2b/song-8a.wav"),
+        ) else {
+            return;
+        };
+        assert_eq!((cap.rate, cap.channels, song.channels), (song.rate, 2, 2));
+        let mono =
+            |p: &Pcm, i: usize| f64::from(p.samples[2 * i]) + f64::from(p.samples[2 * i + 1]);
+        let (xy, xx) = (0..9 * cap.rate as usize).fold((0.0, 0.0), |(xy, xx), i| {
+            let (x, y) = (mono(&song, i), mono(&cap, i));
+            (xy + x * y, xx + x * x)
+        });
+        assert!(
+            (xy / xx - f64::from(SONG_LEVEL)).abs() < 0.01,
+            "{}",
+            xy / xx
+        );
+    }
+
+    /// The records' pitch (C `func_10011624`, `alCents2Ratio`): Race's hums by `func_150D5124` with
+    /// the Doppler, V r1 (`polish-g5-scratch`: scenario 11, 3 bots, an idle human); Tank's drive loop
+    /// by `func_151BB0E0`, V t2 (the human driving about 0x24: all 2404 frames of 0x4A8 within
+    /// 2e-4); the mixer steps that ratio of frames an output frame.
+    #[test]
+    fn records_bend_their_pitch_as_the_oracle() {
+        // r1: bot 1's hum 0 at state 2 falls 16 a frame and rises at once to 5 × its height.
+        assert_eq!(hum_cents(0, 2, 34.86, 4), 174);
+        assert_eq!([cents_step(207, 70), cents_step(159, 174)], [191, 174]);
+        assert_eq!(hum_cents(0, 2, 400.0, 4), 1000);
+        assert_eq!(
+            [hum_cents(0, 1, 30.0, 4), hum_cents(0, 0, 0.0, 9)],
+            [400, 400]
+        );
+        assert_eq!([hum_cents(1, 1, 0.0, 4), hum_cents(1, 2, 0.0, 4)], [0, 400]);
+        assert_eq!([hum_cents(1, 2, 0.0, 5), hum_cents(1, 0, 0.0, 5)], [0, 400]);
+        assert_eq!(hum_cents(2, 0, 0.0, 4), 0);
+        // Hum 1 at state 0 jumps to 16000 whatever the count (the C tests state 0 first).
+        assert_eq!(hum_target(1, 0, 0.0, 6), (16000.0, true));
+        // r1 reads 140-143: the human's hum 0 (400 cents) and hum 1 (0) eased toward the Doppler
+        // of its distances 99, 86, 82, 89 to the ear.
+        for (cents, ratios) in [
+            (400, [1.32654, 1.31498, 1.30054, 1.28428]),
+            (0, [1.05287, 1.04369, 1.03223, 1.01933]),
+        ] {
+            let mut b = Bend {
+                cents,
+                ratio: ratios[0],
+                dist: Some(99),
+            };
+            for (d, want) in [86, 82, 89].into_iter().zip(&ratios[1..]) {
+                b.step(cents, Some(d));
+                assert!((b.ratio - want).abs() < 2e-5, "{} vs {want}", b.ratio);
+            }
+        }
+        assert_eq!(
+            [doppler(99, 86), doppler(0, 600), doppler(600, 0)],
+            [367.0 / 359.0, 0.5, 2.0]
+        );
+        let mut new = Bend::FLAT;
+        new.step(400, Some(500));
+        assert!(
+            (new.ratio - 1.259_921).abs() < 1e-5,
+            "a new record: the cents alone"
+        );
+        // t2: speed × the hull's pitch / 2, truncated (reads 90, 420, 1010, 1300).
+        for (speed, pitch, cents, ratio) in [
+            (43.52, -11.534791, -250, 0.865_539_1),
+            (43.52, 8.028975, 174, 1.105_735_4),
+            (39.68, 23.682598, 469, 1.311_165_7),
+            (-43.52, -10.804356, -235, 0.873_070_9),
+        ] {
+            assert_eq!(engine_cents(speed, pitch), cents);
+            let mut b = Bend::FLAT;
+            b.step(cents, None);
+            assert!((b.ratio - ratio).abs() < 2e-4, "{} vs {ratio}", b.ratio);
+        }
+        // The mixer: 400 cents steps 1.26 frames an output frame, between frames linearly.
+        let pcm = Pcm {
+            samples: (0..100).map(|i| i * 100).collect::<Vec<i16>>().into(),
+            channels: 1,
+            rate: 22050,
+        };
+        let control = Arc::new(Control::default());
+        control
+            .ears
+            .iter()
+            .for_each(|e| e.store(1f32.to_bits(), Relaxed));
+        control.pitch.store(new.ratio.to_bits(), Relaxed);
+        let mut p = Playing::new(&pcm, None, false, 1.0, control.clone());
+        let left: Vec<f32> = (0..20)
+            .map(|_| p.next().unwrap() * 32768.0)
+            .step_by(2)
+            .collect();
+        for (k, l) in left.iter().enumerate() {
+            let want = 100.0 * (k as f32 * new.ratio);
+            assert!((l - want).abs() < 0.1, "frame {k}: {l} vs {want}");
+        }
+        control.pitch.store(1f32.to_bits(), Relaxed);
+        assert_eq!(p.frame, 12, "back to a frame an output frame from 12.6");
+    }
+
+    /// `func_15074664` (C): any player's put-on muffles; a take-off unmuffles only after that
+    /// player's own put-on; a death (the mask dropped at 0 health) leaves it.
+    #[test]
+    fn the_mask_muffles_from_any_put_on() {
+        let mut s = Sounds::default();
+        let (bare, masked) = (
+            at(1, 0.0, 0),
+            Seen {
+                masked: true,
+                ..at(1, 0.0, 0)
+            },
+        );
+        let other = |p: Seen| Seen { slot: 2, ..p };
+        assert!(s.mask(&bare, &masked) && s.muffled, "a put-on (anyone's)");
+        assert!(!s.mask(&other(masked), &other(bare)), "2 never put one on");
+        assert!(s.mask(&masked, &bare) && !s.muffled, "1's take-off");
+        assert!(s.mask(&other(bare), &other(masked)));
+        let dead = Seen {
+            health: 0,
+            ..other(bare)
+        };
+        assert!(
+            !s.mask(&other(masked), &dead) && s.muffled,
+            "a death keeps it"
+        );
+    }
+
+    /// The pack's audio with map 30 (War: Colors), or None without a pack.
+    fn colors_pack() -> Option<Pack> {
+        map_pack("30")
+    }
+
+    /// The pack's audio with `map`, or None without a pack.
+    fn map_pack(map: &str) -> Option<Pack> {
+        let dir = std::env::var("CONKER_ASSETS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into());
+        let audio = Audio::load(|f| std::fs::read(format!("{dir}/{f}"))).ok();
+        let Some(audio) = audio.filter(|a| a.events.maps.contains_key(map)) else {
+            eprintln!("no map {map} audio in the pack at {dir}: skipping");
+            return None;
+        };
+        Some(Pack::new(audio, Vec::new(), Vec::new(), map, &[]))
+    }
+
+    /// Tank (V s1): a tank idles from its creation (0x4A7); speeding up it drives (0x4A8) with a
+    /// gear change (0x4A3-0x4A6), at full speed it coasts (0x4A5); a shell gone by a tank that lost
+    /// health is the rocket's blast; a death by a shell 0x2E6 22 ticks on, the engine stopping;
+    /// the bomb taken 0xB or 0xC; the countdown's song at the plant.
+    #[test]
+    fn tank_sounds_follow_the_engine_shells_and_bomb() {
+        let Some(pack) = map_pack("24") else { return };
+        assert_eq!(
+            [0.0, 3.0, 48.0, -10.0].map(|v| engine(v, 48.0)),
+            [0, 1, 2, 1]
+        );
+        assert_eq!(
+            [engine(48.0, 48.0), engine(4.0, 0.0), engine(-30.0, 0.0)],
+            [2, 0, 2]
+        );
+        let body = crate::characters("24")
+            .iter()
+            .position(|c| *c == crate::tank::MODEL);
+        let tank = |speed, target, health| Seen {
+            body: body.unwrap(),
+            speed,
+            target,
+            health,
+            reaction: u16::from(conker_rules::tank::CLIP_HIT),
+            ..at(1, 0.0, 0)
+        };
+        let mut s = Sounds::default();
+        let m = |shells: usize, carrier, countdown| MatchView {
+            tank: true,
+            countdown,
+            tanks: conker_sim::net::TankView {
+                shells: vec![([100.0, 0.0, 0.0], 0, 0.0); shells],
+                carrier,
+                ..default()
+            },
+            ..default()
+        };
+        let steps = [
+            (tank(0.0, 0.0, 6), tank(0.0, 0.0, 6), m(1, None, 0)),
+            (tank(0.0, 0.0, 6), tank(3.0, 48.0, 6), m(1, None, 0)),
+            (tank(3.0, 48.0, 6), tank(48.0, 48.0, 6), m(1, None, 0)),
+            (tank(48.0, 48.0, 6), tank(48.0, 48.0, 1), m(0, None, 0)),
+            (tank(48.0, 48.0, 1), tank(0.0, 0.0, 0), m(0, Some(1), 300)),
+            (tank(0.0, 0.0, 0), tank(0.0, 0.0, 0), m(0, Some(1), 299)),
+        ];
+        let ids = heard(&mut s, &pack, 100..140, |s, cx| {
+            let (was, is, m) = &steps[(cx.tick as usize - 100).min(5)];
+            s.tank(cx, m, &[(*was, *is)]);
+        });
+        let at = |t: u32| -> Vec<u16> { ids.iter().filter(|i| i.0 == t).map(|i| i.1).collect() };
+        assert_eq!(at(100), [1191]);
+        assert!(
+            matches!(at(101)[..], [1187..=1190, 1192] | [1192, 1187..=1190]),
+            "{ids:?}"
+        );
+        assert_eq!(at(102), [1189]);
+        assert!(
+            matches!(at(103)[..], [689 | 693 | 694 | 695 | 701 | 702]),
+            "{ids:?}"
+        );
+        assert!(matches!(at(104)[..], [11 | 12, COUNTDOWN]), "{ids:?}");
+        assert_eq!(at(126), [742]);
+        assert!(
+            !s.voices
+                .iter()
+                .any(|v| [1191, 1192].contains(&v.id) && !v.stopped)
+        );
+    }
+
+    fn cx(pack: &Pack, tick: u32) -> Cx<'_> {
+        let ear = Ear {
+            slot: 0,
+            pos: [0.0; 3],
+            right: [1.0, 0.0],
+        };
+        Cx {
+            pack,
+            tick,
+            read: -1,
+            ear,
+        }
+    }
+
+    /// The ids `run` started over ticks `ticks` (each tick: the sounds due, `run`, then as headless).
+    fn heard(
+        s: &mut Sounds,
+        pack: &Pack,
+        ticks: std::ops::Range<u32>,
+        mut run: impl FnMut(&mut Sounds, &Cx),
+    ) -> Vec<(u32, u16)> {
+        let mut ids = Vec::new();
+        for t in ticks {
+            let cx = cx(pack, t);
+            let before = s.voices.len();
+            s.due(&cx);
+            run(s, &cx);
+            ids.extend(s.voices[before..].iter().map(|v| (t, v.id)));
+            s.upkeep(&cx, &[], None);
+        }
+        ids
+    }
+
+    /// A bolt plays no flight sound, but its pass once, the first frame a player stands ahead of
+    /// it within 7.5 frames of its flight (C `func_150538CC`'s type 6), and none on a wall; a knife
+    /// one sound a tick, and its wall's.
+    #[test]
+    fn a_bolt_passes_once() {
+        let Some(pack) = map_pack("2d") else { return };
+        let player = |slot, z, weapon| Seen {
+            pos: [0.0, 0.0, z],
+            ..at(slot, 0.0, weapon)
+        };
+        let fly = |weapon| {
+            let mut s = Sounds::default();
+            let (shooter, target) = (player(1, 0.0, weapon), player(2, -2000.0, 0));
+            heard(&mut s, &pack, 100..116, |s, cx| {
+                let z = -50.0 - BOLT_STEP * (cx.tick - 100) as f32;
+                let m = MatchView {
+                    shots: [[0.0, 0.0, z]]
+                        .into_iter()
+                        .filter(|_| cx.tick < 115)
+                        .collect(),
+                    ..default()
+                };
+                s.match_sounds(cx, &m, &[(shooter, shooter), (target, target)], &[]);
+            })
+            .into_iter()
+            .filter(|i| matches!(i.1, 559 | 560 | 1086..=1089 | 176 | 1113 | 1114))
+            .collect::<Vec<_>>()
+        };
+        let bolt = fly(BOLTS);
+        assert!(matches!(bolt[..], [(109, 1086..=1089)]), "{bolt:?}");
+        let knife = fly(SHOTS);
+        assert_eq!(knife.len(), 16);
+        assert!(
+            knife[..15].iter().all(|i| [559, 560].contains(&i.1)),
+            "{knife:?}"
+        );
+        assert!(matches!(knife[15], (115, 176 | 1113 | 1114)), "{knife:?}");
+    }
+
+    /// A flag taken (V c1a read 328: 0x5B0, the line 0x5A3 or 0x5A5 ten frames on, 0x5B1 after it);
+    /// none again from that flag's slot within 300 frames; a bot's line is the odd id, clicked too,
+    /// and heard centred at its volume however far (V `beach-environment.md` §6; V g5c c1 reads
+    /// 2294-2374: a bot's 0x5B0, line 0x64B at 32700 and 0x5B1, near/far 0x7FFF/0x7FFE, playing
+    /// 4372-4602 from the listener).
+    #[test]
+    fn a_flag_taken_calls_on_the_radio() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let squirrel = |bot| Seen {
+            flag: Some((0, bot)),
+            bot,
+            ..at(1, 0.0, 0)
+        };
+        let (was, is) = (at(1, 0.0, 0), squirrel(false));
+        let mut voicing = Vec::new();
+        let calls = heard(&mut s, &pack, 100..120, |s, cx| {
+            if cx.tick == 100 {
+                s.player(cx, &was, &is);
+            }
+            s.clicks_off(cx, &[(is, is)]);
+            voicing.push((s.voicing(cx, 1), s.voicing(cx, 2)));
+        });
+        assert_eq!(voicing[5], (true, false), "slot 1's line is due: it voices");
+        let line = calls.iter().find(|c| c.1 != 0x5B0 && c.1 != 0x5B1);
+        assert_eq!(calls.first(), Some(&(100, 0x5B0)));
+        assert!(matches!(line, Some(&(110, 0x5A3 | 0x5A5))), "{calls:x?}");
+        assert!(calls.contains(&(111, 0x5B1)), "{calls:x?}");
+        let again = heard(&mut s, &pack, 399..400, |s, cx| s.player(cx, &was, &is));
+        assert_eq!(again, [], "busy till 300 frames on");
+        let bot = Seen {
+            pos: [20_000.0, 0.0, 0.0],
+            ..squirrel(true)
+        };
+        let mut levels = Vec::new();
+        let calls = heard(&mut s, &pack, 400..420, |s, cx| {
+            if cx.tick == 400 {
+                s.player(cx, &was, &bot);
+            }
+            s.clicks_off(cx, &[(bot, bot)]);
+            let new = s.voices.iter().filter(|v| v.started == cx.tick);
+            levels.extend(new.map(|v| v.level(&cx.ear)));
+        });
+        assert!(
+            matches!(
+                calls[..],
+                [(400, 0x5B0), (410, 0x5A4 | 0x5A6), (411, 0x5B1)]
+            ),
+            "{calls:x?}"
+        );
+        assert_eq!(
+            levels,
+            [25000.0, 32700.0, 30000.0].map(|v| (v / 32767.0, 0.5))
+        );
+    }
+
+    /// A gun's release (the trigger falling, V gcQ): one of 0x618-0x61A at the gunner, then the same
+    /// one again 15 ticks on where the gunner was, not following it.
+    /// `func_1000F568`'s bag: the first three a permutation, then never the last again at once and
+    /// each bag of two the other two (V e_gren, ctlw_k*: 1447-1449 in every order).
+    #[test]
+    fn bounces_draw_from_the_shuffle_bag() {
+        let mut s = Sounds::default();
+        for _ in 0..20 {
+            s.bag = (0, 0);
+            let mut first: Vec<_> = (0..3).map(|_| s.shuffle(3)).collect();
+            let last = first[2];
+            let next = [s.shuffle(3), s.shuffle(3)];
+            first.sort_unstable();
+            assert_eq!(first, [0, 1, 2]);
+            assert!(
+                next[0] != next[1] && !next.contains(&last),
+                "{next:?} after {last}"
+            );
+        }
+    }
+
+    /// A bullet of gun 0x23 (chance 255) heading at the camera 400 away at 300 a frame: only the
+    /// 5-frame leads (800-802) can pass, once; the tommy gun's (chance 0) never.
+    #[test]
+    fn a_bullet_passing_the_camera_whizzes_once() {
+        let Some(pack) = colors_pack() else { return };
+        if !(pack.audio.events.cues.iter()).any(|c| matches!(c.on, On::FlyBy { .. })) {
+            eprintln!("no fly-by in the pack: skipping");
+            return;
+        }
+        for (gun, n) in [(0x23, 1), (0x38, 0)] {
+            let mut s = Sounds::default();
+            let shooter = at(1, 400.0, gun);
+            let calls = heard(&mut s, &pack, 0..12, |s, cx| {
+                let b = BulletView {
+                    pos: [400.0, 0.0, 0.0],
+                    vel: [-300.0, 0.0, 0.0],
+                    life: 4.0 - cx.tick as f32 * 0.1,
+                    born: 0,
+                    owner: 1,
+                };
+                s.fly_by(cx, &[b], [0.0; 3], &[(shooter, shooter)]);
+            });
+            assert_eq!(calls.len(), n, "{gun:#x}: {calls:?}");
+            assert!(
+                calls.iter().all(|c| (800..=802).contains(&c.1)),
+                "{calls:?}"
+            );
+        }
+    }
+
+    /// The hiss at the throw is 1299, or the fuse's 929 when cooked below 120 VIs; a twin-gun kill
+    /// pops the head (1278) only with the shot death.
+    #[test]
+    fn a_cooked_hiss_and_a_head_pop() {
+        let Some(pack) = colors_pack() else { return };
+        if !(pack.audio.events.cues.iter()).any(|c| c.on == On::Head { weapon: 0x09 }) {
+            eprintln!("no head pop in the pack: skipping");
+            return;
+        }
+        for (cook, id) in [(240, 1299), (118, 929)] {
+            let mut s = Sounds::default();
+            let was = Seen {
+                clock: clock(GRENADE_THROW, 0.0, 1.0),
+                cook,
+                ..at(1, 100.0, GRENADE)
+            };
+            let is = Seen {
+                clock: clock(GRENADE_THROW, 5.0, 1.0),
+                ..was
+            };
+            s.player(&cx(&pack, 1), &was, &is);
+            assert!(s.voices.iter().any(|v| v.id == id), "cook {cook}");
+        }
+        for (reaction, popped) in [(DEATH_SHOT, true), (conker_anim::combat::HIT, false)] {
+            let mut s = Sounds::default();
+            let was = at(1, 100.0, 0);
+            let is = Seen {
+                health: 0,
+                hit: 0x09,
+                reaction,
+                ..was
+            };
+            s.player(&cx(&pack, 1), &was, &is);
+            assert_eq!(s.voices.iter().any(|v| v.id == 1278), popped);
+        }
+    }
+
+    /// The grenade's pull and throw sound as the clip each class plays (V sq_e_gren: the squirrel's
+    /// 0x175 plays 1548, its 0x16C 1420; e_gren: the Tedi's 0x16B 1237, its 0x176 nothing).
+    #[test]
+    fn grenade_clips_sound_as_each_class_plays_them() {
+        let Some(pack) = colors_pack() else { return };
+        let heard = |class, side: Side, id, from, to| {
+            let mut s = Sounds::default();
+            let was = Seen {
+                class,
+                body: side as usize,
+                clock: clock(id, from, 1.0),
+                ..at(1, 100.0, GRENADE)
+            };
+            let is = Seen {
+                clock: clock(id, to, 1.0),
+                ..was
+            };
+            s.player(&cx(&pack, 1), &was, &is);
+            s.voices.iter().map(|v| v.id).collect::<Vec<_>>()
+        };
+        use conker_sim::movement::Side;
+        assert_eq!(heard(4, Side::Squirrels, GRENADE_PULL, 24.0, 26.0), [1548]);
+        assert!(heard(3, Side::Tediz, GRENADE_PULL, 24.0, 26.0).is_empty());
+        let throw = heard(4, Side::Squirrels, GRENADE_THROW, 2.0, 3.5);
+        assert!(matches!(throw[..], [889 | 891 | 1420]), "{throw:?}");
+        let throw = heard(3, Side::Tediz, GRENADE_THROW, 2.0, 3.5);
+        assert!(matches!(throw[..], [1235 | 1237]), "{throw:?}");
+    }
+
+    /// Item 0x3A (V s1a): the fuse 0x96 from the pull's first frame with its thrower, then with the
+    /// grenade; its bounce (0x186-0x188) takes its place, 0x26's blast; a pull left before the
+    /// throw stops it.
+    #[test]
+    fn the_lobs_fuse_follows_the_grenade() {
+        let Some(pack) = map_pack("1a") else { return };
+        let pack = Pack { lob: true, ..pack };
+        let mut s = Sounds::default();
+        let was = at(1, 100.0, 0);
+        let is = Seen {
+            clock: clock(LOB_PULL, 0.0, 1.0),
+            ..was
+        };
+        s.player(&cx(&pack, 100), &was, &is);
+        let fuse = |s: &Sounds| {
+            s.voices
+                .iter()
+                .find(|v| v.id == 0x96 && !v.stopped)
+                .map(|v| (v.owner, v.follows))
+        };
+        assert_eq!(fuse(&s), Some((lit(&is), Some(1))));
+        let g = |y_vel| Grenade {
+            pos: [300.0, 0.0, 0.0],
+            y_vel,
+            speed: 0.0,
+            angle: 0,
+            state: 0,
+            floor: None,
+            owner: 1,
+            fuse: 400,
+        };
+        s.grenades(&cx(&pack, 110), &[(110, g(-3.0))]);
+        assert_eq!(fuse(&s), Some((Owner::Grenade(110, 1), None)));
+        let calls = heard(&mut s, &pack, 111..113, |s, cx| match cx.tick {
+            112 => s.grenades(cx, &[]),
+            _ => s.grenades(cx, &[(110, g(6.0))]),
+        });
+        assert!(
+            matches!(calls[..], [(111, 0x186..=0x188), (112, 1549)]),
+            "{calls:x?}"
+        );
+        assert_eq!(fuse(&s), None, "the bounce took its place");
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &was, &is);
+        s.player(&cx(&pack, 101), &is, &was);
+        assert_eq!(fuse(&s), None, "the pull left");
+    }
+
+    /// A restart empties the match's lists at once: the frozen rockets and grenades go silently
+    /// ([`Sounds::prime`]); in play, one gone blasts where it was.
+    #[test]
+    fn a_restart_blasts_nothing() {
+        let Some(pack) = map_pack("2d") else { return };
+        let g = Grenade {
+            pos: [300.0, 0.0, 0.0],
+            y_vel: 0.0,
+            speed: 0.0,
+            angle: 0,
+            state: 0,
+            floor: None,
+            owner: 1,
+            fuse: 400,
+        };
+        let m = |phase, n| MatchView {
+            phase,
+            rockets: vec![[0.0; 3]; n],
+            ..default()
+        };
+        let mut s = Sounds::default();
+        let gs = [(90, g)];
+        let ids = heard(&mut s, &pack, 100..104, |s, cx| {
+            let (m, gs) = match cx.tick {
+                100 => (m(1, 1), &gs[..]),
+                101 => (m(2, 1), &gs[..]),
+                102 => (m(3, 1), &gs[..]),
+                _ => (m(0, 0), &[][..]),
+            };
+            s.prime(&m, gs);
+            s.rockets(cx, &m.rockets);
+            s.grenades(cx, gs);
+        });
+        assert_eq!(ids, []);
+        let ids = heard(&mut s, &pack, 104..106, |s, cx| {
+            let m = m(1, usize::from(cx.tick == 104));
+            s.prime(&m, &[]);
+            s.rockets(cx, &m.rockets);
+        });
+        assert!(ids.iter().all(|i| i.0 == 105) && !ids.is_empty(), "{ids:?}");
+    }
+
+    /// The aim laser's hum 1232 (cue `laser`) loops for its aimer alone, from the laser's making
+    /// to its end (C `func_151026BC`; V las2): another player's laser is silent.
+    #[test]
+    fn the_laser_hums_for_its_aimer() {
+        let Some(pack) = map_pack("2d") else { return };
+        let hum = |s: &Sounds| s.voices.iter().any(|v| v.id == 1232 && !v.stopped);
+        let was = Seen {
+            local: true,
+            ..at(1, 0.0, 0x18)
+        };
+        let is = Seen { laser: true, ..was };
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &was, &is);
+        assert!(hum(&s));
+        heard(&mut s, &pack, 101..103, |s, cx| {
+            if cx.tick == 101 {
+                s.player(cx, &is, &was);
+            }
+        });
+        assert!(!hum(&s));
+        let other = |p: Seen| Seen { local: false, ..p };
+        let mut s = Sounds::default();
+        s.player(&cx(&pack, 100), &other(was), &other(is));
+        assert!(!hum(&s));
+    }
+
+    #[test]
+    fn a_gun_release_plays_twice() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let gunner = at(1, 100.0, 0);
+        let gun = |trigger| GunView {
+            state: gun::IDLE,
+            gunner: Some(1),
+            trigger,
+            ..GunView::default()
+        };
+        let mut released = Vec::new();
+        let calls = heard(&mut s, &pack, 100..130, |s, cx| {
+            let moved = Seen {
+                pos: [500.0, 0.0, 0.0],
+                ..gunner
+            };
+            let p = if cx.tick < 102 { gunner } else { moved };
+            s.guns(cx, &[gun(cx.tick < 101)], &[(p, p)]);
+            let new = s.voices.iter().filter(|v| v.started == cx.tick);
+            released.extend(new.map(|v| (v.pos, v.follows)));
+        });
+        assert!(
+            matches!(calls[..], [(101, a), (116, b)] if a == b && (0x618..0x61B).contains(&a)),
+            "{calls:x?}"
+        );
+        let here = gunner.pos;
+        assert_eq!(released, [(here, Some(1)), (here, None)]);
+    }
+
+    /// The stem's gain (`beach-environment.md` §4: CC 0xFC = v·255/100): full within 3213 of its
+    /// point, 0.99 at 3219, none from 4000. A zone's volume: full within near, half way between,
+    /// silent below 401 (§5: trigger 0x23's 17331, 451, 1385).
+    #[test]
+    fn the_stem_follows_and_zones_fade_by_distance() {
+        let f = Follow {
+            at: [0, -377, 8227],
+            near: 3000,
+            far: 4000,
+        };
+        let gains =
+            [0.0, 3000.0, 3213.0, 3219.0, 3500.0, 3999.0, 4000.0, 9000.0].map(|d| follow(&f, d));
+        assert_eq!(gains, [1.0, 1.0, 1.0, 0.99, 0.63, 0.0, 0.0, 0.0]);
+        let play = Play {
+            sounds: vec![0x4A7],
+            volume: 17331,
+            own: None,
+            near: 451,
+            far: 1385,
+            channel: Channel::Free,
+            chance: 255,
+            if_idle: false,
+            pitch: [0, 0],
+            ticks: None,
+        };
+        let v = [0.0, 451.0, 918.0, 1363.0, 1364.0, 1385.0].map(|d| zone_volume(&play, d).round());
+        assert_eq!(v, [17331.0, 17331.0, 8666.0, 408.0, 0.0, 0.0]);
+    }
+
+    /// A capture: 30 frames after the score rises, the scorers' jingle (0x1A4 squirrels, 0x1A7
+    /// Tediz) and a voice at each loser (Tediz 0x662-0x664; C script 0xBB, V c1a read 412).
+    #[test]
+    fn a_capture_cheers_30_frames_on() {
+        let Some(pack) = colors_pack() else { return };
+        let mut s = Sounds::default();
+        let tedi = |slot| Seen {
+            team: 1,
+            ..at(slot, 0.0, 0)
+        };
+        let all = [
+            (at(1, 0.0, 0), at(1, 0.0, 0)),
+            (tedi(2), tedi(2)),
+            (tedi(3), tedi(3)),
+        ];
+        let mut m = MatchView {
+            colors: true,
+            ..Default::default()
+        };
+        let calls = heard(&mut s, &pack, 10..50, |s, cx| {
+            m.scores[0] = u16::from(cx.tick >= 12);
+            s.colors(cx, &m, &all);
+        });
+        let (jingle, voices) = calls.split_first().expect("a jingle");
+        assert_eq!(*jingle, (42, LINES[1].0));
+        assert_eq!(voices.len(), 2, "{calls:x?}");
+        assert!(
+            voices
+                .iter()
+                .all(|v| v.0 == 42 && (0x662..=0x664).contains(&v.1))
+        );
+    }
+
+    /// Race: the countdown's beeps (0x687 twice, 0x688), a missile fired (0x237 at the racer), in
+    /// flight from its 15th tick (0x2EE-0x2F0), its hit on the racer it knocks up (0x107), a kick's
+    /// (0x3F7 at the kicker), a scrape (778-785) and a blow-up (0x4C8 or 0x434, a blast, debris);
+    /// each racer's hums from its spawn, hum 0 with fewer than 5 racers.
+    #[test]
+    fn race_plays_its_events() {
+        let Some(pack) = map_pack("33") else { return };
+        let mut s = Sounds::default();
+        let racer = |slot| RacerView {
+            slot,
+            ..RacerView::default()
+        };
+        let mut m = MatchView {
+            race: true,
+            ..Default::default()
+        };
+        m.racing.racers = vec![racer(0), racer(1)];
+        let mut all = vec![
+            (at(0, 0.0, 0), at(0, 0.0, 0)),
+            (at(1, 300.0, 0), at(1, 300.0, 0)),
+        ];
+        let calls = heard(&mut s, &pack, 1..60, |s, cx| {
+            let t = cx.tick;
+            m.racing.stage = match t {
+                10 => 1,
+                20 => 2,
+                30 => 3,
+                _ => 0,
+            };
+            // Fired at 31, flying 155 a tick, gone at 50 knocking up racer 1 (moved ahead of it).
+            m.racing.missiles = (31..50)
+                .contains(&t)
+                .then(|| ([155.0 * (t - 31) as f32, 100.0, 0.0], None))
+                .into_iter()
+                .collect();
+            // Racer 0 kicks at 55 (racer 1 down at 54, knocked again), scrapes at 56, blows up at
+            // 58.
+            let knocked = (50..54).contains(&t) || t >= 55;
+            m.racing.racers[1].knock = u8::from(knocked) * 20;
+            m.racing.racers[0].kick = u8::from(t >= 55) * 10;
+            all[1].1.pos[0] = if t < 54 { 2900.0 } else { 200.0 };
+            all[0].0.health = all[0].1.health;
+            all[0].1.health = match t {
+                56 => 5,
+                57 => 5,
+                58.. => 0,
+                _ => 6,
+            };
+            s.race(cx, &m, &all);
+        });
+        let ids = |set: &[u16]| -> Vec<u32> {
+            calls
+                .iter()
+                .filter(|c| set.contains(&c.1))
+                .map(|c| c.0)
+                .collect()
+        };
+        assert_eq!(ids(&[1459]), [1, 1], "{calls:?}");
+        assert_eq!(ids(&[1460]), [1, 1]);
+        assert_eq!(ids(&[1671, 1672]), [10, 20, 30]);
+        assert_eq!(ids(&[567]), [31]);
+        let flight = ids(&[750, 751, 752]);
+        assert_eq!(flight.first(), Some(&46), "{calls:?}");
+        assert_eq!(ids(&[263]), [50]);
+        assert_eq!(ids(&[1015]), [55]);
+        assert_eq!(ids(&(778..=785).collect::<Vec<_>>()), [56]);
+        assert_eq!(ids(&[1224, 1076]), [58]);
+        assert_eq!(ids(&[694, 695]), [58]);
+        // The hums' volumes: hum 0 by the height, hum 1 steady with 5 racers, 512 a tick.
+        assert_eq!(hum_target(0, 0, 40.0, 4), (1000.0, true));
+        assert_eq!(hum_target(0, 2, 10.0, 4), (7000.0, false));
+        assert_eq!(hum_target(1, 2, 0.0, 5), (12000.0, false));
+        assert_eq!(hum_step(1000.0, (24000.0, false)), 1512.0);
+        assert_eq!(hum_state(150.0), 0);
+    }
+
+    /// A rocket's launch is its fire clip's event (C: the clips' route events): sound 699 on the
+    /// shooter's channel A, at its own volume for the shooter, on the tick the clip starts (the
+    /// local player's predicted clip, the others' shown one): 0x77 for every body; War: Beach's
+    /// 0x207 for the Tediz and the Sergeant's and Tediz Leader's 0x2C7 (classes 0x25, 0x26) once
+    /// the pack has those clips' events.
+    #[test]
+    fn a_rocket_launch_plays_its_sound() {
+        use conker_anim::combat::{W16_FIRE, W16_IDLE};
+        use conker_anim::request_at;
+        use conker_rules::beach::{ROCKET_FIRE, TEDI_CLASS};
+        let Some(pack) = map_pack("2d") else { return };
+        let body = |name| (pack.characters.iter()).position(|c| *c == name);
+        let mut shooters: Vec<_> = (0..pack.characters.len())
+            .map(|b| (b, TEDI_CLASS, W16_FIRE))
+            .collect();
+        shooters.extend(body("117").map(|b| (b, TEDI_CLASS, ROCKET_FIRE)));
+        shooters.extend(body("176").map(|b| (b, 0x25, W16_FIRE)));
+        for (body, class, clip) in shooters {
+            let name = pack.characters[body];
+            let drawn = conker_rules::characters::clip(class, clip);
+            if !pack.clips[body].iter().any(|e| e.clip == drawn) {
+                eprintln!("{name}: no clip {drawn:#x} events in the pack (re-pack): skipping");
+                continue;
+            }
+            let mut was = Seen {
+                body,
+                class,
+                local: true,
+                ..at(0, 0.0, 0x16)
+            };
+            let (mut clock, mut level) = (AnimPlayer::default(), None);
+            let ids = heard(&mut Sounds::default(), &pack, 100..104, |s, cx| {
+                let id = if cx.tick < 102 { W16_IDLE } else { clip };
+                clock.tick(request_at(id, 0.0, 0.0, 0), 28);
+                let is = Seen { clock, ..was };
+                s.player(cx, &was, &is);
+                let launch = s
+                    .voices
+                    .iter()
+                    .find(|v| v.id == 699 && v.started == cx.tick);
+                level = level.or(launch.map(|v| v.level(&cx.ear)));
+                was = is;
+            });
+            assert_eq!(ids, [(102, 699)], "{name} {drawn:#x}");
+            assert_eq!(level, Some((32000.0 / 32767.0, 0.5)), "{name}");
+        }
+    }
+}

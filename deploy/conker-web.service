@@ -1,0 +1,35 @@
+# systemd unit for the web server (deploy/README.md): /etc/systemd/system/conker-web.service. It
+# serves the landing's /api/ on loopback behind Caddy and starts a conker-server per match from the
+# landing's Create server, on the ports --game-ports names (each N for the game, N + 1 for its token
+# endpoint on loopback); a restart ends every match.
+[Unit]
+Description=Conker web server and its game servers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=conker
+Group=conker
+# server.ts from the checkout in /opt/conker/src. --assets: the asset pack deploy/pack.sh uploads
+# (Caddy serves the same folder at /assets/). --public: the domain's A and AAAA addresses (the
+# connect tokens name them; the game servers check it).
+ExecStart=/usr/local/bin/bun /opt/conker/src/web/app/server.ts --host 127.0.0.1 --port 8080 \
+    --game-ports 5900-5949 --server /opt/conker/conker-server --assets /srv/conker/assets \
+    --cert /etc/conker/tls/fullchain.pem --cert-key /etc/conker/tls/privkey.pem \
+    --token-key /etc/conker/token.key --public 203.0.113.7 --public 2001:db8::7
+# HOME: Bun's cache, in the private /tmp (the game servers' logs go there too).
+Environment=RUST_LOG=info HOME=/tmp
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

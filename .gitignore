@@ -4,3 +4,14 @@
 /lab/
 .claude/settings.local.json
 .DS_Store
+target/
+target-net/
+web/dist/
+# The asset pack (ROM-derived, assets/): a symlink for the dev static server, never committed.
+web/assets
+# The landing app's build (web/app: `bun run build`) and its dependencies.
+web/index.html
+web/landing/
+web/app/node_modules/
+# Screenshots from checking the landing in a browser.
+web/app/screenshots/

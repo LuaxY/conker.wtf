@@ -1,0 +1,18 @@
+{
+  "name": "conker-bad-fur-day",
+  "private": true,
+  "scripts": {
+    "build": "bun run build:native && bun run build:web && bun run build:landing",
+    "build:native": "CARGO_TARGET_DIR=target-net cargo build --release -p conker-server -p conker-client",
+    "build:web": "CARGO_TARGET_DIR=target-net WASM_OPT=\"${WASM_OPT:-$(ls lab/tools/emsdk/upstream/bin/wasm-opt 2>/dev/null)}\" sh web/build.sh web",
+    "build:landing": "cd web/app && bun install && bun run build",
+    "pack": "rom=\"$PWD/roms/game.z64\" && CONKER_ROM=\"${CONKER_ROM:-$rom}\" CARGO_TARGET_DIR=target-net cargo run --release -p conker-extract -- pack --map 2d --map 30 --map 34 --map 3f --map 2b --map 1a --map 24 --map 33 --background 2d=lab/audio/captures/background_loop.wav --background 30=lab/audio/map30/background_loop.wav --background 34=lab/audio/map34/background_loop.wav --background 3f=lab/audio/map3f/background_loop.wav --background 2b=lab/audio/map2b/background_loop.wav --song 2b=lab/audio/map2b/song_8a.wav --stem 2b=lab/audio/map2b/background_stem.wav --background 1a=lab/audio/map1a/background_loop.wav --background 24=lab/audio/map24/background_loop.wav --song 24=lab/audio/map24/countdown.wav",
+    "start": "bun run build && bun run serve",
+    "serve": "cd web/app && bun run serve",
+    "server": "target-net/release/conker-server --digest-file web/dist/digest.txt",
+    "client": "target-net/release/conker-client --server 127.0.0.1:5888 --digest \"$(cat web/dist/digest.txt)\"",
+    "test": "rom=\"$PWD/roms/game.z64\" && CONKER_ROM=\"${CONKER_ROM:-$rom}\" CARGO_TARGET_DIR=target-net cargo test -q -p conker-rules -p conker-sim -p conker-camera -p conker-bots -p conker-anim -p conker-server -p conker-client -p conker-assets -p conker-extract -p extract-scene -p extract-character",
+    "check": "cargo fmt --check && CARGO_TARGET_DIR=target-net cargo clippy -q -p conker-rules -p conker-sim -p conker-camera -p conker-bots -p conker-anim -p conker-server -p conker-client -p conker-assets -p conker-extract -p extract-scene -p extract-character -- -D warnings && cd web/app && bun run check",
+    "clean:cache": "rm -rf target-net/debug"
+  }
+}

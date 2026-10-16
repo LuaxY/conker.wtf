@@ -1,0 +1,1689 @@
+//! The asset pack: what a multiplayer match needs from the game, extracted once from the ROM
+//! (`conker-extract pack`) into files that are easy to edit, and read back here into the values
+//! the runtime extracted in memory before ([`Slice`]).
+//!
+//! Layout, relative to the pack root (the pack's own `README.md` documents every file):
+//! - `pack.json`: the [`Manifest`];
+//! - `maps/<map>/`: `level.gltf` (+ `level.bin`, `textures/*.png`), `collision.json`,
+//!   `spawns.json`, `pickups.json`, `triggers.json`, `nav.json`, `ai.bin`, `lights.json`,
+//!   `outros.json` ([`outro::Outro`]), `segments.json` ([`Segments`]), `cameras.json`
+//!   ([`CameraPoint`]); on `2d`, `24`, `3f` and `33`, `props.gltf` (+ `props.bin`);
+//!   on `3f`, `raptor.json` ([`raptor::Raptor`]); on `33`, `race.json` ([`race::Race`]);
+//! - `characters/<character>/`: `character.gltf` (+ `.bin`, PNGs), `character.json`, one folder
+//!   per character;
+//! - `weapons/<set>/`: `held.gltf` (+ `.bin`, PNGs), `held.json`, `projectiles.gltf`, the child
+//!   objects' rigs ([`RIGS`], [`rig_gltf`]), the effects' models (`effects.gltf`, [`EFFECTS`]);
+//! - `game/`: `acos.json`, `sink.json`, `class.bin` (map 24 has its own `class.bin`);
+//! - `audio/`: `sounds.json`, `events.json` and WAV files ([`audio::Audio`]);
+//! - `hud/`: `hud.json` and PNGs ([`hud::Hud`]).
+//!
+//! No file system here: [`Slice::load`] reads through a closure, so the same code runs where the
+//! files are on disk and in a browser that fetched them first ([`Slice::files`] lists them). The
+//! glTF files are not read here (Bevy's glTF loader loads them by path, [`level_gltf`] etc.), but
+//! for a character's joints and clips ([`pose::Skeleton`], the server's body parts).
+
+pub mod audio;
+pub mod hud;
+pub mod outro;
+pub mod pose;
+pub mod race;
+pub mod raptor;
+
+use std::fmt::Display;
+use std::io::{self, Write};
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// The pack format this build reads and writes ([`Manifest::format`]).
+pub const FORMAT: u32 = 1;
+/// The manifest's path.
+pub const MANIFEST: &str = "pack.json";
+/// The folders of what a Deathmatch reads: its map, its characters (bank-01 models: the squirrels'
+/// soldier, 128, the Tediz' Tedi, 117, then the cavemen's, 136: conker-sim's `Side` order) and its
+/// weapon set.
+pub const PACK_MAP: &str = "2d";
+pub const PACK_CHARACTERS: [&str; 3] = ["128", "117", "136"];
+pub const PACK_WEAPONS: &str = "deathmatch";
+/// Entries of the game's acos table (`.game` data at 0x80085EC0: 62 + 64 + 6).
+pub const ACOS_LEN: usize = 132;
+/// Bytes of one trigger record.
+const TRIGGER: usize = 0x34;
+/// The navigation graph's "no neighbour".
+const NO_NODE: u8 = 0xFF;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{file}: {message}")]
+    Read { file: String, message: String },
+    #[error("{file}: {source}")]
+    Json {
+        file: String,
+        source: serde_json::Error,
+    },
+    #[error("{file}: {field}: {message}")]
+    Invalid {
+        file: String,
+        field: String,
+        message: String,
+    },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+fn invalid(file: &str, field: impl Display, message: impl Display) -> Error {
+    Error::Invalid {
+        file: file.into(),
+        field: field.to_string(),
+        message: message.to_string(),
+    }
+}
+
+/// `pack.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Manifest {
+    /// [`FORMAT`] when written; a pack of another format is refused.
+    pub format: u32,
+    /// SHA-1 of the ROM it was extracted from (`.z64` byte order).
+    pub source_rom_sha1: String,
+    /// The folders under `maps/`, `characters/` and `weapons/`.
+    pub maps: Vec<String>,
+    pub characters: Vec<String>,
+    pub weapons: Vec<String>,
+    /// The folders under `audio/` that hold sound files; empty (or absent, in a pack exported
+    /// before there was sound): the pack has no sound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<String>,
+    /// Whether the pack has the HUD (`hud/`; absent in a pack exported before it).
+    #[serde(default)]
+    pub hud: bool,
+}
+
+impl Manifest {
+    pub fn to_json(&self) -> Vec<u8> {
+        to_json(self, 1)
+    }
+}
+
+/// The glTF files, relative to the pack root (Bevy loads them by path, with their `.bin` and PNGs).
+pub fn level_gltf(map: &str) -> String {
+    format!("maps/{map}/level.gltf")
+}
+
+/// War: Total War's props on its map (`2d` only): glTF scene 0 the props its Deathmatch hides, named
+/// as the level's nodes; scenes 1 and 2 the canister's and the gas mask's models at the origin. On
+/// `33`, Race's board and helmets, a scene each in its joint's frame ([`race::Attached`]).
+pub fn props_gltf(map: &str) -> String {
+    format!("maps/{map}/props.gltf")
+}
+
+/// The models a map's outros show (on maps with an outro attachment or prop): glTF scenes named
+/// `09-<entry>` (hex, an attachment in its joint's frame) and `prop-<placement>` (at the origin).
+pub fn outro_gltf(map: &str) -> String {
+    format!("maps/{map}/outro.gltf")
+}
+
+/// The effects' models, on every map ([`EFFECTS`]): glTF scene `i` is `EFFECTS[i]`, named
+/// `09-<entry>` (hex), at the origin in its model units.
+pub fn effects_gltf(weapons: &str) -> String {
+    format!("weapons/{weapons}/effects.gltf")
+}
+
+/// The effects' bank-09 models in [`effects_gltf`]'s scene order, as (name, entry)
+/// (`lab/research/mp-original/effects-g4.md`): `ring` the blasts' ring (model id 0x54: War:
+/// Beach's detonation, the rocket's and the grenade's blasts; a sphere of radius 100, alpha-blended),
+/// `spark` the explosive death's chunks (model id 0x39, §4), `flak` the flak's puffs (0x1B, §5),
+/// `drop` a swimmer's splash drops (0x35, §9). Then Race's death blast (effect type 0x19,
+/// `lab/research/mp-original/g5-pack-scratch/race/NOTES.md`): `fire` its fire shell (model id
+/// 0x55; its smoke shell is `ring`), `board_6c`..`board_6e` the board's three pieces (0x6C-0x6E)
+/// and `gib_7e`..`gib_81` the racer's (character 4's) pieces.
+pub const EFFECTS: [(&str, usize); 12] = [
+    ("ring", 0x157),
+    ("spark", 0x132),
+    ("flak", 0xE5),
+    ("drop", 0xBE),
+    ("fire", 0x158),
+    ("board_6c", 0x16F),
+    ("board_6d", 0x170),
+    ("board_6e", 0x171),
+    ("gib_7e", 0x17D),
+    ("gib_7f", 0x17E),
+    ("gib_80", 0x17F),
+    ("gib_81", 0x179),
+];
+
+pub fn character_gltf(character: &str) -> String {
+    format!("characters/{character}/character.gltf")
+}
+
+pub fn held_gltf(weapons: &str) -> String {
+    format!("weapons/{weapons}/held.gltf")
+}
+
+/// The projectiles in flight: glTF scenes 0-5 the thrown grenade, the rocket, the knife, the bolt
+/// (both crossbows'), Tank's shell and the bone knife, at the origin with +z along the flight; 6
+/// and 7 item 0x3A's thrown grenade on 0x1A (bank 01 #137) and on 0x3F (#186), in their rest pose
+/// (the game draws it in its clip 0, the fuse bent: [`RIGS`]' `lob`).
+pub fn projectiles_gltf(weapons: &str) -> String {
+    format!("weapons/{weapons}/projectiles.gltf")
+}
+
+/// The child objects a character holds that have their own rig and clips (bank-01 models, the
+/// held list's `object` kind; `lab/research/mp-original/held-leftovers.md` §1), as (the glTF's
+/// name, the bank-01 entries it draws). Each [`rig_gltf`] is one skinned mesh on the first entry's
+/// joints (`joint_00`..) with its clips (`pair_NNNN_anim_IIII`, as a character's), the k-th entry
+/// drawn by the primitives whose `extras.list` is k: the entries share one rig and one clip set
+/// (C: equal joints and clips). `crossbow`: the crossbow 0x18's 0x6E and War: Raptor's bone
+/// crossbow 0x41's 0x2F, 3 joints (the nock `joint_01`, the loaded bolt's `joint_02`), clips 0 (the
+/// draw's bind pose), 1 (a one-tick pose), 2 (the fire, 31 ticks) and 3 (the holster, 36). `lob`:
+/// item 0x3A's grenade on 0x1A (0x89) and on 0x3F (0xBA), 4 joints, clips 0 (once thrown: the fuse
+/// bent), 1 (30 ticks), 2 (24) and 3 (30). Clip 0 is an empty pair's one frame, its channels'
+/// bases; a clip keys some joints only, the others are at rest.
+pub const RIGS: [(&str, [usize; 2]); 2] = [("crossbow", [0x6E, 0x2F]), ("lob", [0x89, 0xBA])];
+
+pub fn rig_gltf(weapons: &str, rig: &str) -> String {
+    format!("weapons/{weapons}/{rig}.gltf")
+}
+
+/// The flamethrower's flame (blob 0x916, RGBA32 32 × 32): its stream's texture.
+pub fn flame_png(weapons: &str) -> String {
+    format!("weapons/{weapons}/flame.png")
+}
+
+/// Where a collision triangle comes from (extract-scene's `Layer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    /// The scene bundle's segment 0 (its triangles carry surface words).
+    Terrain,
+    /// Its segment 3.
+    Secondary,
+    /// The model of placement `n`, in world space.
+    Placement(usize),
+    /// The model of placement `n`, a water surface (War: Beach's sea, 0x2B's placement 1): the
+    /// water height and the line query read it, the floor query and the walls do not.
+    Water(usize),
+}
+
+/// A world-space collision triangle (extract-scene's `Triangle`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangle {
+    pub points: [[f32; 3]; 3],
+    pub layer: Layer,
+    /// The terrain's surface word; None on the other layers.
+    pub surface: Option<u32>,
+}
+
+/// A multiplayer spawn record (extract-scene's `SpawnPoint`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpawnPoint {
+    pub position: [i16; 3],
+    pub byte_06: u8,
+    /// Facing in 1/256 turns (the u16 facing is `yaw << 8`).
+    pub yaw: u8,
+    /// The camera eye at (re)spawn.
+    #[serde(serialize_with = "ints3")]
+    pub camera: [f32; 3],
+    pub byte_14: u8,
+    pub byte_15: i8,
+}
+
+/// What a pickup gives (conker-rules' `Gives`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gives {
+    Weapon(u8),
+    /// +3 grenades.
+    Grenades,
+    /// A gas mask (War: Total War).
+    Mask,
+}
+
+/// A pickup on the map: its placement, what it gives and where it is (conker-rules'
+/// `Arena::pickups`, in the multiplayer weapon manager's order).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pickup {
+    pub placement: u16,
+    pub gives: Gives,
+    #[serde(serialize_with = "ints3")]
+    pub position: [f32; 3],
+    /// VIs (2 a frame) until a taken pickup is back (MP+0xEAC); absent: the rules' own (240).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respawn: Option<u16>,
+    /// The spots it moves to at each (re)appearance, a random one no other pickup stands on, in
+    /// the game's spot order (0x1A's roaming weapons); empty (absent): it stays at `position`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "ints3s"
+    )]
+    pub roams: Vec<[f32; 3]>,
+}
+
+/// Ids and length of one character animation, in the character glTF's animation order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipInfo {
+    /// Pair index in the character's bank-02 entry.
+    pub pair: usize,
+    /// Logical animation ids routed to the pair (what the game plays: u16 +0x84 of a character).
+    pub logical: Vec<u16>,
+    /// Stored keyframes.
+    pub frames: usize,
+    /// Length in 30 Hz ticks. Loop on this: the glTF animation ends at `(duration - 1) / 30` s.
+    pub duration_ticks: u16,
+}
+
+impl ClipInfo {
+    /// Its animation's name in the character glTF: `pair_NNNN_anim_IIII` (the pair, then the first
+    /// logical id, decimal). The client finds animations by it, so a re-export may reorder them.
+    pub fn animation(&self) -> String {
+        let mut name = format!("pair_{:04}", self.pair);
+        if let Some(id) = self.logical.first() {
+            name += &format!("_anim_{id:04}");
+        }
+        name
+    }
+}
+
+/// A character clip that moves the character by its root: the data of
+/// `conker_sim::root::RootTrack { ids: logical, duration, step, z, end }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RootClip {
+    pub logical: Vec<u16>,
+    pub duration: u16,
+    pub step: u16,
+    /// The root z channel per stored frame (32 per model unit) and at the loop point.
+    pub z: Vec<i32>,
+    pub end: i16,
+}
+
+/// A model a character holds (extract-character's `Held`): drawn with the character's joint
+/// `joint` while the last of its events that fired created it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    /// Bank-09 entry (the held glTF's mesh `09-<entry>-<part>`, hex), or a child object's bank-01
+    /// entry (`01-<entry>-<list>`; [`RIGS`] has its rig and clips).
+    pub entry: usize,
+    pub joint: u8,
+    /// (logical animation id, clip time in ticks) of every event that creates it, and removes it.
+    pub create: Vec<(u16, f32)>,
+    pub remove: Vec<(u16, f32)>,
+}
+
+/// `maps/<map>/lights.json`: the level's point lights the client draws (War: Total War's on `2d`,
+/// War: Beach's on `2b`, the level's own 34 on `1a`, none elsewhere) and the ambient light its lit draws start from (CBFD's lighting: a lit vertex's
+/// colour times the ambient plus each light's colour times min(1, `size` × 2048 / d²), the vertex
+/// `d` units from it).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Lights {
+    pub ambient: [u8; 3],
+    pub lights: Vec<Light>,
+    /// The lights (indices in `lights`) that switch on and off at random, each by itself (light
+    /// behaviour 255, 0x1A's kinds 0x900-0xD00): each frame an on one goes off with chance 35/1000,
+    /// an off one on with 70/1000 (C `func_15100340` → `func_151616D0` → `func_151604A0`; per frame I,
+    /// the oracle's spans agree); empty (absent) elsewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switching: Vec<usize>,
+}
+
+/// A fixed camera's point (`cameras.json`): the ROM's `[0x0C, scene, 8]`, 0x18-byte records that
+/// a kind-5 camera hint's point index reads (C `func_1512E8E0`: `*0x800DC020` + index · 0x18;
+/// `lab/research/mp-original/cameras-clips-g4.md` §1): 6 on 0x2B, 4 on 0x1A, none elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraPoint {
+    /// s16 x, y, z at +0: where the eye looks from (mode 0x40 springs it toward this).
+    pub at: [i16; 3],
+    /// The record's other 18 bytes (+6..+0x18) in hex, kept as they are (for reference: not read).
+    pub rest: String,
+}
+
+/// `level.gltf`'s materials whose texture the game binds at run time (CBFD's per-scene switch in
+/// `func_1510B9D0`: 0x1A's `func_15100464`; 0x33's crowd is in `race.json`, the other packed maps
+/// have none), `level.gltf` drawing each one's first frame; empty off 0x1A.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Segments {
+    /// Materials showing their frames in turn, as Race's crowd: 0x1A's two computer screens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screens: Option<race::Crowd>,
+    /// The lamp of each [`Lights::switching`] light, in its order (0x1A's five).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lamps: Vec<Lamp>,
+}
+
+/// A switching light's lamp: `materials` (`level.gltf`'s, by name) draw `on` while the light is on
+/// (as `level.gltf` does), `off` while it is off; PNGs relative to the map's folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lamp {
+    pub materials: Vec<String>,
+    pub on: String,
+    pub off: String,
+}
+
+impl Segments {
+    /// Refuses screens a client could not show and lamps that are not one per switching light.
+    fn check(&self, file: &str, lights: &Lights) -> Result<()> {
+        if let Some((field, why)) = self.screens.as_ref().and_then(race::Crowd::invalid) {
+            return Err(invalid(file, format!("screens.{field}"), why));
+        }
+        let (n, k) = (self.lamps.len(), lights.switching.len());
+        if n != 0 && n != k {
+            let why = format!("{n}, not one per switching light ({k})");
+            return Err(invalid(file, "lamps", why));
+        }
+        Ok(())
+    }
+}
+
+/// A point light at `at`, of `rgb`, `size + swing × sin φ` big, φ stepping `step` a frame (from
+/// any phase), shining `when`; `flicker`: it flickers in bursts (light behaviour 4, `func_151607A4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Light {
+    #[serde(serialize_with = "ints3")]
+    pub at: [f32; 3],
+    pub rgb: [u8; 3],
+    pub size: f32,
+    pub swing: f32,
+    pub step: f32,
+    pub when: When,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flicker: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum When {
+    /// Outside War: Total War's gas countdown.
+    Calm,
+    /// During the countdown.
+    Countdown,
+    /// While the prop on this placement shows.
+    Shown(u16),
+    /// On every player carrying a gas canister (`at` is the carrier's).
+    Carried,
+}
+
+/// `characters/<character>/character.json`: a character's model lift, its clips (one per glTF
+/// animation) and the root-motion ones.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Character {
+    /// Model units the model is drawn above the player (scaled with it).
+    pub model_lift: i16,
+    pub clips: Vec<ClipInfo>,
+    #[serde(rename = "root_motion")]
+    pub root_clips: Vec<RootClip>,
+    /// A player model's hitbox (radius, half height, centre height) and push body (radius, height,
+    /// centre height) at full size: its bank-0x11 record's +0x20/+0x22/+0x24 and +0x1A/+0x1C/+0x1E.
+    /// The game uses them × the class's scale (0.5; 0.6 for classes 0x25/0x26, 0.7 for the raptor),
+    /// truncated in f32 (obj+0xD2-D6, +0xE4-E8). Absent for the characters no player is drawn as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hitbox: Option<[i16; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<[i16; 3]>,
+    /// The character folder whose glTF animations drive this one (the same joints and animation
+    /// slots): its own glTF then has none, and `clips` and `root_motion` are empty (read the other
+    /// folder's). A translation key of joint k is the other's less the other's node k translation
+    /// plus this one's. Absent: its own glTF has its clips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clips_from: Option<String>,
+    /// The display lists the game leaves undrawn whatever the class (bit k: the glTF primitives
+    /// whose `extras.list` is k), besides those a class's `looks` hide. Absent: all drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<u16>,
+    /// War: Beach's villager looks drawn with this model: class → the display lists it hides (bit
+    /// k: the glTF primitives whose `extras.list` is k). Empty (absent) for the other characters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub looks: std::collections::BTreeMap<u8, u8>,
+    /// Heist's team looks drawn with this model (the Wise Guy's), or the tank's flag colours (model
+    /// 119); absent for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teams: Option<Teams>,
+    /// The tank's moving parts and light swaps (model 119); absent for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tank: Option<Tank>,
+    /// The eyes that blink (segments 6 and 7, `func_1502F01C`); empty (absent) for a character
+    /// that never does. Its glTF draws every face segment's default (eyes open; Conker's mouth).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<FaceSegment>,
+    /// The body-part spheres a bullet or a projectile tests; absent for a model the game gives
+    /// none (it tests a cylinder instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Parts>,
+}
+
+/// A model's body-part spheres (`func_1508114C`, `lab/research/mp-original/held-leftovers.md`
+/// §2), at full size (the game scales radii by obj+0x14C, the broad sphere by obj+0x150).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Parts {
+    /// The broad sphere, tested first: radius and centre height, as `hitbox`'s (its bank-0x11
+    /// record's +0xE, +0x10). A ray that misses it hits nothing.
+    pub broad: [i16; 2],
+    /// (joint, part, radius, x, y, z) in the game's table order: a sphere of `radius` at (x, y, z)
+    /// in joint `joint`'s frame (the matrix slot, the glTF's `joint_NN`); `part` goes to the hit
+    /// (0xA the head, 0 the body, 4-9 the zombies' limbs). A hit sphere replaces the best one if
+    /// it is the first, or nearer and of a part ≥ the best's.
+    pub spheres: Vec<[i16; 6]>,
+}
+
+/// One eye segment of a blinking character: the materials the game draws from it and its three
+/// looks, swapped together on both eyes (`lab/research/mp-original/faces.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceSegment {
+    /// The game's segment: 6 or 7.
+    pub segment: u8,
+    /// The glTF materials that draw it (their own texture is `textures[0]`).
+    pub materials: Vec<usize>,
+    /// Open, half shut and shut, relative to the character's folder.
+    pub textures: [String; 3],
+}
+
+/// A character's look per team: one material's texture swapped (the game binds it to segment 0x0A
+/// per team).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Teams {
+    /// The glTF material that draws it (its own texture is team 0's).
+    pub material: usize,
+    /// Per team (Heist's REDS, BLUES, GREENS, YELLOWS; the tank's red, blue, green and yellow
+    /// flags), its PNG, relative to the character's folder.
+    pub textures: Vec<String>,
+}
+
+/// Model 119's parts besides its clips (`lab/research/mp-original/tank.md`): joint indices of
+/// the model (the glTF skin's order) and glTF materials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tank {
+    /// The turret's joint, turned about its parent's y axis by the turret's yaw.
+    pub turret: usize,
+    /// The gun's joint, turned about the turret's x axis by the gun's pitch.
+    pub gun: usize,
+    /// The joint at the gun's muzzle.
+    pub muzzle: usize,
+    /// The brake lights' material, drawn unlit; `brake_lit` (relative to the character's folder)
+    /// is its texture while the tank brakes.
+    pub brake: usize,
+    pub brake_lit: String,
+    /// The treads' materials, one per side, whose texture scrolls as that side moves: `treads[k]`
+    /// draws the tread on joint `tread_joints[k]`; the game scrolls `tread_joints[0]`'s by its first
+    /// speed, `tread_joints[1]`'s by its second.
+    pub treads: [usize; 2],
+    pub tread_joints: [usize; 2],
+}
+
+/// What a match on one map, with its characters and one weapon set, reads from the pack: the
+/// runtime values of `conker_extract::Slice` (without its GLBs, which are files here) and the
+/// tables the server read from the ROM besides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Slice {
+    /// `maps/<map>/collision.json`: the collision in build order (terrain, secondary, placements).
+    pub collision: Vec<Triangle>,
+    /// The water's current (on `2b`, the sea's; empty elsewhere): its path's points (x, y, z,
+    /// speed), the ROM's path asset `[0x10, scene]` path 1; kept on the first water run of
+    /// `collision.json`.
+    pub current: Vec<[i16; 4]>,
+    /// `maps/<map>/spawns.json`.
+    pub spawns: Vec<SpawnPoint>,
+    /// `maps/<map>/pickups.json`.
+    pub pickups: Vec<Pickup>,
+    /// `maps/<map>/triggers.json`, as the ROM's table `[0x0C, scene, 5]` (0x34-byte records) that
+    /// `CameraLevel::new`, `Lifts::new` and conker-bots' `Assets::triggers` read.
+    pub triggers: Vec<u8>,
+    /// `maps/<map>/nav.json`, as the ROM's navigation graph `[0x19, scene]` (`Assets::nav`).
+    pub nav: Vec<u8>,
+    /// `maps/<map>/lights.json`.
+    pub lights: Lights,
+    /// `maps/<map>/outros.json`: War: Total War's victory outros (on `2d`; none elsewhere).
+    pub outros: Vec<outro::Outro>,
+    /// `maps/<map>/segments.json`.
+    pub segments: Segments,
+    /// `maps/<map>/cameras.json`: the fixed cameras' points, by the hints' point index.
+    pub cameras: Vec<CameraPoint>,
+    /// The characters, in the order [`Slice::load`] was given their folders.
+    pub characters: Vec<Character>,
+    /// `weapons/<set>/held.json`: glTF scene `i` of the held glTF is `held[i]`.
+    pub held: Vec<Held>,
+    /// `game/acos.json`: the game's acos table ([`ACOS_LEN`] entries).
+    pub acos: Vec<u16>,
+    /// `game/sink.json`: per surface kind, the sink table (depth, change with speed, speed %).
+    pub sink: [[i8; 3]; 32],
+    /// `maps/<map>/ai.bin` (`[0x14, id]`, the scene's multiplayer AI script) and `game/class.bin`
+    /// (`[0x0F, 0]`, the characters' class data; on 0x24 `maps/24/class.bin`, the tank's
+    /// `[0x0F, 119]`): conker-bots' `Assets::ai` and `Assets::class`.
+    pub ai: Vec<u8>,
+    pub class: Vec<u8>,
+}
+
+/// The data files of a slice, relative to the pack root, in [`Slice::files`] order: the manifest,
+/// the map's five, the weapon set's, the game's two, the map's AI script, the game's class data,
+/// the map's lights, outros, segments and camera points, then one per character.
+fn data_files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
+    let mut files = vec![
+        MANIFEST.into(),
+        format!("maps/{map}/collision.json"),
+        format!("maps/{map}/spawns.json"),
+        format!("maps/{map}/pickups.json"),
+        format!("maps/{map}/triggers.json"),
+        format!("maps/{map}/nav.json"),
+        format!("weapons/{weapons}/held.json"),
+        "game/acos.json".into(),
+        "game/sink.json".into(),
+        format!("maps/{map}/ai.bin"),
+        // Tank's tanks walk by their own class data.
+        if map == "24" {
+            format!("maps/{map}/class.bin")
+        } else {
+            "game/class.bin".into()
+        },
+        format!("maps/{map}/lights.json"),
+        format!("maps/{map}/outros.json"),
+        format!("maps/{map}/segments.json"),
+        format!("maps/{map}/cameras.json"),
+    ];
+    files.extend(
+        characters
+            .iter()
+            .map(|c| format!("characters/{c}/character.json")),
+    );
+    files
+}
+
+/// `collision.json`: runs of consecutive triangles of one layer.
+#[derive(Serialize, Deserialize)]
+struct Run {
+    layer: Layer,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    current: Vec<[i16; 4]>,
+    triangles: Vec<Face>,
+}
+
+/// A triangle of a run: its three points and its surface word (hex string, or null).
+#[derive(Serialize, Deserialize)]
+struct Face(
+    #[serde(serialize_with = "points")] [[f32; 3]; 3],
+    #[serde(with = "word")] Option<u32>,
+);
+
+/// One trigger record, every field the ROM's records carry (`+0x24..+0x34` is filled at run time
+/// and zero in the ROM).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct Trigger {
+    /// `+0x0`: the bottom centre; `+0x6`: half-width, height, half-depth.
+    center: [i16; 3],
+    size: [i16; 3],
+    /// `+0xC`, `+0x10`: degrees.
+    pitch: f32,
+    yaw: f32,
+    /// `+0x14`: 1 = switched off.
+    off: u8,
+    /// `+0x15 >> 2` and `+0x15 & 3`.
+    kind: u8,
+    shape: u8,
+    /// `+0x16`, `+0x17`, then the words at `+0x18`, `+0x1C`, `+0x20`.
+    flags: u8,
+    action: u8,
+    arg: u32,
+    word_1c: u32,
+    command: u32,
+}
+
+impl Trigger {
+    fn parse(r: &[u8; TRIGGER]) -> Self {
+        let h = |o: usize| i16::from_be_bytes([r[o], r[o + 1]]);
+        let w = |o: usize| u32::from_be_bytes(r[o..o + 4].try_into().unwrap());
+        Self {
+            center: [h(0), h(2), h(4)],
+            size: [h(6), h(8), h(0xA)],
+            pitch: f32::from_bits(w(0xC)),
+            yaw: f32::from_bits(w(0x10)),
+            off: r[0x14],
+            kind: r[0x15] >> 2,
+            shape: r[0x15] & 3,
+            flags: r[0x16],
+            action: r[0x17],
+            arg: w(0x18),
+            word_1c: w(0x1C),
+            command: w(0x20),
+        }
+    }
+
+    fn bytes(&self) -> [u8; TRIGGER] {
+        let mut r = [0; TRIGGER];
+        for (k, v) in self.center.iter().chain(&self.size).enumerate() {
+            r[2 * k..2 * k + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        r[0xC..0x10].copy_from_slice(&self.pitch.to_be_bytes());
+        r[0x10..0x14].copy_from_slice(&self.yaw.to_be_bytes());
+        r[0x14..0x18].copy_from_slice(&[
+            self.off,
+            self.kind << 2 | self.shape,
+            self.flags,
+            self.action,
+        ]);
+        for (o, v) in [(0x18, self.arg), (0x1C, self.word_1c), (0x20, self.command)] {
+            r[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        r
+    }
+}
+
+/// One navigation node (`[0x19, scene]`: a u16 count, a u16 ([`NavFile`]), 16-byte nodes, zero
+/// padding to 8 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct Node {
+    pos: [i16; 3],
+    band: u8,
+    id: u8,
+    half: u8,
+    /// Neighbour node indices, 255 = none.
+    next: [u8; 5],
+    barrier: u8,
+    /// `+0xF`: zero on the maps but 0x1A's node 2 (0x14); the bots don't read it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    byte_15: u8,
+}
+
+fn is_zero(b: &u8) -> bool {
+    *b == 0
+}
+
+/// `nav.json`: the nodes, or, when the graph's u16 at +2 is not zero (0x1A's 0x3D, unread), that
+/// word and the nodes.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum NavFile {
+    Nodes(Vec<Node>),
+    Graph { word_2: u16, nodes: Vec<Node> },
+}
+
+impl NavFile {
+    fn new(word_2: u16, nodes: Vec<Node>) -> Self {
+        match word_2 {
+            0 => Self::Nodes(nodes),
+            _ => Self::Graph { word_2, nodes },
+        }
+    }
+
+    fn parts(&self) -> (u16, &[Node]) {
+        match self {
+            Self::Nodes(nodes) => (0, nodes),
+            Self::Graph { word_2, nodes } => (*word_2, nodes),
+        }
+    }
+}
+
+fn parse_nav(bytes: &[u8]) -> Option<NavFile> {
+    let word = |o: usize| Some(u16::from_be_bytes([*bytes.get(o)?, *bytes.get(o + 1)?]));
+    let body = bytes.get(4..4 + 16 * usize::from(word(0)?))?;
+    let nodes = (body.as_chunks::<16>().0.iter())
+        .map(|r| Node {
+            pos: [0, 2, 4].map(|o| i16::from_be_bytes([r[o], r[o + 1]])),
+            band: r[6],
+            id: r[7],
+            half: r[8],
+            next: [r[9], r[10], r[11], r[12], r[13]],
+            barrier: r[14],
+            byte_15: r[15],
+        })
+        .collect();
+    Some(NavFile::new(word(2)?, nodes))
+}
+
+fn nav_bytes(word_2: u16, nodes: &[Node]) -> Vec<u8> {
+    let mut out = (nodes.len() as u16).to_be_bytes().to_vec();
+    out.extend(word_2.to_be_bytes());
+    for n in nodes {
+        out.extend(n.pos.iter().flat_map(|v| v.to_be_bytes()));
+        out.extend([n.band, n.id, n.half]);
+        out.extend(n.next);
+        out.extend([n.barrier, n.byte_15]);
+    }
+    out.resize(out.len().next_multiple_of(8), 0);
+    out
+}
+
+/// A pack JSON file's value (`file` names it in the error).
+pub fn parse_json<T: DeserializeOwned>(file: &str, bytes: &[u8]) -> Result<T> {
+    serde_json::from_slice(bytes).map_err(|source| Error::Json {
+        file: file.into(),
+        source,
+    })
+}
+
+impl Slice {
+    /// The data files [`Slice::load`] reads, relative to the pack root (`pack.json` first).
+    pub fn files(map: &str, characters: &[&str], weapons: &str) -> Vec<String> {
+        data_files(map, characters, weapons)
+    }
+
+    /// Reads the slice of `map`, `characters` and `weapons` (folder names in `pack.json`):
+    /// `read(path)` returns the bytes of the pack file at `path` (relative to the pack root).
+    /// Errors name the file and, where the format allows, the field.
+    pub fn load<E: Display>(
+        map: &str,
+        characters: &[&str],
+        weapons: &str,
+        mut read: impl FnMut(&str) -> Result<Vec<u8>, E>,
+    ) -> Result<Self> {
+        let files = data_files(map, characters, weapons);
+        let [
+            manifest,
+            collision,
+            spawns,
+            pickups,
+            triggers,
+            nav,
+            held,
+            acos,
+            sink,
+            ai,
+            class,
+            lights,
+            outros,
+            segments,
+            cameras,
+        ] = &files[..15]
+        else {
+            unreachable!("data_files lists 15 files before the characters")
+        };
+        let mut bytes = |file: &str| {
+            read(file).map_err(|e| Error::Read {
+                file: file.into(),
+                message: e.to_string(),
+            })
+        };
+        let m: Manifest = parse_json(manifest, &bytes(manifest)?)?;
+        if m.format != FORMAT {
+            let why = format!(
+                "{}, this build reads {FORMAT}: re-export the pack",
+                m.format
+            );
+            return Err(invalid(manifest, "format", why));
+        }
+        let wanted = (characters.iter()).map(|&c| ("characters", &m.characters, c));
+        for (field, names, name) in [("maps", &m.maps, map), ("weapons", &m.weapons, weapons)]
+            .into_iter()
+            .chain(wanted)
+        {
+            if !names.iter().any(|n| n == name) {
+                return Err(invalid(manifest, field, format!("no {name:?}")));
+            }
+        }
+
+        let runs: Vec<Run> = parse_json(collision, &bytes(collision)?)?;
+        let records: Vec<Trigger> = parse_json(triggers, &bytes(triggers)?)?;
+        for (i, t) in records.iter().enumerate() {
+            if t.kind >= 64 || t.shape >= 4 {
+                let why = format!("kind {} (0-63) and shape {} (0-3)", t.kind, t.shape);
+                return Err(invalid(triggers, format!("[{i}]"), why));
+            }
+        }
+        let graph: NavFile = parse_json(nav, &bytes(nav)?)?;
+        let (word_2, nodes) = graph.parts();
+        if nodes.len() > usize::from(NO_NODE) {
+            return Err(invalid(nav, "(graph)", "at most 255 nodes"));
+        }
+        for (i, n) in nodes.iter().enumerate() {
+            if let Some(k) = n
+                .next
+                .iter()
+                .find(|&&k| k != NO_NODE && usize::from(k) >= nodes.len())
+            {
+                return Err(invalid(nav, format!("[{i}].next"), format!("no node {k}")));
+            }
+        }
+        let acos_table: Vec<u16> = parse_json(acos, &bytes(acos)?)?;
+        if acos_table.len() != ACOS_LEN {
+            let why = format!("{ACOS_LEN} entries, not {}", acos_table.len());
+            return Err(invalid(acos, "(table)", why));
+        }
+        let lights: Lights = parse_json(lights, &bytes(lights)?)?;
+        Ok(Self {
+            current: (runs.iter().find(|r| !r.current.is_empty()))
+                .map_or(vec![], |r| r.current.clone()),
+            collision: (runs.into_iter())
+                .flat_map(|r| {
+                    let layer = r.layer;
+                    r.triangles
+                        .into_iter()
+                        .map(move |Face(points, surface)| Triangle {
+                            points,
+                            layer,
+                            surface,
+                        })
+                })
+                .collect(),
+            spawns: parse_json(spawns, &bytes(spawns)?)?,
+            pickups: parse_json(pickups, &bytes(pickups)?)?,
+            triggers: records.iter().flat_map(Trigger::bytes).collect(),
+            nav: nav_bytes(word_2, nodes),
+            characters: (files[15..].iter())
+                .map(|f| parse_json(f, &bytes(f)?))
+                .collect::<Result<_>>()?,
+            outros: parse_json(outros, &bytes(outros)?)?,
+            segments: {
+                let s: Segments = parse_json(segments, &bytes(segments)?)?;
+                s.check(segments, &lights)?;
+                s
+            },
+            lights,
+            cameras: parse_json(cameras, &bytes(cameras)?)?,
+            held: parse_json(held, &bytes(held)?)?,
+            acos: acos_table,
+            sink: parse_json(sink, &bytes(sink)?)?,
+            ai: bytes(ai)?,
+            class: bytes(class)?,
+        })
+    }
+
+    /// The slice's data files ([`Slice::files`] but `pack.json`), as [`Slice::load`] reads them;
+    /// `characters` names the folders of [`Slice::characters`], in order. Fails if the trigger
+    /// table or the navigation graph holds bytes the pack format does not keep (they are written
+    /// decoded and re-encoded on load).
+    pub fn write(
+        &self,
+        map: &str,
+        characters: &[&str],
+        weapons: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        assert_eq!(
+            characters.len(),
+            self.characters.len(),
+            "a folder per character"
+        );
+        let files = data_files(map, characters, weapons);
+        let [
+            _,
+            collision,
+            spawns,
+            pickups,
+            triggers,
+            nav,
+            held,
+            acos,
+            sink,
+            ai,
+            class,
+            lights,
+            outros,
+            segments,
+            cameras,
+        ] = files[..15]
+            .to_vec()
+            .try_into()
+            .expect("15 files before the characters");
+        let mut runs: Vec<Run> = Vec::new();
+        for t in &self.collision {
+            let face = Face(t.points, t.surface);
+            match runs.last_mut() {
+                Some(run) if run.layer == t.layer => run.triangles.push(face),
+                _ => runs.push(Run {
+                    layer: t.layer,
+                    current: vec![],
+                    triangles: vec![face],
+                }),
+            }
+        }
+        if let Some(run) = runs.iter_mut().find(|r| matches!(r.layer, Layer::Water(_))) {
+            run.current.clone_from(&self.current);
+        }
+        let (chunks, rest) = self.triggers.as_chunks::<TRIGGER>();
+        let records: Vec<Trigger> = chunks.iter().map(Trigger::parse).collect();
+        if !rest.is_empty()
+            || records
+                .iter()
+                .flat_map(Trigger::bytes)
+                .ne(self.triggers.iter().copied())
+        {
+            return Err(invalid(
+                &triggers,
+                "(table)",
+                "holds bytes the pack does not keep",
+            ));
+        }
+        let graph = parse_nav(&self.nav).unwrap_or(NavFile::Nodes(vec![]));
+        let (word_2, nodes) = graph.parts();
+        if nav_bytes(word_2, nodes) != self.nav {
+            return Err(invalid(
+                &nav,
+                "(graph)",
+                "holds bytes the pack does not keep",
+            ));
+        }
+        let mut out = vec![
+            (collision, to_json(&runs, 3)),
+            (spawns, to_json(&self.spawns, 2)),
+            (pickups, to_json(&self.pickups, 2)),
+            (triggers, to_json(&records, 2)),
+            (nav, to_json(&graph, 1 + usize::from(word_2 != 0))),
+            (held, to_json(&self.held, 2)),
+            (acos, to_json(&self.acos, 1)),
+            (sink, to_json(&self.sink, 1)),
+            (ai, self.ai.clone()),
+            (class, self.class.clone()),
+            (lights, to_json(&self.lights, 2)),
+            (outros, to_json(&self.outros, 3)),
+            (segments, to_json(&self.segments, 3)),
+            (cameras, to_json(&self.cameras, 2)),
+        ];
+        let character_files = files[15..].iter().cloned();
+        out.extend(character_files.zip(self.characters.iter().map(|c| to_json(c, 2))));
+        Ok(out)
+    }
+}
+
+/// An f32 written as an integer when it is one (and not -0.0), else as the shortest decimal that
+/// reads back to the same bits: exact either way.
+struct Num(f32);
+
+impl Serialize for Num {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let x = self.0;
+        if x.fract() == 0.0 && x.abs() < 1e9 && !(x == 0.0 && x.is_sign_negative()) {
+            s.serialize_i32(x as i32)
+        } else {
+            s.serialize_f32(x)
+        }
+    }
+}
+
+fn ints3<S: Serializer>(v: &[f32; 3], s: S) -> Result<S::Ok, S::Error> {
+    v.map(Num).serialize(s)
+}
+
+fn ints3s<S: Serializer>(v: &[[f32; 3]], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(v.iter().map(|p| p.map(Num)))
+}
+
+fn points<S: Serializer>(v: &[[f32; 3]; 3], s: S) -> Result<S::Ok, S::Error> {
+    v.map(|p| p.map(Num)).serialize(s)
+}
+
+/// A surface word as `"0x0000000a"`, or null.
+mod word {
+    use super::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error as _;
+
+    pub fn serialize<S: Serializer>(v: &Option<u32>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(w) => s.serialize_str(&format!("{w:#010x}")),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let word = text
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok());
+        word.map(Some).ok_or_else(|| {
+            D::Error::custom(format!("surface word {text:?}: expected 0x and hex digits"))
+        })
+    }
+}
+
+/// JSON, pretty down to `depth` levels of nesting and compact below them, so each record of a
+/// long list (a triangle, a node, a clip) is one line. Floats print as serde_json prints them: the
+/// shortest decimal that reads back to the same bits.
+pub fn to_json<T: Serialize + ?Sized>(value: &T, depth: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let formatter = Pretty {
+        level: 0,
+        depth,
+        has_value: false,
+    };
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, formatter);
+    value.serialize(&mut ser).expect("pack values serialise");
+    out.push(b'\n');
+    out
+}
+
+/// serde_json's `PrettyFormatter`, compact deeper than `depth`.
+struct Pretty {
+    level: usize,
+    depth: usize,
+    has_value: bool,
+}
+
+impl Pretty {
+    fn newline<W: ?Sized + Write>(&self, w: &mut W) -> io::Result<()> {
+        w.write_all(b"\n")?;
+        w.write_all(&b"  ".repeat(self.level))
+    }
+
+    fn open<W: ?Sized + Write>(&mut self, w: &mut W, bracket: &[u8]) -> io::Result<()> {
+        self.level += 1;
+        self.has_value = false;
+        w.write_all(bracket)
+    }
+
+    fn close<W: ?Sized + Write>(&mut self, w: &mut W, bracket: &[u8]) -> io::Result<()> {
+        self.level -= 1;
+        if self.has_value && self.level < self.depth {
+            self.newline(w)?;
+        }
+        w.write_all(bracket)
+    }
+
+    fn item<W: ?Sized + Write>(&mut self, w: &mut W, first: bool) -> io::Result<()> {
+        if !first {
+            w.write_all(b",")?;
+        }
+        if self.level <= self.depth {
+            self.newline(w)?;
+        }
+        Ok(())
+    }
+}
+
+impl serde_json::ser::Formatter for Pretty {
+    fn begin_array<W: ?Sized + Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.open(w, b"[")
+    }
+
+    fn end_array<W: ?Sized + Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.close(w, b"]")
+    }
+
+    fn begin_array_value<W: ?Sized + Write>(&mut self, w: &mut W, first: bool) -> io::Result<()> {
+        self.item(w, first)
+    }
+
+    fn end_array_value<W: ?Sized + Write>(&mut self, _: &mut W) -> io::Result<()> {
+        self.has_value = true;
+        Ok(())
+    }
+
+    fn begin_object<W: ?Sized + Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.open(w, b"{")
+    }
+
+    fn end_object<W: ?Sized + Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.close(w, b"}")
+    }
+
+    fn begin_object_key<W: ?Sized + Write>(&mut self, w: &mut W, first: bool) -> io::Result<()> {
+        self.item(w, first)
+    }
+
+    fn begin_object_value<W: ?Sized + Write>(&mut self, w: &mut W) -> io::Result<()> {
+        w.write_all(if self.level <= self.depth {
+            b": "
+        } else {
+            b":"
+        })
+    }
+
+    fn end_object_value<W: ?Sized + Write>(&mut self, _: &mut W) -> io::Result<()> {
+        self.has_value = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn sample() -> Slice {
+        let record = |kind: u8, pitch: f32, yaw: f32| {
+            Trigger {
+                center: [-100, 20, 3000],
+                size: [50, 120, 80],
+                pitch,
+                yaw,
+                off: 0,
+                kind,
+                shape: 3,
+                flags: 1,
+                action: 0x2D,
+                arg: 7,
+                word_1c: 0x1D73_4849,
+                command: 30,
+            }
+            .bytes()
+        };
+        let node = |next: [u8; 5]| Node {
+            pos: [1, -2, 3],
+            band: 1,
+            id: 9,
+            half: 40,
+            next,
+            barrier: 0,
+            byte_15: 0,
+        };
+        Slice {
+            collision: vec![
+                Triangle {
+                    points: [[-2267.0, -521.0, 6016.0], [0.0, -0.0, 1.0], [2.0, 3.0, 4.0]],
+                    layer: Layer::Terrain,
+                    surface: Some(0x0010_000A),
+                },
+                Triangle {
+                    points: [
+                        [0.1, 113.399994, -7.5e-8],
+                        [1e10, 3.0, 4.0],
+                        [5.0, 6.0, 7.0],
+                    ],
+                    layer: Layer::Placement(10),
+                    surface: None,
+                },
+                Triangle {
+                    points: [[1.0; 3]; 3],
+                    layer: Layer::Terrain,
+                    surface: Some(5),
+                },
+                Triangle {
+                    points: [[-3345.0, -539.0, 8283.0], [0.0; 3], [2.0; 3]],
+                    layer: Layer::Water(1),
+                    surface: None,
+                },
+            ],
+            current: vec![[584, -565, 13977, 64], [231, -565, 6011, 10]],
+            spawns: vec![SpawnPoint {
+                position: [-2267, -521, 6016],
+                byte_06: 0xFF,
+                yaw: 64,
+                camera: [-2001.5, -400.0, 6200.25],
+                byte_14: 0,
+                byte_15: -3,
+            }],
+            pickups: vec![
+                Pickup {
+                    placement: 12,
+                    gives: Gives::Weapon(0x09),
+                    position: [1.0, 2.0, 3.0],
+                    respawn: None,
+                    roams: vec![],
+                },
+                Pickup {
+                    placement: 33,
+                    gives: Gives::Grenades,
+                    position: [-1.0, 0.0, 3.5],
+                    respawn: Some(300),
+                    roams: vec![[-1.0, 0.0, 3.5], [4.0, -0.0, 0.25]],
+                },
+            ],
+            triggers: [record(1, 6.1e-5, 333.8), record(8, 0.0, -0.0)].concat(),
+            nav: nav_bytes(
+                0x3D,
+                &[
+                    node([1, NO_NODE, NO_NODE, NO_NODE, NO_NODE]),
+                    Node {
+                        byte_15: 0x14,
+                        ..node([0; 5])
+                    },
+                ],
+            ),
+            lights: Lights {
+                ambient: [50, 50, 52],
+                lights: [When::Countdown, When::Shown(27)]
+                    .map(|when| Light {
+                        at: [-149.0, -1421.0, 0.5],
+                        rgb: [255, 0, 0],
+                        size: 85.0,
+                        swing: 55.0,
+                        step: 0.1021,
+                        when,
+                        flicker: when == When::Shown(27),
+                    })
+                    .into(),
+                switching: vec![1],
+            },
+            outros: vec![sample_outro()],
+            segments: Segments {
+                screens: Some(race::Crowd {
+                    step: 8,
+                    panels: vec![race::Panel {
+                        material: "m69-seg02000000".into(),
+                        frames: vec!["textures/1547.png".into(), "textures/1548.png".into()],
+                    }],
+                }),
+                lamps: vec![Lamp {
+                    materials: vec!["m30-seg04000000".into(), "m31-seg04000000".into()],
+                    on: "textures/0364.png".into(),
+                    off: "textures/3197.png".into(),
+                }],
+            },
+            cameras: vec![CameraPoint {
+                at: [2024, 277, 9703],
+                rest: "0000000002efc17c6662414b5ba100000000".into(),
+            }],
+            characters: vec![
+                Character {
+                    model_lift: 42,
+                    clips: vec![],
+                    root_clips: vec![],
+                    hitbox: Some([73, 128, 88]),
+                    body: Some([60, -133, 66]),
+                    clips_from: Some("117".into()),
+                    hidden: Some(0x710),
+                    looks: [(0x11, 0x3A), (0x1C, 0x0C)].into(),
+                    teams: Some(Teams {
+                        material: 2,
+                        textures: vec!["textures/team-0.png".into(), "textures/team-1.png".into()],
+                    }),
+                    tank: Some(Tank {
+                        turret: 2,
+                        gun: 3,
+                        muzzle: 4,
+                        brake: 11,
+                        brake_lit: "textures/brake-lit.png".into(),
+                        treads: [13, 15],
+                        tread_joints: [13, 12],
+                    }),
+                    faces: vec![FaceSegment {
+                        segment: 6,
+                        materials: vec![12, 13],
+                        textures: ["open", "half", "shut"]
+                            .map(|t| format!("textures/face-{t}.png")),
+                    }],
+                    parts: Some(Parts {
+                        broad: [117, 95],
+                        spheres: vec![[12, 0xA, 38, 0, 33, 5], [12, 0, 14, 0, -9, 0]],
+                    }),
+                },
+                Character {
+                    model_lift: 43,
+                    clips: vec![ClipInfo {
+                        pair: 3,
+                        logical: vec![0, 0x77],
+                        frames: 12,
+                        duration_ticks: 23,
+                    }],
+                    root_clips: vec![RootClip {
+                        logical: vec![0x77],
+                        duration: 23,
+                        step: 2,
+                        z: vec![0, -32, 4577],
+                        end: -9,
+                    }],
+                    hitbox: None,
+                    body: None,
+                    clips_from: None,
+                    hidden: None,
+                    looks: Default::default(),
+                    teams: None,
+                    tank: None,
+                    faces: vec![],
+                    parts: None,
+                },
+            ],
+            held: vec![Held {
+                entry: 0x1A,
+                joint: 9,
+                create: vec![(0x7B, 15.0)],
+                remove: vec![(0x7C, 13.999998)],
+            }],
+            acos: (0..ACOS_LEN as u16).collect(),
+            sink: std::array::from_fn(|k| [k as i8, -(k as i8), 90]),
+            ai: vec![1, 2, 3],
+            class: vec![],
+        }
+    }
+
+    fn sample_outro() -> outro::Outro {
+        use outro::*;
+        let key = |t, value, catmull| Key { t, value, catmull };
+        Outro {
+            winner: 1,
+            cutscene: 4,
+            length: 800,
+            camera: Camera {
+                path: vec![[-2849, -481, 6019], [-2848, -481, 5907]],
+                along: vec![key(0, 0.0, false), key(800, 100.0, false)],
+                yaw: vec![key(0, 64.0, true), key(800, 108.0, true)],
+                pitch: vec![key(1, 12.0, false)],
+                from: 0,
+            },
+            cuts: vec![Camera {
+                path: vec![[-331, -190, 3569]],
+                along: vec![],
+                yaw: vec![key(800, 243.0, false)],
+                pitch: vec![],
+                from: 800,
+            }],
+            actor: Actor {
+                character: "90".into(),
+                animation: "pair_0045_anim_0056".into(),
+                ticks: 51,
+                rate: 1.2,
+                at: [-3000, -521, 5948],
+                facing: 182,
+                lift: 0,
+                scale: 0.5,
+                once: false,
+                path: vec![],
+                along: vec![],
+                yaw: vec![],
+                plays: vec![],
+                head: Some(Head {
+                    t: 0,
+                    joint: 3,
+                    pitch: vec![key(0, -0.85, false)],
+                    yaw: vec![key(130, 36.0, true)],
+                }),
+                talk: Some(Talk {
+                    jaw: 6,
+                    skew: true,
+                    says: vec![Say {
+                        t: 36,
+                        state: CHATTER,
+                        degrees: 45,
+                    }],
+                }),
+                mask: None,
+                attach: vec![Attach {
+                    t: 0,
+                    entry: 0x57,
+                    joint: 14,
+                    on: true,
+                }],
+                team: None,
+                roll: vec![],
+                pitch: vec![],
+            },
+            cast: vec![Actor {
+                character: "40".into(),
+                animation: "pair_0002_anim_0004".into(),
+                ticks: 26,
+                rate: 1.04,
+                at: [-140, -420, 2895],
+                facing: 16384,
+                lift: 0,
+                scale: 0.5,
+                once: true,
+                path: vec![[-140, -420, 2895], [-166, -395, 3148]],
+                along: vec![key(0, 0.0, true), key(1100, 100.0, true)],
+                yaw: vec![key(0, 0.0, false)],
+                plays: vec![Play {
+                    t: 50,
+                    animation: "pair_0001_anim_0002".into(),
+                    ticks: 30,
+                    rate: 0.5,
+                    once: false,
+                    blend: 9,
+                }],
+                mask: Some(0x0E),
+                team: Some(0),
+                roll: vec![key(530, 0.0, true), key(601, -16.0, true)],
+                ..Actor::default()
+            }],
+            fade: Fade {
+                rgb: [0; 3],
+                duration: 25,
+            },
+            voice: Some(Voice {
+                t: 30,
+                entry: 0xB3,
+                file: "maps/2d/voice-b3.wav".into(),
+            }),
+            song: Some(Voice {
+                t: 1,
+                entry: 0x8A,
+                file: "maps/2b/song-8a.wav".into(),
+            }),
+            subtitles: Some(Subtitles {
+                pages: vec![Page {
+                    t: 16,
+                    lines: vec!["are victorious !".into(), " ".into()],
+                }],
+                close: 745,
+                anchor: hud::Anchor(hud::Horizontal::Left, hud::Vertical::Top),
+                text: [71, 28],
+                quads: vec![Quad {
+                    texture: "bubble".into(),
+                    rect: [124, 1, 173, 57],
+                    uv: [63.0, 0.21875, -0.359375, 62.75],
+                    colour: [255; 4],
+                }],
+                moves: vec![Place {
+                    t: 100,
+                    anchor: hud::Anchor(hud::Horizontal::Left, hud::Vertical::Top),
+                    text: [100, 25],
+                    quads: vec![],
+                }],
+            }),
+            props: vec![Prop {
+                placement: 3,
+                at: [1076, -29, 257],
+                rotation: [7.0, 174.0],
+                scale: Some([37.0, 37.01, 2.195]),
+            }],
+            sounds: vec![ScriptSound {
+                id: 0x6DE,
+                actor: 2,
+                t: 908,
+                stop: Some(1100),
+                fade_in: None,
+                fade_out: None,
+                cents: 150,
+            }],
+            near: Some(30.0),
+            light: Some(Light {
+                t: 0,
+                at: [-644, 180, 4728],
+                rgb: [255; 3],
+                size: 8.0,
+            }),
+            particles: vec![Particles {
+                actor: 1,
+                emitter: 0x50,
+                t: 530,
+                until: 566,
+            }],
+        }
+    }
+
+    const CHARACTERS: [&str; 2] = ["128", "117"];
+
+    fn files(slice: &Slice) -> BTreeMap<String, Vec<u8>> {
+        let manifest = Manifest {
+            format: FORMAT,
+            source_rom_sha1: "00".into(),
+            maps: vec!["2d".into()],
+            characters: CHARACTERS.map(String::from).into(),
+            weapons: vec!["deathmatch".into()],
+            audio: vec![],
+            hud: false,
+        };
+        let mut files: BTreeMap<_, _> = slice
+            .write("2d", &CHARACTERS, "deathmatch")
+            .unwrap()
+            .into_iter()
+            .collect();
+        files.insert(MANIFEST.into(), manifest.to_json());
+        files
+    }
+
+    fn load(files: &BTreeMap<String, Vec<u8>>) -> Result<Slice> {
+        Slice::load("2d", &CHARACTERS, "deathmatch", |p| {
+            files.get(p).cloned().ok_or("missing")
+        })
+    }
+
+    fn bits(s: &Slice) -> Vec<u32> {
+        (s.collision
+            .iter()
+            .flat_map(|t| t.points.into_iter().flatten()))
+        .chain(s.spawns.iter().flat_map(|p| p.camera))
+        .chain(s.pickups.iter().flat_map(|p| p.position))
+        .chain(
+            s.pickups
+                .iter()
+                .flat_map(|p| p.roams.iter().flatten().copied()),
+        )
+        .chain(
+            s.held
+                .iter()
+                .flat_map(|h| h.create.iter().chain(&h.remove).map(|e| e.1)),
+        )
+        .map(f32::to_bits)
+        .collect()
+    }
+
+    #[test]
+    fn write_then_load_gives_the_same_slice_bit_for_bit() {
+        let slice = sample();
+        let files = files(&slice);
+        assert_eq!(
+            files.len(),
+            Slice::files("2d", &CHARACTERS, "deathmatch").len()
+        );
+        let back = load(&files).unwrap();
+        assert_eq!(back, slice);
+        // Each character in its folder, the file as before (`root_motion`).
+        let tedi = String::from_utf8(files["characters/117/character.json"].clone()).unwrap();
+        assert!(tedi.starts_with("{\n  \"model_lift\": 43,"), "{tedi}");
+        assert!(
+            tedi.contains("\"root_motion\": [\n    {\"logical\":[119]"),
+            "{tedi}"
+        );
+        let squirrel = String::from_utf8(files["characters/128/character.json"].clone()).unwrap();
+        assert!(
+            squirrel.starts_with("{\n  \"model_lift\": 42,"),
+            "{squirrel}"
+        );
+        // `hitbox`, `body`, `clips_from` and `hidden` only when set: a file without them (a pack
+        // from before them, the Tedi's here) reads them as None.
+        assert!(squirrel.contains("\"clips_from\": \"117\""), "{squirrel}");
+        assert!(
+            !tedi.contains("hitbox") && !tedi.contains("clips_from") && !tedi.contains("hidden")
+        );
+        // `faces` only when the character blinks, `parts` only when the model has them.
+        assert!(!tedi.contains("faces") && !tedi.contains("parts"), "{tedi}");
+        assert!(
+            squirrel
+                .contains("\"parts\": {\n    \"broad\": [117,95],\n    \"spheres\": [[12,10,38,"),
+            "{squirrel}"
+        );
+        assert!(squirrel.contains("\"faces\": [\n    {\"segment\":6,\"materials\":[12,13],\"textures\":[\"textures/face-open.png\""), "{squirrel}");
+        assert_eq!(bits(&back), bits(&slice));
+        // Integers stay integers, -0.0 keeps its sign, and one triangle per line.
+        let collision = String::from_utf8(files["maps/2d/collision.json"].clone()).unwrap();
+        assert!(
+            collision.contains("[[-2267,-521,6016],[0,-0.0,1],[2,3,4]],\"0x0010000a\"]"),
+            "{collision}"
+        );
+        assert!(
+            collision.contains("[[0.1,113.399994,-7.5e-8],[10000000000.0,3,4],[5,6,7]],null]"),
+            "{collision}"
+        );
+        assert_eq!(collision.matches("\"layer\"").count(), 4);
+        // The water's run keeps the current, before its triangles.
+        assert!(
+            collision
+                .contains("\"water\": 1\n    },\n    \"current\": [\n      [584,-565,13977,64],"),
+            "{collision}"
+        );
+        assert_eq!(collision.matches("\"current\"").count(), 1);
+        // The graph's word and a node's byte 15 only when not zero.
+        let nav = String::from_utf8(files["maps/2d/nav.json"].clone()).unwrap();
+        assert!(
+            nav.starts_with("{\n  \"word_2\": 61,\n  \"nodes\": [\n    {"),
+            "{nav}"
+        );
+        assert_eq!(nav.matches("\"byte_15\":20").count(), 1, "{nav}");
+        // A pickup's respawn and roaming spots only when it has them.
+        let pickups = String::from_utf8(files["maps/2d/pickups.json"].clone()).unwrap();
+        assert_eq!(pickups.matches("\"respawn\"").count(), 1, "{pickups}");
+        assert!(
+            pickups.contains("\"respawn\": 300,\n    \"roams\": [[-1,0,3.5],[4,-0.0,0.25]]"),
+            "{pickups}"
+        );
+    }
+
+    #[test]
+    fn pretty_to_a_depth_then_compact() {
+        let v = BTreeMap::from([("a", vec![[1, 2], [3, 4]]), ("b", vec![])]);
+        let text = |depth| String::from_utf8(to_json(&v, depth)).unwrap();
+        assert_eq!(text(0), "{\"a\":[[1,2],[3,4]],\"b\":[]}\n");
+        assert_eq!(text(1), "{\n  \"a\": [[1,2],[3,4]],\n  \"b\": []\n}\n");
+        assert_eq!(
+            text(2),
+            "{\n  \"a\": [\n    [1,2],\n    [3,4]\n  ],\n  \"b\": []\n}\n"
+        );
+    }
+
+    #[test]
+    fn errors_name_the_file_and_the_field() {
+        let base = files(&sample());
+        let error = |path: &str, edit: &dyn Fn(String) -> Option<String>| {
+            let mut f = base.clone();
+            match edit(String::from_utf8(f[path].clone()).unwrap()) {
+                Some(text) => f.insert(path.into(), text.into()),
+                None => f.remove(path),
+            };
+            load(&f).unwrap_err().to_string()
+        };
+        let e = error("maps/2d/spawns.json", &|t| {
+            Some(t.replace("\"yaw\"", "\"jaw\""))
+        });
+        assert!(
+            e.starts_with("maps/2d/spawns.json: missing field `yaw`"),
+            "{e}"
+        );
+        let e = error("maps/2d/collision.json", &|t| {
+            Some(t.replace("0x0010000a", "10000a"))
+        });
+        assert!(
+            e.starts_with("maps/2d/collision.json: surface word \"10000a\""),
+            "{e}"
+        );
+        assert_eq!(
+            error("maps/2d/pickups.json", &|_| None),
+            "maps/2d/pickups.json: missing"
+        );
+        let e = error("game/acos.json", &|_| Some("[1, 2]".into()));
+        assert_eq!(e, "game/acos.json: (table): 132 entries, not 2");
+        let node =
+            r#"[{"pos":[0,0,0],"band":0,"id":0,"half":0,"next":[1,255,255,255,255],"barrier":0}]"#;
+        let e = error("maps/2d/nav.json", &|_| Some(node.into()));
+        assert_eq!(e, "maps/2d/nav.json: [0].next: no node 1");
+        let e = error("maps/2d/triggers.json", &|t| {
+            Some(t.replacen("\"kind\": 1", "\"kind\": 64", 1))
+        });
+        assert_eq!(
+            e,
+            "maps/2d/triggers.json: [0]: kind 64 (0-63) and shape 3 (0-3)"
+        );
+        // Lamps one per switching light, screens with frames; none at all off 0x1A (`{}`).
+        let e = error("maps/2d/segments.json", &|t| {
+            Some(t.replace(
+                "\"lamps\": [",
+                "\"lamps\": [{\"materials\":[],\"on\":\"\",\"off\":\"\"},",
+            ))
+        });
+        let why = "lamps: 2, not one per switching light (1)";
+        assert_eq!(e, format!("maps/2d/segments.json: {why}"));
+        let e = error("maps/2d/segments.json", &|t| {
+            Some(t.replace("\"textures/1547.png\",\"textures/1548.png\"", ""))
+        });
+        assert_eq!(e, "maps/2d/segments.json: screens.panels[0].frames: empty");
+        assert_eq!(to_json(&Segments::default(), 3), b"{}\n");
+        let e = error(MANIFEST, &|t| {
+            Some(t.replace("\"format\": 1", "\"format\": 2"))
+        });
+        assert_eq!(
+            e,
+            "pack.json: format: 2, this build reads 1: re-export the pack"
+        );
+        let e = error(MANIFEST, &|t| Some(t.replace("117", "0")));
+        assert_eq!(e, "pack.json: characters: no \"117\"");
+        let e = error("characters/128/character.json", &|_| None);
+        assert_eq!(e, "characters/128/character.json: missing");
+    }
+
+    #[test]
+    fn tables_the_pack_cannot_keep_are_refused() {
+        let mut slice = sample();
+        slice.triggers[0x30] = 1; // run-time bytes
+        assert!(slice.write("2d", &CHARACTERS, "deathmatch").is_err());
+        let mut slice = sample();
+        slice.nav.push(0);
+        assert!(slice.write("2d", &CHARACTERS, "deathmatch").is_err());
+    }
+}
