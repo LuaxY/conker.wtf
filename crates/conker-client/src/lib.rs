@@ -326,16 +326,18 @@ pub fn arg_pairs(args: impl IntoIterator<Item = String>) -> Vec<(String, String)
     out
 }
 
-/// `?key=value&flag` URL query string as key/value pairs, `%XX` escapes decoded (browsers write
-/// `server=host:port` as `server=host%3Aport` when a page script edits the query).
+/// `?key=value&flag` URL query string as key/value pairs, `+` a space and `%XX` escapes decoded
+/// (browsers write `server=host:port` as `server=host%3Aport` when a page script edits the query;
+/// the lobby's `URLSearchParams` a pseudonym's spaces as `+`).
 pub fn query_pairs(query: &str) -> Vec<(String, String)> {
+    let decode = |s: &str| percent_decode(&s.replace('+', " "));
     query
         .trim_start_matches('?')
         .split('&')
         .filter(|kv| !kv.is_empty())
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (percent_decode(k), percent_decode(v))
+            (decode(k), decode(v))
         })
         .collect()
 }
@@ -1953,6 +1955,10 @@ mod tests {
         let cfg = Config::from_pairs(query_pairs("log=conker_client%3Ddebug")).unwrap();
         assert!(log_plugin(&cfg).filter.ends_with(",conker_client=debug"));
         assert_eq!(cfg.side, None, "the server's pick");
+        let name = Config::from_pairs(query_pairs("name=Hungover+Squirrel%2B"))
+            .unwrap()
+            .name;
+        assert_eq!(name.as_deref(), Some("Hungover Squirrel+"));
         let side = |v| Config::from_pairs(query_pairs(v)).map(|c| c.side);
         assert_eq!(side("side=squirrels"), Ok(Some(Side::Squirrels)));
         assert_eq!(side("?side=tediz"), Ok(Some(Side::Tediz)));
