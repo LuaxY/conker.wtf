@@ -53,8 +53,14 @@ const TIPS = [
   "Gamepad: A jumps, X reloads, Y draws, B crouches, the triggers aim and fire.",
   "The Esc menu's Settings rebind the keys, the mouse and the gamepad.",
 ];
+// In a random order (Fisher-Yates), each once before any comes back.
+for (let i = TIPS.length - 1; i > 0; i--) {
+  const j = Math.floor(Math.random() * (i + 1));
+  [TIPS[i], TIPS[j]] = [TIPS[j], TIPS[i]];
+}
 const tip = document.getElementById("tip");
 let tips = 0;
+tip.textContent = TIPS[0];
 const turn = setInterval(() => {
   if (intro.hidden) return clearInterval(turn);
   tip.classList.add("out");
