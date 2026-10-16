@@ -289,15 +289,17 @@ pub fn build(app: &mut App) {
         app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
         app.add_systems(Startup, spawn_panel);
     }
-    let render = app.sub_app_mut(RenderApp);
-    render.insert_resource(Began(Instant::now()));
-    render.add_systems(
-        Render,
-        (
-            begin.in_set(RenderSystems::ExtractCommands),
-            end_render.in_set(RenderSystems::PostCleanup),
-        ),
-    );
+    // No render world without a GPU backend (Bevy's own plugins check too).
+    if let Some(render) = app.get_sub_app_mut(RenderApp) {
+        render.insert_resource(Began(Instant::now()));
+        render.add_systems(
+            Render,
+            (
+                begin.in_set(RenderSystems::ExtractCommands),
+                end_render.in_set(RenderSystems::PostCleanup),
+            ),
+        );
+    }
 }
 
 #[cfg(test)]

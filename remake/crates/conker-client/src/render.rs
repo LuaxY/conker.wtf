@@ -1177,7 +1177,7 @@ fn update_hud(
     let text = match (player.single(), game.single()) {
         (Ok(c), Ok(m)) if *status == NetStatus::Connected && on.0 => hud_text(c, m),
         _ if *status == NetStatus::Connected => String::new(),
-        // The page's `#net` line says where the connection stands (a failure too).
+        // The page's loading overlay says where the connection stands, its `#net` line a failure.
         _ if cfg!(target_family = "wasm") => String::new(),
         _ => status.text(&cfg).0,
     };

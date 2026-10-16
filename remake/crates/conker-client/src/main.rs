@@ -125,14 +125,11 @@ pub async fn start() -> Result<(), String> {
         .collect();
     let mut bytes = std::collections::HashMap::new();
     let count = files.len();
-    for (n, (file, request)) in files.into_iter().zip(requests).enumerate() {
-        let done = format!("the asset pack: {n} / {count} files");
-        loading(
-            "Counting the chocolate…",
-            &done,
-            through(PACK, n as f32 / count as f32),
-        );
+    for (n, (file, request)) in (1..).zip(files.into_iter().zip(requests)) {
         bytes.insert(file, request.await?);
+        let done = format!("the asset pack: {n} / {count} files");
+        let progress = through(PACK, n as f32 / count as f32);
+        loading("Counting the chocolate…", &done, progress);
     }
     if let Some(server) = pack {
         let read = |p: &str| bytes.get(p).cloned();
