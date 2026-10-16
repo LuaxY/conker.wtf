@@ -28,8 +28,8 @@
 //! - **The results** (not this menu's): the pointer over RESTART or QUIT lights it, a click on it or
 //!   Enter chooses ([`crate::results`]); there, and on the lost page, the pointer is free
 //!   ([`crate::pointer::Free`]).
-//! - **Settings** apply live, APPLY saves them ([`crate::settings::save`]; offscreen runs never do),
-//!   BACK drops what wasn't applied.
+//! - **Settings** apply and save as they change ([`crate::settings::save`]; offscreen runs never
+//!   save): BACK, Esc and the pad's Menu keep them.
 //! - `keys=READ:KEY,…` presses keys at script reads, for screenshots ([`press_keys`]).
 
 use crate::bindings::{Action, Bindings, KeyLabels};
@@ -56,15 +56,13 @@ pub const LOST: [&str; 2] = ["RECONNECT", "QUIT"];
 const WHY_CHARS: usize = 46;
 /// A conflict's choices.
 pub const CHOICES: [&str; 3] = ["SWAP", "REPLACE", "CANCEL"];
-/// The settings' buttons: APPLY saves, BACK drops what wasn't applied, DEFAULTS resets the tab.
-pub const BUTTONS: [&str; 3] = ["APPLY", "BACK", "DEFAULTS"];
+/// The settings' buttons: BACK to the main page, DEFAULTS resets the tab.
+pub const BUTTONS: [&str; 2] = ["BACK", "DEFAULTS"];
 /// Rows a tab shows at once.
 pub const VISIBLE: usize = 18;
 /// Seconds a held direction waits before it repeats, then between repeats.
 const REPEAT_DELAY: f64 = 0.4;
 const REPEAT_EVERY: f64 = 0.08;
-/// Seconds APPLY's SAVED shows.
-const SAVED_SECS: f64 = 2.0;
 
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct Menu {
@@ -92,17 +90,13 @@ pub enum Page {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sheet {
     pub tab: Tab,
-    /// The focused item ([`items`]) and its column (a Keyboard & Mouse slot; APPLY, BACK).
+    /// The focused item ([`items`]) and its column (a Keyboard & Mouse slot; BACK, DEFAULTS).
     pub focus: usize,
     pub column: usize,
     /// The first row shown.
     pub scroll: usize,
     pub capture: Option<Capture>,
     pub conflict: Option<Conflict>,
-    /// When APPLY saved.
-    saved: Option<f64>,
-    /// The settings and bindings as last applied: BACK goes back to them.
-    applied: (Settings, Bindings),
 }
 
 /// A captured input that another slot holds: SWAP, REPLACE or CANCEL.
@@ -116,7 +110,7 @@ pub struct Conflict {
     pub focus: usize,
 }
 
-/// What the focus moves through on a tab: the tabs, its rows but the groups' titles, APPLY / BACK.
+/// What the focus moves through on a tab: the tabs, its rows but the groups' titles, the buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Tabs,
@@ -155,8 +149,6 @@ pub enum Effect {
     Resume,
     Leave,
     Reconnect,
-    /// APPLY: save the settings.
-    Save,
 }
 
 /// What a rectangle of the layout stands for.
@@ -253,7 +245,7 @@ impl Menu {
                 }
                 Nav::Confirm if *focus == 0 => Some(Effect::Resume),
                 Nav::Confirm if *focus == 1 => {
-                    self.page = Page::Settings(Box::new(Sheet::new(s, b)));
+                    self.page = Page::Settings(Box::new(Sheet::new()));
                     None
                 }
                 Nav::Confirm => Some(Effect::Leave),
@@ -276,11 +268,10 @@ impl Menu {
             Page::Settings(sheet) => {
                 let free = sheet.conflict.is_none();
                 let back_button = nav == Nav::Confirm && sheet.item() == Item::Buttons;
-                let back = free && (nav == Nav::Back || back_button && sheet.column == 1);
+                let back = free && (nav == Nav::Back || back_button && sheet.column == 0);
                 if !back && nav != Nav::Menu {
                     return sheet.nav(nav, now, s, b);
                 }
-                (*s, *b) = sheet.applied.clone();
                 match nav {
                     Nav::Menu => {
                         self.page = Page::Main(0);
@@ -376,7 +367,7 @@ impl Menu {
 }
 
 impl Sheet {
-    fn new(s: &Settings, b: &Bindings) -> Self {
+    fn new() -> Self {
         Self {
             tab: Tab::Keys,
             focus: 0,
@@ -384,8 +375,6 @@ impl Sheet {
             scroll: 0,
             capture: None,
             conflict: None,
-            saved: None,
-            applied: (s.clone(), b.clone()),
         }
     }
 
@@ -478,13 +467,8 @@ impl Sheet {
                 Row::Bind(a) => self.capture = Some(Capture::new(a, self.slot(), now)),
                 Row::Group(_) => {}
             },
-            // DEFAULTS: this tab's (applied live, saved by APPLY).
-            (Nav::Confirm, Item::Buttons) if self.column == 2 => ui::reset(self.tab, s, b),
-            // APPLY (BACK is the menu's).
-            (Nav::Confirm, Item::Buttons) => {
-                (self.applied, self.saved) = ((s.clone(), b.clone()), Some(now));
-                return Some(Effect::Save);
-            }
+            // DEFAULTS: this tab's (BACK is the menu's).
+            (Nav::Confirm, Item::Buttons) => ui::reset(self.tab, s, b),
             _ => {}
         }
         None
@@ -795,7 +779,7 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
     }
     let buttons = focused == Item::Buttons;
     for (i, label) in BUTTONS.iter().enumerate() {
-        let rect = [56.0 + 62.0 * i as f32, 187.0, 56.0, 14.0];
+        let rect = [87.0 + 62.0 * i as f32, 187.0, 56.0, 14.0];
         let lit = buttons && sh.column == i;
         p.button(
             label,
@@ -804,9 +788,6 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
             Target::Item(items.len() - 1, i),
             [Z_BAR, Z_TEXT],
         );
-    }
-    if sh.saved.is_some_and(|t| look.now - t < SAVED_SECS) {
-        p.text("SAVED", [262.0, 190.0], true, SMALL, GREY, Z_TEXT);
     }
     p.text(&hint(g), [146.0, 205.0], true, 0.45, GREY, Z_TEXT);
     if let Some(c) = &sh.capture {
@@ -850,7 +831,7 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
     }
 }
 
-/// The HUD's font and frame; whether APPLY writes the settings (a window's run).
+/// The HUD's font and frame; whether a change writes the settings (a window's run).
 #[derive(Resource)]
 struct Setup {
     hud: Hud,
@@ -868,7 +849,7 @@ struct Last {
     repeat: Repeat,
 }
 
-/// Drawn clients (windowed and offscreen) only; `save`: APPLY writes the settings (a window's).
+/// Drawn clients (windowed and offscreen) only; `save`: a change writes the settings (a window's).
 pub fn build(app: &mut App, hud: Hud, save: bool) {
     app.init_resource::<Menu>();
     app.insert_resource(Setup { hud, save });
@@ -1111,13 +1092,12 @@ fn run(
                 reconnect.start(now);
             }
             Effect::Reconnect => {}
-            Effect::Save => {
-                if setup.save {
-                    crate::settings::save(&s);
-                }
-                info!("settings: applied");
-            }
         }
+    }
+    // Saved as they change (a held step, each step), as the menu leaves them.
+    if setup.save && *settings != s {
+        crate::settings::save(&s);
+        info!("settings: saved");
     }
     settings.set_if_neq(s);
     bindings.set_if_neq(b);
@@ -1362,7 +1342,7 @@ mod tests {
             Row::Bind(Action::Fire)
         );
         assert_eq!(sh.column, 1);
-        // The list scrolls to the focus: the last row shown, then APPLY / BACK.
+        // The list scrolls to the focus: the last row shown, then BACK / DEFAULTS.
         for _ in 0..30 {
             sh.nav(Nav::Down, 0.0, &mut s, &mut b);
         }
@@ -1409,8 +1389,8 @@ mod tests {
         assert_eq!(hint(Glyphs::PlayStation), ps);
     }
 
-    /// DEFAULTS (the buttons' third) resets its tab only: the keyboard slots, the pad's slots and
-    /// settings, the look's, the gameplay's; live, without saving.
+    /// DEFAULTS (the buttons' second) resets its tab only: the keyboard slots, the pad's slots and
+    /// settings, the look's, the gameplay's.
     #[test]
     fn defaults_reset_the_tab_only() {
         let (mut s, mut b) = (Settings::default(), Bindings::default());
@@ -1427,9 +1407,9 @@ mod tests {
         let mut m = Menu::default();
         let sh = settings_page(&mut m, &mut s, &mut b);
         let defaults = |sh: &mut Sheet, s: &mut Settings, b: &mut Bindings| {
-            sh.focus(items(sh.tab).len() - 1, 2);
-            assert_eq!((sh.item(), sh.column), (Item::Buttons, 2));
-            assert_eq!(sh.nav(Nav::Confirm, 0.0, s, b), None, "not saved");
+            sh.focus(items(sh.tab).len() - 1, 1);
+            assert_eq!((sh.item(), sh.column), (Item::Buttons, 1));
+            assert_eq!(sh.nav(Nav::Confirm, 0.0, s, b), None);
         };
         defaults(sh, &mut s, &mut b);
         let jump = |b: &Bindings, slot| ui::get(b, Action::Jump, slot);
@@ -1449,7 +1429,6 @@ mod tests {
         sh.set_tab::<()>(Tab::Gameplay);
         defaults(sh, &mut s, &mut b);
         assert_eq!((&s, &b), (&Settings::default(), &Bindings::default()));
-        assert_eq!(sh.saved, None);
     }
 
     #[test]
@@ -1536,32 +1515,32 @@ mod tests {
         );
     }
 
+    /// A change holds at once (`run` saves it as it changes): Esc, BACK and the pad's Menu keep it.
     #[test]
-    fn apply_saves_and_back_drops_the_rest() {
+    fn changes_hold_and_back_keeps_them() {
         let (mut s, mut b) = (Settings::default(), Bindings::default());
         let mut m = Menu::default();
-        let sh = settings_page(&mut m, &mut s, &mut b);
-        sh.set_tab::<()>(Tab::Look);
-        sh.nav(Nav::Down, 0.0, &mut s, &mut b);
-        sh.nav(Nav::Right, 0.0, &mut s, &mut b);
+        let more = |m: &mut Menu, s: &mut Settings, b: &mut Bindings| {
+            let sh = settings_page(m, s, b);
+            sh.set_tab::<()>(Tab::Look);
+            sh.nav(Nav::Down, 0.0, s, b);
+            assert_eq!(sh.nav(Nav::Right, 0.0, s, b), None);
+        };
+        more(&mut m, &mut s, &mut b);
+        assert!((s.mouse.sensitivity - 1.6).abs() < 1e-5);
+        assert_eq!(m.nav(Nav::Back, 1.0, &mut s, &mut b), None);
+        assert_eq!(m.page, Page::Main(1));
+        more(&mut m, &mut s, &mut b);
+        let Page::Settings(sh) = &mut m.page else {
+            unreachable!()
+        };
         sh.focus(items(Tab::Look).len() - 1, 0);
-        assert_eq!(
-            sh.nav(Nav::Confirm, 5.0, &mut s, &mut b),
-            Some(Effect::Save)
-        );
-        let applied = s.clone();
-        assert!((applied.mouse.sensitivity - 1.6).abs() < 1e-5);
-        // A change after APPLY, then BACK: back to what was applied, on the main page.
-        sh.focus(1, 0);
-        sh.nav(Nav::Right, 6.0, &mut s, &mut b);
-        b.set(Action::Fire, Default::default());
-        assert_ne!(s, applied);
-        assert_eq!(m.nav(Nav::Back, 7.0, &mut s, &mut b), None);
-        assert_eq!(
-            (m.page.clone(), &s, &b),
-            (Page::Main(1), &applied, &Bindings::default())
-        );
-        // What APPLY saves loads back (a file under $CONKER_SETTINGS's directory, else the temp dir).
+        assert_eq!(m.nav(Nav::Confirm, 2.0, &mut s, &mut b), None, "BACK");
+        assert_eq!(m.page, Page::Main(1));
+        more(&mut m, &mut s, &mut b);
+        assert_eq!(m.nav(Nav::Menu, 3.0, &mut s, &mut b), Some(Effect::Resume));
+        assert!((s.mouse.sensitivity - 1.8).abs() < 1e-5);
+        // What is saved loads back (a file under $CONKER_SETTINGS's directory, else the temp dir).
         let base = std::env::var_os("CONKER_SETTINGS")
             .map(std::path::PathBuf::from)
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -1584,13 +1563,6 @@ mod tests {
             (saved.mouse.sensitivity, rebound)
         );
         std::fs::remove_dir_all(dir).unwrap();
-        // The pad's Menu in the settings drops the rest too, and resumes.
-        let sh = settings_page(&mut m, &mut s, &mut b);
-        sh.set_tab::<()>(Tab::Look);
-        sh.nav(Nav::Down, 0.0, &mut s, &mut b);
-        sh.nav(Nav::Right, 0.0, &mut s, &mut b);
-        assert_eq!(m.nav(Nav::Menu, 1.0, &mut s, &mut b), Some(Effect::Resume));
-        assert_eq!(s, applied);
     }
 
     #[test]

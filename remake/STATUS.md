@@ -23,6 +23,10 @@ No wire or rules change (protocol 47).
   Chrome's JS heap; natively sysinfo's process CPU and resident memory, Bevy's `sysinfo_plugin`, native only), the
   connection, client id, tick and rollbacks, RTT, jitter and the interpolation delay, the map, players, entities, the
   window and the GPU. No packet loss (lightyear's ping counters are private) and no bytes/s.
+- **Settings save as they change** (C): APPLY is gone (the buttons are BACK and DEFAULTS); `menu::run` saves
+  whenever the menu changed them (each step of a held slider too), and BACK, Esc and the pad's Menu keep them
+  (they used to drop what wasn't applied). The SAVED note went with APPLY. Test `changes_hold_and_back_keeps_them`
+  replaces `apply_saves_and_back_drops_the_rest`.
 - Not yet seen in a running game: the wasm isn't rebuilt (`bun run build:web`), so neither the real steps nor the
   panel have been on screen. `lab/tools/landing-shots/shot.ts` now waits for the overlay to go, not for `#net`.
 - Tests: new `loading_steps_fill_the_bar_in_order_and_end`, `frames_read_as_rate_times_and_shares`; conker-client
