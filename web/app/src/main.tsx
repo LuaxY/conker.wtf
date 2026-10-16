@@ -66,6 +66,12 @@ function Layout() {
             </span>
             A fan remake of Conker's Bad Fur Day multiplayer in Rust and WebAssembly. Not affiliated
             with Rare, Microsoft or Nintendo. No Rumble Pak needed.
+            <a
+              href="https://github.com/LuaxY/conker.wtf"
+              className="font-bold text-bone underline hover:text-amber"
+            >
+              GitHub
+            </a>
           </p>
         </footer>
       </div>
