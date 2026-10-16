@@ -26,7 +26,7 @@ pub struct Font(Hud);
 /// smaller by `NEAR / distance` (as the bodies shrink), and none past [`FAR`].
 const SCALE: f32 = 0.5;
 const NEAR: f32 = 400.0;
-const FAR: f32 = 1600.0;
+const FAR: f32 = 2500.0;
 /// Game units from the top of the head (the hitbox's) to the tag's bottom.
 const ABOVE: f32 = 12.0;
 /// Under the rest of the HUD (its shadow 0.5 lower).
