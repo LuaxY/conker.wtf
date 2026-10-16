@@ -179,8 +179,8 @@ use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
     BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
-    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, RESULTS, RaceView, RacerView, RaptorView,
-    Restart, Saw, TankView, Teams, map_scene, pack_hash, scene_world,
+    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, Pseudonym, RESULTS, RaceView, RacerView,
+    RaptorView, Restart, Saw, TankView, Teams, map_scene, pack_hash, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -1761,8 +1761,10 @@ fn join_player(
             _ => {}
         }
     }
+    let name = pseudonym(asked.name.as_deref(), index);
     commands.spawn((
         PlayerId(remote.0),
+        Pseudonym(name.clone()),
         Player(fighter.body),
         Fighting::new(index, &fighter),
         FightingOwner(client),
@@ -1779,7 +1781,7 @@ fn join_player(
         },
     ));
     info!(
-        "client {:?} connected via {transport} as {side:?} (asked {:?}), team {}, class {:#x} (asked {:?}); slot {index} on record {} at {:?} facing {}",
+        "client {:?} {name:?} connected via {transport} as {side:?} (asked {:?}), team {}, class {:#x} (asked {:?}); slot {index} on record {} at {:?} facing {}",
         remote.0,
         asked.side,
         fighter.team,
@@ -1789,6 +1791,24 @@ fn join_player(
         place.pos,
         place.facing
     );
+}
+
+/// The most characters of a [`Pseudonym`] (the lobby's field takes as many).
+const PSEUDONYM_MAX: usize = 20;
+
+/// The pseudonym a human in `slot` shows over its head: the one its client asked for, kept to what
+/// the HUD's font draws (ASCII letters and digits, spaces and `'.!?-`), its spaces collapsed, at
+/// most [`PSEUDONYM_MAX`] characters; none left, `Player N` (its slot from 1).
+fn pseudonym(asked: Option<&str>, slot: usize) -> String {
+    let kept: String = (asked.unwrap_or_default().chars())
+        .filter(|c| c.is_ascii_alphanumeric() || " '.!?-".contains(*c))
+        .collect();
+    // ASCII only from here: any byte is a character boundary.
+    let words = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    match words[..words.len().min(PSEUDONYM_MAX)].trim_end() {
+        "" => format!("Player {}", slot + 1),
+        name => name.to_string(),
+    }
 }
 
 /// A client left: its netcode disconnect or timeout, or its transport closing (lightyear then
@@ -3085,6 +3105,24 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A pseudonym keeps the HUD font's characters, its spaces collapsed, at most 20; none left,
+    /// the slot's `Player N`.
+    #[test]
+    fn a_pseudonym_keeps_what_the_font_draws() {
+        assert_eq!(
+            pseudonym(Some("  Hungover   Squirrel "), 0),
+            "Hungover Squirrel"
+        );
+        assert_eq!(pseudonym(Some("<b>Tedi</b>_\u{e9}!"), 0), "bTedib!");
+        assert_eq!(pseudonym(Some(&"x".repeat(99)), 0), "x".repeat(20));
+        assert_eq!(
+            pseudonym(Some(&format!("{} yz", "x".repeat(19))), 0),
+            "x".repeat(19)
+        );
+        assert_eq!(pseudonym(Some(" \t<>"), 2), "Player 3");
+        assert_eq!(pseudonym(None, 0), "Player 1");
     }
 
     /// A client quiet past [`STALE_TICKS`] lets go of its held fire and stick, its camera and

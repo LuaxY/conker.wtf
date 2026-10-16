@@ -3,8 +3,8 @@
 //! Each crate adds its own lightyear role (`client`/`server`) and transports; this module only
 //! registers what both sides must agree on: the input type ([`Input`], one per tick, its camera yaw
 //! included), the replicated player state ([`Player`], predicted by its owner), each player's
-//! combat state ([`Combat`]), the match ([`MatchView`]), the side and pick a client asks for when it joins
-//! ([`Join`]) and what a client showed when it took an input ([`Saw`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
+//! combat state ([`Combat`]), the match ([`MatchView`]), the side, pick and pseudonym a client asks for when it
+//! joins ([`Join`], [`Pseudonym`]) and what a client showed when it took an input ([`Saw`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
 //! the player): the server runs the match, each client predicts its own player with the same rules.
 
 use crate::collision::{CollisionWorld, Layer};
@@ -108,7 +108,9 @@ use serde::{Deserialize, Serialize};
 /// the sniper on the press; a quiet client stands; the netcode timeout 30 s (was 3; carried in the token).
 /// 46: the netcode and WebTransport idle timeouts 5 min (were 30 s; carried in the token).
 /// 47: the modern aim arm 40 to the side (was 20: the body hid the crosshair; shared).
-pub const PROTOCOL_ID: u64 = 47;
+/// 48: pseudonyms: a client asks for one when it joins ([`Join::name`]), every human's goes out in
+/// [`Pseudonym`] (bots have none).
+pub const PROTOCOL_ID: u64 = 48;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -122,6 +124,10 @@ pub const DEFAULT_PORT: u16 = 5888;
 /// The client that owns a player entity.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct PlayerId(pub PeerId);
+
+/// A human player's pseudonym, which the clients draw over its head; bots have none.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Pseudonym(pub String);
 
 /// Authoritative player state; predicted on the owning client, interpolated on the others.
 /// `floor.tri` indexes the collision world, so server and clients must build it from the same asset
@@ -499,12 +505,14 @@ pub struct Saw {
 
 /// A client's first message: the side it asks for (`None`: the server's pick, the side with fewer
 /// players) and the menu pick it plays (conker-rules' `characters::PICKS`; `None`: the scenario's
-/// class, by the side; one the map does not allow plays the set's default for the slot). The server
-/// puts the player in the match when it arrives.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+/// class, by the side; one the map does not allow plays the set's default for the slot) and its
+/// pseudonym (the server keeps what the HUD's font draws; `None`: `Player N`). The server puts the
+/// player in the match when it arrives.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Join {
     pub side: Option<Side>,
     pub character: Option<u8>,
+    pub name: Option<String>,
 }
 
 /// Over, the results' RESTART: this client's player wants the next match now.
@@ -620,6 +628,7 @@ impl Plugin for ProtocolPlugin {
             },
         });
         app.component::<PlayerId>().replicate();
+        app.component::<Pseudonym>().replicate();
         app.component::<Player>()
             .replicate()
             .predict()

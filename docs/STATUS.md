@@ -1,7 +1,25 @@
-# Status (newest first; latest 2026-10-15, protocol 47)
+# Status (newest first; latest 2026-10-17, protocol 48)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Pseudonyms: a tag over each human (2026-10-17)
+
+Protocol 48: `Join::name` and a replicated `Pseudonym` on each human's player entity (bots have none).
+- **The lobby** (`Lobby.tsx`): a "Pseudonym" field at the top of "Who are you?", two random words from the game
+  (`data.ts` `randomPseudonym`: an epithet and one of the game's folk, "Hungover Squirrel"), a dice for others. It
+  lives in `usePlayer.name` (localStorage `conker-player`; the first visit's random one is written at once) and goes
+  into the play URL as `name=` unless empty. The field drops what the server would (`PSEUDONYM.drop`), at most 20.
+- **The server** (`join_player`): `pseudonym()` keeps ASCII letters, digits, spaces and `'.!?-` (the HUD font's),
+  collapses the spaces, at most 20; none left, `Player N` (a native client, an old link). The tag rides the entity: a
+  human taking a bot's slot spawns its own (with the name), a leaver's bot is a new one (without); reseats and Total
+  War's takeovers keep the human's entity. Test `a_pseudonym_keeps_what_the_font_draws`.
+- **The client** (`tags.rs`, like `crosshair.rs`): every other human's name in capitals over its hitbox's top, the
+  HUD font at half size, white on its shadow, in fractional frame pixels (no stepping), under the rest of the HUD.
+  Not while dead or out of lives, not outside play (phase 0), and not behind a wall (one `raycast` from the eye per
+  human a frame: a tag through a wall would give the player away). `name=` on the client (`Config::name`).
+- Not in a running game yet (no build was asked for): the tags' height and size want a look.
+- Left: the names on the STATS rows and the team screen; team-coloured tags.
 
 ## From play: a loading overlay, the diagnostics panel
 

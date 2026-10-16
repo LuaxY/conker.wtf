@@ -841,7 +841,7 @@ fn on_connecting(
 }
 
 /// Connected: the client joins the match with the side it asks for (`side=`, else the server's
-/// pick).
+/// pick), its pick and its pseudonym.
 fn on_connected(
     trigger: On<Add, Connected>,
     mut clients: Query<&mut MessageSender<Join>, With<Client>>,
@@ -850,12 +850,13 @@ fn on_connected(
 ) {
     if let Ok(mut joins) = clients.get_mut(trigger.entity) {
         info!(
-            "client {} connected over {:?}; joins on side {:?} with pick {:?}",
-            cfg.id, cfg.transport, cfg.side, cfg.character
+            "client {} connected over {:?}; joins on side {:?} with pick {:?} as {:?}",
+            cfg.id, cfg.transport, cfg.side, cfg.character, cfg.name
         );
         joins.send::<JoinChannel>(Join {
             side: cfg.side,
             character: cfg.character,
+            name: cfg.name.clone(),
         });
         *status = NetStatus::Connected;
     }

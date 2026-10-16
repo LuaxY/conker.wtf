@@ -334,6 +334,69 @@ export function randomName(not?: string): string {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+/** The two words of a random pseudonym (the lobby's), a word and one of the game's folk; the
+ * longest pair fits the game server's 20 characters. */
+const EPITHETS = [
+  "Hungover",
+  "Drunken",
+  "Windy",
+  "Furry",
+  "Squeaky",
+  "Sloppy",
+  "Mighty",
+  "Grumpy",
+  "Cheesy",
+  "Greedy",
+  "Sneaky",
+  "Spooky",
+  "Undead",
+  "Feral",
+  "Evil",
+  "Rusty",
+  "Stinky",
+  "Tipsy",
+  "Barmy",
+  "Bloody",
+  "Fluffy",
+  "Naughty",
+] as const;
+const FOLK = [
+  "Squirrel",
+  "Tedi",
+  "Weasel",
+  "Caveman",
+  "Raptor",
+  "Bat",
+  "Zombie",
+  "Villager",
+  "Sergeant",
+  "Haybot",
+  "Gargoyle",
+  "Wasp",
+  "Sunflower",
+  "Scarecrow",
+  "Mobster",
+  "Rodent",
+  "Conker",
+  "Berri",
+  "Gregg",
+  "Marvin",
+  "Franky",
+  "Birdy",
+  "Batula",
+  "Poo",
+] as const;
+
+/** Two words at random from EPITHETS and FOLK, other than `not` (so the lobby's dice always changes it). */
+export function randomPseudonym(not?: string): string {
+  const pick = (words: readonly string[]) => words[Math.floor(Math.random() * words.length)];
+  const name = `${pick(EPITHETS)} ${pick(FOLK)}`;
+  return name === not ? randomPseudonym(not) : name;
+}
+
+/** What the game server keeps of a pseudonym: the HUD font's characters, at most 20. */
+export const PSEUDONYM = { max: 20, drop: /[^A-Za-z0-9 '.!?-]/g } as const;
+
 /** `s` within `mode`'s limits: fewer bots, and its default score for one out of its range. */
 export function fit(s: Settings, mode: Mode): Settings {
   const { maxScore, defaultScore, maxBots } = MODES[mode];

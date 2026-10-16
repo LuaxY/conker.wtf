@@ -53,7 +53,7 @@ host's port 5888) is gone from the list too: a game server started by hand is re
 
 **URL contract.**
 - The lobby's "Join game" opens `play.html?server=HOST:PORT&transport=wt|ws&side=squirrels|tediz&digest=HEX` (plus
-  `&character=N` when a pick is chosen, `&team=T` when a Heist team is; URL-encoded:
+  `&name=PSEUDONYM` unless the field is empty, `&character=N` when a pick is chosen, `&team=T` when a Heist team is; URL-encoded:
   `server=localhost%3A5900`; the client decodes it). `digest` is that server's WebTransport certificate hash, from
   `/api/servers`: several servers run at once, so `dist/digest.txt` (one server's at most) can't serve them all. The game
   page hands its URL to the client unchanged, and the client rejects any option it does not know (table below).
@@ -249,6 +249,7 @@ The game page's URL options (`play.html?a=1&b=2`):
 | `map=2d` / `30` | the map to load instead of asking the server's `/info` (it must be the server's; without `/info` the client can't check its pack against the server's) |
 | `side=squirrels` / `tediz` / `cavemen` | the side to play on: the squirrels (the SHC soldier), the Tediz (the Tedi) or the cavemen (the caveman), each with its own model; default: the server puts you on the side with fewer players (the squirrels on a tie; the Tediz against caveman bots, on 0x3F or with `--cavemen`). Deathmatch scoring stays per player |
 | `character=N` / name | the character to play (the select's pick: 0-21 or its name, e.g. `sergeant`, `neo-conker`; `../docs/STATUS.md`, "Characters: the client and the lobby"), where the server's map and mode have a select and allow it (its `--cheats` add picks); else the server gives the slot's default. The lobby's picker lists the allowed ones |
+| `name=PSEUDONYM` | the pseudonym over your head on the other players' screens (bots have none, so a tag tells a human from a bot). The server keeps ASCII letters, digits, spaces and `'.!?-`, at most 20, drawn in capitals; default `Player N`. The lobby fills it with two random words (its dice draws others) and keeps it in localStorage |
 | `team=T` | the team modes' team, asked for once the player is in (Heist 0-3: REDS, BLUES, GREENS, YELLOWS; else 0 or 1, the side's order); the server refuses a team with no room for another human. In the match, Tab (a gamepad's Select) opens the team screen: left / right switches team (respawning there), Q / E move the BALANCE (the first human's: bots to team 0 or team 1) |
 | `script` | drive the player with a test pattern instead of the keyboard |
 | `lag=MS` | add MS to every packet in both directions (a round trip takes 2·MS more), to test the netcode |

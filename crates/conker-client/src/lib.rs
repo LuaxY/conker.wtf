@@ -42,6 +42,7 @@ pub mod segments;
 pub mod settings;
 pub mod settings_ui;
 pub mod smooth;
+pub mod tags;
 pub mod tank;
 pub mod teams;
 pub mod traps;
@@ -201,6 +202,9 @@ pub struct Config {
     /// `character=N|NAME`: the menu pick to play (conker-rules' `characters::PICKS`, 0-21, or its
     /// name in [`PICKS`]), sent when joining; default none, the scenario's class.
     pub character: Option<u8>,
+    /// `name=PSEUDONYM`: the pseudonym over this player's head on the others' screens, sent when
+    /// joining (the server keeps what the HUD's font draws); default the server's `Player N`.
+    pub name: Option<String>,
     /// `map=2d|30|34|3f|2b`: the map (the pack's `maps/<map>/`); default the server's, from its `/info`
     /// ([`connection::info_url`]).
     pub map: String,
@@ -235,6 +239,7 @@ impl Config {
             log: None,
             side: None,
             character: None,
+            name: None,
             map: String::new(),
             team: None,
             keys: Vec::new(),
@@ -280,6 +285,7 @@ impl Config {
                 "team" => cfg.team = Some(value.parse().ok().filter(|t| *t < 4).ok_or_else(bad)?),
                 "keys" => cfg.keys = menu::parse_keys(&value).ok_or_else(bad)?,
                 "character" => cfg.character = Some(parse_pick(&value).ok_or_else(bad)?),
+                "name" => cfg.name = Some(value),
                 "side" => {
                     cfg.side = Some(match value.as_str() {
                         "squirrels" => Side::Squirrels,
@@ -979,6 +985,7 @@ pub fn run(
         }
         render::build(&mut app, slice, &cfg);
         crosshair::build(&mut app, hud.frame);
+        tags::build(&mut app, hud.clone());
         diag::build(&mut app);
         menu::build(&mut app, hud.clone(), !cfg.offscreen);
         hud::build(&mut app, hud, pickups.clone());

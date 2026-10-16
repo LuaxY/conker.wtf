@@ -1,8 +1,17 @@
 import { getRouteApi, Link } from "@tanstack/react-router";
-import { ArrowLeft, Crosshair } from "lucide-react";
+import { ArrowLeft, Crosshair, Dices } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { allowed, MAPS, MODES, PICKS, players, settingRows } from "./data";
+import {
+  allowed,
+  MAPS,
+  MODES,
+  PICKS,
+  players,
+  PSEUDONYM,
+  randomPseudonym,
+  settingRows,
+} from "./data";
 import { usePlayer } from "./store";
 import { Banner, PLATES, SIDES, StatusBadge, useRefresh } from "./ui";
 
@@ -12,7 +21,7 @@ const HEIST_TEAMS = ["Reds", "Blues", "Greens", "Yellows"];
 
 export function Lobby() {
   const server = route.useLoaderData();
-  const { side, transport, character, set } = usePlayer();
+  const { name, side, transport, character, set } = usePlayer();
   useRefresh();
   // The picks this server's map and mode allow with its cheats (none: no select); a pick not among
   // them is not asked for (the server would give the slot's default anyway).
@@ -30,6 +39,8 @@ export function Lobby() {
     "token-url": `/api/servers/${server.id}/token`,
   };
   if (server.digest) options.digest = server.digest;
+  // None: the game server's "Player N".
+  if (name.trim()) options.name = name.trim();
   if (pick !== null) options.character = String(pick);
   if (server.mode === "heist" && team) options.team = team;
   const play = `play.html?${new URLSearchParams(options)}`;
@@ -79,7 +90,32 @@ export function Lobby() {
           <h2 id="you" className="chrome font-display text-4xl [--c:#b070ff]">
             Who are you?
           </h2>
-          <fieldset className="mt-4">
+          <div className="mt-4 flex items-end gap-3">
+            <label className="grid min-w-0 flex-1 gap-1">
+              <span className="font-stencil text-sm tracking-wider text-dust uppercase">
+                Pseudonym
+              </span>
+              <input
+                name="pseudonym"
+                maxLength={PSEUDONYM.max}
+                autoComplete="off"
+                spellCheck={false}
+                value={name}
+                onChange={(e) => set({ name: e.target.value.replace(PSEUDONYM.drop, "") })}
+                className="field"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => set({ name: randomPseudonym(name) })}
+              aria-label="Another pseudonym"
+              title="Another pseudonym"
+              className="pill"
+            >
+              <Dices aria-hidden className="size-5" />
+            </button>
+          </div>
+          <fieldset className="mt-6">
             <legend className="font-stencil text-sm tracking-wider text-dust uppercase">
               Side
             </legend>

@@ -1553,7 +1553,11 @@ pub fn build(app: &mut App, hud: Hud, pickups: Vec<conker_assets::Pickup>) {
     );
     app.add_systems(
         Update,
-        (display_space, draw.after(crate::crosshair::update)),
+        (
+            display_space,
+            draw.after(crate::crosshair::update)
+                .after(crate::tags::update),
+        ),
     );
 }
 
@@ -2051,7 +2055,7 @@ fn draw(
     game: Query<&MatchView>,
     roster: Query<(&PlayerId, &Combat), Or<(With<Predicted>, With<Interpolated>)>>,
     menu: Res<crate::results::Menu>,
-    (playing, outros, blasts, fighting, view, heads, joints, course, crosshair): (
+    (playing, outros, blasts, fighting, view, heads, joints, course, crosshair, tags): (
         Res<crate::outro::Playing>,
         Res<crate::outro::Outros>,
         Option<Res<crate::beach::Blasts>>,
@@ -2061,6 +2065,7 @@ fn draw(
         Query<&GlobalTransform>,
         Option<Res<crate::race::Course>>,
         Option<Res<crate::crosshair::Quads>>,
+        Option<Res<crate::tags::Quads>>,
     ),
     timeline: Res<LocalTimeline>,
     (mut fading, mut escaped, mut ended, prompt, esc_menu, orbit): (
@@ -2248,6 +2253,7 @@ fn draw(
             }
             let mut quads = sprites(&a.hud, &shown);
             quads.extend(crosshair.iter().flat_map(|c| c.0.iter().cloned()));
+            quads.extend(tags.iter().flat_map(|t| t.0.iter().cloned()));
             quads
         }
     };
