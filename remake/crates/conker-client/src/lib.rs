@@ -19,6 +19,7 @@ pub mod bindings;
 pub mod connection;
 pub mod corpses;
 pub mod crosshair;
+pub mod diag;
 pub mod effects;
 pub mod faces;
 pub mod flags;
@@ -72,6 +73,22 @@ pub mod web {
                 .await
                 .map_err(why)?;
             Ok(js_sys::Uint8Array::new(&body).to_vec())
+        }
+    }
+
+    /// A loading step for the page's overlay (`play.js`'s `conkerLoading`): the bubble's words,
+    /// the line under it and the bar's fill (0-1; 1 hides the overlay).
+    pub fn loading(step: &str, detail: &str, progress: f32) {
+        let report = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &"conkerLoading".into()).ok())
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(report) = report {
+            let _ = report.call3(
+                &JsValue::NULL,
+                &step.into(),
+                &detail.into(),
+                &progress.into(),
+            );
         }
     }
 }
@@ -962,6 +979,7 @@ pub fn run(
         }
         render::build(&mut app, slice, &cfg);
         crosshair::build(&mut app, hud.frame);
+        diag::build(&mut app);
         menu::build(&mut app, hud.clone(), !cfg.offscreen);
         hud::build(&mut app, hud, pickups.clone());
     }

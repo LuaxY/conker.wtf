@@ -3,6 +3,31 @@
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `../GAPS.md` (the
 G6 audit, 2026-10-15).
 
+## From play: a loading overlay, the diagnostics panel
+
+No wire or rules change (protocol 47).
+- **The frozen map while joining** (C, V headless Chrome, the overlay's look only): `play.js` hid `#intro` once
+  `start()` returned, but Bevy still loaded the models, compiled the shaders, fetched the token, connected and waited
+  for the player, all over a frozen level. The overlay now stays up until the player is in. Its chocolate bar is a
+  real progress bar (12 pieces), the speech bubble names the step and a line under it says what is done: the game's
+  download (`play.js` counts a clone of the wasm's response, so the browser still caches the compiled module; MB only
+  when compressed), `/info`, the pack's files (`start()`), the models, the frames until calm, the token, the
+  handshake, the join (`connection::step`, sent by `report` through the page's `conkerLoading`). It fades on the
+  player's arrival, on a failure (the lost page and `#net` take over), or 20 s after connecting without the player;
+  a reconnect never brings it back. `ready`'s loaded count and calm frames moved into a `Load` resource (`load`).
+- **`#net`** shows a failure or a lost connection only (no more permanent `connected to ...`); the sound's "Press a
+  key or click for sound" line is gone: the click that captures the mouse opens the output.
+- **Diagnostics** (C): the key under Esc (`Action::Diagnostics`, Backquote, rebindable; ² on AZERTY, labelled
+  BACKQUOTE) toggles a panel top right (`diag.rs`; `#diag` in the page, over the overlay too), refreshed 4 times a
+  second: fps and frame times, the update's and the render's work a frame, memory (browser: the wasm heap and
+  Chrome's JS heap; natively sysinfo's process CPU and resident memory, Bevy's `sysinfo_plugin`, native only), the
+  connection, client id, tick and rollbacks, RTT, jitter and the interpolation delay, the map, players, entities, the
+  window and the GPU. No packet loss (lightyear's ping counters are private) and no bytes/s.
+- Not yet seen in a running game: the wasm isn't rebuilt (`bun run build:web`), so neither the real steps nor the
+  panel have been on screen. `lab/tools/landing-shots/shot.ts` now waits for the overlay to go, not for `#net`.
+- Tests: new `loading_steps_fill_the_bar_in_order_and_end`, `frames_read_as_rate_times_and_shares`; conker-client
+  236 pass; `bun run check` and the wasm32 clippy clean.
+
 ## From play: LEAVE MATCH in the browser, the body over the crosshair
 
 **Since (protocol 47):** the modern aim arm's shoulder is 40, not 20.

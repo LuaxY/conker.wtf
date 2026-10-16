@@ -83,6 +83,8 @@ fn main() {}
 #[cfg(target_family = "wasm")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start() -> Result<(), String> {
+    use conker_client::connection::{PACK, through};
+    use conker_client::web::loading;
     let location = web_sys::window().map(|w| w.location());
     let query = location.as_ref().and_then(|l| l.search().ok());
     let mut pairs = conker_client::query_pairs(&query.unwrap_or_default());
@@ -96,6 +98,8 @@ pub async fn start() -> Result<(), String> {
     // The server's map and pack first (its `/info`), unless `?map=` names one.
     let mut pack = None;
     if cfg.map.is_empty() {
+        let at = format!("which map {} plays", cfg.server);
+        loading("Asking the barman…", &at, PACK.0);
         let info = conker_client::connection::info_url(&cfg);
         let body = (conker_client::web::fetch(&info).await)
             .map_err(|e| format!("could not get the server's map from {e}"))?;
@@ -120,7 +124,14 @@ pub async fn start() -> Result<(), String> {
         .map(|f| conker_client::web::fetch(&format!("{root}/{f}")))
         .collect();
     let mut bytes = std::collections::HashMap::new();
-    for (file, request) in files.into_iter().zip(requests) {
+    let count = files.len();
+    for (n, (file, request)) in files.into_iter().zip(requests).enumerate() {
+        let done = format!("the asset pack: {n} / {count} files");
+        loading(
+            "Counting the chocolate…",
+            &done,
+            through(PACK, n as f32 / count as f32),
+        );
         bytes.insert(file, request.await?);
     }
     if let Some(server) = pack {
@@ -140,6 +151,7 @@ pub async fn start() -> Result<(), String> {
     // The sound's two data files, if the pack has sound (its WAVs load later, through Bevy).
     let sound = match sound {
         true => {
+            loading("Counting the chocolate…", "the sound bank", PACK.1);
             let files = Audio::files();
             let requests = files.map(|f| conker_client::web::fetch(&format!("{root}/{f}")));
             let mut bytes = std::collections::HashMap::new();

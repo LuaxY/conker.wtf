@@ -29,8 +29,9 @@ serde_json.workspace = true
 serde.workspace = true
 
 # The HUD: Bevy text natively; the page's own `#hud` element in the browser (1.5 MB gzip less wasm).
+# sysinfo: the diagnostics panel's process CPU and memory (`diag`; the browser has no such figures).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-bevy = { workspace = true, features = ["bevy_ui", "bevy_ui_render", "bevy_text", "default_font"] }
+bevy = { workspace = true, features = ["bevy_ui", "bevy_ui_render", "bevy_text", "default_font", "sysinfo_plugin"] }
 # `ca=` (dev/test): a WebTransport link checked against a CA; the exact versions lightyear 0.30.1 uses.
 aeronet_webtransport = "=0.21.0"
 lightyear_aeronet = "=0.30.1"

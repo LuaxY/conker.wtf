@@ -38,10 +38,11 @@ pub enum Action {
     Mute,
     TextHud,
     DebugCamera,
+    Diagnostics,
 }
 
 impl Action {
-    pub const ALL: [Action; 20] = {
+    pub const ALL: [Action; 21] = {
         use Action::*;
         [
             MoveForward,
@@ -64,6 +65,7 @@ impl Action {
             Mute,
             TextHud,
             DebugCamera,
+            Diagnostics,
         ]
     };
 
@@ -153,7 +155,8 @@ impl Slots {
 pub struct Bindings(pub [Slots; Action::ALL.len()]);
 
 impl Default for Bindings {
-    /// §7's tables (Crouch on C, Walk on Left Shift; the debug camera on F8).
+    /// §7's tables (Crouch on C, Walk on Left Shift; the debug camera on F8, the diagnostics on the
+    /// key under Esc, whatever it types).
     fn default() -> Self {
         use Action::*;
         use GamepadButton as P;
@@ -185,6 +188,7 @@ impl Default for Bindings {
                 Mute => (Bind::Key(K::KeyM), None, None),
                 TextHud => (Bind::Key(K::KeyH), None, None),
                 DebugCamera => (Bind::Key(K::F8), None, None),
+                Diagnostics => (Bind::Key(K::Backquote), None, None),
             };
             Slots {
                 keys: [Some(k), alt],
@@ -561,6 +565,7 @@ mod tests {
             (KeyM, 0),
             (Tab, 0),
             (F8, 0),
+            (Backquote, 0),
         ] {
             assert_eq!(bits(&[key], &[], 0.0), bit, "{key:?}");
         }

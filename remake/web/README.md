@@ -67,7 +67,7 @@ falls back to CSS or a lucide icon (`Sprite` in `app/src/ui.tsx`): a paper "Them
 squirrel and a panda, plain plates.
 
 **The game page** (`play.html`) wears the same look with no build step and no web font of its own (it falls back to
-system fonts): an iris opens on the title, a chocolate bar fills while the pack loads, and the status line is a speech
+system fonts): an iris opens on the title, the chocolate bar is the loading bar, and the status line is a speech
 bubble ("Waking up the Tediz", "Counting the chocolate", "Bugger. Could not start: ..."). Its element ids, its options
 and how it starts the client are unchanged.
 
@@ -202,7 +202,7 @@ python3 -m http.server 8080 --bind :: --directory web   # or this: serve web/, n
 ```
 
 Open <http://localhost:8080/> for the landing (Join game, then Create server or a server's Lobby) or
-<http://localhost:8080/play.html> for the game page, which starts by itself, with a status line while the pack loads. The client
+<http://localhost:8080/play.html> for the game page, which starts by itself, under a loading overlay. The client
 first asks the game server which map it plays: `GET /info` next to the token endpoint below (`http://localhost:5889/info`,
 `{"map":"2d","protocol":11}`; the server's `--map 2d|30|34|3f`, default `2d`; a client of another protocol stops there and says
 to reload). Then it fetches that map's and the pack's 13 data files from `assets/` (all at once), then the sound's two (`audio/sounds.json`,
@@ -220,9 +220,14 @@ is used as it is. The file is stale once the server exits, so delete it then. Fo
 background tab runs a frame a second at most (Chrome: one a minute after 5 min hidden), and the server stands its
 player meanwhile; past the 5 min netcode timeout it drops it, and the page offers RECONNECT (I).
 
-The line at the bottom left is the connection's status (also logged as `connection: ...`): `loading the level`,
-`connecting to HOST:PORT over WebTransport…`, `connected to ...`, `could not connect to ...: REASON. HINT` or
-`disconnected from ...: REASON`. The HUD stays off until the player is in the match; once the connection is gone or
+The loading overlay (`#intro`) stays up until the player is in the match. Its chocolate bar fills with each step: the
+game's download (`play.js` counts `dist/client_bg.wasm`'s bytes; MB only when it comes compressed), `/info`, the pack's
+data files, Bevy's models, the frames until calm (the shaders compile), the token, the handshake and the join. The
+speech bubble names the step and the line under it says what is done (`the asset pack: 12 / 17 files`, `connecting to
+HOST:PORT over WebTransport…`): `start()` and `connection::report` call the page's `conkerLoading`. It fades once the
+player is in, on a failure (the page over the level takes over), or 20 s after the connection without the player.
+The line at the bottom left (`#net`) shows only a failure or a lost connection (every status is logged as `connection:
+...`): `could not connect to ...: REASON. HINT` or `disconnected from ...: REASON`. Once the connection is gone or
 failed, a page over the level says why and offers RECONNECT (a fresh token, as a new player; it tries again for 5 min 5 s,
 as the server may still hold the old slot) or QUIT (the landing page, as the Esc menu's LEAVE MATCH and the results'
 QUIT). The page connects once the level and the character have loaded and ten frames in a row took under 0.25 s, so
@@ -290,7 +295,9 @@ The twist, the scope's look and the strafe with the stick held are wave 4's: the
 buttons the table already had. The mouse moves the stick only while R is held (2 stick units per pixel the mouse moves
 in a frame), so a keyboard player can aim finer than the keys' full stick.
 
-F8 toggles the free debug camera (its own keys fly it). M mutes and unmutes the sound. Ctrl is not used: browsers keep
+F8 toggles the free debug camera (its own keys fly it). The key under Esc (` on QWERTY, ² on AZERTY) toggles a
+diagnostics panel, top right (`diag.rs`): frame rate and times, the update's and the render's work, memory (the wasm
+and JS heaps; natively the process's CPU and memory), the connection (RTT, jitter, rollbacks), the match and the GPU. M mutes and unmutes the sound. Ctrl is not used: browsers keep
 Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and opens the Esc
 menu (RESUME, SETTINGS with rebinding, LEAVE MATCH; the gamepad's Menu opens it too): the player stands, the camera
 keeps its yaw, until RESUME (a click or Enter takes the lock again; the gamepad's resumes without it). LEAVE MATCH
@@ -320,8 +327,8 @@ sound from the pack's `audio/`: footsteps by floor, the characters' voices and c
 cases, hits, blasts, the grenade's hiss, flight, landings and fuse), pickups, the map's two bubbling spots and the
 background noise (`audio/maps/2d/background.wav`, a recording of the game's own output, looped for the whole match).
 Positional sounds fade linearly from `near` to `far` around your player and pan with the follow camera; your own play
-centred. Browsers start audio only after a user gesture, so the page says "Press a key or click for sound" (top
-right) until the first key press or click on the game, which opens the output; the WAVs (13 MB, 7.5 MB of it the
+centred. Browsers start audio only after a user gesture: the first key press or click on the game (the click that
+captures the mouse) opens the output; the WAVs (13 MB, 7.5 MB of it the
 background) then load in the background, and each sound plays once its file is in. M mutes ("Sound muted (M)").
 `log=conker_client::audio=debug` adds a `SOUND t=TICK read=READ id=ID p=OWNER vol=V gain=G pan=P` line per sound
 started (and `HIT` lines: the weapon a hit was put down to). A pack without `audio` in `pack.json` plays silent.

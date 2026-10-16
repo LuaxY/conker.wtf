@@ -5,8 +5,9 @@
 //!   netcode timeout. Headless clients have no assets, so they connect after the calm frames.
 //! - **Status** ([`NetStatus`]): loading, connecting (the token fetch, then the handshake),
 //!   connected, failed or disconnected, with the reason and what to do (the page's words in the
-//!   browser, the command line's natively); logged on every change, and shown in the page's `#net`
-//!   line or the native HUD.
+//!   browser, the command line's natively); logged on every change, and shown in the native HUD.
+//!   In the browser the page's loading overlay shows each step until the player is in ([`step`]),
+//!   and the `#net` line a failure or a lost connection only.
 //! - **Input** starts with the follow camera (the client synced, its player arrived): no input goes
 //!   out before, `predict` steps nothing before (it reads the input), and the server holds the
 //!   player as it joined until that first input, so both start on the same tick from the same state.
@@ -66,6 +67,29 @@ const RETRY_EVERY: f64 = 2.0;
 /// Frames in a row, each shorter than [`CALM_SECS`], before connecting.
 pub const CALM: u32 = 10;
 pub const CALM_SECS: f32 = 0.25;
+/// The browser's loading bar, in order (`play.js` fills it to 0.28 with the game's download):
+/// `start`'s fetches (`/info`, the pack's data files), Bevy's models, the frames until calm (the
+/// shaders compile on the first draws), then the token, the handshake and the join ([`step`]).
+pub const PACK: (f32, f32) = (0.3, 0.55);
+pub const MODELS: (f32, f32) = (0.55, 0.8);
+pub const WARM: (f32, f32) = (0.8, 0.88);
+/// Seconds the loading overlay waits for the player after the connection, then gives up on it.
+#[cfg(any(target_family = "wasm", test))]
+const JOIN_SECS: f64 = 20.0;
+
+/// `f` (0-1) of the way through a part of the loading bar.
+pub fn through((from, to): (f32, f32), f: f32) -> f32 {
+    from + (to - from) * f.clamp(0.0, 1.0)
+}
+
+/// How far the (windowed) load is: the level and the map's characters loaded, of how many, and the
+/// frames in a row since all were and calm ([`load`]).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Load {
+    pub loaded: usize,
+    pub of: usize,
+    pub calm: u32,
+}
 
 /// Where the connection stands, with the reason of a failure or a disconnection.
 #[derive(Resource, Clone, Debug, PartialEq)]
@@ -221,11 +245,13 @@ fn tidy(error: &str) -> String {
 /// The connection's systems and observers (see the module docs).
 pub fn build(app: &mut App) {
     app.insert_resource(NetStatus::Loading);
-    app.init_resource::<Reconnect>();
+    app.init_resource::<Reconnect>().init_resource::<Load>();
     app.add_systems(
         Update,
-        (retry, connect.run_if(ready), watchdog, show).chain(),
+        (retry, load, connect.run_if(ready), watchdog, show).chain(),
     );
+    #[cfg(target_family = "wasm")]
+    app.add_systems(Update, report.after(show));
     leaving(app);
     app.add_systems(
         PostUpdate,
@@ -253,36 +279,122 @@ pub fn build(app: &mut App) {
         .add_observer(on_player_left);
 }
 
-/// Not connected yet, (windowed) the level and the characters loaded, and the frames since calm;
-/// or the token on its way ([`connect`] polls it).
-fn ready(
-    status: Res<NetStatus>,
+/// [`Load`]: the level and the map's own characters (`render`'s assets; windowed clients connect
+/// once they loaded, the picks' load after, `render::load_characters`), and the calm frames since.
+/// Headless clients have no assets to wait for.
+fn load(
     assets: Option<Res<AssetServer>>,
     time: Res<Time<Real>>,
-    mut calm: Local<u32>,
     cfg: Res<Config>,
-    clients: Query<(), With<Client>>,
-) -> bool {
-    // The level and the map's own characters (`render`'s assets): windowed clients connect once
-    // they loaded (the picks' load after, `render::load_characters`).
-    let loaded = assets.is_none_or(|a| {
+    mut load: ResMut<Load>,
+) {
+    let (mut loaded, mut of) = (0, 0);
+    if let Some(a) = assets {
         let characters = crate::map_characters(&cfg.map).into_iter();
-        std::iter::once(crate::render::level_scene(&cfg.map))
+        for path in std::iter::once(crate::render::level_scene(&cfg.map))
             .chain(characters.map(conker_assets::character_gltf))
-            .all(|path| {
-                a.get_handle_untyped(&path)
-                    .is_some_and(|h| a.is_loaded_with_dependencies(&h))
-            })
-    });
-    *calm = if loaded && time.delta_secs() < CALM_SECS {
-        *calm + 1
-    } else {
-        0
+        {
+            of += 1;
+            loaded += a
+                .get_handle_untyped(&path)
+                .is_some_and(|h| a.is_loaded_with_dependencies(&h)) as usize;
+        }
+    }
+    let calm = match loaded == of && time.delta_secs() < CALM_SECS {
+        true => load.calm + 1,
+        false => 0,
     };
+    load.set_if_neq(Load { loaded, of, calm });
+}
+
+/// Not connected yet, (windowed) the level and the characters loaded, and the frames since calm;
+/// or the token on its way ([`connect`] polls it).
+fn ready(status: Res<NetStatus>, load: Res<Load>, clients: Query<(), With<Client>>) -> bool {
     match *status {
-        NetStatus::Loading => *calm >= CALM,
+        NetStatus::Loading => load.calm >= CALM,
         NetStatus::Connecting(_) => clients.is_empty(),
         _ => false,
+    }
+}
+
+/// The loading overlay's step: the bubble's words, the line under it and the bar's fill; 1 once
+/// the player is in (`playing`), or when a failure leaves the connection to the menu's page, or
+/// [`JOIN_SECS`] after the connection (`joined`: since then) without the player. `linking`: the
+/// client spawned (the token is in, the handshake under way).
+#[cfg(any(target_family = "wasm", test))]
+fn step(
+    status: &NetStatus,
+    load: Load,
+    cfg: &Config,
+    linking: bool,
+    playing: bool,
+    joined: f64,
+) -> (String, String, f32) {
+    let step = |a: &str, b: String, f| (a.to_string(), b, f);
+    match status {
+        _ if playing || joined > JOIN_SECS => step("", String::new(), 1.0),
+        NetStatus::Failed(_) | NetStatus::Disconnected(_) => step("", String::new(), 1.0),
+        NetStatus::Loading if load.loaded < load.of => step(
+            "Building the level…",
+            format!(
+                "the level and its characters: {} / {} models",
+                load.loaded, load.of
+            ),
+            through(MODELS, load.loaded as f32 / load.of as f32),
+        ),
+        NetStatus::Loading => step(
+            "Polishing the guns…",
+            "compiling the shaders".into(),
+            through(WARM, load.calm as f32 / CALM as f32),
+        ),
+        NetStatus::Connecting(_) if !linking => step(
+            "Getting a ticket…",
+            format!("a connect token from {}", cfg.server),
+            0.9,
+        ),
+        NetStatus::Connecting(_) => step("Knocking on the door…", status.text(cfg).0, 0.94),
+        NetStatus::Connected => step(
+            "Joining the match…",
+            format!(
+                "{}: waiting for the server to drop you in",
+                status.text(cfg).0
+            ),
+            0.97,
+        ),
+    }
+}
+
+/// Sends each new [`step`] to the page's loading overlay (`play.js`), until it is over (the
+/// overlay gone, a reconnect's statuses never bring it back).
+#[cfg(target_family = "wasm")]
+#[allow(clippy::too_many_arguments)]
+fn report(
+    status: Res<NetStatus>,
+    load: Res<Load>,
+    cfg: Res<Config>,
+    clients: Query<(), With<Client>>,
+    playing: Query<(), With<FollowCamera>>,
+    time: Res<Time<Real>>,
+    mut connected: Local<Option<f64>>,
+    mut last: Local<(String, String, f32)>,
+) {
+    if last.2 >= 1.0 {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    *connected = (*status == NetStatus::Connected).then(|| connected.unwrap_or(now));
+    let joined = connected.map_or(0.0, |t| now - t);
+    let next = step(
+        &status,
+        *load,
+        &cfg,
+        !clients.is_empty(),
+        !playing.is_empty(),
+        joined,
+    );
+    if *last != next {
+        crate::web::loading(&next.0, &next.1, next.2);
+        *last = next;
     }
 }
 
@@ -832,7 +944,7 @@ fn watchdog(
     }
 }
 
-/// Logs each new status; in the browser, writes it into the page's `#net` element.
+/// Logs each new status; in the browser, writes a problem into the page's `#net` element.
 fn show(status: Res<NetStatus>, cfg: Res<Config>) {
     if !status.is_changed() {
         return;
@@ -843,13 +955,13 @@ fn show(status: Res<NetStatus>, cfg: Res<Config>) {
     } else {
         info!("connection: {text}");
     }
+    // The loading overlay has the rest ([`step`]).
     #[cfg(target_family = "wasm")]
     if let Some(el) = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("net"))
     {
-        el.set_text_content(Some(&text));
-        el.set_class_name(if problem { "error" } else { "" });
+        el.set_text_content(Some(if problem { &text } else { "" }));
     }
 }
 
@@ -974,6 +1086,44 @@ mod tests {
         let (t, problem) = text(NetStatus::Disconnected("left".into()), &cfg);
         assert!(problem && t.ends_with("[::1]:5888: left"), "{t}");
         assert!(t.is_ascii(), "{t}");
+    }
+
+    /// The loading overlay's steps fill the bar in order, after `start`'s fetches, and go once the
+    /// player is in, on a failure, or when the player never comes.
+    #[test]
+    fn loading_steps_fill_the_bar_in_order_and_end() {
+        let cfg = Config::from_pairs([("server".to_string(), "h:1".to_string())]).unwrap();
+        let load = |loaded, calm| Load {
+            loaded,
+            of: 4,
+            calm,
+        };
+        let connecting = NetStatus::Connecting(0.0);
+        let steps = [
+            step(&NetStatus::Loading, load(0, 0), &cfg, false, false, 0.0),
+            step(&NetStatus::Loading, load(3, 0), &cfg, false, false, 0.0),
+            step(&NetStatus::Loading, load(4, 5), &cfg, false, false, 0.0),
+            step(&connecting, load(4, 9), &cfg, false, false, 0.0),
+            step(&connecting, load(4, 9), &cfg, true, false, 0.0),
+            step(&NetStatus::Connected, load(4, 9), &cfg, true, false, 1.0),
+        ];
+        assert_eq!(steps[0].2, PACK.1);
+        assert!(
+            steps.windows(2).all(|w| w[0].2 < w[1].2 && w[1].2 < 1.0),
+            "{steps:?}"
+        );
+        assert_eq!(steps[1].1, "the level and its characters: 3 / 4 models");
+        assert!(
+            steps[4].1.starts_with("connecting to h:1 over"),
+            "{}",
+            steps[4].1
+        );
+        let end =
+            |s: &NetStatus, playing, joined| step(s, load(4, 9), &cfg, true, playing, joined).2;
+        assert_eq!(end(&NetStatus::Connected, true, 1.0), 1.0);
+        assert_eq!(end(&NetStatus::Connected, false, JOIN_SECS + 1.0), 1.0);
+        assert_eq!(end(&NetStatus::Failed("x".into()), false, 0.0), 1.0);
+        assert_eq!(end(&NetStatus::Disconnected("x".into()), false, 0.0), 1.0);
     }
 
     /// The native fetch gives up on a server that takes the connection and never answers, and

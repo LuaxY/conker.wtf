@@ -136,10 +136,6 @@ const ROCKETS: u8 = 0x16;
 const SHOTS: u8 = 0x14;
 /// The crossbow, whose shots are bolts.
 const BOLTS: u8 = 0x18;
-/// The browser's hint until the first key press or click.
-#[cfg(target_family = "wasm")]
-const HINT: &str = "Press a key or click for sound";
-
 /// Whether a pack has sound: `pack.json`'s `audio` list is not empty.
 pub fn has_sound(manifest: &[u8]) -> bool {
     serde_json::from_slice::<Manifest>(manifest).is_ok_and(|m| !m.audio.is_empty())
@@ -269,8 +265,6 @@ pub fn build(
             Update,
             (open.run_if(not(resource_exists::<Output>)), mute, running),
         );
-        #[cfg(target_family = "wasm")]
-        note(HINT);
     }
 }
 
@@ -2834,7 +2828,8 @@ impl Output {
 }
 
 /// Opens the sound device and loads every sound: natively at once; in the browser on the first key
-/// press or click (Chrome lets an AudioContext made after a user gesture run), clearing the hint.
+/// press or click (Chrome lets an AudioContext made after a user gesture run: the click that
+/// captures the mouse).
 fn open(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -2850,8 +2845,6 @@ fn open(
         return;
     }
     *tried = true;
-    #[cfg(target_family = "wasm")]
-    note("");
     let device = rodio::DeviceSinkBuilder::from_default_device()
         .map(|b| b.with_error_callback(|e| warn!("sound: {e}")))
         .and_then(|b| b.open_stream());

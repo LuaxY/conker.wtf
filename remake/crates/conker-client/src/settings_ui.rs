@@ -79,7 +79,7 @@ pub const GROUPS: [(&str, &[Action]); 4] = {
             ],
         ),
         ("CAMERA", &[ShoulderSwap, DebugCamera]),
-        ("UI", &[Scoreboard, Mute, TextHud]),
+        ("UI", &[Scoreboard, Mute, TextHud, Diagnostics]),
     ]
 };
 
@@ -480,10 +480,11 @@ pub fn action_label(a: Action) -> String {
 }
 
 /// A key as its player knows it: what it types on their layout (the AZERTY cache, letters and
-/// digits), else its physical name shortened (L SHIFT, UP, NUM 1).
+/// digits; not AZERTY's ², which the HUD font lacks), else its physical name shortened (L SHIFT,
+/// UP, NUM 1).
 pub fn key_label(k: KeyCode, labels: Option<&KeyLabels>) -> String {
     if let Some(Key::Character(c)) = labels.and_then(|l| l.0.get(&k))
-        && c.chars().all(char::is_alphanumeric)
+        && c.chars().all(|c| c.is_alphabetic() || c.is_ascii_digit())
     {
         return c.to_uppercase();
     }
@@ -797,6 +798,8 @@ mod tests {
         l.0.insert(KeyCode::KeyM, Key::Character(",".into()));
         assert_eq!(key_label(KeyCode::KeyW, Some(&l)), "Z");
         assert_eq!(key_label(KeyCode::KeyM, Some(&l)), "M");
+        l.0.insert(KeyCode::Backquote, Key::Character("²".into()));
+        assert_eq!(key_label(KeyCode::Backquote, Some(&l)), "BACKQUOTE");
         for (k, label) in [
             (KeyCode::ShiftLeft, "L SHIFT"),
             (KeyCode::ControlRight, "R CTRL"),
