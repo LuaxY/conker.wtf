@@ -1,7 +1,8 @@
 //! Each other human's pseudonym over its head ([`Pseudonym`]: bots have none, so a tag tells a
 //! human from a bot), as quads for the HUD's renderer ([`Quads`], which [`crate::hud`] draws with
-//! its own): the HUD's font at half size, white on its shadow. None while the player is dead or out
-//! of lives, nor behind a wall (a tag through one would show where the player hides).
+//! its own): the HUD's font at half size up close, shrinking with the distance as the bodies do,
+//! white on its shadow. None far off, while the player is dead or out of lives, nor behind a wall
+//! (a tag through one would show where the player hides).
 
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::prelude::*;
@@ -21,8 +22,11 @@ pub struct Quads(pub Vec<Sprite>);
 #[derive(Resource)]
 pub struct Font(Hud);
 
-/// The tags' size against the HUD's own text.
+/// The tags' size against the HUD's own text, up to [`NEAR`] from the eye (game units); further,
+/// smaller by `NEAR / distance` (as the bodies shrink), and none past [`FAR`].
 const SCALE: f32 = 0.5;
+const NEAR: f32 = 400.0;
+const FAR: f32 = 1600.0;
 /// Game units from the top of the head (the hitbox's) to the tag's bottom.
 const ABOVE: f32 = 12.0;
 /// Under the rest of the HUD (its shadow 0.5 lower).
@@ -63,7 +67,7 @@ pub fn update(
         let feet = crate::render::stands(Vec3::from(p.pos), p.sink);
         let top = feet + Vec3::Y * (head.centre + head.half + ABOVE);
         let (to, len) = ((top - eye).normalize_or_zero(), eye.distance(top));
-        if raycast(&world.0, eye.to_array(), to.to_array(), len) < len {
+        if len > FAR || raycast(&world.0, eye.to_array(), to.to_array(), len) < len {
             continue;
         }
         let Ok(at) = camera.world_to_viewport(&GlobalTransform::from(*transform), top) else {
@@ -72,15 +76,11 @@ pub fn update(
         // Laid out at the origin, then scaled and moved to the point (its bottom there) in
         // fractional frame pixels: `Text::at`'s whole ones would step as the player moves.
         let [x, y] = frame_point(hud.frame, window, at);
+        let k = SCALE * (NEAR / len).min(1.0);
         let glyphs = text(hud, &name.0.to_uppercase(), None, &style, Z);
         quads.0.extend(glyphs.into_iter().map(|mut s| {
             let [rx, ry, w, h] = s.rect;
-            s.rect = [
-                x + rx * SCALE,
-                y + (ry - line) * SCALE,
-                w * SCALE,
-                h * SCALE,
-            ];
+            s.rect = [x + rx * k, y + (ry - line) * k, w * k, h * k];
             s
         }));
     }

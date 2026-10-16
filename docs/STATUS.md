@@ -15,10 +15,10 @@ Protocol 48: `Join::name` and a replicated `Pseudonym` on each human's player en
   human taking a bot's slot spawns its own (with the name), a leaver's bot is a new one (without); reseats and Total
   War's takeovers keep the human's entity. Test `a_pseudonym_keeps_what_the_font_draws`.
 - **The client** (`tags.rs`, like `crosshair.rs`): every other human's name in capitals over its hitbox's top, the
-  HUD font at half size, white on its shadow, in fractional frame pixels (no stepping), under the rest of the HUD.
+  HUD font at half size up to 400 units from the eye, smaller by 400 / distance further (as the bodies shrink),
+  none past 1600; white on its shadow, in fractional frame pixels (no stepping), under the rest of the HUD.
   Not while dead or out of lives, not outside play (phase 0), and not behind a wall (one `raycast` from the eye per
   human a frame: a tag through a wall would give the player away). `name=` on the client (`Config::name`).
-- Not in a running game yet (no build was asked for): the tags' height and size want a look.
 - Left: the names on the STATS rows and the team screen; team-coloured tags.
 
 ## From play: a loading overlay, the diagnostics panel
