@@ -78,6 +78,13 @@ fn main() {
 #[cfg(target_family = "wasm")]
 fn main() {}
 
+/// One push-to-talk packet from the page's `voice.js` (Opus, 20 ms), sent with the next frame.
+#[cfg(target_family = "wasm")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn voice_frame(packet: Vec<u8>) {
+    conker_client::voice::push(packet);
+}
+
 /// Fetches the asset pack's data files and starts the client. Errors (a missing or malformed file,
 /// a bad URL option) come back to the page as a rejected string; nothing has started then.
 #[cfg(target_family = "wasm")]

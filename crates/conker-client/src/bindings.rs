@@ -35,6 +35,7 @@ pub enum Action {
     ShoulderSwap,
     Walk,
     Scoreboard,
+    PushToTalk,
     Mute,
     TextHud,
     DebugCamera,
@@ -42,7 +43,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 21] = {
+    pub const ALL: [Action; 22] = {
         use Action::*;
         [
             MoveForward,
@@ -62,6 +63,7 @@ impl Action {
             ShoulderSwap,
             Walk,
             Scoreboard,
+            PushToTalk,
             Mute,
             TextHud,
             DebugCamera,
@@ -179,12 +181,13 @@ impl Default for Bindings {
                 Holster => (Bind::Key(K::KeyQ), None, Some(P::North)),
                 Grenade => (Bind::Key(K::KeyG), None, Some(P::LeftTrigger)),
                 ShoulderSwap => (
-                    Bind::Key(K::KeyV),
+                    Bind::Key(K::KeyX),
                     Some(Bind::Mouse(MouseButton::Middle)),
                     Some(P::RightTrigger),
                 ),
                 Walk => (Bind::Key(K::ShiftLeft), None, Some(P::LeftThumb)),
                 Scoreboard => (Bind::Key(K::Tab), None, Some(P::Select)),
+                PushToTalk => (Bind::Key(K::KeyV), None, None),
                 Mute => (Bind::Key(K::KeyM), None, None),
                 TextHud => (Bind::Key(K::KeyH), None, None),
                 DebugCamera => (Bind::Key(K::F8), None, None),
@@ -562,6 +565,7 @@ mod tests {
             (KeyF, 0),
             (KeyE, 0),
             (KeyV, 0),
+            (KeyX, 0),
             (KeyM, 0),
             (Tab, 0),
             (F8, 0),

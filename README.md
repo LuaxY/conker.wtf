@@ -106,7 +106,8 @@ included) and leave.
 | Fire | Left click, F or Shift | RT, LT or LB |
 | Aim / scope | Right click or R | RB |
 | Grenade (hold to cook) | G | Right stick ↓ |
-| Mute | M | |
+| Push-to-talk | Hold V | |
+| Mute (sound and voices) | M | |
 
 For one game server and the native client without the website: `bun run server -- --bots 3` and
 `bun run client -- --side tediz`.

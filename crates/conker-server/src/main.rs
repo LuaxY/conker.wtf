@@ -178,9 +178,10 @@ use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
-    BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Join, MatchView,
-    PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, Pseudonym, RESULTS, RaceView, RacerView,
-    RaptorView, Restart, Saw, TankView, Teams, map_scene, pack_hash, scene_world,
+    BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Heard, Join,
+    MatchView, PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, Pseudonym, RESULTS, RaceView,
+    RacerView, RaptorView, Restart, Saw, TankView, Teams, VOICE_BYTES, Voice, VoiceChannel,
+    map_scene, pack_hash, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -757,7 +758,13 @@ fn main() {
     // Every frame (lightyear drops messages a frame leaves unread), before its fixed ticks.
     app.add_systems(
         RunFixedMainLoop,
-        (join, collect_saws, restart_votes, team_requests)
+        (
+            join,
+            collect_saws,
+            restart_votes,
+            team_requests,
+            relay_voice,
+        )
             .chain()
             .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
     );
@@ -1147,6 +1154,13 @@ impl Game {
     /// The mode's team row ([`team_row`]; `None` free for all).
     fn row(&self) -> Option<TeamRow> {
         team_row(&self.setup.settings)
+    }
+
+    /// Whether the player in slot `listener` hears the one in `speaker` talk (push-to-talk): free
+    /// for all, everyone does; the team modes, its team-mates.
+    fn hears(&self, speaker: usize, listener: usize) -> bool {
+        let team = |i: usize| self.m.players.get(i).map(|f| f.team);
+        self.row().is_none() || team(speaker) == team(listener)
     }
 
     /// Team `t`'s side: Heist's four the squirrels' (the Wise Guys); Raptor's 0 the cavemen, 1 the
@@ -1642,7 +1656,9 @@ fn on_connected(
     mut commands: Commands,
 ) {
     if let Ok(remote) = clients.get(trigger.entity) {
-        commands.entity(trigger.entity).insert(Saws::default());
+        commands
+            .entity(trigger.entity)
+            .insert((Saws::default(), Talk::default()));
         info!(
             "client {:?} passed the handshake; it joins with its side",
             remote.0
@@ -1941,6 +1957,59 @@ fn restart_votes(
         if let Some(slot) = slot.filter(|_| voted && shown) {
             game.votes.insert(slot);
             info!("slot {slot} votes to restart");
+        }
+    }
+}
+
+/// The [`Voice`] packets a client may send a second: 50 at 20 ms each, with room for a burst after
+/// a stall.
+const VOICE_RATE: u32 = 75;
+
+/// A client's push-to-talk this second: the second, and the packets it sent in it.
+#[derive(Component, Default)]
+struct Talk {
+    second: u64,
+    sent: u32,
+}
+
+/// Push-to-talk: each client's [`Voice`] packets go to the clients whose players hear its own
+/// ([`Game::hears`]) with its slot ([`Heard`]). None from a client with no player yet, none over
+/// [`VOICE_BYTES`], none past [`VOICE_RATE`] a second.
+fn relay_voice(
+    mut clients: Query<(Entity, &mut MessageReceiver<Voice>, &mut Talk), With<ClientOf>>,
+    players: Query<(&Slot, &ControlledBy)>,
+    time: Res<Time<Real>>,
+    game: Res<Game>,
+    mut sender: ServerMultiMessageSender,
+) {
+    let second = time.elapsed().as_secs();
+    for (client, mut voice, mut talk) in &mut clients {
+        let packets: Vec<Voice> = voice.receive().collect();
+        let Some(speaker) = (players.iter())
+            .find(|p| p.1.owner == client)
+            .map(|p| p.0.index)
+        else {
+            continue;
+        };
+        let listeners: BTreeSet<Entity> = (players.iter())
+            .filter(|(slot, by)| by.owner != client && game.hears(speaker, slot.index))
+            .map(|(_, by)| by.owner)
+            .collect();
+        for Voice(packet) in packets {
+            if talk.second != second {
+                *talk = Talk { second, sent: 0 };
+            }
+            talk.sent += 1;
+            if packet.len() > VOICE_BYTES || talk.sent > VOICE_RATE || listeners.is_empty() {
+                continue;
+            }
+            let heard = Heard {
+                slot: speaker as u16,
+                packet,
+            };
+            if let Err(e) = sender.send_to_entities::<Heard, VoiceChannel>(&heard, &listeners) {
+                warn!("voice from slot {speaker}: {e}");
+            }
         }
     }
 }
@@ -3324,6 +3393,27 @@ mod tests {
             fill(&mut g);
             let got: Vec<u8> = g.m.players.iter().map(|f| f.team).collect();
             assert_eq!(got, teams);
+        }
+    }
+
+    /// Push-to-talk reaches everyone free for all, the speaker's team-mates in the team modes.
+    #[test]
+    fn voices_reach_everyone_or_the_team() {
+        for (total_war, heard) in [(false, [true, true]), (true, [true, false])] {
+            let mut g = game(Setup {
+                settings: Settings {
+                    total_war,
+                    ..Settings::default()
+                },
+                bots: 3,
+                ..Setup::default()
+            });
+            fill(&mut g);
+            assert_eq!(
+                [g.hears(0, 1), g.hears(0, 2)],
+                heard,
+                "total war {total_war}"
+            );
         }
     }
 

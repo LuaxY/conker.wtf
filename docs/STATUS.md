@@ -1,7 +1,34 @@
-# Status (newest first; latest 2026-10-17, protocol 48)
+# Status (newest first; latest 2026-10-17, protocol 49)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Push-to-talk: voice over the game's own connection (2026-10-17)
+
+Protocol 49: `Voice` (a client's Opus packet) and `Heard` (the server's relay: the speaker's slot and the packet) on
+`VoiceChannel` (unreliable, unordered). No new service: the voice rides lightyear's WebTransport (or WebSocket).
+- **The keys** (`bindings.rs`): PUSH TO TALK on V (rebindable, in the settings' UI group; no pad default); SHOULDER
+  SWAP moved from V to X (middle mouse still its alternate). T stays free for a text chat. Only bindings that differ
+  from the defaults are stored, so the move reaches everyone who never rebound the swap.
+- **The page** (`web/voice.js`, from `play.js`): the first V asks for the microphone (echo cancellation, noise
+  suppression, auto gain); an AudioWorklet buffers it, WebCodecs' `AudioEncoder` makes mono Opus at 24 kbps in 20 ms
+  packets while V is held, each to the client's `voice_frame` export. Each speaker gets its own `AudioDecoder`; its
+  packets play back to back 80 ms behind (a gap or a stall starts again 80 ms out). M mutes the voices with the sound.
+  Problems (no WebCodecs audio, Opus not encodable, the microphone blocked) show in `#voice` under the mute line.
+- **The client** (`voice.rs`): V's press and release to the page (`conkerVoice.talk`), the page's packets to the
+  server, the relayed ones to the page (`conkerVoice.play`), and each slot's last packet time (`Talking`). Natively
+  nothing records or plays, but the bubbles show.
+- **The server** (`relay_voice`): a client's packets go to every other client whose player hears its own
+  (`Game::hears`: free for all everyone, the team modes the team-mates; test `voices_reach_everyone_or_the_team`).
+  None from a client with no player, none over 400 bytes, none past 75 a second.
+- **The bubble** (`tags.rs`): the outros' speech bubble and tail, small, over a talking player's tag for 0.25 s after
+  its last packet (shrinking with the tag, hidden with it behind walls, while dead and outside play); a bigger one at
+  the HUD's left bottom while this client's own packets go out.
+- Not in a running game yet (no build was asked for): the bubbles' size and place, the playback buffer, the
+  permission prompt over the pointer lock (it may drop the lock: the Esc menu opens), Firefox and Safari.
+- Left: voice on the native client (cpal input and libopus); Chrome doesn't cancel echo from Web Audio's output (the
+  game's own sound reaches a speaker user's microphone while V is held; headsets are fine); Safari's Opus encoding
+  unconfirmed (checked at the first V); a per-player mute; voices placed in 3D; a pad default.
 
 ## Pseudonyms: a tag over each human (2026-10-17)
 

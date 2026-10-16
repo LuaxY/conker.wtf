@@ -2,7 +2,8 @@
 //! human from a bot), as quads for the HUD's renderer ([`Quads`], which [`crate::hud`] draws with
 //! its own): the HUD's font at half size up close, shrinking with the distance as the bodies do,
 //! white on its shadow. None far off, while the player is dead or out of lives, nor behind a wall
-//! (a tag through one would show where the player hides).
+//! (a tag through one would show where the player hides). Over a talking player's tag, a speech
+//! bubble (push-to-talk, [`crate::voice`]); one at the HUD's left while this client talks.
 
 use bevy::camera_controller::free_camera::FreeCameraState;
 use bevy::prelude::*;
@@ -12,7 +13,8 @@ use conker_rules::projectile::raycast;
 use conker_sim::net::{Collision, Combat, MatchView, Player, Pseudonym};
 use lightyear::prelude::Interpolated;
 
-use crate::hud::{Sprite, frame_point, text};
+use crate::hud::{Sprite, Tex, frame_point, text};
+use crate::voice::Talking;
 
 /// This frame's tag quads (frame pixels, centred).
 #[derive(Resource, Clone, Debug, Default)]
@@ -33,6 +35,35 @@ const ABOVE: f32 = 12.0;
 const Z: f32 = 0.6;
 const WHITE: Rgba = [255, 255, 255, 255];
 const SHADOW: Rgba = [0, 0, 0, 200];
+/// The speech bubble ([`bubble`]): the outros' bubble and tail, frame pixels up close, the tail's
+/// tip `GAP` over the tag; the HUD's own (its tip, from the frame's left bottom) and its size.
+const BUBBLE: [f32; 2] = [14.0, 10.0];
+const TAIL: [f32; 2] = [5.0, 5.0];
+const GAP: f32 = 2.0;
+const OWN: ([f32; 2], f32) = ([24.0, 160.0], 1.5);
+
+/// A speech bubble `k` times [`BUBBLE`]'s size, its tail's tip at `tip` (frame pixels), outlined
+/// in the tags' shadow.
+fn bubble(tip: [f32; 2], k: f32, anchor: Anchor) -> impl Iterator<Item = Sprite> {
+    let ([x, y], [bw, bh], [tw, th]) = (tip, BUBBLE.map(|v| v * k), TAIL.map(|v| v * k));
+    // The tail's tip is its texture's right bottom; its top reaches into the bubble.
+    let parts = [
+        ("tail", 16.0, [x - tw, y - th, tw, th]),
+        ("bubble", 64.0, [x - bw / 2.0, y - th * 0.6 - bh, bw, bh]),
+    ];
+    [(SHADOW, k, Z - 0.5), (WHITE, 0.0, Z)]
+        .into_iter()
+        .flat_map(move |(colour, grow, z)| {
+            parts.map(|(tex, size, [rx, ry, w, h])| Sprite {
+                tex: Tex::Texture(tex.into()),
+                uv: [0.0, 0.0, size, size],
+                rect: [rx - grow, ry - grow, w + 2.0 * grow, h + 2.0 * grow],
+                anchor,
+                colour,
+                z,
+            })
+        })
+}
 
 /// This frame's [`Quads`], once the view's camera has moved and before the HUD draws them.
 pub fn update(
@@ -41,9 +72,15 @@ pub fn update(
     game: Query<&MatchView>,
     players: Query<(&Player, &Combat, &Pseudonym), With<Interpolated>>,
     view: Single<(&Camera, &Transform), With<FreeCameraState>>,
+    (talking, time): (Res<Talking>, Res<Time<Real>>),
     mut quads: ResMut<Quads>,
 ) {
     quads.0.clear();
+    let now = time.elapsed_secs();
+    if talking.own(now) {
+        let left = Anchor(Horizontal::Left, Vertical::Bottom);
+        quads.0.extend(bubble(OWN.0, OWN.1, left));
+    }
     let (camera, transform) = *view;
     let live = game.iter().any(|m| m.phase == 0);
     let (Some(window), true) = (camera.logical_viewport_size(), live) else {
@@ -76,7 +113,12 @@ pub fn update(
         // Laid out at the origin, then scaled and moved to the point (its bottom there) in
         // fractional frame pixels: `Text::at`'s whole ones would step as the player moves.
         let [x, y] = frame_point(hud.frame, window, at);
-        let k = SCALE * (NEAR / len).min(1.0);
+        let near = (NEAR / len).min(1.0);
+        let k = SCALE * near;
+        if talking.talks(c.slot, now) {
+            let tip = [x, y - line * k - GAP * near];
+            quads.0.extend(bubble(tip, near, style.anchor));
+        }
         let glyphs = text(hud, &name.0.to_uppercase(), None, &style, Z);
         quads.0.extend(glyphs.into_iter().map(|mut s| {
             let [rx, ry, w, h] = s.rect;

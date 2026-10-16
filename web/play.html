@@ -62,6 +62,10 @@
     #sound { position: fixed; top: calc(var(--hud) * 69 + 8px); right: 8px; margin: 0; padding: 4px 6px;
       background: rgba(0, 0, 0, 0.45); font-size: 14px; pointer-events: none; }
     #sound:empty { display: none; }
+    /* Push-to-talk's problems (voice.js), under #sound. */
+    #voice { position: fixed; top: calc(var(--hud) * 69 + 44px); right: 8px; margin: 0; padding: 4px 6px;
+      background: rgba(0, 0, 0, 0.45); font-size: 14px; pointer-events: none; }
+    #voice:empty { display: none; }
     #teams { position: fixed; top: 30%; left: 30%; margin: 0; padding: 10px; background: rgba(0, 0, 0, 0.6);
       color: #fff; font: 20px/1.4 ui-monospace, monospace; white-space: pre; pointer-events: none; }
     #teams:empty { display: none; }
@@ -76,6 +80,7 @@
   <pre id="hud" aria-live="off"></pre>
   <p id="net" role="status" aria-live="polite"></p>
   <p id="sound" role="status" aria-live="polite"></p>
+  <p id="voice" role="status" aria-live="polite"></p>
   <pre id="teams" aria-live="polite"></pre>
   <pre id="diag" aria-live="off"></pre>
   <div id="intro">

@@ -47,6 +47,7 @@ pub mod tank;
 pub mod teams;
 pub mod traps;
 pub mod upper;
+pub mod voice;
 
 /// Browser fetches: the asset pack's data files and the connect token.
 #[cfg(target_family = "wasm")]
@@ -988,6 +989,7 @@ pub fn run(
         render::build(&mut app, slice, &cfg);
         crosshair::build(&mut app, hud.frame);
         tags::build(&mut app, hud.clone());
+        voice::build(&mut app);
         diag::build(&mut app);
         menu::build(&mut app, hud.clone(), !cfg.offscreen);
         hud::build(&mut app, hud, pickups.clone());

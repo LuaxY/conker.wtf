@@ -308,7 +308,8 @@ Ctrl and Alt, unlike round 1.
 | Holster / drop (flag, bag) | Q | – | |
 | Interact (pick up a weapon) | F | E | Picking up draws the weapon |
 | Grenade | G | – | |
-| Shoulder swap | V | Middle mouse | |
+| Shoulder swap | X | Middle mouse | Was V; V is push-to-talk (2026-10-17) |
+| Push-to-talk | V (hold) | – | Everyone hears you; your team only in the team modes |
 | Walk | Left Shift (hold) | – | Not Alt; the original has no sprint |
 | Scoreboard / teams | Tab (hold) | – | |
 | Menu | Esc (fixed) | – | Opens on lock loss |

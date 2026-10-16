@@ -4,7 +4,7 @@
 //! registers what both sides must agree on: the input type ([`Input`], one per tick, its camera yaw
 //! included), the replicated player state ([`Player`], predicted by its owner), each player's
 //! combat state ([`Combat`]), the match ([`MatchView`]), the side, pick and pseudonym a client asks for when it
-//! joins ([`Join`], [`Pseudonym`]) and what a client showed when it took an input ([`Saw`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
+//! joins ([`Join`], [`Pseudonym`]) and what a client showed when it took an input ([`Saw`]), and push-to-talk ([`Voice`], [`Heard`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
 //! the player): the server runs the match, each client predicts its own player with the same rules.
 
 use crate::collision::{CollisionWorld, Layer};
@@ -110,7 +110,8 @@ use serde::{Deserialize, Serialize};
 /// 47: the modern aim arm 40 to the side (was 20: the body hid the crosshair; shared).
 /// 48: pseudonyms: a client asks for one when it joins ([`Join::name`]), every human's goes out in
 /// [`Pseudonym`] (bots have none).
-pub const PROTOCOL_ID: u64 = 48;
+/// 49: push-to-talk voice: a client's Opus packets ([`Voice`]), relayed to the others ([`Heard`]).
+pub const PROTOCOL_ID: u64 = 49;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -528,6 +529,25 @@ pub enum Teams {
     Balance(i8),
 }
 
+/// One packet of a client's push-to-talk voice: 20 ms of its microphone in Opus (the page's
+/// WebCodecs encoder), at most [`VOICE_BYTES`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Voice(pub Vec<u8>);
+
+/// A [`Voice`] packet as the server relays it to the clients that hear it: the speaker's slot.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Heard {
+    pub slot: u16,
+    pub packet: Vec<u8>,
+}
+
+/// The largest [`Voice`] packet the server relays (the page encodes about 60 bytes, 24 kbps).
+pub const VOICE_BYTES: usize = 400;
+
+/// The channel [`Voice`] and [`Heard`] travel on: unreliable and unordered (a lost or late packet
+/// is a gap in the speech, the page plays them as they come).
+pub struct VoiceChannel;
+
 /// The channel [`Join`], [`Restart`] and [`Teams`] travel on: reliable.
 pub struct JoinChannel;
 
@@ -653,6 +673,15 @@ impl Plugin for ProtocolPlugin {
         .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<Saw>()
             .add_direction(NetworkDirection::ClientToServer);
+        app.add_channel::<VoiceChannel>(ChannelSettings {
+            mode: ChannelMode::UnorderedUnreliable,
+            ..default()
+        })
+        .add_direction(NetworkDirection::Bidirectional);
+        app.register_message::<Voice>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Heard>()
+            .add_direction(NetworkDirection::ServerToClient);
     }
 }
 

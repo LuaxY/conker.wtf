@@ -79,7 +79,7 @@ pub const GROUPS: [(&str, &[Action]); 4] = {
             ],
         ),
         ("CAMERA", &[ShoulderSwap, DebugCamera]),
-        ("UI", &[Scoreboard, Mute, TextHud, Diagnostics]),
+        ("UI", &[Scoreboard, PushToTalk, Mute, TextHud, Diagnostics]),
     ]
 };
 
