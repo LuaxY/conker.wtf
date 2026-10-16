@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="https://conker.wtf">
-    <img alt="Two Tediz in a Deathmatch" src="https://conker.wtf/assets/screenshots/modes/deathmatch.jpg">
+    <img alt="Two Tediz in a Deathmatch" src="https://conker.wtf/assets/screenshots/modes/total-war.jpg">
   </a>
 </p>
 
@@ -40,8 +40,7 @@ camera, walls, the spawn picker and the game's RNG match it bit for bit on the r
 combat event lands on the same frame.
 
 **No game data lives in this repository.** Every model, texture, sound and table comes from your own ROM (Conker's Bad
-Fur Day, USA, SHA-1 `4cbadd3c4e0729dec46af64ad018050eada4f47a`): `conker-extract pack` exports it once into an
-editable asset pack that the server reads and serves to the browsers, so players never need a ROM.
+Fur Day, USA: `conker-extract pack` exports it once into an editable asset pack that the server reads and serves to the browsers, so players never need a ROM.
 
 ## Features
 
