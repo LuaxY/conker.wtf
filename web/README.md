@@ -1,7 +1,7 @@
 # Browser client
 
 `index.html` is the landing (Home, the server browser and the lobby: "Landing" below, built from `app/`).
-`play.html` + `play.js` (+ `voice.js`, push-to-talk), the game page, load the wasm client from `dist/` (`client.js` + `client_bg.wasm`, built from
+`play.html` + `play.js` (+ `voice.js`, push-to-talk; `chat.js`, the text chat), the game page, load the wasm client from `dist/` (`client.js` + `client_bg.wasm`, built from
 `crates/conker-client`, WebGL2) and start it at once. Nobody picks or uploads a ROM: the client fetches the asset
 pack (`conker-extract pack`: scenes 0x2D, 0x30, 0x34 and 0x3F, character 117 and the held weapons as glTF + PNG, the game data as
 JSON) from `assets/` next to the page, from the site that serves the game. Besides the page and the pack, it fetches only
@@ -299,7 +299,9 @@ diagnostics panel, top right (`diag.rs`): frame rate and times, the update's and
 and JS heaps; natively the process's CPU and memory), the connection (RTT, jitter, rollbacks), the match and the GPU. M mutes and unmutes the sound and the voices. Holding V
 talks to the other players (everyone; the team modes, the team): the first press asks for the microphone, `voice.js`
 encodes it to Opus (WebCodecs: Chrome 94, Firefox 130, Safari 26) and a speech bubble shows over the talker's tag on
-the others' screens (`../docs/STATUS.md`, "Push-to-talk"). Ctrl is not used: browsers keep
+the others' screens (`../docs/STATUS.md`, "Push-to-talk"). T opens a chat box to everyone, Y to the team (also over
+the Esc menu and the results): Enter sends, Esc cancels; the last lines show over the network line, the team's light
+blue (`chat.js`, `../docs/STATUS.md`, "Text chat"). Ctrl is not used: browsers keep
 Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and opens the Esc
 menu (RESUME, SETTINGS with rebinding, LEAVE MATCH; the gamepad's Menu opens it too): the player stands, the camera
 keeps its yaw, until RESUME (a click or Enter takes the lock again; the gamepad's resumes without it). LEAVE MATCH

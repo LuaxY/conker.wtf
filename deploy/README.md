@@ -128,8 +128,8 @@ rsync -a target-net/site/ vps:/srv/conker/site/
 ```
 
 The site holds `index.html` and `landing/` (the landing: its scripts, styles and fonts, named by their
-content), `play.html`, `play.js`, `voice.js` and `v/<hash>/` (the client, named by its content), the text files with
-`.br` and `.gz` copies. Pages revalidate `index.html`, `play.html`, `play.js` and `voice.js` on every load; `landing/`
+content), `play.html`, `play.js`, `voice.js`, `chat.js` and `v/<hash>/` (the client, named by its content), the text files with
+`.br` and `.gz` copies. Pages revalidate `index.html`, `play.html`, `play.js`, `voice.js` and `chat.js` on every load; `landing/`
 and the client folder are cached for a year, and each build makes new names. Old `landing/` files and `v/`
 folders can be deleted once no page has them open (`rsync --delete` does it at the next upload). Deploy the server and the page together: they must
 have the same protocol version (`PROTOCOL_ID`), or the server refuses the page's token.

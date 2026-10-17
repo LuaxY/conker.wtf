@@ -45,22 +45,10 @@ impl Talking {
     }
 }
 
-/// The page's `conkerVoice[method](...args)` (`voice.js`; nothing before the page sets it).
+/// The page's `conkerVoice[method](...args)` (`voice.js`).
 #[cfg(target_family = "wasm")]
 fn page(method: &str, args: &[wasm_bindgen::JsValue]) {
-    use wasm_bindgen::JsCast;
-    let voice = web_sys::window()
-        .and_then(|w| js_sys::Reflect::get(&w, &"conkerVoice".into()).ok())
-        .filter(|v| v.is_object());
-    let Some(voice) = voice else {
-        return;
-    };
-    let call = js_sys::Reflect::get(&voice, &method.into())
-        .ok()
-        .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
-    if let Some(call) = call {
-        let _ = call.apply(&voice, &args.iter().collect());
-    }
+    crate::web::page("conkerVoice", method, args);
 }
 
 /// The key pressed or released: the page's microphone on or off; Mute (M): the voices too.

@@ -107,6 +107,7 @@ included) and leave.
 | Aim / scope | Right click or R | RB |
 | Grenade (hold to cook) | G | Right stick ↓ |
 | Push-to-talk | Hold V | |
+| Chat (everyone / team) | T / Y, Enter sends, Esc cancels | |
 | Mute (sound and voices) | M | |
 
 For one game server and the native client without the website: `bun run server -- --bots 3` and

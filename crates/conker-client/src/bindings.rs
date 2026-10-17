@@ -36,6 +36,8 @@ pub enum Action {
     Walk,
     Scoreboard,
     PushToTalk,
+    ChatAll,
+    ChatTeam,
     Mute,
     TextHud,
     DebugCamera,
@@ -43,7 +45,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 22] = {
+    pub const ALL: [Action; 24] = {
         use Action::*;
         [
             MoveForward,
@@ -64,6 +66,8 @@ impl Action {
             Walk,
             Scoreboard,
             PushToTalk,
+            ChatAll,
+            ChatTeam,
             Mute,
             TextHud,
             DebugCamera,
@@ -188,6 +192,9 @@ impl Default for Bindings {
                 Walk => (Bind::Key(K::ShiftLeft), None, Some(P::LeftThumb)),
                 Scoreboard => (Bind::Key(K::Tab), None, Some(P::Select)),
                 PushToTalk => (Bind::Key(K::KeyV), None, None),
+                // The page's chat box (no pad: no typing on it).
+                ChatAll => (Bind::Key(K::KeyT), None, None),
+                ChatTeam => (Bind::Key(K::KeyY), None, None),
                 Mute => (Bind::Key(K::KeyM), None, None),
                 TextHud => (Bind::Key(K::KeyH), None, None),
                 DebugCamera => (Bind::Key(K::F8), None, None),
@@ -565,6 +572,8 @@ mod tests {
             (KeyF, 0),
             (KeyE, 0),
             (KeyV, 0),
+            (KeyT, 0),
+            (KeyY, 0),
             (KeyX, 0),
             (KeyM, 0),
             (Tab, 0),

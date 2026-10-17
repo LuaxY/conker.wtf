@@ -310,6 +310,7 @@ Ctrl and Alt, unlike round 1.
 | Grenade | G | – | |
 | Shoulder swap | X | Middle mouse | Was V; V is push-to-talk (2026-10-17) |
 | Push-to-talk | V (hold) | – | Everyone hears you; your team only in the team modes |
+| Chat: everyone / team | T / Y | – | The page's box (browser); also over the Esc menu and the results |
 | Walk | Left Shift (hold) | – | Not Alt; the original has no sprint |
 | Scoreboard / teams | Tab (hold) | – | |
 | Menu | Esc (fixed) | – | Opens on lock loss |

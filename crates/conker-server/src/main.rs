@@ -178,10 +178,10 @@ use conker_sim::collision::CollisionWorld;
 use conker_sim::follow::Follow;
 use conker_sim::movement::{Input, Side, state};
 use conker_sim::net::{
-    BulletView, CashView, Collision, Combat, DEFAULT_PORT, FlagView, GunView, Heard, Join,
-    MatchView, PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, Pseudonym, RESULTS, RaceView,
-    RacerView, RaptorView, Restart, Saw, TankView, Teams, VOICE_BYTES, Voice, VoiceChannel,
-    map_scene, pack_hash, scene_world,
+    BulletView, CHAT_MAX, CashView, Chat, ChatChannel, Collision, Combat, DEFAULT_PORT, FlagView,
+    GunView, Heard, Join, MatchView, PROTOCOL_ID, Player, PlayerId, ProtocolPlugin, Pseudonym,
+    RESULTS, RaceView, RacerView, RaptorView, Restart, Said, Saw, TankView, Teams, VOICE_BYTES,
+    Voice, VoiceChannel, map_scene, pack_hash, scene_world,
 };
 use core::time::Duration;
 use lightyear::input::server::InputSystems;
@@ -764,6 +764,7 @@ fn main() {
             restart_votes,
             team_requests,
             relay_voice,
+            relay_chat,
         )
             .chain()
             .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
@@ -1656,9 +1657,11 @@ fn on_connected(
     mut commands: Commands,
 ) {
     if let Ok(remote) = clients.get(trigger.entity) {
-        commands
-            .entity(trigger.entity)
-            .insert((Saws::default(), Talk::default()));
+        commands.entity(trigger.entity).insert((
+            Saws::default(),
+            Talk::default(),
+            Chatted::default(),
+        ));
         info!(
             "client {:?} passed the handshake; it joins with its side",
             remote.0
@@ -2009,6 +2012,66 @@ fn relay_voice(
             };
             if let Err(e) = sender.send_to_entities::<Heard, VoiceChannel>(&heard, &listeners) {
                 warn!("voice from slot {speaker}: {e}");
+            }
+        }
+    }
+}
+
+/// When a client's last [`Chat`] line went out (`Time<Real>` seconds): at most one a second.
+#[derive(Component, Default)]
+struct Chatted(Option<f64>);
+
+/// A chat line as the server relays it: its control characters (line breaks, escapes) and runs of
+/// spaces one space, at most [`CHAT_MAX`] characters; `None` if nothing is left. The clients put
+/// it in the page as text, never as HTML.
+fn chat_text(text: &str) -> Option<String> {
+    let spaced = text.replace(char::is_control, " ");
+    let words = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line: String = words.chars().take(CHAT_MAX).collect();
+    Some(line.trim_end().to_string()).filter(|l| !l.is_empty())
+}
+
+/// Text chat: each client's [`Chat`] line, kept to [`chat_text`], goes with its pseudonym
+/// ([`Said`]) to every player, the speaker's own client included; a team line to the players who
+/// hear it ([`Game::hears`]: free for all, everyone), still marked a team line. None from a client
+/// with no player yet, none within a second of its last.
+fn relay_chat(
+    mut clients: Query<(Entity, &mut MessageReceiver<Chat>, &mut Chatted), With<ClientOf>>,
+    players: Query<(&Slot, &ControlledBy, &Pseudonym)>,
+    time: Res<Time<Real>>,
+    game: Res<Game>,
+    mut sender: ServerMultiMessageSender,
+) {
+    let now = time.elapsed_secs_f64();
+    for (client, mut chat, mut chatted) in &mut clients {
+        let lines: Vec<Chat> = chat.receive().collect();
+        let Some((speaker, name)) = (players.iter())
+            .find(|p| p.1.owner == client)
+            .map(|(slot, _, name)| (slot.index, &name.0))
+        else {
+            continue;
+        };
+        for Chat { team, text } in lines {
+            let Some(text) = chat_text(&text) else {
+                continue;
+            };
+            if chatted.0.is_some_and(|t| now - t < 1.0) {
+                continue;
+            }
+            chatted.0 = Some(now);
+            let listeners: BTreeSet<Entity> = (players.iter())
+                .filter(|(slot, ..)| !team || game.hears(speaker, slot.index))
+                .map(|(_, by, _)| by.owner)
+                .collect();
+            let to = if team { "its team" } else { "everyone" };
+            info!("chat: slot {speaker} {name:?} to {to}: {text:?}");
+            let said = Said {
+                name: name.clone(),
+                team,
+                text,
+            };
+            if let Err(e) = sender.send_to_entities::<Said, ChatChannel>(&said, &listeners) {
+                warn!("chat from slot {speaker}: {e}");
             }
         }
     }
@@ -3192,6 +3255,24 @@ mod tests {
         );
         assert_eq!(pseudonym(Some(" \t<>"), 2), "Player 3");
         assert_eq!(pseudonym(None, 0), "Player 1");
+    }
+
+    /// A chat line keeps its words, its control characters and runs of spaces one space, at most
+    /// 100 characters (not bytes); none left, none.
+    #[test]
+    fn a_chat_line_keeps_its_words() {
+        assert_eq!(chat_text("  gg \t wp\r\n"), Some("gg wp".into()));
+        assert_eq!(chat_text("a\u{1b}[31mb\u{0}c"), Some("a [31mb c".into()));
+        assert_eq!(
+            chat_text("<b>été</b> &amp;"),
+            Some("<b>été</b> &amp;".into())
+        );
+        assert_eq!(chat_text(&"é".repeat(150)), Some("é".repeat(100)));
+        assert_eq!(
+            chat_text(&format!("{} yz", "x".repeat(99))),
+            Some("x".repeat(99))
+        );
+        assert_eq!(chat_text(" \u{7}\r\n "), None);
     }
 
     /// A client quiet past [`STALE_TICKS`] lets go of its held fire and stick, its camera and

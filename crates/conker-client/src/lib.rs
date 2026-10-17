@@ -16,6 +16,7 @@
 pub mod audio;
 pub mod beach;
 pub mod bindings;
+pub mod chat;
 pub mod connection;
 pub mod corpses;
 pub mod crosshair;
@@ -75,6 +76,23 @@ pub mod web {
                 .await
                 .map_err(why)?;
             Ok(js_sys::Uint8Array::new(&body).to_vec())
+        }
+    }
+
+    /// The page's `window[object][method](...args)` (`voice.js`'s `conkerVoice`, `chat.js`'s
+    /// `conkerChat`; nothing before the page sets it).
+    pub fn page(object: &str, method: &str, args: &[JsValue]) {
+        let object = web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &object.into()).ok())
+            .filter(|v| v.is_object());
+        let Some(object) = object else {
+            return;
+        };
+        let call = js_sys::Reflect::get(&object, &method.into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(call) = call {
+            let _ = call.apply(&object, &args.iter().collect());
         }
     }
 
@@ -990,6 +1008,7 @@ pub fn run(
         crosshair::build(&mut app, hud.frame);
         tags::build(&mut app, hud.clone());
         voice::build(&mut app);
+        chat::build(&mut app);
         diag::build(&mut app);
         menu::build(&mut app, hud.clone(), !cfg.offscreen);
         hud::build(&mut app, hud, pickups.clone());
@@ -1260,6 +1279,7 @@ fn buffer_input(
         None if free_camera.iter().any(|c| c.enabled) => (0, 0, 0), // the keys fly the camera
         None if team_screen.open => (0, 0, 0),                      // the pad picks a team
         None if paused.0 => (0, 0, 0), // the Esc menu holds it: stand, keeping the yaw
+        None if chat::open() => (0, 0, 0), // the chat box has the keys
         None if modern => {
             let d = controls.devices(wheel, Vec2::ZERO);
             let scoped = camera.follow.cam.scope.on;

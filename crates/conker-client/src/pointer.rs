@@ -199,7 +199,8 @@ mod web {
         on(&document, "pointerlockchange", move |_| {
             let locked = doc.pointer_lock_element().is_some();
             LOCKED.store(locked, Relaxed);
-            if !locked {
+            // The chat box lets it go itself: no menu.
+            if !locked && !crate::chat::open() {
                 LOST.store(true, Relaxed);
             }
         });

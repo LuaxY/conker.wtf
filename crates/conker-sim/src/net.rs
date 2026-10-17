@@ -4,7 +4,7 @@
 //! registers what both sides must agree on: the input type ([`Input`], one per tick, its camera yaw
 //! included), the replicated player state ([`Player`], predicted by its owner), each player's
 //! combat state ([`Combat`]), the match ([`MatchView`]), the side, pick and pseudonym a client asks for when it
-//! joins ([`Join`], [`Pseudonym`]) and what a client showed when it took an input ([`Saw`]), and push-to-talk ([`Voice`], [`Heard`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
+//! joins ([`Join`], [`Pseudonym`]) and what a client showed when it took an input ([`Saw`]), push-to-talk ([`Voice`], [`Heard`]) and text chat ([`Chat`], [`Said`]). conker-rules adds the fighter (`conker_rules::net::Fighting`, predicted with
 //! the player): the server runs the match, each client predicts its own player with the same rules.
 
 use crate::collision::{CollisionWorld, Layer};
@@ -111,7 +111,8 @@ use serde::{Deserialize, Serialize};
 /// 48: pseudonyms: a client asks for one when it joins ([`Join::name`]), every human's goes out in
 /// [`Pseudonym`] (bots have none).
 /// 49: push-to-talk voice: a client's Opus packets ([`Voice`]), relayed to the others ([`Heard`]).
-pub const PROTOCOL_ID: u64 = 49;
+/// 50: text chat: a client's line ([`Chat`]), relayed with its pseudonym ([`Said`]).
+pub const PROTOCOL_ID: u64 = 50;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -548,6 +549,30 @@ pub const VOICE_BYTES: usize = 400;
 /// is a gap in the speech, the page plays them as they come).
 pub struct VoiceChannel;
 
+/// A line of text chat from a client: to everyone, or to its team only (`team`; free for all,
+/// everyone).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Chat {
+    pub team: bool,
+    pub text: String,
+}
+
+/// A [`Chat`] line as the server relays it: the speaker's [`Pseudonym`], whether it was a team
+/// line (free for all, everyone got it), and the text as the server kept it (at most [`CHAT_MAX`]
+/// characters).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Said {
+    pub name: String,
+    pub team: bool,
+    pub text: String,
+}
+
+/// The most characters of a [`Chat`] line the server relays (the page's box takes as many).
+pub const CHAT_MAX: usize = 100;
+
+/// The channel [`Chat`] and [`Said`] travel on: reliable and ordered.
+pub struct ChatChannel;
+
 /// The channel [`Join`], [`Restart`] and [`Teams`] travel on: reliable.
 pub struct JoinChannel;
 
@@ -681,6 +706,15 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<Voice>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<Heard>()
+            .add_direction(NetworkDirection::ServerToClient);
+        app.add_channel::<ChatChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            ..default()
+        })
+        .add_direction(NetworkDirection::Bidirectional);
+        app.register_message::<Chat>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<Said>()
             .add_direction(NetworkDirection::ServerToClient);
     }
 }

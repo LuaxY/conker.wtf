@@ -1,7 +1,7 @@
 // Starts the wasm client as soon as the page loads. The client asks the game server's /info which
 // map it plays, fetches the asset pack (its data files, then Bevy its glTF models) from assets/ next
 // to this page, and, once the level is drawn, its connect token from the game server (a token lasts 60 s).
-// Push-to-talk's microphone and the others' voices are voice.js's.
+// Push-to-talk's microphone and the others' voices are voice.js's, the text chat's box and lines chat.js's.
 // The loading overlay (#intro) stays up until the player is in the match: this script fills its bar
 // while the game downloads, then the client reports each step through window.conkerLoading
 // (conker_client::web::loading) and hides it once its player arrived, or a problem leaves the
@@ -13,11 +13,13 @@
 // dist/digest.txt (`conker-server --digest-file web/dist/digest.txt`) and passes it to the client
 // for start() only, so a reload after a server restart uses the new one. Over https the
 // certificate is checked as any site's, and WebSocket uses wss://.
-import init, { start, voice_frame } from "./dist/client.js";
+import init, { chat_done, start, voice_frame } from "./dist/client.js";
+import { chat } from "./chat.js";
 import { voice } from "./voice.js";
 
-// Push-to-talk (voice.js): the client calls it from start() on.
+// Push-to-talk (voice.js) and the text chat (chat.js): the client calls them from start() on.
 voice(voice_frame);
+chat(chat_done);
 
 const intro = document.getElementById("intro");
 const status = document.getElementById("status");
@@ -54,6 +56,7 @@ const TIPS = [
   "G throws a grenade: hold it to cook it.",
   "Tab opens the team screen in the team modes.",
   "Hold V to talk: everyone hears you, only your team in the team modes.",
+  "T chats with everyone, Y with your team; Enter sends, Esc cancels.",
   "M mutes the sound and the voices, H shows the HUD as text.",
   "The key under Esc shows diagnostics, F8 the free camera.",
   "Gamepad: A jumps, X reloads, Y draws, B crouches, the triggers aim and fire.",

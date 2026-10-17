@@ -1,7 +1,28 @@
-# Status (newest first; latest 2026-10-17, protocol 49)
+# Status (newest first; latest 2026-10-17, protocol 50)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Text chat: T to everyone, Y to the team (2026-10-17)
+
+Protocol 50: `Chat` (a client's line, to everyone or its team) and `Said` (the server's relay: the speaker's pseudonym,
+whether it went to the team, the text) on `ChatChannel` (reliable, ordered).
+- **The keys** (`bindings.rs`): CHAT ALL on T and CHAT TEAM on Y (rebindable, in the settings' UI group; no pad
+  slot). `chat.rs` reads them from the devices itself, as the Esc menu holds the others: the box opens while playing,
+  over the Esc menu, the team screen and the results ("gg"), but not while a rebind waits for its key (T binds T) nor
+  on the lost connection's page.
+- **The page** (`web/chat.js`, from `play.js`; `#chat` over `#net`): the box takes the keys (the player stands; Enter
+  sends to the client's `chat_done` export, Esc or a click elsewhere cancels; the canvas gets the focus back, so the
+  results' Enter never also picks RESTART). Opened while playing, it lets go of the pointer lock without the Esc menu
+  (`pointer.rs` skips the loss while the box is open) and its Enter takes the lock back (Esc leaves it for a click, as
+  the menu's Esc does). The list keeps the last 8 lines, each for 20 s (all while the box is open): everyone's white,
+  the team's light blue with `(Team)`. Lines go in as text (`textContent`), never as HTML.
+- **The server** (`relay_chat`): a line from a client with a player, kept to `chat_text` (control characters and runs
+  of spaces one space, at most 100 characters; test `a_chat_line_keeps_its_words`), goes with the pseudonym to every
+  player, the sender included; a team line to those who hear it (`Game::hears`; free for all, everyone), still
+  marked a team line (light blue). At most one a second per client; each is logged.
+- Natively there is no box: the relayed lines go to the log.
+- Left: history past 8 lines, a per-player mute or block, a word filter, the native client's box.
 
 ## Push-to-talk: voice over the game's own connection (2026-10-17)
 

@@ -833,7 +833,7 @@ fn sheet_layout(p: &mut Paint, sh: &Sheet, look: &Look) {
 
 /// The HUD's font and frame; whether a change writes the settings (a window's run).
 #[derive(Resource)]
-struct Setup {
+pub(crate) struct Setup {
     hud: Hud,
     save: bool,
 }
@@ -841,7 +841,7 @@ struct Setup {
 /// The last frame's [`Paused`] (as the menu left it), focus, pointer (in the frame; in the window,
 /// over the results) and held direction.
 #[derive(Default)]
-struct Last {
+pub(crate) struct Last {
     paused: bool,
     focused: bool,
     cursor: Option<[f32; 2]>,
@@ -961,7 +961,7 @@ fn navs(
 /// The menu's frame: opens or closes it, steers it (a capture, the pointer, the keys and pad),
 /// carries out its choices and lays out its quads.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn run(
+pub(crate) fn run(
     (mut menu, mut quads, setup): (ResMut<Menu>, ResMut<Quads>, Res<Setup>),
     (time, keys, mouse, scroll): (
         Res<Time<Real>>,
@@ -1121,6 +1121,7 @@ fn run(
             && signals.playing
             && !signals.results
             && !signals.locked
+            && !crate::chat::open()
             && !using_pad.is_some_and(|u| u.0),
         lost,
     };
