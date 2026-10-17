@@ -22,6 +22,9 @@ whether it went to the team, the text) on `ChatChannel` (reliable, ordered).
   player, the sender included; a team line to those who hear it (`Game::hears`; free for all, everyone), still
   marked a team line (light blue). At most one a second per client; each is logged.
 - Natively there is no box: the relayed lines go to the log.
+- Checked in two headless Chromes (Total War and Deathmatch): everyone and team lines and their colours, the rate
+  limit, Esc, the Esc menu, a rebind's capture, a rebound key, "gg" on the results (no RESTART), the lost page. Not
+  there: the pointer lock's release on open and its return on Enter (headless Chrome never holds the lock).
 - Left: history past 8 lines, a per-player mute or block, a word filter, the native client's box.
 
 ## Push-to-talk: voice over the game's own connection (2026-10-17)
