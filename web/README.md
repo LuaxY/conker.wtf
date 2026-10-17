@@ -301,7 +301,7 @@ talks to the other players (everyone; the team modes, the team): the first press
 encodes it to Opus (WebCodecs: Chrome 94, Firefox 130, Safari 26) and a speech bubble shows over the talker's tag on
 the others' screens (`../docs/STATUS.md`, "Push-to-talk"). T opens a chat box to everyone, Y to the team (also over
 the Esc menu and the results): Enter sends, Esc cancels; the last lines show over the network line, the team's light
-blue (`chat.js`, `../docs/STATUS.md`, "Text chat"). Ctrl is not used: browsers keep
+blue, who joined or left pale yellow (`chat.js`, `../docs/STATUS.md`, "Text chat"). Ctrl is not used: browsers keep
 Ctrl+W. A press on the canvas takes the pointer lock (raw counts, `unadjustedMovement`); Esc frees it and opens the Esc
 menu (RESUME, SETTINGS with rebinding, LEAVE MATCH; the gamepad's Menu opens it too): the player stands, the camera
 keeps its yaw, until RESUME (a click or Enter takes the lock again; the gamepad's resumes without it). LEAVE MATCH

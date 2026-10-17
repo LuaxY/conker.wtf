@@ -112,7 +112,8 @@ use serde::{Deserialize, Serialize};
 /// [`Pseudonym`] (bots have none).
 /// 49: push-to-talk voice: a client's Opus packets ([`Voice`]), relayed to the others ([`Heard`]).
 /// 50: text chat: a client's line ([`Chat`]), relayed with its pseudonym ([`Said`]).
-pub const PROTOCOL_ID: u64 = 50;
+/// 51: the server's own chat lines (a [`Said`] with no name): who joined, who left.
+pub const PROTOCOL_ID: u64 = 51;
 /// The scene of a pack map: its folder name is the scene in hex (`2d` = 0x2D, `30` = 0x30).
 pub fn map_scene(map: &str) -> Option<u16> {
     u16::from_str_radix(map, 16).ok()
@@ -557,12 +558,12 @@ pub struct Chat {
     pub text: String,
 }
 
-/// A [`Chat`] line as the server relays it: the speaker's [`Pseudonym`], whether it was a team
-/// line (free for all, everyone got it), and the text as the server kept it (at most [`CHAT_MAX`]
-/// characters).
+/// A [`Chat`] line as the server relays it: the speaker's [`Pseudonym`] (none: the server's own
+/// line, who joined or left), whether it was a team line (free for all, everyone got it), and the
+/// text as the server kept it (at most [`CHAT_MAX`] characters).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Said {
-    pub name: String,
+    pub name: Option<String>,
     pub team: bool,
     pub text: String,
 }

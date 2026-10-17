@@ -736,6 +736,8 @@ fn main() {
         .add_observer(on_connected)
         .add_observer(on_disconnected)
         .add_observer(on_left)
+        .add_observer(chat_joined)
+        .add_observer(chat_left)
         .add_observer(relink_evicted_session);
     let settings = game.setup.settings;
     app.insert_resource(game);
@@ -2066,7 +2068,7 @@ fn relay_chat(
             let to = if team { "its team" } else { "everyone" };
             info!("chat: slot {speaker} {name:?} to {to}: {text:?}");
             let said = Said {
-                name: name.clone(),
+                name: Some(name.clone()),
                 team,
                 text,
             };
@@ -2074,6 +2076,53 @@ fn relay_chat(
                 warn!("chat from slot {speaker}: {e}");
             }
         }
+    }
+}
+
+/// A human joined (its player's [`Pseudonym`] came): a line from the server in the others' chat.
+fn chat_joined(
+    trigger: On<Add, Pseudonym>,
+    names: Query<&Pseudonym>,
+    players: Query<(Entity, &ControlledBy), With<Pseudonym>>,
+    sender: ServerMultiMessageSender,
+) {
+    chat_notice(trigger.entity, "joined", &names, &players, sender);
+}
+
+/// A human left (its player, and so its [`Pseudonym`], went): a line from the server in the
+/// others' chat.
+fn chat_left(
+    trigger: On<Remove, Pseudonym>,
+    names: Query<&Pseudonym>,
+    players: Query<(Entity, &ControlledBy), With<Pseudonym>>,
+    sender: ServerMultiMessageSender,
+) {
+    chat_notice(trigger.entity, "left", &names, &players, sender);
+}
+
+/// `player`'s pseudonym and what it did, as a [`Said`] with no name, to every other human's client
+/// (not the leaver's: a closed transport would stop the send for the rest).
+fn chat_notice(
+    player: Entity,
+    what: &str,
+    names: &Query<&Pseudonym>,
+    players: &Query<(Entity, &ControlledBy), With<Pseudonym>>,
+    mut sender: ServerMultiMessageSender,
+) {
+    let Ok(name) = names.get(player) else {
+        return;
+    };
+    let listeners: BTreeSet<Entity> = (players.iter())
+        .filter(|(e, _)| *e != player)
+        .map(|(_, by)| by.owner)
+        .collect();
+    let said = Said {
+        name: None,
+        team: false,
+        text: format!("{} {what}", name.0),
+    };
+    if let Err(e) = sender.send_to_entities::<Said, ChatChannel>(&said, &listeners) {
+        warn!("chat: {} {what}: {e}", name.0);
     }
 }
 

@@ -1,7 +1,16 @@
-# Status (newest first; latest 2026-10-17, protocol 50)
+# Status (newest first; latest 2026-10-17, protocol 51)
 
 The "Left" lines below are as each wave wrote them; many were closed later. The current list is `GAPS.md` (the
 G6 audit, 2026-10-15).
+
+## Chat: who joined, who left (2026-10-17)
+
+Protocol 51: `Said.name` is an `Option`; none is the server's own line. When a human's player comes or goes (its
+`Pseudonym` added or removed: bots have none, a refused client never gets one), the server's `chat_joined` /
+`chat_left` send "<name> joined" / "<name> left" to every other human's client (not the leaver's: a closed transport
+would stop the send for the rest). The page shows them with no name, pale yellow; natively they go to the log.
+- Checked: `bun run check`, the server, sim and client tests, the wasm client's `cargo check`. Not run live (no
+  build was made): a two-client join and leave.
 
 ## Text chat: T to everyone, Y to the team (2026-10-17)
 

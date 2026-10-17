@@ -66,8 +66,8 @@
     #voice { position: fixed; top: calc(var(--hud) * 69 + 44px); right: 8px; margin: 0; padding: 4px 6px;
       background: rgba(0, 0, 0, 0.45); font-size: 14px; pointer-events: none; }
     #voice:empty { display: none; }
-    /* Text chat (chat.js), over #net: the last lines (everyone's white, the team's light blue), and the
-       box while typing. */
+    /* Text chat (chat.js), over #net: the last lines (everyone's white, the team's light blue, the server's
+       who joined or left pale yellow), and the box while typing. */
     #chat { position: fixed; left: 8px; bottom: calc(var(--hud) * 35 + 44px); width: min(36rem, calc(100% - 28px));
       font: 15px/1.35 ui-monospace, monospace; pointer-events: none; }
     #chat-lines { margin: 0; padding: 0; list-style: none; }
@@ -81,6 +81,7 @@
     #chat-box input { flex: 1; min-width: 0; padding: 0; border: 0; outline: none; background: none; color: inherit;
       font: inherit; }
     #chat-lines li.team, #chat-box.team { color: #9cd3ff; }
+    #chat-lines li.server { color: #ffe08a; }
     #teams { position: fixed; top: 30%; left: 30%; margin: 0; padding: 10px; background: rgba(0, 0, 0, 0.6);
       color: #fff; font: 20px/1.4 ui-monospace, monospace; white-space: pre; pointer-events: none; }
     #teams:empty { display: none; }

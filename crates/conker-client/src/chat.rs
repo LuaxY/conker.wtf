@@ -5,7 +5,8 @@
 //! The page's `chat.js` has the box: Enter sends its line through [`done`] (the page's
 //! `chat_done`), Esc or a click elsewhere closes it, and either gives the canvas the keys back.
 //! While it is open the player stands ([`open`]); the pointer lock it lets go of opens no menu,
-//! and its Enter takes it back. [`hear`] gives each relayed line to the page's list. Natively
+//! and its Enter takes it back. [`hear`] gives each relayed line to the page's list, the server's
+//! own (who joined or left) with no name. Natively
 //! there is no box: the lines go to the log.
 
 use bevy::prelude::*;
@@ -96,7 +97,10 @@ fn hear(mut clients: Query<&mut MessageReceiver<Said>, With<Client>>) {
     for mut said in &mut clients {
         for s in said.receive() {
             let to = if s.team { " (team)" } else { "" };
-            info!("chat{to}: {}: {}", s.name, s.text);
+            match &s.name {
+                Some(name) => info!("chat{to}: {name}: {}", s.text),
+                None => info!("chat: {}", s.text),
+            }
             #[cfg(target_family = "wasm")]
             crate::web::page(
                 "conkerChat",

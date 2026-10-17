@@ -1,9 +1,10 @@
 // Text chat (conker_client::chat): the client calls window.conkerChat's open(team) when a chat key
 // goes down (T everyone, Y the team; the box lets go of the pointer lock) and show(name, team, text)
-// for each line the server relays. Enter sends the box's line to the client's chat_done, Esc or a
-// click elsewhere closes it with none; either way the keys go back to the game's canvas. The list
-// keeps the last LINES lines, each shown SHOW ms (all while the box is open); everyone's white, the
-// team's light blue. The lines go in as text, never as HTML.
+// for each line the server relays (no name: the server's own, who joined or left). Enter sends the
+// box's line to the client's chat_done, Esc or a click elsewhere closes it with none; either way the
+// keys go back to the game's canvas. The list keeps the last LINES lines, each shown SHOW ms (all
+// while the box is open); everyone's white, the team's light blue, the server's pale yellow. The
+// lines go in as text, never as HTML.
 
 const LINES = 8;
 const SHOW = 20_000;
@@ -44,10 +45,14 @@ export function chat(done) {
     },
     show(name, team, text) {
       const line = document.createElement("li");
-      const who = document.createElement("b");
-      who.textContent = `${team ? "(Team) " : ""}${name}: `;
-      line.append(who, text);
+      if (name != null) {
+        const who = document.createElement("b");
+        who.textContent = `${team ? "(Team) " : ""}${name}: `;
+        line.append(who);
+      }
+      line.append(text);
       line.classList.toggle("team", team);
+      line.classList.toggle("server", name == null);
       list.append(line);
       while (list.children.length > LINES) list.firstChild.remove();
       setTimeout(() => line.classList.add("old"), SHOW);
